@@ -50,6 +50,28 @@ cargo build --release --locked
 sha256sum target/release/antiphon
 ```
 
+**On Windows, or anywhere the path contains a space,** that `RUSTFLAGS`
+line silently does the wrong thing. Cargo splits `RUSTFLAGS` on spaces, so
+`C:\Users\Some Name\...` arrives as two broken arguments; and under Git Bash
+`$PWD` is `/c/Users/...` while the compiler sees `C:\Users\...`, so the
+prefix never matches and the path ships in the binary anyway. Use
+`CARGO_ENCODED_RUSTFLAGS`, which separates flags with `\x1f` rather than
+spaces, and pass Windows-form paths. This is how the published test builds
+are made:
+
+```bash
+export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+SRC="$(cygpath -w "$PWD")"
+CH="$(cygpath -w "${CARGO_HOME:-$HOME/.cargo}")"
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${SRC}=/build"$'\x1f'"--remap-path-prefix=${CH}=/cargo"
+
+cargo build --release --locked
+sha256sum target/release/antiphon.exe target/release/antiphon-cli.exe
+```
+
+Afterwards, searching the binary for your own username is a quick check
+that the remap took effect.
+
 `--locked` matters: without it, cargo is free to pick newer dependency
 versions than `Cargo.lock` records, and you would be building different
 source than the release did.
@@ -65,6 +87,7 @@ the binary is the source — no trust required.
 | `codegen-units = 1` | Work is split across threads; symbol ordering depends on scheduling, so the same machine can produce different bytes twice |
 | `--remap-path-prefix` | The build directory is baked into panic messages, so `C:\Users\Alice\...` differs from `/home/bob/...` — and the builder's username ships inside the binary |
 | `SOURCE_DATE_EPOCH` | Build timestamps embed the moment of compilation |
+| `strip = true` | On the Windows GNU toolchain, import-library symbol names embed a temporary build folder's full path — username and a random suffix — which path remapping does not reach |
 | `--locked` | Dependency versions drift, so you are verifying different source than was released |
 
 ## What is not done yet
