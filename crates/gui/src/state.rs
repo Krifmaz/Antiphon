@@ -11,13 +11,13 @@ use tokio::task::JoinHandle;
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
-use voip_audio::{start_capture, start_playback, AudioChain, CaptureHandle, ChainConfig, EchoCanceller, PlaybackHandle, PlaybackSink};
-use voip_crypto::IdentityKeyPair;
-use voip_net::{JitterBuffer, PeerConnection, PopResult, Received};
+use antiphon_audio::{start_capture, start_playback, AudioChain, CaptureHandle, ChainConfig, EchoCanceller, PlaybackHandle, PlaybackSink};
+use antiphon_crypto::IdentityKeyPair;
+use antiphon_net::{JitterBuffer, PeerConnection, PopResult, Received};
 
 /// How long the jitter buffer waits for a specific missing frame before
 /// giving up and concealing it (spec §2 "Adaptive jitter buffer"). Fixed
-/// rather than actually adaptive -- see `voip_net::JitterBuffer`'s doc comment.
+/// rather than actually adaptive -- see `antiphon_net::JitterBuffer`'s doc comment.
 const JITTER_MAX_WAIT: Duration = Duration::from_millis(60);
 
 /// How many recently sent audio frames to keep for answering a resend
@@ -271,7 +271,7 @@ impl ActiveCall {
     /// The peer's verified long-term identity (spec §4). Verified by the
     /// handshake, so this is who they provably are -- not who they claim
     /// to be in their profile.
-    pub fn peer_identity(&self) -> voip_crypto::PublicIdentity {
+    pub fn peer_identity(&self) -> antiphon_crypto::PublicIdentity {
         self.peer.peer_identity()
     }
 
@@ -775,7 +775,7 @@ fn catch_up_speed(backlog_frames: usize) -> f32 {
     }
     let over = (backlog_frames - CATCH_UP_START_FRAMES) as f32;
     let span = (CATCH_UP_FULL_FRAMES - CATCH_UP_START_FRAMES) as f32;
-    1.0 + (voip_audio::MAX_SPEED - 1.0) * (over / span).min(1.0)
+    1.0 + (antiphon_audio::MAX_SPEED - 1.0) * (over / span).min(1.0)
 }
 
 /// Default Replay window. The user can change it within the bounds below;
@@ -869,7 +869,7 @@ pub const PUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// one would get a different (and useless) public port.
 pub async fn discover_public_address(local_port: u16) -> Result<(SocketAddr, Arc<UdpSocket>)> {
     let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
-    let public = voip_net::stun::discover_public_addr_default(&socket).await?;
+    let public = antiphon_net::stun::discover_public_addr_default(&socket).await?;
     Ok((public, socket))
 }
 
@@ -901,7 +901,7 @@ impl PortMapHandle {
     pub fn close(self, runtime: &tokio::runtime::Handle) {
         let (gateway, port) = self.stop();
         runtime.spawn(async move {
-            voip_net::port_map::release_mapping(gateway, port).await;
+            antiphon_net::port_map::release_mapping(gateway, port).await;
         });
     }
 
@@ -915,7 +915,7 @@ impl PortMapHandle {
         runtime.block_on(async move {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(900),
-                voip_net::port_map::release_mapping(gateway, port),
+                antiphon_net::port_map::release_mapping(gateway, port),
             )
             .await;
         });
@@ -929,16 +929,16 @@ impl PortMapHandle {
 /// design, so a one-shot request would leave the user reachable for an
 /// hour and then quietly not, with nothing on screen changing.
 pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
-    let local = voip_net::port_map::local_ipv4()
+    let local = antiphon_net::port_map::local_ipv4()
         .await
         .ok_or_else(|| anyhow::anyhow!("this machine has no IPv4 address on a local network"))?;
-    let (gateway, mapping) = voip_net::port_map::open_port(local, local_port).await?;
+    let (gateway, mapping) = antiphon_net::port_map::open_port(local, local_port).await?;
 
     let renewal = tokio::spawn(async move {
         let mut interval = mapping.renew_after();
         loop {
             tokio::time::sleep(interval).await;
-            match voip_net::port_map::request_mapping(gateway, local_port).await {
+            match antiphon_net::port_map::request_mapping(gateway, local_port).await {
                 Ok(renewed) => interval = renewed.renew_after(),
                 // Kept trying rather than given up on: a router that was
                 // rebooting a moment ago will answer the next one, and
@@ -1124,7 +1124,7 @@ pub fn start_loopback(
 }
 
 /// Wires a connected [`PeerConnection`] up to the mic chain and audio
-/// devices and starts the call running. Mirrors `voip-cli`'s `run_call`,
+/// devices and starts the call running. Mirrors `antiphon-cli`'s `run_call`,
 /// but returns live handles instead of blocking, since the GUI needs to
 /// keep going (settings can change mid-call, mute/deafen can toggle, etc).
 pub fn start_pipeline(
@@ -1420,7 +1420,7 @@ pub fn start_pipeline(
                 // Spec §2, layer one: every frame carries a low-quality
                 // copy of the one before it, so a single lost frame is
                 // repaired with no round trip and no added delay.
-                let bytes = voip_net::fec::encode(sequence, &samples, previous_frame.as_deref());
+                let bytes = antiphon_net::fec::encode(sequence, &samples, previous_frame.as_deref());
                 previous_frame = Some(samples.clone());
                 // Kept so a resend request can be answered without
                 // re-running the mic chain.
@@ -1481,7 +1481,7 @@ pub fn start_pipeline(
                     // Ordered by the *application* sequence inside the
                     // payload, not the crypto counter outside it, so a
                     // resend lands in the slot it belongs to.
-                    if let Some(decoded) = voip_net::fec::decode(&plaintext) {
+                    if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
                         recv_jitter.lock().unwrap().push_with_backup(
                             decoded.sequence as u64,
                             decoded.primary,
@@ -1621,7 +1621,7 @@ pub fn start_pipeline(
     let drain_replay_clips = replay_clips.clone();
     // Spec §2 catch-up playback. Held across frames because a splice
     // spans them: it needs the tail of the last frame to line up against.
-    let mut catch_up = voip_audio::TimeCompressor::new(sample_rate);
+    let mut catch_up = antiphon_audio::TimeCompressor::new(sample_rate);
     let mut catch_up_out: Vec<f32> = Vec::new();
     let drain_aec_far = aec_far.clone();
     let mut clip_cutter = crate::replay_history::ClipCutter::default();
@@ -1855,10 +1855,10 @@ mod tests {
 
     #[test]
     fn a_real_stall_pushes_to_the_cap_and_no_further() {
-        assert_eq!(catch_up_speed(CATCH_UP_FULL_FRAMES), voip_audio::MAX_SPEED);
+        assert_eq!(catch_up_speed(CATCH_UP_FULL_FRAMES), antiphon_audio::MAX_SPEED);
         // A catastrophic backlog must not ask for a speed the compressor
         // would have to clamp anyway -- the limit belongs in one place.
-        assert_eq!(catch_up_speed(10_000), voip_audio::MAX_SPEED);
+        assert_eq!(catch_up_speed(10_000), antiphon_audio::MAX_SPEED);
     }
 
     #[test]

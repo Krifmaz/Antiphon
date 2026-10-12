@@ -1,7 +1,7 @@
 //! Invite links (spec §4 "QR code / invite link -- primary method").
 //!
 //! ```text
-//! voip://<64-hex identity key>@<host>:<port>
+//! antiphon://<64-hex identity key>@<host>:<port>
 //! ```
 //!
 //! The link carries **who** and **where to start**, and those two halves
@@ -29,7 +29,12 @@
 
 use crate::error::CryptoError;
 
-const SCHEME: &str = "voip://";
+const SCHEME: &str = "antiphon://";
+
+/// The scheme from before the project was named Antiphon. Still accepted,
+/// never produced: links already handed to people keep working, and a
+/// rename is no reason to make someone ask for a new one.
+const LEGACY_SCHEME: &str = "voip://";
 
 /// A parsed invite: a permanent identity plus a hint about where to reach
 /// it right now.
@@ -62,7 +67,10 @@ impl Invite {
     /// silently become a different valid one.
     pub fn parse(text: &str) -> Result<Self, CryptoError> {
         let trimmed = text.trim();
-        let body = trimmed.strip_prefix(SCHEME).unwrap_or(trimmed);
+        let body = trimmed
+            .strip_prefix(SCHEME)
+            .or_else(|| trimmed.strip_prefix(LEGACY_SCHEME))
+            .unwrap_or(trimmed);
 
         let (hex, address) = match body.split_once('@') {
             Some((hex, address)) => (hex, address.trim()),
@@ -121,7 +129,7 @@ mod tests {
     #[test]
     fn a_link_starts_with_the_scheme() {
         let (_, invite) = invite_for("203.0.113.7:6001");
-        assert!(invite.to_link().starts_with("voip://"), "got {}", invite.to_link());
+        assert!(invite.to_link().starts_with("antiphon://"), "got {}", invite.to_link());
     }
 
     #[test]
@@ -146,7 +154,7 @@ mod tests {
     fn a_link_without_the_scheme_still_parses() {
         // Chat clients and link detectors sometimes eat the prefix.
         let (_, invite) = invite_for("203.0.113.7:6001");
-        let bare = invite.to_link().replace("voip://", "");
+        let bare = invite.to_link().replace("antiphon://", "");
         assert_eq!(Invite::parse(&bare).unwrap(), invite);
     }
 
@@ -168,7 +176,7 @@ mod tests {
 
     #[test]
     fn a_non_hex_identity_is_rejected() {
-        let bad = format!("voip://{}@203.0.113.7:6001", "z".repeat(64));
+        let bad = format!("antiphon://{}@203.0.113.7:6001", "z".repeat(64));
         assert!(Invite::parse(&bad).is_err());
     }
 
@@ -187,8 +195,24 @@ mod tests {
     }
 
     #[test]
+    fn a_link_from_before_the_rename_still_works() {
+        // Links handed out as voip:// must keep working; the rename is no
+        // reason to make anyone ask for a new one.
+        let (_, invite) = invite_for("203.0.113.7:6001");
+        let old = invite.to_link().replace(SCHEME, LEGACY_SCHEME);
+        assert!(old.starts_with("voip://"), "{old}");
+        assert_eq!(Invite::parse(&old).unwrap(), invite);
+    }
+
+    #[test]
+    fn new_links_use_the_new_name() {
+        let (_, invite) = invite_for("203.0.113.7:6001");
+        assert!(!invite.to_link().contains("voip"), "{}", invite.to_link());
+    }
+
+    #[test]
     fn junk_is_an_error_not_a_panic() {
-        for junk in ["", "   ", "voip://", "hello", "voip://@", "@:", "voip://:@:"] {
+        for junk in ["", "   ", "antiphon://", "hello", "antiphon://@", "@:", "antiphon://:@:", "voip://", "voip://@"] {
             assert!(Invite::parse(junk).is_err(), "expected {junk:?} to be rejected");
         }
     }

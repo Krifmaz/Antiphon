@@ -47,7 +47,7 @@ export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
 export RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$CARGO_HOME=/cargo"
 
 cargo build --release --locked
-sha256sum target/release/voip-gui
+sha256sum target/release/antiphon
 ```
 
 `--locked` matters: without it, cargo is free to pick newer dependency

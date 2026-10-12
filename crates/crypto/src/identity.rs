@@ -44,6 +44,9 @@ use crate::error::CryptoError;
 const PREKEY_CONTEXT: &[u8] = b"voip-app/identity/prekey/v1";
 
 /// Salt and info for deriving the two keypairs from one master seed.
+///
+/// Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
+/// Changing any of these changes every identity derived from a seed.
 const MASTER_SALT: &[u8] = b"voip-app/identity/master/v1";
 const INFO_SIGNING: &[u8] = b"voip-app/identity/signing/v1";
 const INFO_PREKEY: &[u8] = b"voip-app/identity/prekey-seed/v1";
@@ -87,7 +90,7 @@ impl PublicIdentity {
 
     /// Wire encoding: `[identity_key][prekey][prekey_signature]`.
     ///
-    /// Hand-rolled and fixed-width, matching `voip-protocol`'s framing --
+    /// Hand-rolled and fixed-width, matching `antiphon-protocol`'s framing --
     /// three fields of known length don't need a serialization framework,
     /// and an explicit stable layout matters more here.
     pub const ENCODED_LEN: usize = 32 + 32 + 64;

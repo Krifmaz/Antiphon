@@ -281,7 +281,7 @@ mod tests {
 
     /// Talks to a real STUN server. Ignored by default so the suite stays
     /// offline and deterministic; run it deliberately with
-    /// `cargo test -p voip-net -- --ignored --nocapture` to confirm
+    /// `cargo test -p antiphon-net -- --ignored --nocapture` to confirm
     /// discovery still works end to end against the live internet.
     #[tokio::test]
     #[ignore = "requires internet access"]

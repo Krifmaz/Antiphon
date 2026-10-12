@@ -39,6 +39,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use crate::error::CryptoError;
 use crate::identity::{IdentityKeyPair, PublicIdentity};
 
+// Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
 const SEAL_SALT: &[u8] = b"voip-app/backup/seal/v1";
 const SEAL_INFO: &[u8] = b"voip-app/backup/seal-key/v1";
 const BACKUP_SALT: &[u8] = b"voip-app/backup/content/v1";

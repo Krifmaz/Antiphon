@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use crate::error::CryptoError;
 use crate::identity::{verify_signature, IdentityKeyPair};
 
+// Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
 const CONTEXT: &[u8] = b"voip-app/route-record/v1";
 
 /// Upper bound on routes in one record, so a malformed or hostile record
@@ -75,7 +76,7 @@ pub struct RouteRecord {
 impl RouteRecord {
     /// Canonical bytes covered by the signature.
     ///
-    /// Hand-rolled and length-prefixed, matching `voip-protocol`'s framing.
+    /// Hand-rolled and length-prefixed, matching `antiphon-protocol`'s framing.
     /// Canonical matters more than compact here: two encoders that
     /// disagree by a byte produce signatures that don't verify.
     fn signing_bytes(&self) -> Vec<u8> {

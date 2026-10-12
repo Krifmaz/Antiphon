@@ -12,9 +12,9 @@ pub enum FrameType {
     /// and the payload is a raw X25519 public key, sent before a [`Session`]
     /// exists (spec §3's ephemeral key exchange).
     ///
-    /// [`Session`]: voip_crypto::Session
+    /// [`Session`]: antiphon_crypto::Session
     Handshake,
-    /// An AEAD-sealed audio frame: `payload` is ciphertext from [`voip_crypto::Session::encrypt`].
+    /// An AEAD-sealed audio frame: `payload` is ciphertext from [`antiphon_crypto::Session::encrypt`].
     Audio,
     /// An AEAD-sealed control message (mute state, PTT state, file-transfer
     /// offers/acks, etc.) -- small, infrequent, JSON-shaped.

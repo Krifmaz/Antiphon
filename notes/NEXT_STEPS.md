@@ -31,7 +31,7 @@ and outruns the receiver's socket buffer.
 **Measure with:**
 
 ```
-cargo test -p voip-gui large_file -- --ignored --nocapture
+cargo test -p antiphon large_file -- --ignored --nocapture
 ```
 
 **Tried and reverted:** 4 MB UDP socket buffers via `socket2` in

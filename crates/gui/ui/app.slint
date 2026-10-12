@@ -22,7 +22,7 @@ export struct EqBand {
     gain: float,
     q: float,
     /// 0 bell, 1 low shelf, 2 high shelf, 3 notch -- an int because Slint
-    /// and Rust share no enum. See `voip_audio::BandType`.
+    /// and Rust share no enum. See `antiphon_audio::BandType`.
     band-type: int,
 }
 
@@ -1071,7 +1071,7 @@ export component MainWindow inherits Window {
     // Bound rather than fixed so two instances running different profiles
     // are tellable apart in the taskbar, which is the whole point of
     // being able to run two.
-    in-out property <string> window-title: "voip-app";
+    in-out property <string> window-title: "Antiphon";
     title: window-title;
     icon: @image-url("tray-icon.png");
     min-width: 560px;
@@ -1482,7 +1482,7 @@ export component MainWindow inherits Window {
 
     in-out property <string> my-share-id: "";
     callback copy-share-id();
-    /// Full invite link (`voip://<id>@<address>`) and its QR code.
+    /// Full invite link (`antiphon://<id>@<address>`) and its QR code.
     in-out property <string> my-invite-link: "";
     in-out property <image> my-invite-qr;
     in-out property <bool> my-invite-has-address: false;
@@ -1549,7 +1549,7 @@ export component MainWindow inherits Window {
     in-out property <float> gate-release: 120;
     in-out property <bool> hpf-enabled: true;
     in-out property <float> hpf-cutoff: 80;
-    // The low-pass stage existed in `voip-audio` and was wired into the
+    // The low-pass stage existed in `antiphon-audio` and was wired into the
     // chain, but nothing in the GUI ever set it -- `read_chain_config`
     // wrote `LowPassConfig::default()` unconditionally, so the stage was
     // unreachable from the app.
@@ -1758,7 +1758,7 @@ export component MainWindow inherits Window {
             height: 32px;
             padding: 0px;
             Image { source: @image-url("tray-icon.png"); width: 24px; height: 24px; }
-            Text { text: "voip-app"; font-size: 17px * text-scale; font-weight: 700; vertical-alignment: center; }
+            Text { text: "Antiphon"; font-size: 17px * text-scale; font-weight: 700; vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
             Text { text: status-text; vertical-alignment: center; color: connected ? Theme.accent-text : Theme.muted-text; }
         }
@@ -1788,7 +1788,7 @@ export component MainWindow inherits Window {
             VerticalBox {
                 padding: 12px;
                 spacing: 4px;
-                Text { text: "==[ voip-app :: server console ]=="; color: #4dff88; font-family: "Consolas"; font-size: 14px; font-weight: 700; }
+                Text { text: "==[ antiphon :: server console ]=="; color: #4dff88; font-family: "Consolas"; font-size: 14px; font-weight: 700; }
                 Text { text: status-text; color: #33cc66; font-family: "Consolas"; font-size: 12px; }
                 if call-stats != "" : Text { text: call-stats; color: #2aa355; font-family: "Consolas"; font-size: 11px; }
                 if connected && peer-display-name != "" : Text { text: "peer: " + peer-display-name; color: #33cc66; font-family: "Consolas"; font-size: 11px; }
@@ -2730,7 +2730,7 @@ export component MainWindow inherits Window {
                     Text { text: "Add from an invite"; font-size: 11px * text-scale; font-weight: 600; }
                     LineEdit {
                         text <=> new-contact-invite;
-                        placeholder-text: "Paste voip://... invite";
+                        placeholder-text: "Paste antiphon://... invite";
                         accepted(v) => { add-from-invite(); }
                     }
                     HorizontalBox {
@@ -4627,7 +4627,7 @@ export component MainWindow inherits Window {
                                         font-size: 10px * text-scale;
                                     }
                                     Text {
-                                        text: "Restoring: voip-cli identity restore \"<your 24 words>\"";
+                                        text: "Restoring: antiphon-cli identity restore \"<your 24 words>\"";
                                         color: Theme.muted-text;
                                         font-family: "Consolas";
                                         font-size: 10px * text-scale;
@@ -4929,7 +4929,7 @@ export component MainWindow inherits Window {
 export component AppTrayIcon inherits SystemTrayIcon {
     icon: @image-url("tray-icon.png");
     in-out property <string> status-line: "not connected";
-    tooltip: "voip-app -- " + status-line;
+    tooltip: "Antiphon -- " + status-line;
 
     callback show-window();
     callback quit-app();

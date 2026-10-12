@@ -1,5 +1,5 @@
 [package]
-name = "voip-crypto"
+name = "antiphon-crypto"
 edition.workspace = true
 version.workspace = true
 

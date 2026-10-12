@@ -1,5 +1,5 @@
 [package]
-name = "voip-net"
+name = "antiphon-net"
 edition.workspace = true
 version.workspace = true
 
@@ -7,5 +7,5 @@ version.workspace = true
 sha2 = "0.11.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
-voip-crypto = { version = "0.1.0", path = "../crypto" }
-voip-protocol = { version = "0.1.0", path = "../protocol" }
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }
+antiphon-protocol = { version = "0.1.0", path = "../protocol" }

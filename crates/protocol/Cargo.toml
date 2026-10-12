@@ -1,8 +1,8 @@
 [package]
-name = "voip-protocol"
+name = "antiphon-protocol"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
 thiserror = "2.0.20"
-voip-crypto = { version = "0.1.0", path = "../crypto" }
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }

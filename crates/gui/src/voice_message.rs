@@ -20,7 +20,7 @@
 //! gain offline delivery when §8's routes exist, so this does not have to
 //! be rebuilt when it does.
 
-use voip_audio::{AudioChain, ChainConfig};
+use antiphon_audio::{AudioChain, ChainConfig};
 
 /// Longest voice message, in seconds.
 ///
@@ -182,7 +182,7 @@ mod tests {
         let samples: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
         let wav = encode_wav(48_000, &samples);
 
-        let dir = std::env::temp_dir().join(format!("voip-vm-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("antiphon-vm-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vm.wav");
         std::fs::write(&path, &wav).unwrap();

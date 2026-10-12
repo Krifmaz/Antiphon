@@ -81,7 +81,7 @@ pub enum ControlMessage {
     /// Carries *application* frame sequence numbers, not crypto counters:
     /// a resend reuses the sequence so it lands in the right slot, while
     /// getting a fresh crypto counter, because reusing an AEAD nonce would
-    /// be catastrophic. See `voip_net::fec`.
+    /// be catastrophic. See `antiphon_net::fec`.
     AudioMissing { sequences: Vec<u32> },
     /// "I am here if you want to talk" -- a silent call (spec §9).
     ///

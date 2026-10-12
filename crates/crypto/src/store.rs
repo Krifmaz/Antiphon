@@ -37,6 +37,49 @@ const SEED_FILE_LEN: usize = 32;
 /// seeds, from before recovery phrases existed.
 const LEGACY_SEED_FILE_LEN: usize = 64;
 
+/// The app's data folder name, inside the platform's config directory.
+///
+/// Capitalised where folder names conventionally are (Windows' AppData,
+/// macOS' Application Support), lower-case under `~/.config`.
+#[cfg(any(windows, target_os = "macos"))]
+pub const APP_DIR: &str = "Antiphon";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub const APP_DIR: &str = "antiphon";
+
+/// The folder's name before the project was called Antiphon.
+pub const LEGACY_APP_DIR: &str = "voip-app";
+
+/// The app's data folder under `base` (the platform config directory),
+/// moving it from its old name the first time.
+///
+/// Both the GUI and the CLI go through this, so they cannot disagree
+/// about where the identity is. The folder is *moved*, not copied: two
+/// copies of an identity key are two things to keep secret, and two
+/// histories would drift apart the moment either was used.
+///
+/// If the move fails -- most likely because an old build is still running
+/// and has a file open -- the old folder is used as it is. Starting from an
+/// empty new folder instead would hand the user a fresh identity, which is
+/// the one outcome a rename must never cause.
+pub fn app_data_dir(base: &Path) -> PathBuf {
+    let current = base.join(APP_DIR);
+    let legacy = base.join(LEGACY_APP_DIR);
+    if current.exists() || !legacy.is_dir() {
+        return current;
+    }
+    match std::fs::rename(&legacy, &current) {
+        Ok(()) => current,
+        Err(e) => {
+            eprintln!(
+                "[identity] could not move {} to {}: {e} -- using it where it is",
+                legacy.display(),
+                current.display()
+            );
+            legacy
+        }
+    }
+}
+
 /// Where the identity lives, given the directory holding app config.
 pub fn identity_path(config_dir: &Path) -> PathBuf {
     config_dir.join("identity.key")
@@ -179,10 +222,48 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("voip-identity-test-{tag}-{}", std::process::id()));
+        dir.push(format!("antiphon-identity-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_old_data_folder_is_moved_with_the_identity_inside_it() {
+        // The rename must not cost anyone their identity: the key, and
+        // everything else in the folder, has to come along unchanged.
+        let base = temp_dir("move");
+        let identity = load_or_create(&identity_path(&base.join(LEGACY_APP_DIR))).unwrap();
+        std::fs::write(base.join(LEGACY_APP_DIR).join("config.json"), b"{}").unwrap();
+
+        let dir = app_data_dir(&base);
+        assert_eq!(dir, base.join(APP_DIR));
+        assert!(!base.join(LEGACY_APP_DIR).exists(), "the old folder was copied, not moved");
+        assert_eq!(load_or_create(&identity_path(&dir)).unwrap().public(), identity.public());
+        assert!(dir.join("config.json").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_existing_new_folder_is_never_overwritten_by_the_old_one() {
+        // If both exist, the new one is already in use. Replacing it with
+        // the old would swap the user's current identity for a stale one.
+        let base = temp_dir("both");
+        std::fs::create_dir_all(base.join(LEGACY_APP_DIR)).unwrap();
+        std::fs::create_dir_all(base.join(APP_DIR)).unwrap();
+        std::fs::write(base.join(APP_DIR).join("marker"), b"current").unwrap();
+
+        assert_eq!(app_data_dir(&base), base.join(APP_DIR));
+        assert_eq!(std::fs::read(base.join(APP_DIR).join("marker")).unwrap(), b"current");
+        assert!(base.join(LEGACY_APP_DIR).exists(), "the old folder was touched");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_fresh_install_gets_the_new_name() {
+        let base = temp_dir("fresh");
+        assert_eq!(app_data_dir(&base), base.join(APP_DIR));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

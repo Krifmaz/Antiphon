@@ -3,9 +3,9 @@ pub enum NetError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Protocol(#[from] voip_protocol::ProtocolError),
+    Protocol(#[from] antiphon_protocol::ProtocolError),
     #[error(transparent)]
-    Crypto(#[from] voip_crypto::CryptoError),
+    Crypto(#[from] antiphon_crypto::CryptoError),
     #[error("handshake payload was not a 32-byte X25519 public key")]
     BadHandshake,
     #[error("no STUN server answered, so the public address is unknown")]

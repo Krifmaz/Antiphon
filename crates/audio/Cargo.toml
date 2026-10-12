@@ -1,5 +1,5 @@
 [package]
-name = "voip-audio"
+name = "antiphon-audio"
 edition.workspace = true
 version.workspace = true
 

@@ -72,7 +72,7 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 - [x] Export a preset to a file ([`on_export_preset`](crates/gui/src/main.rs))
 - [x] Import someone else's preset ([`on_import_preset`](crates/gui/src/main.rs))
 - [x] Each stage toggles independently ([`AudioChain::set_enabled`](crates/audio/src/chain.rs))
-- [x] CLI preset management — `voip-cli preset` ([`crates/app/src/main.rs`](crates/app/src/main.rs))
+- [x] CLI preset management — `antiphon-cli preset` ([`crates/app/src/main.rs`](crates/app/src/main.rs))
 
 ### Utility
 
@@ -147,7 +147,7 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 - [ ] **MLS (RFC 9420)** for groups
 - [ ] **SFrame** for media through a relay
 - [~] **Multi-device** — cross-signing is built ([`device.rs`](crates/crypto/src/device.rs)): devices are signed into a sequenced list by the master key, revoked by omission. No transport or UI for approving a device yet
-- [~] **Backup & recovery** — 24-word recovery phrase, shown in Settings > Profile and restorable via `voip-cli identity restore` ([`mnemonic.rs`](crates/crypto/src/mnemonic.rs)), plus a backup key sealed per-device ([`backup.rs`](crates/crypto/src/backup.rs)) so restoring an identity and restoring history stay separate powers. No Shamir split, and no message history to back up yet
+- [~] **Backup & recovery** — 24-word recovery phrase, shown in Settings > Profile and restorable via `antiphon-cli identity restore` ([`mnemonic.rs`](crates/crypto/src/mnemonic.rs)), plus a backup key sealed per-device ([`backup.rs`](crates/crypto/src/backup.rs)) so restoring an identity and restoring history stay separate powers. No Shamir split, and no message history to back up yet
 - [x] **Persistent identity keys** — Ed25519 identity plus a signed X25519 prekey, generated on first run and stable across restarts ([`identity.rs`](crates/crypto/src/identity.rs), [`store.rs`](crates/crypto/src/store.rs))
 - [x] **Identity is never server-scoped** — no address or host appears in an identity; where to reach someone is a separate signed record ([`route.rs`](crates/crypto/src/route.rs))
 - [~] **Identity key storage** ([`keystore.rs`](crates/crypto/src/keystore.rs)) — on Windows the seed is sealed with DPAPI under the logged-in user, so the file is no longer readable bytes and neither another account nor a copy taken to another machine can unseal it. An existing plaintext file is upgraded in place the first time it is read, verified to keep the same identity. A sealed file that will not unseal is **refused, never replaced**: minting a fresh identity there would change who you are to every contact *and* throw away a key the recovery phrase could still have restored. The **backup key** — which decrypts every message you have ever sent — is sealed and migrated the same way ([`load_or_create_backup_key`](crates/gui/src/history.rs)). **Not done:** Keychain and libsecret — on Linux and macOS both are still written plain, and the code says so rather than pretending. Sealing is user-scoped either way, so it stops another account but not code running as you
@@ -167,7 +167,7 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 
 ### Reaching people
 
-- [x] **QR code / invite link** — `voip://<id>@<address>` links, generated with a scannable QR ([`invite.rs`](crates/crypto/src/invite.rs), [`qr.rs`](crates/gui/src/qr.rs)) and pasted straight into contacts. Carries the permanent identity plus a bootstrap address, so first contact works with no directory, no relay and nobody listed anywhere
+- [x] **QR code / invite link** — `antiphon://<id>@<address>` links (links from before the rename, `voip://`, are still accepted), generated with a scannable QR ([`invite.rs`](crates/crypto/src/invite.rs), [`qr.rs`](crates/gui/src/qr.rs)) and pasted straight into contacts. Carries the permanent identity plus a bootstrap address, so first contact works with no directory, no relay and nobody listed anywhere
 - [x] **QR reachable from the call screen** — as well as the profile settings page, it is a panel in the main view, toggled from the panel menu
 - [x] **QR position user-configurable** — a full `FreeformPanel` like the others: drag by its title, resize from its corner, hide from the panel menu, saved per layout. **Off by default**, unlike every other panel: a code that identifies you should be on screen because you put it there, not because it happened to be on while somebody was sharing their screen. A layout saved before this panel existed loads with it hidden rather than dropped on top of an arrangement someone already made
 - [x] Manual address exchange — add a contact by `host:port` ([`on_add_contact`](crates/gui/src/main.rs), [`Contact`](crates/gui/src/config.rs))
@@ -394,7 +394,7 @@ Recorded so this checklist isn't mistaken for the full inventory:
 - [x] **Settings search** — every section indexed by title plus the words people actually reach for ("sibilance" finds the de-esser), with a summary pointing at other categories ([`search.rs`](crates/gui/src/search.rs))
 - [x] **Call settings tab** — start-of-call defaults, participant defaults, and an Advanced section holding **IP direct calling**, off by default so a raw-address call is a deliberate choice
 - [x] **Multiple identities per machine** — `--profile <name>` gives each its own identity key and settings directory, in both binaries ([`config.rs`](crates/gui/src/config.rs), [`main.rs`](crates/app/src/main.rs)). Not an account system: no server, no login, just one machine holding more than one keypair. The default profile keeps the original paths, so an existing install is untouched
-- [x] **CLI client** (`voip-cli`) with an arrow-key interactive menu, so there are no flags to memorize ([`crates/app/src/interactive.rs`](crates/app/src/interactive.rs))
+- [x] **CLI client** (`antiphon-cli`) with an arrow-key interactive menu, so there are no flags to memorize ([`crates/app/src/interactive.rs`](crates/app/src/interactive.rs))
 - [x] **In-app terminal command box** (`on_terminal_command`)
 - [x] **Window state persistence** — size, position, maximized ([`WindowState`](crates/gui/src/config.rs))
 - [x] **Profile avatar** with import, fit, rotation, crop, and animated-GIF support

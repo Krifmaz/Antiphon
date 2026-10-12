@@ -139,7 +139,7 @@ pub fn export_all(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        app: "voip-app",
+        app: "antiphon",
         summary: &summary,
         notes: vec![
             "Everything here is plain JSON and WAV. You do not need this app to read it.",
@@ -201,7 +201,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voip-export-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("antiphon-export-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

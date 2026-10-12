@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use voip_net::file_transfer::{chunk_len, sha256_hex_reader, CHUNK_SIZE};
+use antiphon_net::file_transfer::{chunk_len, sha256_hex_reader, CHUNK_SIZE};
 
 /// Why a file cannot be offered.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -157,7 +157,7 @@ mod tests {
     use super::*;
 
     fn temp_file(name: &str, contents: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voip-integrity-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("antiphon-integrity-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
@@ -165,7 +165,7 @@ mod tests {
     }
 
     fn read_all(source: &FileSource) -> Vec<u8> {
-        let chunks = voip_net::file_transfer::chunk_count(source.len());
+        let chunks = antiphon_net::file_transfer::chunk_count(source.len());
         (0..chunks).flat_map(|i| source.read_chunk(i).unwrap()).collect()
     }
 
@@ -175,7 +175,7 @@ mod tests {
         let path = temp_file("stable.bin", &contents);
         let (source, hash) = open_and_hash(&path).unwrap();
 
-        assert_eq!(hash, voip_net::file_transfer::sha256_hex(&contents));
+        assert_eq!(hash, antiphon_net::file_transfer::sha256_hex(&contents));
         assert_eq!(source.len(), contents.len() as u64);
         assert_eq!(read_all(&source), contents);
     }
@@ -256,6 +256,6 @@ mod tests {
         let path = temp_file("empty.bin", b"");
         let (source, hash) = open_and_hash(&path).unwrap();
         assert_eq!(source.len(), 0);
-        assert_eq!(hash, voip_net::file_transfer::sha256_hex(b""));
+        assert_eq!(hash, antiphon_net::file_transfer::sha256_hex(b""));
     }
 }

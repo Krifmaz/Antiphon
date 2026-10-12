@@ -17,10 +17,10 @@ A Rust workspace, one crate per concern:
 |---|---|---|
 | [`crates/crypto`](crates/crypto) | §3 Connection & Trust Model | X25519 handshake + a symmetric double-KDF-chain ratchet (ChaCha20-Poly1305 AEAD), forward-secret per message, tolerant of UDP packet reordering |
 | [`crates/protocol`](crates/protocol) | §3 | Hand-rolled binary wire framing tying encrypted sessions to UDP datagrams (`Handshake`/`Audio`/`Control`/`File` frame types) |
-| [`crates/net`](crates/net) | §3 "Known contacts → Direct P2P", §2 Lost Audio Recovery, §5 File Transfer | UDP transport: handshake + encrypted send/receive for one peer connection, an encrypted control channel for non-audio messages, a jitter buffer that reorders out-of-order arrivals and conceals short gaps, and file-transfer chunking/reassembly/hash verification (`voip_net::file_transfer`) |
+| [`crates/net`](crates/net) | §3 "Known contacts → Direct P2P", §2 Lost Audio Recovery, §5 File Transfer | UDP transport: handshake + encrypted send/receive for one peer connection, an encrypted control channel for non-audio messages, a jitter buffer that reorders out-of-order arrivals and conceals short gaps, and file-transfer chunking/reassembly/hash verification (`antiphon_net::file_transfer`) |
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic processing chain (gate, filters, de-esser, EQ, compressor, limiter, gain, pitch shift, reverb) plus named-device capture/playback via `cpal` |
-| [`crates/app`](crates/app) | §1 Utility (PTT / Voice Activation) | `voip-cli`: a flag-driven binary, or run it with no arguments for an arrow-key interactive menu -- no flags to memorize |
-| [`crates/gui`](crates/gui) | §7 Interface (partial), §5 File Transfer | `voip-gui`: a native Slint desktop app -- system tray icon, Call/Settings/Profile tabs, a resizable categorized settings sidebar, live device and push-to-talk/voice-activation pickers, an unlimited-band EQ with a live curve graph, theming (including a freeform-positioned/resized Call tab and a saturation/hue color picker), settings export/import, and file transfer |
+| [`crates/app`](crates/app) | §1 Utility (PTT / Voice Activation) | `antiphon-cli`: a flag-driven binary, or run it with no arguments for an arrow-key interactive menu -- no flags to memorize |
+| [`crates/gui`](crates/gui) | §7 Interface (partial), §5 File Transfer | `antiphon`: a native Slint desktop app -- system tray icon, Call/Settings/Profile tabs, a resizable categorized settings sidebar, live device and push-to-talk/voice-activation pickers, an unlimited-band EQ with a live curve graph, theming (including a freeform-positioned/resized Call tab and a saturation/hue color picker), settings export/import, and file transfer |
 
 ## What's implemented vs. simplified vs. deferred
 
@@ -29,16 +29,16 @@ A Rust workspace, one crate per concern:
 - Signal-style symmetric KDF ratchet: every message gets its own key, forward secret within the chain, with a bounded skipped-key cache so out-of-order UDP delivery still decrypts
 - ChaCha20-Poly1305 AEAD encryption with AAD binding, replay rejection, and tamper rejection (see `crates/crypto`'s tests)
 - Noise gate, high-pass/low-pass filters (RBJ biquads), a split-band de-esser, a parametric peaking EQ, compressor, limiter, both fixed and auto gain, a granular delay-line pitch shifter, and a Freeverb-style reverb -- real DSP, not stubs, each with unit tests against synthetic signals (the pitch shifter's math was wrong on the first pass -- inverted sign in the rate calculation, silently producing near-silence instead of a shifted tone -- caught by its own test, not by ear)
-- The EQ has no fixed band count -- add or remove bands freely, each editable by typing exact Hz/dB/Q values or by dragging directly on the curve graph itself (click near an existing point to grab it, or click empty space to start a new band there). The graph is the actual combined frequency-response curve, not a decorative graphic (`voip_audio::eq_curve_db`, evaluating each enabled band's closed-form biquad magnitude response and summing in dB -- the correct way to combine cascaded filters). The first version of the drag-editing had a real bug: mutating the band list via `ModelRc::as_any().downcast_ref()` could panic invisibly (no console in a windowed app) if that guess about the model's concrete type was ever wrong, making edits silently no-op. Replaced with rebuilding the list from a plain `Vec` each time, which can't fail that way
-- A generic, composable chain: stages toggle independently and the whole thing serializes as a JSON preset (`voip-cli preset`, or the GUI's Export/Import)
-- Named input/output device selection (`voipcli devices`, `--input-device`/`--output-device`, or the GUI's Devices picker) -- not just "whatever the OS default is"
+- The EQ has no fixed band count -- add or remove bands freely, each editable by typing exact Hz/dB/Q values or by dragging directly on the curve graph itself (click near an existing point to grab it, or click empty space to start a new band there). The graph is the actual combined frequency-response curve, not a decorative graphic (`antiphon_audio::eq_curve_db`, evaluating each enabled band's closed-form biquad magnitude response and summing in dB -- the correct way to combine cascaded filters). The first version of the drag-editing had a real bug: mutating the band list via `ModelRc::as_any().downcast_ref()` could panic invisibly (no console in a windowed app) if that guess about the model's concrete type was ever wrong, making edits silently no-op. Replaced with rebuilding the list from a plain `Vec` each time, which can't fail that way
+- A generic, composable chain: stages toggle independently and the whole thing serializes as a JSON preset (`antiphon-cli preset`, or the GUI's Export/Import)
+- Named input/output device selection (`antiphon-cli devices`, `--input-device`/`--output-device`, or the GUI's Devices picker) -- not just "whatever the OS default is"
 - Device Hot-Swap (GUI, spec §1 Utility): changing the mic or output device mid-call swaps the live stream in place -- old stream stops, new one starts feeding the same pipeline, call keeps running. If the new device's native sample rate differs, the DSP chain rebuilds for it automatically (filter cutoffs etc. are rate-dependent)
 - Push-to-talk with a live rebindable key (click "Change" in the GUI, or pick from a menu in the CLI), or voice activation with a sensitivity slider and live meter, as an alternative to holding a key at all
-- Settings persistence: the GUI remembers your audio chain, devices, keybind, theme, and profile across restarts (`%APPDATA%\voip-app\config.json` on Windows); old config files missing newer fields still load via `#[serde(default)]`, with a regression test guarding that
+- Settings persistence: the GUI remembers your audio chain, devices, keybind, theme, and profile across restarts (`%APPDATA%\Antiphon\config.json` on Windows); old config files missing newer fields still load via `#[serde(default)]`, with a regression test guarding that
 - Profile info (display name + status) is sent to the peer over the same encrypted session, as its own frame type (`FrameType::Control`, distinct AAD from audio so one can't be replayed as the other) -- sent a few times at connect in case the first UDP packet is lost, and re-sent if you edit your profile mid-call. The GUI shows "With: &lt;name&gt; -- &lt;status&gt;" once it arrives. An unrecognized or malformed control payload is just dropped, so an older peer that doesn't send one degrades to today's "no name shown" behavior instead of breaking
 - Mic Test & Record Preview (GUI Call tab): records 5 seconds through the actual configured chain/device and plays it back, so "hear exactly what everyone else hears" is literal, not simulated
 - Live Monitoring (GUI Call tab, while connected): a second local playback stream mixes your own processed mic into your headphones in real time, with an honest delay readout (the monitor buffer size, not a made-up number)
-- **File transfer (spec §5)**, GUI Call tab's "File Transfer" panel: send a file to the connected peer over the same encrypted connection as the call, real end to end -- chunked (`voip_net::file_transfer`, ~3.8KB pieces sized to fit one UDP datagram after the AEAD tag and wire header), sent as their own frame type (`FrameType::File`, a distinct AAD from audio/control so one can't be replayed as another), reassembled out-of-order on the other end, and SHA-256 verified before it's ever written to disk. Reliability is "blast then repair," not a sliding-window ARQ: every chunk goes out once, the receiver periodically reports (via a `FileMissing` control message) whatever's still missing given UDP has no delivery guarantee, and the sender resends just those -- realistic for a single P2P hop, where loss is occasional, not the norm. Offer/accept/reject/complete/cancel all go over the existing `Control` channel (`ControlMessage`, JSON, internally tagged so it can carry more than just the old `Hello` profile message); the receiver sees a prompt with the filename and size before anything downloads, and a save-file dialog once it's verified. Whole-file-in-memory on both ends -- fine for what a voice app's file sharing is realistically used for, not a multi-gigabyte transfer tool. Verified with a real integration test (`crates/gui/src/file_transfer.rs`'s `integration_tests`) that runs two actual `PeerConnection`s over loopback UDP through a full handshake + offer + chunked transfer + hash verification + completion round-trip -- this couldn't be manually click-tested here, so that test is the actual evidence it works, not just that its pieces compile
+- **File transfer (spec §5)**, GUI Call tab's "File Transfer" panel: send a file to the connected peer over the same encrypted connection as the call, real end to end -- chunked (`antiphon_net::file_transfer`, ~3.8KB pieces sized to fit one UDP datagram after the AEAD tag and wire header), sent as their own frame type (`FrameType::File`, a distinct AAD from audio/control so one can't be replayed as another), reassembled out-of-order on the other end, and SHA-256 verified before it's ever written to disk. Reliability is "blast then repair," not a sliding-window ARQ: every chunk goes out once, the receiver periodically reports (via a `FileMissing` control message) whatever's still missing given UDP has no delivery guarantee, and the sender resends just those -- realistic for a single P2P hop, where loss is occasional, not the norm. Offer/accept/reject/complete/cancel all go over the existing `Control` channel (`ControlMessage`, JSON, internally tagged so it can carry more than just the old `Hello` profile message); the receiver sees a prompt with the filename and size before anything downloads, and a save-file dialog once it's verified. Whole-file-in-memory on both ends -- fine for what a voice app's file sharing is realistically used for, not a multi-gigabyte transfer tool. Verified with a real integration test (`crates/gui/src/file_transfer.rs`'s `integration_tests`) that runs two actual `PeerConnection`s over loopback UDP through a full handshake + offer + chunked transfer + hash verification + completion round-trip -- this couldn't be manually click-tested here, so that test is the actual evidence it works, not just that its pieces compile
 
 **Deliberately simplified (documented in code, not hidden):**
 - The ratchet is the *symmetric* half of Signal's Double Ratchet only -- no per-message DH step, so no post-compromise security within a call. Adding that is additive, not a rewrite (see `crates/crypto/src/handshake.rs`).
@@ -77,15 +77,15 @@ the "full UI editor" headline feature:
 - A system tray icon (`SystemTrayIcon`, Slint's built-in element -- no separate tray-icon toolkit needed) with Open/Mute/Quit; closing the window hides it to the tray rather than quitting, so "the app lives in the tray" is actually true, not just an icon that happens to appear
 - Accessibility: the custom tab/sidebar-nav buttons and the mic-level meter carry real `accessible-role`/`accessible-label` annotations (screen reader tools see "Settings, tab, selected", not an unlabeled clickable rectangle), on top of the reduce-motion and text-size toggles and Slint's built-in screen-reader plumbing. Still missing from §7: the drag/resize layout editor, arbitrary panel arrangement, full palette/font customization, profile *layout* editing (QR code position etc. -- Profile here is just two text fields), keyboard-only navigation (focus order/keyboard activation weren't part of this pass, just screen-reader labeling)
 
-**The CLI got a front door, not just flags:** run `voipcli` with no
+**The CLI got a front door, not just flags:** run `antiphon-cli` with no
 subcommand and it drops into an `inquire`-based arrow-key menu (listen /
 call / list devices / save a preset), prompting for port, address, PTT key
 (from a menu, not a string you have to know), and device -- the full flag
-syntax (`voipcli listen --port ... --input-device ...`) still works
+syntax (`antiphon-cli listen --port ... --input-device ...`) still works
 unchanged for scripting.
 
 **Lost Audio Recovery (spec §2) -- the jitter buffer layer is real, the other three aren't:**
-- Implemented: an adaptive-position (fixed-timeout, not literally adaptive) jitter buffer in `voip_net::JitterBuffer`, shared by both the CLI and GUI's receive paths. Audio frames are reordered back into sequence using the crypto session's existing per-message counter (no second sequence number invented), and a frame that misses a ~60ms window is concealed by repeating the last good frame instead of leaving silence -- this is spec's "Replay" layer in its simplest form (a repeat, not real recovery)
+- Implemented: an adaptive-position (fixed-timeout, not literally adaptive) jitter buffer in `antiphon_net::JitterBuffer`, shared by both the CLI and GUI's receive paths. Audio frames are reordered back into sequence using the crypto session's existing per-message counter (no second sequence number invented), and a frame that misses a ~60ms window is concealed by repeating the last good frame instead of leaving silence -- this is spec's "Replay" layer in its simplest form (a repeat, not real recovery)
 - Not implemented: forward error correction (redundant low-quality copies riding alongside each packet), retransmit requests (asking the sender to resend a specific lost chunk), and the user-facing Replay controls (auto-play/ask-me/off modes, a replay history panel, catch-up playback, a configurable buffer window) -- all real additional work on top of the jitter buffer that's there now
 
 **Not built (each is a substantial project on its own):**
@@ -112,29 +112,29 @@ cargo test --workspace
 Two-machine (or two-terminal, same machine) call, no flags needed:
 
 ```bash
-cargo run -p voip-cli
+cargo run -p antiphon-cli
 ```
 
 ...and follow the menu on each side. Or skip the menu with flags:
 
 ```bash
 # Side A
-cargo run -p voip-cli -- listen --port 6001
+cargo run -p antiphon-cli -- listen --port 6001
 
 # Side B
-cargo run -p voip-cli -- call --remote <A's IP>:6001 --port 6002
+cargo run -p antiphon-cli -- call --remote <A's IP>:6001 --port 6002
 ```
 
 Hold Space to talk on either side; Ctrl+C to hang up. `--no-ptt` makes the
-mic always-live. `voip-cli devices` lists input/output devices for
-`--input-device`/`--output-device`; `voip-cli preset --out mine.json` dumps
+mic always-live. `antiphon-cli devices` lists input/output devices for
+`--input-device`/`--output-device`; `antiphon-cli preset --out mine.json` dumps
 the default chain as an editable preset, pass it back in with `--preset
 mine.json`.
 
 ### GUI
 
 ```bash
-cargo run -p voip-gui
+cargo run -p antiphon
 ```
 
 It opens a window and puts an icon in the system tray (right-click for
@@ -152,8 +152,8 @@ crates/
   protocol/   wire framing
   net/        UDP transport
   audio/      DSP chain + device I/O
-  app/        voip-cli binary (flags + interactive menu)
-  gui/        voip-gui binary (Slint desktop UI + tray icon)
+  app/        antiphon-cli binary (flags + interactive menu)
+  gui/        antiphon binary (Slint desktop UI + tray icon)
 ```
 
 Each crate's `lib.rs` doc comment states its scope relative to the spec.

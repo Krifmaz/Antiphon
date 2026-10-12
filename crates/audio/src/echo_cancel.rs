@@ -596,7 +596,7 @@ mod cost {
     /// the canceller cannot run in a live call at all.
     ///
     /// Ignored by default because timing under a test runner is noisy;
-    /// run with `cargo test -p voip-audio real_time -- --ignored
+    /// run with `cargo test -p antiphon-audio real_time -- --ignored
     /// --nocapture` in both profiles to see the difference a release
     /// build makes.
     #[ignore]
