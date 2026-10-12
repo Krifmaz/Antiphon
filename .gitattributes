@@ -1,0 +1,5 @@
+# Normalise line endings in the repo so a clone looks the same on every OS.
+* text=auto eol=lf
+*.pdf binary
+*.png binary
+*.ico binary

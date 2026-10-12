@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/crypto",
+    "crates/audio",
+    "crates/protocol",
+    "crates/net",
+    "crates/app",
+    "crates/gui",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+# Audio DSP is optimised even in a debug build, because "debug" changes
+# whether it works rather than only how fast it is. An unoptimised echo
+# canceller takes ~123% of real time to process a second of audio, so it
+# cannot keep up with a live call at all; optimised it takes ~6%. The same
+# goes, less dramatically, for the rest of the chain -- every filter runs
+# per sample, 48,000 times a second.
+#
+# Only this crate, so debugging the app itself still gets real symbols and
+# fast rebuilds. Measure with:
+#   cargo test -p voip-audio real_time -- --ignored --nocapture
+[profile.dev.package.voip-audio]
+opt-level = 3
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# Spec section 13: "users should be able to verify the binary matches the
+# published source". Everything below exists so that two builds of the same
+# commit produce the same bytes.
+#
+# `codegen-units = 1` above is load-bearing for this as well as for speed:
+# with more than one, the compiler splits work across threads and the
+# resulting symbol ordering depends on scheduling, so the same source can
+# produce different bytes on the same machine.
+#
+# Absolute paths are the other big source of divergence. Without remapping,
+# the build directory ends up baked into panic messages -- so a binary built
+# in C:\Users\Alice differs from one built in /home/bob, and the builder's
+# username leaks into the shipped artifact. See BUILDING.md for the exact
+# environment a verifier needs.
+[profile.release.package."*"]
+codegen-units = 1

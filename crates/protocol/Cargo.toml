@@ -1,0 +1,8 @@
+[package]
+name = "voip-protocol"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+thiserror = "2.0.20"
+voip-crypto = { version = "0.1.0", path = "../crypto" }

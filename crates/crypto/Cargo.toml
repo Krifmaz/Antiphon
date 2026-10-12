@@ -1,0 +1,25 @@
+[package]
+name = "voip-crypto"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bip39 = { version = "2.2.2", features = ["zeroize"] }
+chacha20poly1305 = "0.11.0"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+hmac = "0.13.0"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+x25519-dalek = { version = "3.0.0", features = ["getrandom", "static_secrets"] }
+zeroize = "1.9.0"
+
+[target.'cfg(windows)'.dependencies]
+# DPAPI, for spec §6's "private keys in the OS keystore". Windows-only by
+# construction: Keychain and libsecret are separate work, and this crate
+# says so rather than pretending otherwise -- see `keystore.rs`.
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+
+[dev-dependencies]
+hex = "0.4.3"
