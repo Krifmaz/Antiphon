@@ -159,7 +159,7 @@ jobs:
             d=${d%/}
             case $d in *windows*) (cd $d && zip -r ../$d.zip .) ;; *) tar czf $d.tar.gz -C $d . ;; esac
           done
-          # Hashes of the archives (what a downloader or Omnistall verifies),
+          # Hashes of the archives (what a downloader verifies),
           # then of the binaries inside them (what a rebuild is compared to).
           sha256sum *.zip *.tar.gz > SHA256SUMS.txt
           cat antiphon-*/SHA256SUMS-*.txt >> SHA256SUMS.txt
