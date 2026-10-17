@@ -306,6 +306,93 @@ dependencies = [
 ]
 
 [[package]]
+name = "antiphon"
+version = "0.1.0"
+dependencies = [
+ "antiphon-audio",
+ "antiphon-crypto",
+ "antiphon-net",
+ "antiphon-protocol",
+ "anyhow",
+ "device_query",
+ "dirs",
+ "image",
+ "qrcode",
+ "rfd",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "tokio",
+]
+
+[[package]]
+name = "antiphon-audio"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "cpal",
+ "ringbuf",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "antiphon-cli"
+version = "0.1.0"
+dependencies = [
+ "antiphon-audio",
+ "antiphon-crypto",
+ "antiphon-net",
+ "antiphon-protocol",
+ "anyhow",
+ "clap",
+ "device_query",
+ "inquire",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "antiphon-crypto"
+version = "0.1.0"
+dependencies = [
+ "bip39",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "hex",
+ "hkdf",
+ "hmac",
+ "sha2",
+ "thiserror 2.0.20",
+ "windows-sys 0.61.2",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "antiphon-net"
+version = "0.1.0"
+dependencies = [
+ "antiphon-crypto",
+ "antiphon-protocol",
+ "sha2",
+ "socket2",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "antiphon-protocol"
+version = "0.1.0"
+dependencies = [
+ "antiphon-crypto",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6010,93 +6097,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "voip-audio"
-version = "0.1.0"
-dependencies = [
- "approx",
- "cpal",
- "ringbuf",
- "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "voip-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "device_query",
- "inquire",
- "serde",
- "serde_json",
- "tokio",
- "voip-audio",
- "voip-crypto",
- "voip-net",
- "voip-protocol",
-]
-
-[[package]]
-name = "voip-crypto"
-version = "0.1.0"
-dependencies = [
- "bip39",
- "chacha20poly1305",
- "ed25519-dalek",
- "getrandom 0.4.3",
- "hex",
- "hkdf",
- "hmac",
- "sha2",
- "thiserror 2.0.20",
- "windows-sys 0.61.2",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "voip-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "device_query",
- "dirs",
- "image",
- "qrcode",
- "rfd",
- "serde",
- "serde_json",
- "slint",
- "slint-build",
- "tokio",
- "voip-audio",
- "voip-crypto",
- "voip-net",
- "voip-protocol",
-]
-
-[[package]]
-name = "voip-net"
-version = "0.1.0"
-dependencies = [
- "sha2",
- "socket2",
- "thiserror 2.0.20",
- "tokio",
- "voip-crypto",
- "voip-protocol",
-]
-
-[[package]]
-name = "voip-protocol"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.20",
- "voip-crypto",
-]
 
 [[package]]
 name = "vtable"

@@ -7,5 +7,5 @@ pub enum ProtocolError {
     #[error("unknown frame type byte {0}")]
     UnknownFrameType(u8),
     #[error(transparent)]
-    Crypto(#[from] voip_crypto::CryptoError),
+    Crypto(#[from] antiphon_crypto::CryptoError),
 }

@@ -32,6 +32,7 @@
 use crate::error::CryptoError;
 use crate::identity::{verify_signature, IdentityKeyPair, PublicIdentity};
 
+// Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
 const CREDENTIAL_CONTEXT: &[u8] = b"voip-app/device/credential/v1";
 const LIST_CONTEXT: &[u8] = b"voip-app/device/list/v1";
 

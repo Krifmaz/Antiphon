@@ -15,6 +15,7 @@
 
 use sha2::{Digest, Sha256};
 
+// Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
 const CONTEXT: &[u8] = b"voip-app/verification/v1";
 
 /// How many decimal digits the code carries, in groups of five.

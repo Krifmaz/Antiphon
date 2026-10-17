@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use voip_net::file_transfer::{chunk_count, chunk_len, sha256_hex_reader, CHUNK_SIZE};
+use antiphon_net::file_transfer::{chunk_count, chunk_len, sha256_hex_reader, CHUNK_SIZE};
 
 /// Where completed, hash-named files live.
 pub fn store_dir(config_dir: &Path) -> PathBuf {
@@ -96,7 +96,7 @@ pub fn verified_path(config_dir: &Path, hash: &str) -> Option<PathBuf> {
 /// partial file by [`DiskReassembly::finish`] instead.
 #[cfg(test)]
 pub fn put(config_dir: &Path, bytes: &[u8]) -> std::io::Result<String> {
-    let hash = voip_net::file_transfer::sha256_hex(bytes);
+    let hash = antiphon_net::file_transfer::sha256_hex(bytes);
     let dir = store_dir(config_dir);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join(format!("{hash}.bin")), bytes)?;
@@ -474,10 +474,10 @@ impl DiskReassembly {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voip_net::file_transfer::{build_chunks, parse_chunk, sha256_hex};
+    use antiphon_net::file_transfer::{build_chunks, parse_chunk, sha256_hex};
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voip-cas-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("antiphon-cas-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

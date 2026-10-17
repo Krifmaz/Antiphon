@@ -75,13 +75,13 @@ mod tests {
 
     #[test]
     fn a_typical_invite_encodes() {
-        let link = format!("voip://{}@203.0.113.7:6001", "ab".repeat(32));
+        let link = format!("antiphon://{}@203.0.113.7:6001", "ab".repeat(32));
         assert!(qrcode::QrCode::new(link.as_bytes()).is_ok());
     }
 
     #[test]
     fn the_side_is_a_whole_number_of_modules() {
-        let link = format!("voip://{}@203.0.113.7:6001", "ab".repeat(32));
+        let link = format!("antiphon://{}@203.0.113.7:6001", "ab".repeat(32));
         let code = qrcode::QrCode::new(link.as_bytes()).unwrap();
         let total = (code.width() + QUIET_ZONE * 2) as u32;
 
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn a_tiny_target_still_produces_at_least_one_pixel_per_module() {
-        let link = format!("voip://{}@203.0.113.7:6001", "ab".repeat(32));
+        let link = format!("antiphon://{}@203.0.113.7:6001", "ab".repeat(32));
         let code = qrcode::QrCode::new(link.as_bytes()).unwrap();
         let total = (code.width() + QUIET_ZONE * 2) as u32;
 
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn the_quiet_zone_is_included_in_the_size() {
-        let link = format!("voip://{}@203.0.113.7:6001", "ab".repeat(32));
+        let link = format!("antiphon://{}@203.0.113.7:6001", "ab".repeat(32));
         let code = qrcode::QrCode::new(link.as_bytes()).unwrap();
 
         let side = side_for(&link, 240).unwrap();
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn an_identity_only_link_encodes_too() {
-        let link = format!("voip://{}", "ab".repeat(32));
+        let link = format!("antiphon://{}", "ab".repeat(32));
         assert!(qrcode::QrCode::new(link.as_bytes()).is_ok());
     }
 }

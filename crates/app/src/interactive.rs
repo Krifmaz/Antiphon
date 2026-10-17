@@ -1,6 +1,6 @@
 //! The no-flags-required front door: an arrow-key menu that walks a user
 //! through listening for or placing a call without them ever typing a
-//! command. Triggered automatically when `voipcli` is run with no
+//! command. Triggered automatically when `antiphon-cli` is run with no
 //! subcommand -- the CLI equivalent of the GUI's Call tab, for people who'd
 //! rather stay in a terminal (or don't have a desktop session at all).
 use std::net::SocketAddr;
@@ -10,8 +10,8 @@ use anyhow::Result;
 use inquire::{Confirm, Select, Text};
 use tokio::net::UdpSocket;
 
-use voip_audio::{list_input_devices, list_output_devices, ChainConfig};
-use voip_net::PeerConnection;
+use antiphon_audio::{list_input_devices, list_output_devices, ChainConfig};
+use antiphon_net::PeerConnection;
 
 use crate::{run_call, PTT_KEY_CHOICES};
 
@@ -19,7 +19,7 @@ const MAIN_MENU: &[&str] =
     &["Wait for a call (listen)", "Call someone", "List audio devices", "Save a settings preset", "Exit"];
 
 pub async fn run() -> Result<()> {
-    println!("voip-app -- interactive mode (run with a subcommand, e.g. `voipcli listen --help`, to skip this menu)\n");
+    println!("Antiphon -- interactive mode (run with a subcommand, e.g. `antiphon-cli listen --help`, to skip this menu)\n");
 
     loop {
         let choice = Select::new("What would you like to do?", MAIN_MENU.to_vec()).prompt()?;

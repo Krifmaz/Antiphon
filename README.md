@@ -23,8 +23,8 @@ A Cargo workspace, one crate per concern:
 | [`crates/protocol`](crates/protocol) | §3 | Binary wire framing binding encrypted sessions to UDP datagrams (`Handshake` / `Audio` / `Control` / `File`, each with its own AAD) |
 | [`crates/net`](crates/net) | §2, §3, §5, §6 | UDP peer connection, STUN discovery + hole punching, NAT-PMP port mapping with renewal, adaptive jitter buffer, forward error correction, audio retransmit requests, file chunking with per-chunk hashes |
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
-| [`crates/app`](crates/app) | §1 Utility | `voip-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
-| [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `voip-gui`: the Slint desktop app -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
+| [`crates/app`](crates/app) | §1 Utility | `antiphon-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
+| [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon`: the Slint desktop app -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
 Every crate's `lib.rs` doc comment states its scope against the spec.
 
@@ -78,7 +78,7 @@ runner may not have: `discovers_a_public_address_from_a_real_server`
 (a 64 MB transfer, run on purpose when measuring throughput):
 
 ```bash
-cargo test -p voip-gui large_file -- --ignored --nocapture
+cargo test -p antiphon large_file -- --ignored --nocapture
 ```
 
 ## Running it
@@ -86,7 +86,7 @@ cargo test -p voip-gui large_file -- --ignored --nocapture
 ### GUI
 
 ```bash
-cargo run -p voip-gui
+cargo run -p antiphon
 ```
 
 Opens a window and puts an icon in the system tray; closing the window
@@ -100,9 +100,9 @@ settings directory.
 ### CLI
 
 ```bash
-cargo run -p voip-cli            # interactive menu
-cargo run -p voip-cli -- listen --port 6001
-cargo run -p voip-cli -- call --remote <A's IP>:6001 --port 6002
+cargo run -p antiphon-cli            # interactive menu
+cargo run -p antiphon-cli -- listen --port 6001
+cargo run -p antiphon-cli -- call --remote <A's IP>:6001 --port 6002
 ```
 
 Hold Space to talk; Ctrl+C hangs up. `--no-ptt` keeps the mic open,
@@ -118,8 +118,8 @@ crates/
   protocol/   wire framing
   net/        UDP transport, NAT traversal, recovery, file chunks
   audio/      DSP chain, echo cancellation, device I/O
-  app/        voip-cli
-  gui/        voip-gui (Slint UI) + build.rs compiling ui/app.slint
+  app/        antiphon-cli
+  gui/        antiphon (Slint UI) + build.rs compiling ui/app.slint
 docs/         the feature spec
 notes/        where work stopped, for picking up on another machine
 .github/      CI: build + test on Linux/Windows/macOS; reproducible release builds

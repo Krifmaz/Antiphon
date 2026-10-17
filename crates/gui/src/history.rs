@@ -6,7 +6,7 @@
 //! address, so someone moving networks keeps their history and someone
 //! *taking over* an address does not inherit it.
 //!
-//! Encrypted with the account's [`voip_crypto::BackupKey`], which is the
+//! Encrypted with the account's [`antiphon_crypto::BackupKey`], which is the
 //! key that gets sealed to authorised devices. That is what makes the
 //! device-approval story real rather than decorative: history on disk is
 //! unreadable without a key that only approved devices hold, so a stolen
@@ -14,7 +14,7 @@
 //!
 //! **Known gap, stated rather than hidden:** the backup key itself is
 //! written next to the identity as plain bytes, for exactly the reason
-//! `voip_crypto::store` documents -- an OS keystore integration is a
+//! `antiphon_crypto::store` documents -- an OS keystore integration is a
 //! separate piece of work. Someone with read access to the config
 //! directory today can therefore read history. This raises the bar from
 //! "open the file" to "open two files", which is honest but not a
@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use voip_crypto::BackupKey;
+use antiphon_crypto::BackupKey;
 
 /// One stored message.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -141,8 +141,8 @@ pub fn load_or_create_backup_key(config_dir: &Path) -> std::io::Result<BackupKey
         )
     };
     match std::fs::read(&path) {
-        Ok(bytes) if voip_crypto::keystore::is_wrapped(&bytes) => {
-            let plain = voip_crypto::keystore::unwrap(&bytes).ok_or_else(|| {
+        Ok(bytes) if antiphon_crypto::keystore::is_wrapped(&bytes) => {
+            let plain = antiphon_crypto::keystore::unwrap(&bytes).ok_or_else(|| {
                 unreadable("was sealed by the operating system and cannot be unsealed here")
             })?;
             if plain.len() != 32 {
@@ -161,7 +161,7 @@ pub fn load_or_create_backup_key(config_dir: &Path) -> std::io::Result<BackupKey
             // fails: the key is already loaded and correct, and refusing
             // to start over a storage upgrade would leave the user worse
             // off than the plaintext file they already had.
-            if voip_crypto::keystore::available() {
+            if antiphon_crypto::keystore::available() {
                 if let Err(e) = save_backup_key(&path, &key) {
                     eprintln!("[history] could not move the backup key into the OS keystore: {e}");
                 }
@@ -184,7 +184,7 @@ fn save_backup_key(path: &Path, key: &BackupKey) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = key.to_bytes();
-    match voip_crypto::keystore::wrap(&bytes) {
+    match antiphon_crypto::keystore::wrap(&bytes) {
         Some(sealed) => std::fs::write(path, sealed),
         None => std::fs::write(path, bytes),
     }
@@ -398,7 +398,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voip-hist-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("antiphon-hist-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -570,8 +570,8 @@ mod tests {
         assert_eq!(load(&dir, "ab", &loaded)[0].text, "before the upgrade");
 
         let on_disk = std::fs::read(backup_key_path(&dir)).unwrap();
-        if voip_crypto::keystore::available() {
-            assert!(voip_crypto::keystore::is_wrapped(&on_disk), "still plaintext");
+        if antiphon_crypto::keystore::available() {
+            assert!(antiphon_crypto::keystore::is_wrapped(&on_disk), "still plaintext");
             assert!(
                 !on_disk.windows(32).any(|w| w == key.to_bytes()),
                 "the key is still sitting in the file"
@@ -587,7 +587,7 @@ mod tests {
         // Generating a new one here would silently make every
         // conversation on the machine permanently unreadable.
         let dir = temp_dir("backupsealed");
-        let mut damaged = voip_crypto::keystore::MAGIC.to_vec();
+        let mut damaged = antiphon_crypto::keystore::MAGIC.to_vec();
         damaged.extend_from_slice(&[0xff; 64]);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(backup_key_path(&dir), &damaged).unwrap();

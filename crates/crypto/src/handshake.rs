@@ -6,6 +6,7 @@ use crate::error::CryptoError;
 use crate::identity::{IdentityKeyPair, PublicIdentity};
 use crate::session::Session;
 
+// Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
 const ROOT_SALT: &[u8] = b"voip-app/handshake/root/v2";
 const INFO_A2B: &[u8] = b"voip-app/chain/a2b/v1";
 const INFO_B2A: &[u8] = b"voip-app/chain/b2a/v1";

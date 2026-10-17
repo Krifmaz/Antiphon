@@ -12,7 +12,7 @@
 //! Reliability is "blast then repair," not a sliding-window ARQ: the sender
 //! sends every chunk once, the receiver tracks what's missing via
 //! [`FileReassembler::missing_chunks`] and asks for retransmits (as a
-//! `FileMissing` control message -- see `voip-gui`'s `control` module,
+//! `FileMissing` control message -- see `antiphon`'s `control` module,
 //! which owns the actual message envelope), and the sender resends just
 //! those. Simple, and UDP loss on a single P2P hop rarely needs more than
 //! one or two repair rounds in practice.

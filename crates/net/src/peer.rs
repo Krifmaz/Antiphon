@@ -5,8 +5,8 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
-use voip_crypto::{HandshakeInit, HandshakeMessage, IdentityKeyPair, PublicIdentity, Session};
-use voip_protocol::{decode, encode, FrameType};
+use antiphon_crypto::{HandshakeInit, HandshakeMessage, IdentityKeyPair, PublicIdentity, Session};
+use antiphon_protocol::{decode, encode, FrameType};
 
 use crate::error::NetError;
 
@@ -228,7 +228,7 @@ impl PeerConnection {
 
     /// Sends one file-transfer chunk (spec §5). `plaintext` is the whole
     /// `[transfer_id][chunk_index][bytes]` payload -- chunking/framing is
-    /// `voip_net::file_transfer`'s job, this just seals and sends it. A
+    /// `antiphon_net::file_transfer`'s job, this just seals and sends it. A
     /// distinct AAD ("file") from audio/control, same reasoning as those.
     pub async fn send_file_chunk(&self, plaintext: &[u8]) -> Result<(), NetError> {
         let sealed = {

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use voip_audio::ChainConfig;
+use antiphon_audio::ChainConfig;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProfileData {
@@ -390,7 +390,7 @@ pub struct Contact {
     /// answers at it.
     ///
     /// This is what actually identifies the contact -- see
-    /// `voip_crypto::contact` for the trust rules built on it.
+    /// `antiphon_crypto::contact` for the trust rules built on it.
     #[serde(default)]
     pub identity_key: String,
     /// Whether a verification code was compared out of band and matched.
@@ -427,7 +427,7 @@ pub struct Contact {
     /// Empty means none. Stored on the contact because a harsh microphone
     /// is a fact about them that outlives any one call.
     #[serde(default)]
-    pub eq_bands: Vec<voip_audio::EqBandConfig>,
+    pub eq_bands: Vec<antiphon_audio::EqBandConfig>,
     /// Where this contact came from, when that is worth remembering --
     /// currently "Introduced by <name>" (spec §4).
     ///
@@ -731,15 +731,14 @@ pub fn profile() -> Option<String> {
 }
 
 /// The directory holding this app's config. Also where the identity key
-/// lives -- see `voip_crypto::store`, and note that the key is
+/// lives -- see `antiphon_crypto::store`, and note that the key is
 /// deliberately a separate file so settings export can't sweep it up.
 ///
 /// The default profile keeps the original path exactly, so an existing
 /// install's settings and identity are found where they already are.
 /// Named profiles nest under `profiles/`.
 pub fn config_dir() -> Option<std::path::PathBuf> {
-    let mut dir = dirs::config_dir()?;
-    dir.push("voip-app");
+    let mut dir = antiphon_crypto::store::app_data_dir(&dirs::config_dir()?);
     if let Some(name) = profile() {
         dir.push("profiles");
         dir.push(name);
@@ -920,7 +919,7 @@ mod tests {
     #[test]
     fn a_preset_round_trips_through_a_shared_file() {
         let preset = VoicePreset { name: "Radio".to_string(), chain: ChainConfig::default_preset() };
-        let path = std::env::temp_dir().join("voip_preset_test.json");
+        let path = std::env::temp_dir().join("antiphon_preset_test.json");
         save_preset_to(&path, &preset).unwrap();
         let back = load_preset_from(&path).unwrap();
         assert_eq!(back.name, "Radio");
@@ -930,7 +929,7 @@ mod tests {
 
     #[test]
     fn a_malformed_preset_file_reports_an_error_instead_of_a_default() {
-        let path = std::env::temp_dir().join("voip_preset_bad.json");
+        let path = std::env::temp_dir().join("antiphon_preset_bad.json");
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(load_preset_from(&path).is_err(), "someone handed you this file -- a failure has to be explainable");
         let _ = std::fs::remove_file(&path);

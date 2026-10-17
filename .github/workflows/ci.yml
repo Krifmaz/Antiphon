@@ -82,27 +82,33 @@ jobs:
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev libgtk-3-dev
       - name: Reproducible environment
         shell: bash
+        # CARGO_ENCODED_RUSTFLAGS rather than RUSTFLAGS, and Windows-form
+        # paths on Windows: under Git Bash $PWD is /d/a/... while rustc sees
+        # D:\a\..., so a POSIX-form prefix never matches and the path ships
+        # in the binary. See BUILDING.md.
         run: |
           echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=--remap-path-prefix=$PWD=/build --remap-path-prefix=$HOME/.cargo=/cargo" >> "$GITHUB_ENV"
+          SRC="$PWD"; CH="${CARGO_HOME:-$HOME/.cargo}"
+          if [ "$RUNNER_OS" = Windows ]; then SRC="$(cygpath -w "$SRC")"; CH="$(cygpath -w "$CH")"; fi
+          printf 'CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo\n' "$SRC" "$CH" >> "$GITHUB_ENV"
       - name: Build once
         shell: bash
         run: |
           cargo build --release --locked --target ${{ matrix.target }}
           mkdir -p out/first
-          cp target/${{ matrix.target }}/release/voip-gui${{ matrix.ext }} target/${{ matrix.target }}/release/voip-cli${{ matrix.ext }} out/first/
+          cp target/${{ matrix.target }}/release/antiphon${{ matrix.ext }} target/${{ matrix.target }}/release/antiphon-cli${{ matrix.ext }} out/first/
       - name: Build again from clean
         shell: bash
         run: |
           cargo clean
           cargo build --release --locked --target ${{ matrix.target }}
           mkdir -p out/second
-          cp target/${{ matrix.target }}/release/voip-gui${{ matrix.ext }} target/${{ matrix.target }}/release/voip-cli${{ matrix.ext }} out/second/
+          cp target/${{ matrix.target }}/release/antiphon${{ matrix.ext }} target/${{ matrix.target }}/release/antiphon-cli${{ matrix.ext }} out/second/
       - name: Refuse to ship anything that does not reproduce
         shell: bash
         run: |
           cd out
-          for bin in voip-gui${{ matrix.ext }} voip-cli${{ matrix.ext }}; do
+          for bin in antiphon${{ matrix.ext }} antiphon-cli${{ matrix.ext }}; do
             cmp first/$bin second/$bin || { echo "::error::$bin differs between two builds of the same commit"; exit 1; }
           done
           cd first && shasum -a 256 * > ../SHA256SUMS-${{ matrix.target }}.txt && cat ../SHA256SUMS-${{ matrix.target }}.txt

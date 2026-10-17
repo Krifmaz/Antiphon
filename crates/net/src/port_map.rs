@@ -320,7 +320,7 @@ mod tests {
     /// Talks to whatever router is actually on this network.
     ///
     /// Ignored by default: it needs a real gateway, and CI has none. Run
-    /// it by hand with `cargo test -p voip-net live_router -- --ignored
+    /// it by hand with `cargo test -p antiphon-net live_router -- --ignored
     /// --nocapture` to see what your own router does.
     #[ignore]
     #[tokio::test]

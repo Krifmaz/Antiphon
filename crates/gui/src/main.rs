@@ -40,7 +40,7 @@ use device_query::Keycode;
 use slint::fontique_010::fontique;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
-use voip_audio::{
+use antiphon_audio::{
     list_input_devices, list_output_devices, BandType, ChainConfig, CompressorConfig, DeEsserConfig, EqBandConfig, GainConfig,
     HighPassConfig, LimiterConfig, LowPassConfig, NoiseGateConfig, PitchShiftConfig, ReverbConfig,
 };
@@ -133,8 +133,8 @@ fn main() -> anyhow::Result<()> {
     // key-change warning and make verification meaningless.
     let identity_dir = config::config_dir()
         .ok_or_else(|| anyhow::anyhow!("could not locate a config directory for the identity key"))?;
-    let identity = Arc::new(voip_crypto::store::load_or_create(
-        &voip_crypto::store::identity_path(&identity_dir),
+    let identity = Arc::new(antiphon_crypto::store::load_or_create(
+        &antiphon_crypto::store::identity_path(&identity_dir),
     )?);
 
     let peer_volume_db = Arc::new(Mutex::new(0.0f32));
@@ -154,7 +154,7 @@ fn main() -> anyhow::Result<()> {
         // learns describes this room and these speakers, which do not
         // change between calls (spec §1's "survives device hot-swap").
         // 48 kHz is the rate the pipeline runs at.
-        echo_canceller: Arc::new(Mutex::new(voip_audio::EchoCanceller::new(48_000))),
+        echo_canceller: Arc::new(Mutex::new(antiphon_audio::EchoCanceller::new(48_000))),
         peer_volume_db: peer_volume_db.clone(),
         peer_muted: peer_muted.clone(),
         punch_socket: Mutex::new(None),
@@ -165,11 +165,11 @@ fn main() -> anyhow::Result<()> {
     let main_window = MainWindow::new()?;
     main_window.set_my_share_id(share_id(&app_state.identity.public().identity_key).into());
     main_window.set_eq_preset_names(string_vec_to_model(
-        voip_audio::eq_preset_names().iter().map(|s| s.to_string()).collect(),
+        antiphon_audio::eq_preset_names().iter().map(|s| s.to_string()).collect(),
     ));
     refresh_invite(&main_window, &app_state);
     if let Some(name) = &profile {
-        main_window.set_window_title(format!("voip-app -- {name}").into());
+        main_window.set_window_title(format!("antiphon-app -- {name}").into());
     }
     let tray = AppTrayIcon::new()?;
 
@@ -695,11 +695,11 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let Some(app) = window_weak.upgrade() else { return };
             let text = app.get_new_contact_invite().to_string();
 
-            let invite = match voip_crypto::Invite::parse(&text) {
+            let invite = match antiphon_crypto::Invite::parse(&text) {
                 Ok(invite) => invite,
                 Err(_) => {
                     app.set_contacts_message(
-                        "That doesn't look like an invite link. It should start with voip://".into(),
+                        "That doesn't look like an invite link. It should start with antiphon://".into(),
                     );
                     return;
                 }
@@ -854,7 +854,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                         return;
                     };
                     // A voice message has nothing to preview.
-                    let sha256 = voip_net::file_transfer::sha256_hex(&wav);
+                    let sha256 = antiphon_net::file_transfer::sha256_hex(&wav);
                     active.send_file(
                         &state2.runtime,
                         name,
@@ -1303,7 +1303,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 app.set_recovery_phrase_shown(false);
                 return;
             }
-            let phrase = voip_crypto::mnemonic::phrase_from_seed(&state.identity.master_seed());
+            let phrase = antiphon_crypto::mnemonic::phrase_from_seed(&state.identity.master_seed());
             app.set_recovery_phrase(phrase.into());
             app.set_recovery_phrase_shown(true);
 
@@ -1429,7 +1429,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 center_hz: 1000.0,
                 gain_db: 0.0,
                 q: 1.0,
-                band_type: voip_audio::BandType::Bell,
+                band_type: antiphon_audio::BandType::Bell,
             });
             apply_eq_bands_to_ui(&app, &bands);
             apply_settings_change(&app, &state);
@@ -1443,7 +1443,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let mut bands = eq_bands_from_ui(&app);
             if let Ok(i) = usize::try_from(index) {
                 if let Some(band) = bands.get_mut(i) {
-                    band.band_type = voip_audio::BandType::from_i32(band_type);
+                    band.band_type = antiphon_audio::BandType::from_i32(band_type);
                 }
             }
             apply_eq_bands_to_ui(&app, &bands);
@@ -1458,7 +1458,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         // worse than no preset, and everything stays editable afterwards.
         main_window.on_eq_load_preset(move |name| {
             let Some(app) = window_weak.upgrade() else { return };
-            let Some(bands) = voip_audio::eq_preset(&name) else { return };
+            let Some(bands) = antiphon_audio::eq_preset(&name) else { return };
             apply_eq_bands_to_ui(&app, &bands);
             apply_settings_change(&app, &state);
         });
@@ -1498,7 +1498,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                     center_hz: freq,
                     gain_db: 0.0,
                     q: 1.0,
-                    band_type: voip_audio::BandType::Bell,
+                    band_type: antiphon_audio::BandType::Bell,
                 });
                 bands.len() - 1
             });
@@ -1988,7 +1988,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             std::thread::spawn(move || {
                 let Some(path) = rfd::FileDialog::new()
                     .set_title("Export voice preset")
-                    .add_filter("voip-app preset", &["json"])
+                    .add_filter("Antiphon preset", &["json"])
                     .set_file_name(format!("{}.json", preset.name))
                     .save_file()
                 else {
@@ -2017,7 +2017,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             std::thread::spawn(move || {
                 let Some(path) = rfd::FileDialog::new()
                     .set_title("Import a voice preset")
-                    .add_filter("voip-app preset", &["json"])
+                    .add_filter("Antiphon preset", &["json"])
                     .pick_file()
                 else {
                     return;
@@ -2720,9 +2720,9 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let window_weak2 = window_weak.clone();
             std::thread::spawn(move || {
                 let Some(path) = rfd::FileDialog::new()
-                    .set_title("Export voip-app settings")
-                    .add_filter("voip-app settings", &["json"])
-                    .set_file_name("voip-app-settings.json")
+                    .set_title("Export Antiphon settings")
+                    .add_filter("Antiphon settings", &["json"])
+                    .set_file_name("antiphon-settings.json")
                     .save_file()
                 else {
                     return;
@@ -2748,7 +2748,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let state2 = state.clone();
             std::thread::spawn(move || {
                 let Some(path) =
-                    rfd::FileDialog::new().set_title("Import voip-app settings").add_filter("voip-app settings", &["json"]).pick_file()
+                    rfd::FileDialog::new().set_title("Import Antiphon settings").add_filter("Antiphon settings", &["json"]).pick_file()
                 else {
                     return;
                 };
@@ -2990,7 +2990,7 @@ fn finish_connect(
     window_weak: slint::Weak<MainWindow>,
     tray_weak: slint::Weak<AppTrayIcon>,
     state: Arc<AppState>,
-    result: anyhow::Result<voip_net::PeerConnection>,
+    result: anyhow::Result<antiphon_net::PeerConnection>,
     config: ChainConfig,
     input_device: Option<String>,
     output_device: Option<String>,
@@ -3003,7 +3003,7 @@ fn finish_connect(
             // Computed before the pipeline consumes `peer`, from the
             // identity the handshake actually verified rather than
             // anything the peer merely claimed about themselves.
-            let code = voip_crypto::verification_code(
+            let code = antiphon_crypto::verification_code(
                 &state.identity.public().identity_key,
                 &peer.peer_identity().identity_key,
             );
@@ -3133,7 +3133,7 @@ fn device_model(names: Vec<String>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items))
 }
 
-/// Maps the UI's device dropdown selection back to what `voip-audio` expects:
+/// Maps the UI's device dropdown selection back to what `antiphon-audio` expects:
 /// `None` picks the system default, matching the "System default" sentinel entry.
 fn selected_devices(app: &MainWindow) -> (Option<String>, Option<String>) {
     let to_opt = |s: String| if s == DEFAULT_DEVICE_LABEL || s.is_empty() { None } else { Some(s) };
@@ -3404,8 +3404,8 @@ struct PeerTrust {
 /// directly rather than the UI model. A contact that isn't saved at all is
 /// not pinned -- there is nothing to warn about and nothing to remember
 /// until the user decides to keep them.
-fn evaluate_peer_trust(remote_addr: &str, peer: &voip_crypto::PublicIdentity) -> PeerTrust {
-    let fingerprint = voip_crypto::fingerprint(&peer.identity_key);
+fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity) -> PeerTrust {
+    let fingerprint = antiphon_crypto::fingerprint(&peer.identity_key);
     let mut config = config::load();
 
     let Some(index) = config.contacts.iter().position(|c| c.address == remote_addr) else {
@@ -3419,20 +3419,20 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &voip_crypto::PublicIdentity) ->
 
     let contact = &config.contacts[index];
     let pinned = decode_identity_key(&contact.identity_key).map(|identity_key| {
-        voip_crypto::PinnedContact {
+        antiphon_crypto::PinnedContact {
             identity_key,
             petname: contact.name.clone(),
             trust: if contact.verified {
-                voip_crypto::TrustLevel::Verified
+                antiphon_crypto::TrustLevel::Verified
             } else {
-                voip_crypto::TrustLevel::Unverified
+                antiphon_crypto::TrustLevel::Unverified
             },
             first_seen_secs: contact.first_seen_secs,
         }
     });
 
-    match voip_crypto::evaluate(pinned.as_ref(), peer) {
-        voip_crypto::TrustDecision::FirstContact => {
+    match antiphon_crypto::evaluate(pinned.as_ref(), peer) {
+        antiphon_crypto::TrustDecision::FirstContact => {
             // Trust on first use: remember the key so a later change is
             // detectable. Nobody has checked it yet, and the message says so.
             let name = contact.name.clone();
@@ -3448,8 +3448,8 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &voip_crypto::PublicIdentity) ->
                 ),
             }
         }
-        voip_crypto::TrustDecision::Unchanged { trust } => {
-            let verified = trust == voip_crypto::TrustLevel::Verified;
+        antiphon_crypto::TrustDecision::Unchanged { trust } => {
+            let verified = trust == antiphon_crypto::TrustLevel::Verified;
             PeerTrust {
                 fingerprint,
                 verified,
@@ -3461,7 +3461,7 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &voip_crypto::PublicIdentity) ->
                 },
             }
         }
-        voip_crypto::TrustDecision::KeyChanged { was_verified, .. } => {
+        antiphon_crypto::TrustDecision::KeyChanged { was_verified, .. } => {
             // Deliberately not re-pinned. Silently accepting the new key
             // would erase the only evidence that anything happened.
             let name = contact.name.clone();
@@ -3814,7 +3814,7 @@ fn peer_tone_positions(bands: &[EqBandConfig]) -> (f32, f32, f32) {
 /// Only the EQ bands: this is somebody else's voice, and running it
 /// through a gate or a compressor tuned for *your* microphone would be
 /// processing their audio with settings chosen for different input.
-fn peer_eq_chain(bands: &[EqBandConfig]) -> Option<voip_audio::AudioChain> {
+fn peer_eq_chain(bands: &[EqBandConfig]) -> Option<antiphon_audio::AudioChain> {
     if bands.iter().all(|b| !b.enabled) {
         return None;
     }
@@ -3829,7 +3829,7 @@ fn peer_eq_chain(bands: &[EqBandConfig]) -> Option<voip_audio::AudioChain> {
     chain.reverb.enabled = false;
     chain.gain = GainConfig::Fixed { enabled: false, gain_db: 0.0 };
     chain.eq_bands = bands.to_vec();
-    Some(voip_audio::AudioChain::from_config(EQ_CURVE_PREVIEW_SAMPLE_RATE, &chain))
+    Some(antiphon_audio::AudioChain::from_config(EQ_CURVE_PREVIEW_SAMPLE_RATE, &chain))
 }
 
 /// Pushes the network capability table into the UI (spec §10).
@@ -3933,7 +3933,7 @@ fn refresh_invite(app: &MainWindow, state: &std::sync::Arc<state::AppState>) {
         }
     };
 
-    let invite = voip_crypto::Invite {
+    let invite = antiphon_crypto::Invite {
         identity_key: state.identity.public().identity_key,
         address: address.clone(),
     };
@@ -3994,7 +3994,7 @@ fn apply_contacts_to_ui(app: &MainWindow, contacts: &[config::Contact]) {
 /// pinned yet.
 fn pinned_fingerprint(contact: &config::Contact) -> String {
     match decode_identity_key(&contact.identity_key) {
-        Some(key) => voip_crypto::fingerprint(&key),
+        Some(key) => antiphon_crypto::fingerprint(&key),
         None => String::new(),
     }
 }
@@ -4672,7 +4672,7 @@ fn eq_band_from_ui(b: &EqBand) -> EqBandConfig {
         center_hz: b.freq,
         gain_db: b.gain,
         q: b.q,
-        band_type: voip_audio::BandType::from_i32(b.band_type),
+        band_type: antiphon_audio::BandType::from_i32(b.band_type),
     }
 }
 
@@ -4708,8 +4708,8 @@ const EQ_CURVE_VIEWBOX_H: f32 = 100.0;
 /// evaluate each enabled band's closed-form magnitude response and add.
 fn recompute_eq_curve(app: &MainWindow) {
     let bands = eq_bands_from_ui(app);
-    let freqs = voip_audio::log_spaced_frequencies(EQ_CURVE_MIN_HZ, EQ_CURVE_MAX_HZ, EQ_CURVE_POINTS);
-    let curve_db = voip_audio::eq_curve_db(&bands, EQ_CURVE_PREVIEW_SAMPLE_RATE, &freqs);
+    let freqs = antiphon_audio::log_spaced_frequencies(EQ_CURVE_MIN_HZ, EQ_CURVE_MAX_HZ, EQ_CURVE_POINTS);
+    let curve_db = antiphon_audio::eq_curve_db(&bands, EQ_CURVE_PREVIEW_SAMPLE_RATE, &freqs);
 
     let mut path = String::new();
     for (i, (&f, &db)) in freqs.iter().zip(curve_db.iter()).enumerate() {
@@ -5046,7 +5046,7 @@ fn set_binding_name(app: &MainWindow, id: &str, name: &str) {
 fn read_chain_config(app: &MainWindow) -> ChainConfig {
     ChainConfig {
         name: "gui".to_string(),
-        noise_suppress: voip_audio::NoiseSuppressConfig {
+        noise_suppress: antiphon_audio::NoiseSuppressConfig {
             enabled: app.get_ns_enabled(),
             strength: app.get_ns_strength(),
         },

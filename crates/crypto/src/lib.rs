@@ -28,6 +28,19 @@
 //! Not yet implemented, each a larger piece of work building on
 //! [`Session`]: the DH ratchet step (post-compromise security), MLS for
 //! groups, and SFrame for relayed media.
+//!
+//! # Frozen labels
+//!
+//! The domain-separation labels in this crate (`b"voip-app/..."`), the
+//! keystore's `VOIPKEY1` marker and its sealing entropy still carry the
+//! project's name from before it was called Antiphon, and they must stay
+//! that way. They are inputs to key derivation and to on-disk formats, not
+//! names: change the identity labels and every recovery phrase restores a
+//! *different* identity, tripping a key-change warning with every contact;
+//! change the verification or handshake labels and two builds can no longer
+//! talk or agree on a code; change the keystore constants and every sealed
+//! key on disk becomes unreadable. A rename touches what people see. These
+//! are not that.
 
 pub mod backup;
 mod contact;

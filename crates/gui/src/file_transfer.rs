@@ -1,5 +1,5 @@
 //! App-layer file transfer (spec §5): owns the send/receive lifecycle and
-//! shared progress state; `voip_net::file_transfer` owns the wire-level
+//! shared progress state; `antiphon_net::file_transfer` owns the wire-level
 //! chunk format, `crate::control::ControlMessage` owns the
 //! offer/accept/missing/complete envelope. This module wires those two
 //! together into something a call can actually run.
@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use voip_net::file_transfer::{chunk_count, encode_chunk, parse_chunk};
-use voip_net::PeerConnection;
+use antiphon_net::file_transfer::{chunk_count, encode_chunk, parse_chunk};
+use antiphon_net::PeerConnection;
 
 use crate::content_store::{DiskReassembly, MAX_REQUEST};
 use crate::control::ControlMessage;
@@ -920,11 +920,11 @@ mod integration_tests {
     //! uses, without a GUI or two machines.
     use super::*;
     use tokio::net::UdpSocket;
-    use voip_net::file_transfer::{sha256_hex, CHUNK_SIZE};
-    use voip_net::Received;
+    use antiphon_net::file_transfer::{sha256_hex, CHUNK_SIZE};
+    use antiphon_net::Received;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voip-ft-e2e-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("antiphon-ft-e2e-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -946,8 +946,8 @@ mod integration_tests {
 
         // Two distinct identities, so this exercises the same authenticated
         // handshake a real call uses rather than a special test path.
-        let id_a = voip_crypto::IdentityKeyPair::generate();
-        let id_b = voip_crypto::IdentityKeyPair::generate();
+        let id_a = antiphon_crypto::IdentityKeyPair::generate();
+        let id_b = antiphon_crypto::IdentityKeyPair::generate();
         let (peer_a, peer_b) = tokio::join!(
             PeerConnection::connect(socket_a, addr_b, &id_a),
             PeerConnection::listen(socket_b, &id_b)
@@ -1076,7 +1076,7 @@ mod integration_tests {
     }
 
     /// A large transfer, timed. Ignored by default because of its size;
-    /// run with `cargo test -p voip-gui large_file -- --ignored --nocapture`.
+    /// run with `cargo test -p antiphon large_file -- --ignored --nocapture`.
     #[ignore]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_large_file_streams_through() {

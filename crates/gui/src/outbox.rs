@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use voip_crypto::BackupKey;
+use antiphon_crypto::BackupKey;
 
 /// Cap on queued messages per contact.
 ///
@@ -219,7 +219,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join(format!("voip-outbox-test-{name}-{}", std::process::id()));
+            .join(format!("antiphon-outbox-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

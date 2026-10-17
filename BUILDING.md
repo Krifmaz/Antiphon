@@ -56,8 +56,30 @@ export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
 export RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$CARGO_HOME=/cargo"
 
 cargo build --release --locked
-sha256sum target/release/voip-gui
+sha256sum target/release/antiphon
 ```
+
+**On Windows, or anywhere the path contains a space,** that `RUSTFLAGS`
+line silently does the wrong thing. Cargo splits `RUSTFLAGS` on spaces, so
+`C:\Users\Some Name\...` arrives as two broken arguments; and under Git Bash
+`$PWD` is `/c/Users/...` while the compiler sees `C:\Users\...`, so the
+prefix never matches and the path ships in the binary anyway. Use
+`CARGO_ENCODED_RUSTFLAGS`, which separates flags with `\x1f` rather than
+spaces, and pass Windows-form paths. This is how the published test builds
+are made:
+
+```bash
+export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+SRC="$(cygpath -w "$PWD")"
+CH="$(cygpath -w "${CARGO_HOME:-$HOME/.cargo}")"
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${SRC}=/build"$'\x1f'"--remap-path-prefix=${CH}=/cargo"
+
+cargo build --release --locked
+sha256sum target/release/antiphon.exe target/release/antiphon-cli.exe
+```
+
+Afterwards, searching the binary for your own username is a quick check
+that the remap took effect.
 
 `--locked` matters: without it, cargo is free to pick newer dependency
 versions than `Cargo.lock` records, and you would be building different
@@ -74,6 +96,7 @@ the binary is the source — no trust required.
 | `codegen-units = 1` | Work is split across threads; symbol ordering depends on scheduling, so the same machine can produce different bytes twice |
 | `--remap-path-prefix` | The build directory is baked into panic messages, so `C:\Users\Alice\...` differs from `/home/bob/...` — and the builder's username ships inside the binary |
 | `SOURCE_DATE_EPOCH` | Build timestamps embed the moment of compilation |
+| `strip = true` | On the Windows GNU toolchain, import-library symbol names embed a temporary build folder's full path — username and a random suffix — which path remapping does not reach |
 | `--locked` | Dependency versions drift, so you are verifying different source than was released |
 
 ## The pipeline
@@ -105,8 +128,9 @@ bde2b5ac155831d3452c08c78354c4af640795ab172b590ad1f73a68d2d1ff35  first/voip-gui
 bde2b5ac155831d3452c08c78354c4af640795ab172b590ad1f73a68d2d1ff35  second/voip-gui
 ```
 
-Both binaries identical. The hashes are for the commit that introduced
-this section and will differ for any other; what matters is that two
+Both binaries identical. The hashes are for commit 4866782, which
+introduced this section and still built the binaries under their old
+names; they will differ for any other commit, what matters is that two
 builds of the same commit agreed, which had not been demonstrated before.
 
 ## What is not done yet
@@ -142,7 +166,7 @@ code. `a_large_file_streams_through` moves 64 MB over loopback and is for
 measuring throughput on purpose:
 
 ```bash
-cargo test --release -p voip-gui large_file -- --ignored --nocapture
+cargo test --release -p antiphon large_file -- --ignored --nocapture
 ```
 
 Use `--release` for that number: the dev profile optimises the crypto

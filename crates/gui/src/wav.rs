@@ -37,7 +37,7 @@ mod tests {
     #[test]
     fn writes_a_valid_header_and_correct_length() {
         let dir = std::env::temp_dir();
-        let path = dir.join("voip_wav_test.wav");
+        let path = dir.join("antiphon_wav_test.wav");
         let samples = vec![0.0f32, 0.5, -0.5, 1.0, -1.0];
         write_wav_16bit_mono(&path, 48000, &samples).unwrap();
 

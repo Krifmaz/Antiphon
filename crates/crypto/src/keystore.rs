@@ -28,6 +28,10 @@
 /// by looking, rather than by trying to unseal and interpreting failure --
 /// which cannot distinguish "not sealed" from "sealed and damaged", and
 /// those two need very different handling.
+///
+/// Frozen under the project's old name, along with [`ENTROPY`] below --
+/// see "Frozen labels" in `lib.rs`. Changing either would make every key
+/// already sealed on disk unreadable.
 pub const MAGIC: &[u8] = b"VOIPKEY1";
 
 /// Second-factor entropy, mixed into the seal.

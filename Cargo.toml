@@ -22,8 +22,8 @@ version = "0.1.0"
 #
 # Only this crate, so debugging the app itself still gets real symbols and
 # fast rebuilds. Measure with:
-#   cargo test -p voip-audio real_time -- --ignored --nocapture
-[profile.dev.package.voip-audio]
+#   cargo test -p antiphon-audio real_time -- --ignored --nocapture
+[profile.dev.package.antiphon-audio]
 opt-level = 3
 
 # The same argument for the crypto primitives: every audio frame and every
@@ -50,6 +50,16 @@ opt-level = 3
 [profile.release]
 lto = true
 codegen-units = 1
+# No symbol table in release binaries. Not for size (though it halves the
+# CLI): on the Windows GNU toolchain, rustc builds import libraries in a
+# temporary folder under target\, and the symbol names it gives them embed
+# that folder's full path -- the builder's username included -- plus a
+# random suffix. --remap-path-prefix does not reach them. Measured: both
+# binaries carried "C:\Users\<name>\...\rustcXXXXXX" until this was set,
+# which leaked the name *and* made two builds of one commit differ.
+# Panic messages keep their file:line locations; only backtrace function
+# names are lost.
+strip = true
 
 # Spec section 13: "users should be able to verify the binary matches the
 # published source". Everything below exists so that two builds of the same

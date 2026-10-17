@@ -12,17 +12,17 @@ use device_query::{DeviceQuery, DeviceState};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use voip_audio::{list_input_devices, list_output_devices, start_capture, start_playback, AudioChain, ChainConfig};
-use voip_crypto::{verification_code, IdentityKeyPair};
-use voip_net::{JitterBuffer, PeerConnection, PopResult};
+use antiphon_audio::{list_input_devices, list_output_devices, start_capture, start_playback, AudioChain, ChainConfig};
+use antiphon_crypto::{verification_code, IdentityKeyPair};
+use antiphon_net::{JitterBuffer, PeerConnection, PopResult};
 
 /// Loads this machine's long-term identity, generating one on first run
 /// (spec §4). Shared by every call path so both the CLI and the
 /// interactive menu speak as the same person.
 pub(crate) fn load_identity() -> Result<IdentityKeyPair> {
     let dir = dirs_config_dir().context("could not locate a config directory for the identity key")?;
-    let path = voip_crypto::store::identity_path(&dir);
-    voip_crypto::store::load_or_create(&path)
+    let path = antiphon_crypto::store::identity_path(&dir);
+    antiphon_crypto::store::load_or_create(&path)
         .with_context(|| format!("could not load the identity key at {}", path.display()))
 }
 
@@ -76,7 +76,7 @@ fn dirs_config_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
-    let mut dir = base?.join("voip-app");
+    let mut dir = antiphon_crypto::store::app_data_dir(&base?);
     if let Some(Some(name)) = PROFILE.get() {
         dir.push("profiles");
         dir.push(name);
@@ -86,7 +86,7 @@ fn dirs_config_dir() -> Option<std::path::PathBuf> {
 
 /// Prints the code both sides compare out of band (spec §4
 /// "Verification code").
-pub(crate) fn announce_peer(identity: &IdentityKeyPair, peer: &voip_crypto::PublicIdentity) {
+pub(crate) fn announce_peer(identity: &IdentityKeyPair, peer: &antiphon_crypto::PublicIdentity) {
     println!(
         "Verification code (compare this with them out loud): {}",
         verification_code(&identity.public().identity_key, &peer.identity_key)
@@ -95,7 +95,7 @@ pub(crate) fn announce_peer(identity: &IdentityKeyPair, peer: &voip_crypto::Publ
 
 /// How long the jitter buffer waits for a specific missing frame before
 /// giving up and concealing it (spec §2 "Adaptive jitter buffer"). Fixed
-/// rather than actually adaptive -- see `voip_net::JitterBuffer`'s doc comment.
+/// rather than actually adaptive -- see `antiphon_net::JitterBuffer`'s doc comment.
 const JITTER_MAX_WAIT: Duration = Duration::from_millis(60);
 
 /// A minimal two-party encrypted voice call: the vertical slice of the full
@@ -107,7 +107,7 @@ const JITTER_MAX_WAIT: Duration = Duration::from_millis(60);
 pub(crate) const PTT_KEY_CHOICES: &[&str] = &["space", "capslock", "tab", "ctrl", "rctrl", "shift", "rshift", "alt", "ralt", "grave"];
 
 #[derive(Parser)]
-#[command(name = "voipcli")]
+#[command(name = "antiphon-cli")]
 struct Cli {
     /// Use a separate identity and settings directory, so one machine can
     /// hold more than one identity (e.g. to call yourself while testing).
@@ -138,10 +138,10 @@ enum Command {
         /// Disable push-to-talk; the mic is always live (still processed through the chain).
         #[arg(long)]
         no_ptt: bool,
-        /// Microphone name from `voipcli devices`; omit for the system default.
+        /// Microphone name from `antiphon-cli devices`; omit for the system default.
         #[arg(long)]
         input_device: Option<String>,
-        /// Output device name from `voipcli devices`; omit for the system default.
+        /// Output device name from `antiphon-cli devices`; omit for the system default.
         #[arg(long)]
         output_device: Option<String>,
     },
@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
             IdentityAction::Show => {
                 let identity = load_identity()?;
                 println!("Identity: {}", hex(&identity.public().identity_key));
-                println!("Invite:   {}", voip_crypto::Invite {
+                println!("Invite:   {}", antiphon_crypto::Invite {
                     identity_key: identity.public().identity_key,
                     address: String::new(),
                 }.to_link());
@@ -197,22 +197,22 @@ async fn main() -> Result<()> {
                 println!("Anyone who reads them becomes you, and there is no server that");
                 println!("can reset your identity if you lose them.
 ");
-                println!("{}", voip_crypto::mnemonic::phrase_from_seed(&identity.master_seed()));
+                println!("{}", antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed()));
             }
             IdentityAction::Restore { phrase, force } => {
-                let seed = voip_crypto::mnemonic::seed_from_phrase(&phrase)
+                let seed = antiphon_crypto::mnemonic::seed_from_phrase(&phrase)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let restored = voip_crypto::IdentityKeyPair::from_master_seed(seed);
+                let restored = antiphon_crypto::IdentityKeyPair::from_master_seed(seed);
 
                 let dir = dirs_config_dir().ok_or_else(|| anyhow::anyhow!("no config directory"))?;
-                let path = voip_crypto::store::identity_path(&dir);
+                let path = antiphon_crypto::store::identity_path(&dir);
 
                 // Overwriting an identity makes you a different person to
                 // every contact who pinned the old key, so it takes an
                 // explicit --force rather than happening because someone
                 // pasted a phrase to see what it did.
                 if path.exists() && !force {
-                    let existing = voip_crypto::store::load_or_create(&path)?;
+                    let existing = antiphon_crypto::store::load_or_create(&path)?;
                     if existing.public().identity_key == restored.public().identity_key {
                         println!("That phrase already matches this profile's identity. Nothing to do.");
                         return Ok(());
@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
                     );
                 }
 
-                voip_crypto::store::save(&path, &restored)?;
+                antiphon_crypto::store::save(&path, &restored)?;
                 println!("Restored identity {}", hex(&restored.public().identity_key));
                 println!("Saved to {}", path.display());
             }
@@ -332,12 +332,12 @@ pub(crate) async fn run_call(
         // one (spec section 2 forward error correction).
         let mut previous_frame: Option<Vec<f32>> = None;
         // Application frame sequence, independent of the crypto counter --
-        // see `voip_net::fec` for why they must not be the same number.
+        // see `antiphon_net::fec` for why they must not be the same number.
         let mut sequence: u32 = 0;
         while let Some(mut samples) = rx.recv().await {
             chain.process(&mut samples);
             if send_ptt.load(Ordering::Relaxed) {
-                let bytes = voip_net::fec::encode(sequence, &samples, previous_frame.as_deref());
+                let bytes = antiphon_net::fec::encode(sequence, &samples, previous_frame.as_deref());
                 previous_frame = Some(samples.clone());
                 sequence = sequence.wrapping_add(1);
                 if let Err(e) = send_peer.send_audio(&bytes).await {
@@ -362,8 +362,8 @@ pub(crate) async fn run_call(
     let recv_task = tokio::spawn(async move {
         let result = recv_peer
             .recv_loop(move |msg| match msg {
-                voip_net::Received::Audio { counter: _, plaintext } => {
-                    if let Some(decoded) = voip_net::fec::decode(&plaintext) {
+                antiphon_net::Received::Audio { counter: _, plaintext } => {
+                    if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
                         recv_jitter.lock().unwrap().push_with_backup(
                             decoded.sequence as u64,
                             decoded.primary,
@@ -375,8 +375,8 @@ pub(crate) async fn run_call(
                 // a peer's control messages (e.g. the GUI's display
                 // name/status, file-transfer offers) and file chunks are
                 // just dropped.
-                voip_net::Received::Control(_) => {}
-                voip_net::Received::File(_) => {}
+                antiphon_net::Received::Control(_) => {}
+                antiphon_net::Received::File(_) => {}
             })
             .await;
         if let Err(e) = result {

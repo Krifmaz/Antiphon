@@ -34,7 +34,7 @@ now built optimised in the dev profile (see `Cargo.toml`); measure with
 `--release` when the number matters:
 
 ```
-cargo test --release -p voip-gui large_file -- --ignored --nocapture
+cargo test --release -p antiphon large_file -- --ignored --nocapture
 ```
 
 ## Next: the relay
