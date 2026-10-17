@@ -26,6 +26,27 @@ version = "0.1.0"
 [profile.dev.package.voip-audio]
 opt-level = 3
 
+# The same argument for the crypto primitives: every audio frame and every
+# file chunk is encrypted and authenticated, and unoptimised ChaCha20 and
+# SHA-256 cap a debug build's file transfer at a few MB/s on loopback --
+# which made the send-rate controller look broken when it was in fact
+# correctly discovering a receiver that could not keep up. Only the
+# primitives, so this workspace's own crates still debug normally.
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.hkdf]
+opt-level = 3
+
 [profile.release]
 lto = true
 codegen-units = 1

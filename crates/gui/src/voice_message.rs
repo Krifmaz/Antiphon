@@ -51,7 +51,7 @@ pub fn is_voice_message(file_name: &str) -> bool {
 /// unlike your calls -- no gate, no EQ, no compression -- which is a
 /// surprise nobody wants from a feature that is supposed to be "the same
 /// as talking".
-pub fn process_recording(samples: &mut Vec<f32>, sample_rate: u32, config: &ChainConfig) {
+pub fn process_recording(samples: &mut [f32], sample_rate: u32, config: &ChainConfig) {
     AudioChain::from_config(sample_rate, config).process(samples);
 }
 
@@ -132,10 +132,10 @@ mod tests {
     #[test]
     fn silence_is_trimmed_from_both_ends_but_not_the_middle() {
         let mut samples = vec![0.0f32; 100];
-        samples.extend(std::iter::repeat(0.5).take(10));
-        samples.extend(std::iter::repeat(0.0).take(50)); // a pause mid-speech
-        samples.extend(std::iter::repeat(0.4).take(10));
-        samples.extend(std::iter::repeat(0.0).take(100));
+        samples.extend(std::iter::repeat_n(0.5, 10));
+        samples.extend(std::iter::repeat_n(0.0, 50)); // a pause mid-speech
+        samples.extend(std::iter::repeat_n(0.4, 10));
+        samples.extend(std::iter::repeat_n(0.0, 100));
 
         let trimmed = trim_silence(&samples, 0.01);
 
@@ -208,7 +208,7 @@ mod tests {
     fn duration_is_reported_in_real_seconds() {
         assert!((duration_secs(&vec![0.0; 48_000], 48_000) - 1.0).abs() < 1e-6);
         // A zero rate must not divide by zero.
-        assert!(duration_secs(&vec![0.0; 10], 0).is_finite());
+        assert!(duration_secs(&[0.0; 10], 0).is_finite());
     }
 
     #[test]

@@ -32,6 +32,9 @@ use image::{codecs::gif::GifDecoder, AnimationDecoder};
 
 use crate::MainWindow;
 
+/// Installs one decoded frame on whichever image slot is animating.
+type SetFrame = Rc<dyn Fn(&MainWindow, slint::Image)>;
+
 /// One decoded frame's raw pixels -- plain data, safe to build on any
 /// thread and hand across to the UI thread.
 pub struct RawFrame {
@@ -90,7 +93,7 @@ fn decode_gif_raw_frames(bytes: &[u8]) -> anyhow::Result<Vec<RawFrame>> {
         // A few encoders emit a 0ms delay, which would otherwise spin the
         // reschedule loop as fast as it can tick -- floor it to something
         // still snappy but not a busy-loop.
-        let delay_ms = if denom == 0 { 100 } else { (numer / denom).max(20) } as u64;
+        let delay_ms = numer.checked_div(denom).map_or(100, |d| d.max(20)) as u64;
         let buffer = frame.into_buffer();
         let (width, height) = buffer.dimensions();
         frames.push(RawFrame { width, height, rgba: buffer.into_raw(), delay_ms });
@@ -127,7 +130,7 @@ pub fn apply_raw_loaded(
     window_weak: slint::Weak<MainWindow>,
     raw: RawLoaded,
     slot: ImageSlot,
-    set_frame: Rc<dyn Fn(&MainWindow, slint::Image)>,
+    set_frame: SetFrame,
 ) -> anyhow::Result<()> {
     let my_generation = slot.generation(app).wrapping_add(1);
     slot.set_generation(app, my_generation);
@@ -158,7 +161,7 @@ fn schedule_gif_frame(
     frame_index: usize,
     slot: ImageSlot,
     my_generation: i32,
-    set_frame: Rc<dyn Fn(&MainWindow, slint::Image)>,
+    set_frame: SetFrame,
 ) {
     let Some(app) = window_weak.upgrade() else { return };
     if slot.generation(&app) != my_generation || images.is_empty() {

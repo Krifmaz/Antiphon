@@ -17,7 +17,16 @@ reproducible build is that you do not have to take anyone's word for it.
 cargo build --release
 ```
 
-Built with **Rust 1.98.0**.
+Built with **Rust 1.97.0**, which is what the CI pipeline pins and what
+the reproducibility check below was run with. (1.98.0 also builds it; a
+*release* must use the stated version, for the reason under "Why each
+setting is there".)
+
+On Linux the audio and UI stacks need their development headers first:
+
+```bash
+sudo apt-get install libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev
+```
 
 There is deliberately **no `rust-toolchain.toml`**, and the reason is worth
 recording because adding one looks obviously correct:
@@ -61,11 +70,44 @@ the binary is the source — no trust required.
 
 | Setting | Without it |
 |---|---|
-| Rust 1.98.0 exactly | Different compilers emit different code from identical source |
+| Rust 1.97.0 exactly | Different compilers emit different code from identical source |
 | `codegen-units = 1` | Work is split across threads; symbol ordering depends on scheduling, so the same machine can produce different bytes twice |
 | `--remap-path-prefix` | The build directory is baked into panic messages, so `C:\Users\Alice\...` differs from `/home/bob/...` — and the builder's username ships inside the binary |
 | `SOURCE_DATE_EPOCH` | Build timestamps embed the moment of compilation |
 | `--locked` | Dependency versions drift, so you are verifying different source than was released |
+
+## The pipeline
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) is spec §10's "one
+pipeline building every target from the same commit":
+
+- **Every push and pull request:** build, test and clippy on Linux,
+  Windows and macOS, with the toolchain pinned per platform — which is
+  the right place to pin it, since a build matrix already knows its
+  target triple.
+- **Every `v*` tag:** the release build above, run **twice from clean on
+  each platform**. The job compares the two binaries byte for byte and
+  refuses to publish anything that differs, then uploads the binaries with
+  a `SHA256SUMS` file. So reproducibility is not a property someone
+  asserted once; it is checked on every release, and a regression in it
+  fails the build rather than shipping.
+
+## Cross-check
+
+Run on 2026-10-17, Linux x86_64, Rust 1.97.0, following the procedure
+above exactly: a release build, `cargo clean --release`, a second release
+build, and a byte comparison.
+
+```
+5f88b5256928ba0804f6e136d7159b4693343a160149ed5fdd3820fa1de54684  first/voip-cli
+bde2b5ac155831d3452c08c78354c4af640795ab172b590ad1f73a68d2d1ff35  first/voip-gui
+5f88b5256928ba0804f6e136d7159b4693343a160149ed5fdd3820fa1de54684  second/voip-cli
+bde2b5ac155831d3452c08c78354c4af640795ab172b590ad1f73a68d2d1ff35  second/voip-gui
+```
+
+Both binaries identical. The hashes are for the commit that introduced
+this section and will differ for any other; what matters is that two
+builds of the same commit agreed, which had not been demonstrated before.
 
 ## What is not done yet
 
@@ -78,15 +120,14 @@ that did not:
   whoever served you the download page. Reproducibility proves the binary
   matches *some* source; a signature is what ties the published hash to the
   people who made it. Both are needed.
-- **Reproducibility is configured, not yet proven.** The settings above are
-  the known requirements, but no two-machine cross-check has actually been
-  run to confirm the output is byte-identical. Until that is done, treat
-  this as the intended procedure rather than a demonstrated property.
-- **No release pipeline.** Spec §10 wants one pipeline building every
-  target from the same commit. Builds are currently local and Windows-only.
-- **The toolchain version is not enforced**, for the reason above. A real
-  release pipeline would pin the full triple per platform, which is the
-  right place to solve this — a build matrix already knows its target.
+- **One machine per platform, not two.** The pipeline's two builds run on
+  the same runner image. That rules out the non-determinism this file is
+  about (symbol ordering, timestamps, paths) but not a difference between
+  two differently provisioned machines. A verifier building on their own
+  machine and matching the published hash is the check that closes that,
+  and it is the one this procedure exists to make possible.
+- **Packaging.** The pipeline produces bare binaries, not the Flatpak /
+  AppImage / deb / MSI / dmg spec §10 lists.
 
 ## Running the tests
 
@@ -94,7 +135,16 @@ that did not:
 cargo test --workspace
 ```
 
-One test is ignored by default (`discovers_a_public_address_from_a_real_server`)
-because it needs internet access and a reachable STUN server; it would
-otherwise fail offline or behind a firewall for reasons that have nothing
-to do with the code.
+Two tests are ignored by default. `discovers_a_public_address_from_a_real_server`
+needs internet access and a reachable STUN server, and would otherwise fail
+offline or behind a firewall for reasons that have nothing to do with the
+code. `a_large_file_streams_through` moves 64 MB over loopback and is for
+measuring throughput on purpose:
+
+```bash
+cargo test --release -p voip-gui large_file -- --ignored --nocapture
+```
+
+Use `--release` for that number: the dev profile optimises the crypto
+primitives (see `Cargo.toml`) but the rest of the receive path is still
+unoptimised, and a debug figure measures the compiler, not the protocol.

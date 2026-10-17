@@ -25,6 +25,7 @@
 //! store is inspectable with a file manager, deleting an entry is deleting
 //! a file, and there is no index to corrupt or migrate.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -139,6 +140,15 @@ pub const MAX_REQUEST: usize = 256;
 /// for too.
 const QUIET_BEFORE_TAIL_REQUEST: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long after asking for a chunk before asking for it again.
+///
+/// Long enough for the request to cross, the sender to queue it behind
+/// whatever it is already resending, and the chunk to come back. Without
+/// this every request round repeated the previous one's list, so the
+/// sender resent the same chunks over and over while the ones actually
+/// still missing waited their turn.
+const REREQUEST_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// What is saved alongside a partial file.
 ///
 /// Received chunks are stored as ranges, not as a list: chunks arrive
@@ -174,6 +184,8 @@ pub struct DiskReassembly {
     since_persist: u32,
     highest_seen: Option<u32>,
     last_chunk_at: Instant,
+    /// When each still-missing chunk was last asked for.
+    requested: HashMap<u32, Instant>,
 }
 
 impl DiskReassembly {
@@ -247,6 +259,7 @@ impl DiskReassembly {
             since_persist: 0,
             highest_seen: None,
             last_chunk_at: Instant::now(),
+            requested: HashMap::new(),
         };
         for index in adopted {
             if this.mark(index) {
@@ -290,13 +303,69 @@ impl DiskReassembly {
         file.seek(SeekFrom::Start(index as u64 * CHUNK_SIZE as u64))?;
         file.write_all(bytes)?;
         self.mark(index);
+        self.requested.remove(&index);
         self.highest_seen = Some(self.highest_seen.map_or(index, |h| h.max(index)));
         self.last_chunk_at = Instant::now();
         self.since_persist += 1;
-        if self.since_persist >= PERSIST_EVERY {
-            self.persist()?;
-        }
         Ok(true)
+    }
+
+    /// Whether enough has arrived since the last save that the index is
+    /// due to be written again. The caller runs [`persist_job`] off the
+    /// receive path -- see there for why it is not done here.
+    ///
+    /// [`persist_job`]: Self::persist_job
+    pub fn persist_due(&self) -> bool {
+        self.since_persist >= PERSIST_EVERY
+    }
+
+    /// The periodic save as a job for a blocking thread.
+    ///
+    /// Saving inline cost real throughput: `sync_data` can take tens of
+    /// milliseconds, and every chunk arriving during it piles up in a
+    /// socket buffer that holds about fifty. Each save was a burst of
+    /// loss, each burst a repair round and a rate cut -- measured at
+    /// roughly a third of all chunks on loopback. So the fsync and the
+    /// index write run elsewhere, on a duplicate of the file handle.
+    ///
+    /// The ordering guarantee is kept: the ranges are snapshotted *now*,
+    /// the job syncs the file first and writes the index second, so the
+    /// index only ever claims chunks whose bytes were already on disk
+    /// before it was written. Chunks that land between snapshot and sync
+    /// are synced too and simply not claimed yet -- the safe direction.
+    pub fn persist_job(&mut self) -> std::io::Result<impl FnOnce() -> std::io::Result<()> + Send + 'static> {
+        self.since_persist = 0;
+        let file = match self.file.as_ref() {
+            Some(file) => Some(file.try_clone()?),
+            None => None,
+        };
+        let index = self.index_snapshot();
+        let path = partial_index_path(&self.config_dir, &self.hash).expect("hash was validated");
+        Ok(move || {
+            if let Some(file) = file {
+                file.sync_data()?;
+            }
+            let json = serde_json::to_vec(&index)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            std::fs::write(path, json)
+        })
+    }
+
+    fn index_snapshot(&self) -> Index {
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for index in (0..self.chunk_count).filter(|&i| self.has_chunk(i)) {
+            match ranges.last_mut() {
+                Some((_, end)) if *end + 1 == index => *end = index,
+                _ => ranges.push((index, index)),
+            }
+        }
+        Index {
+            file_name: self.file_name.clone(),
+            file_size: self.file_size,
+            chunk_count: self.chunk_count,
+            have_ranges: ranges,
+            have: Vec::new(),
+        }
     }
 
     pub fn is_complete(&self) -> bool {
@@ -319,15 +388,25 @@ impl DiskReassembly {
     /// sent. The tail it simply has not reached yet is left alone: asking
     /// for it would have the sender send everything twice. Once nothing has
     /// arrived for a couple of seconds the first pass is over, and the
-    /// tail is fair game too.
-    pub fn chunks_to_request(&self) -> Vec<u32> {
+    /// tail is fair game too. A chunk asked for in the last
+    /// [`REREQUEST_AFTER`] is skipped: its answer is probably on the way.
+    pub fn chunks_to_request(&mut self) -> Vec<u32> {
+        let now = Instant::now();
         let quiet = self.last_chunk_at.elapsed() >= QUIET_BEFORE_TAIL_REQUEST;
         let limit = if quiet {
             self.chunk_count
         } else {
             self.highest_seen.unwrap_or(0)
         };
-        (0..limit).filter(|&i| !self.has_chunk(i)).take(MAX_REQUEST).collect()
+        let wanted: Vec<u32> = (0..limit)
+            .filter(|&i| !self.has_chunk(i))
+            .filter(|i| self.requested.get(i).is_none_or(|at| now.duration_since(*at) >= REREQUEST_AFTER))
+            .take(MAX_REQUEST)
+            .collect();
+        for &i in &wanted {
+            self.requested.insert(i, now);
+        }
+        wanted
     }
 
     /// Saves which chunks are on disk, so an interruption loses nothing.
@@ -341,20 +420,7 @@ impl DiskReassembly {
         file.flush()?;
         file.sync_data()?;
 
-        let mut ranges: Vec<(u32, u32)> = Vec::new();
-        for index in (0..self.chunk_count).filter(|&i| self.has_chunk(i)) {
-            match ranges.last_mut() {
-                Some((_, end)) if *end + 1 == index => *end = index,
-                _ => ranges.push((index, index)),
-            }
-        }
-        let index = Index {
-            file_name: self.file_name.clone(),
-            file_size: self.file_size,
-            chunk_count: self.chunk_count,
-            have_ranges: ranges,
-            have: Vec::new(),
-        };
+        let index = self.index_snapshot();
         let path = partial_index_path(&self.config_dir, &self.hash).expect("hash was validated");
         let json = serde_json::to_vec(&index)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -544,6 +610,41 @@ mod tests {
     }
 
     #[test]
+    fn the_background_save_claims_only_what_it_was_shown() {
+        // The job is handed a snapshot. Chunks that land after the
+        // snapshot but before the job runs are on disk and synced, but the
+        // index must not claim them -- claiming less than is there is the
+        // safe direction, claiming more is a hash failure at the very end.
+        let dir = temp_dir("bg-save");
+        let data = sample(CHUNK_SIZE * 4);
+        let hash = sha256_hex(&data);
+
+        let mut r = DiskReassembly::open(&dir, &hash, "f", data.len() as u64).unwrap();
+        feed(&mut r, &data, |i| i < 2);
+        let job = r.persist_job().unwrap();
+        feed(&mut r, &data, |i| i == 2); // arrives while the job is queued
+        job().unwrap();
+        drop(r);
+
+        let second = DiskReassembly::open(&dir, &hash, "f", data.len() as u64).unwrap();
+        assert_eq!(second.resumed(), 2, "only the snapshotted chunks are claimed");
+    }
+
+    #[test]
+    fn the_periodic_save_falls_due_by_chunk_count() {
+        let dir = temp_dir("due");
+        let data = sample(CHUNK_SIZE * (PERSIST_EVERY as usize + 1));
+        let hash = sha256_hex(&data);
+        let mut r = DiskReassembly::open(&dir, &hash, "f", data.len() as u64).unwrap();
+        feed(&mut r, &data, |i| i < PERSIST_EVERY - 1);
+        assert!(!r.persist_due());
+        feed(&mut r, &data, |i| i == PERSIST_EVERY - 1);
+        assert!(r.persist_due());
+        let _ = r.persist_job().unwrap();
+        assert!(!r.persist_due(), "taking the job resets the count");
+    }
+
+    #[test]
     fn a_partial_for_a_different_size_is_not_adopted() {
         // Same hash name, different claimed size: one of the two is lying,
         // and resuming would build a file that cannot verify.
@@ -658,6 +759,11 @@ mod tests {
         let mut r = DiskReassembly::open(&dir, &hash, "f", data.len() as u64).unwrap();
         feed(&mut r, &data, |i| i != 2 && i <= 5);
         assert_eq!(r.chunks_to_request(), vec![2]);
+        // Asked for once; not asked for again while the answer is likely
+        // still on its way.
+        assert!(r.chunks_to_request().is_empty());
+        r.requested.insert(2, Instant::now() - REREQUEST_AFTER);
+        assert_eq!(r.chunks_to_request(), vec![2], "never asked again after the wait");
     }
 
     #[test]

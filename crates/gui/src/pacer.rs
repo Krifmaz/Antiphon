@@ -45,6 +45,18 @@ const ADJUST_EVERY: Duration = Duration::from_millis(100);
 /// the rate -- and is not treated as a sign of going too fast.
 const LOSS_TOLERANCE: f64 = 0.02;
 
+/// After backing off, loss reports are ignored for this long.
+///
+/// A loss is reported by the receiver some time after it happened -- it
+/// notices the gap, waits for its next request slot, and the request has
+/// to cross -- and a large burst is reported over several requests. So the
+/// reports for one burst at the *old* rate keep arriving after the rate has
+/// already been cut for it. Measured before this: one burst at 3 MB/s was
+/// reported across three windows and cut the rate three times, to a third
+/// of where one cut would have left it. TCP has the same rule -- at most
+/// one decrease per round trip -- for the same reason.
+const RECOVERY: Duration = Duration::from_millis(600);
+
 /// Only sleep once this far ahead of schedule. Anything shorter and the
 /// OS timer's granularity, not the rate, decides how long the sleep is.
 const MIN_SLEEP: Duration = Duration::from_millis(2);
@@ -62,6 +74,9 @@ pub struct Pacer {
     /// When the next chunk is due.
     next_send: Instant,
     last_adjust: Instant,
+    /// When the rate was last cut; losses reported before `RECOVERY` has
+    /// passed belong to the rate that was already cut for them.
+    last_decrease: Option<Instant>,
     /// Sent and reported lost since the last adjustment.
     sent: u64,
     lost: u64,
@@ -75,6 +90,7 @@ impl Default for Pacer {
             slow_start: true,
             next_send: now,
             last_adjust: now,
+            last_decrease: None,
             sent: 0,
             lost: 0,
         }
@@ -125,11 +141,18 @@ impl Pacer {
             return;
         }
         self.last_adjust = now;
-        let loss = if self.sent == 0 { 0.0 } else { self.lost as f64 / self.sent as f64 };
+        // Capped at 1: reports for chunks sent in an earlier window land in
+        // this one, so the raw ratio can exceed 100%, which is a sign of
+        // the same stale reporting the recovery window exists for.
+        let loss = if self.sent == 0 { 0.0 } else { (self.lost as f64 / self.sent as f64).min(1.0) };
         self.sent = 0;
         self.lost = 0;
+        let recovering = self.last_decrease.is_some_and(|at| now.duration_since(at) < RECOVERY);
 
-        if loss > LOSS_TOLERANCE {
+        if loss > LOSS_TOLERANCE && recovering {
+            // Already cut for this burst; hold rather than cut again.
+        } else if loss > LOSS_TOLERANCE {
+            self.last_decrease = Some(now);
             // Multiplicative decrease: back off sharply, because what is
             // being lost has to be sent again and every extra packet on a
             // full link makes the congestion worse.
@@ -216,6 +239,31 @@ mod tests {
         pacer.adjust(now + ADJUST_EVERY);
         assert!(pacer.rate() < 10.0 * 1024.0 * 1024.0 * 0.8);
         assert!(!pacer.slow_start, "a loss ends slow start");
+    }
+
+    #[test]
+    fn one_burst_of_loss_is_one_cut_not_several() {
+        // The receiver reports a burst over several requests, so the same
+        // loss shows up in consecutive windows. Cutting for each report
+        // would punish one event three times over.
+        let mut pacer = Pacer { rate: 3.0 * 1024.0 * 1024.0, slow_start: false, ..Default::default() };
+        let mut now = Instant::now();
+        pacer.last_adjust = now;
+        for _ in 0..3 {
+            pacer.sent = 50;
+            pacer.report_loss(20);
+            now += ADJUST_EVERY;
+            pacer.adjust(now);
+        }
+        let after_one_cut = 3.0 * 1024.0 * 1024.0 * 0.7;
+        assert!((pacer.rate() - after_one_cut).abs() < 1.0, "cut to {} instead of once to {after_one_cut}", pacer.rate());
+
+        // Once the recovery window has passed, a fresh loss is a fresh cut.
+        now += RECOVERY;
+        pacer.sent = 50;
+        pacer.report_loss(20);
+        pacer.adjust(now);
+        assert!(pacer.rate() < after_one_cut * 0.75);
     }
 
     #[test]

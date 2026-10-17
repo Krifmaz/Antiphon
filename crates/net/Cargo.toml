@@ -5,6 +5,8 @@ version.workspace = true
 
 [dependencies]
 sha2 = "0.11.0"
+# Only for SO_RCVBUF; already in the tree underneath tokio.
+socket2 = "0.6.5"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 voip-crypto = { version = "0.1.0", path = "../crypto" }

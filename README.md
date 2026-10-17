@@ -1,135 +1,87 @@
 # Antiphon
 
-A working vertical slice of the [feature spec](docs/voip-app-feature-spec.pdf): two
-peers doing a direct, end-to-end encrypted, push-to-talk voice call, with a
-real multi-stage microphone processing chain in between, plus a native GUI
-and a friendlier CLI on top. It is not the full spec -- that describes a
-multi-year, multi-engineer platform (custom crypto protocol, DHT discovery,
-ML noise suppression, per-platform native UI, group calls, VPN integration,
-and so on). This is the part of it that's real, tested, and runs today,
-built so the rest can be layered on without a rewrite.
+A direct, end-to-end encrypted voice app in Rust: two peers, no server in
+the call path, a real multi-stage microphone processing chain, encrypted
+text chat and file transfer over the same connection, and a native Slint
+desktop UI with a CLI alongside it.
+
+It is a working vertical slice of the [feature spec](docs/voip-app-feature-spec.pdf),
+not the whole of it. The spec describes a multi-year platform -- relays,
+DHT discovery, group calls over MLS, mobile clients, VPN integration. What
+is built is the part that needs no infrastructure beyond two machines that
+can reach each other, built so the rest layers on without a rewrite.
+**[`FEATURES.md`](FEATURES.md) is the authoritative, line-by-line status
+of every item in the spec**; this file is the overview.
 
 ## What's here
 
-A Rust workspace, one crate per concern:
+A Cargo workspace, one crate per concern:
 
 | Crate | Spec section | What it does |
 |---|---|---|
-| [`crates/crypto`](crates/crypto) | §3 Connection & Trust Model | X25519 handshake + a symmetric double-KDF-chain ratchet (ChaCha20-Poly1305 AEAD), forward-secret per message, tolerant of UDP packet reordering |
-| [`crates/protocol`](crates/protocol) | §3 | Hand-rolled binary wire framing tying encrypted sessions to UDP datagrams (`Handshake`/`Audio`/`Control`/`File` frame types) |
-| [`crates/net`](crates/net) | §3 "Known contacts → Direct P2P", §2 Lost Audio Recovery, §5 File Transfer | UDP transport: handshake + encrypted send/receive for one peer connection, an encrypted control channel for non-audio messages, a jitter buffer that reorders out-of-order arrivals and conceals short gaps, and file-transfer chunking/reassembly/hash verification (`voip_net::file_transfer`) |
-| [`crates/audio`](crates/audio) | §1 Audio Suite | The mic processing chain (gate, filters, de-esser, EQ, compressor, limiter, gain, pitch shift, reverb) plus named-device capture/playback via `cpal` |
-| [`crates/app`](crates/app) | §1 Utility (PTT / Voice Activation) | `voip-cli`: a flag-driven binary, or run it with no arguments for an arrow-key interactive menu -- no flags to memorize |
-| [`crates/gui`](crates/gui) | §7 Interface (partial), §5 File Transfer | `voip-gui`: a native Slint desktop app -- system tray icon, Call/Settings/Profile tabs, a resizable categorized settings sidebar, live device and push-to-talk/voice-activation pickers, an unlimited-band EQ with a live curve graph, theming (including a freeform-positioned/resized Call tab and a saturation/hue color picker), settings export/import, and file transfer |
+| [`crates/crypto`](crates/crypto) | §3 Connection & Trust | Persistent Ed25519 identity + signed X25519 prekey, authenticated triple-DH handshake, symmetric KDF ratchet with ChaCha20-Poly1305 (fresh key per message, reorder-tolerant), trust-on-first-use key pinning, 40-digit verification codes, 24-word recovery phrase, cross-signed device list, OS keystore sealing (DPAPI on Windows) |
+| [`crates/protocol`](crates/protocol) | §3 | Binary wire framing binding encrypted sessions to UDP datagrams (`Handshake` / `Audio` / `Control` / `File`, each with its own AAD) |
+| [`crates/net`](crates/net) | §2, §3, §5, §6 | UDP peer connection, STUN discovery + hole punching, NAT-PMP port mapping with renewal, adaptive jitter buffer, forward error correction, audio retransmit requests, file chunking with per-chunk hashes |
+| [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
+| [`crates/app`](crates/app) | §1 Utility | `voip-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
+| [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `voip-gui`: the Slint desktop app -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
-## What's implemented vs. simplified vs. deferred
+Every crate's `lib.rs` doc comment states its scope against the spec.
 
-**Real, not simplified:**
-- X25519 ECDH handshake, HKDF-derived per-direction chain keys
-- Signal-style symmetric KDF ratchet: every message gets its own key, forward secret within the chain, with a bounded skipped-key cache so out-of-order UDP delivery still decrypts
-- ChaCha20-Poly1305 AEAD encryption with AAD binding, replay rejection, and tamper rejection (see `crates/crypto`'s tests)
-- Noise gate, high-pass/low-pass filters (RBJ biquads), a split-band de-esser, a parametric peaking EQ, compressor, limiter, both fixed and auto gain, a granular delay-line pitch shifter, and a Freeverb-style reverb -- real DSP, not stubs, each with unit tests against synthetic signals (the pitch shifter's math was wrong on the first pass -- inverted sign in the rate calculation, silently producing near-silence instead of a shifted tone -- caught by its own test, not by ear)
-- The EQ has no fixed band count -- add or remove bands freely, each editable by typing exact Hz/dB/Q values or by dragging directly on the curve graph itself (click near an existing point to grab it, or click empty space to start a new band there). The graph is the actual combined frequency-response curve, not a decorative graphic (`voip_audio::eq_curve_db`, evaluating each enabled band's closed-form biquad magnitude response and summing in dB -- the correct way to combine cascaded filters). The first version of the drag-editing had a real bug: mutating the band list via `ModelRc::as_any().downcast_ref()` could panic invisibly (no console in a windowed app) if that guess about the model's concrete type was ever wrong, making edits silently no-op. Replaced with rebuilding the list from a plain `Vec` each time, which can't fail that way
-- A generic, composable chain: stages toggle independently and the whole thing serializes as a JSON preset (`voip-cli preset`, or the GUI's Export/Import)
-- Named input/output device selection (`voipcli devices`, `--input-device`/`--output-device`, or the GUI's Devices picker) -- not just "whatever the OS default is"
-- Device Hot-Swap (GUI, spec §1 Utility): changing the mic or output device mid-call swaps the live stream in place -- old stream stops, new one starts feeding the same pipeline, call keeps running. If the new device's native sample rate differs, the DSP chain rebuilds for it automatically (filter cutoffs etc. are rate-dependent)
-- Push-to-talk with a live rebindable key (click "Change" in the GUI, or pick from a menu in the CLI), or voice activation with a sensitivity slider and live meter, as an alternative to holding a key at all
-- Settings persistence: the GUI remembers your audio chain, devices, keybind, theme, and profile across restarts (`%APPDATA%\voip-app\config.json` on Windows); old config files missing newer fields still load via `#[serde(default)]`, with a regression test guarding that
-- Profile info (display name + status) is sent to the peer over the same encrypted session, as its own frame type (`FrameType::Control`, distinct AAD from audio so one can't be replayed as the other) -- sent a few times at connect in case the first UDP packet is lost, and re-sent if you edit your profile mid-call. The GUI shows "With: &lt;name&gt; -- &lt;status&gt;" once it arrives. An unrecognized or malformed control payload is just dropped, so an older peer that doesn't send one degrades to today's "no name shown" behavior instead of breaking
-- Mic Test & Record Preview (GUI Call tab): records 5 seconds through the actual configured chain/device and plays it back, so "hear exactly what everyone else hears" is literal, not simulated
-- Live Monitoring (GUI Call tab, while connected): a second local playback stream mixes your own processed mic into your headphones in real time, with an honest delay readout (the monitor buffer size, not a made-up number)
-- **File transfer (spec §5)**, GUI Call tab's "File Transfer" panel: send a file to the connected peer over the same encrypted connection as the call, real end to end -- chunked (`voip_net::file_transfer`, ~3.8KB pieces sized to fit one UDP datagram after the AEAD tag and wire header), sent as their own frame type (`FrameType::File`, a distinct AAD from audio/control so one can't be replayed as another), reassembled out-of-order on the other end, and SHA-256 verified before it's ever written to disk. Reliability is "blast then repair," not a sliding-window ARQ: every chunk goes out once, the receiver periodically reports (via a `FileMissing` control message) whatever's still missing given UDP has no delivery guarantee, and the sender resends just those -- realistic for a single P2P hop, where loss is occasional, not the norm. Offer/accept/reject/complete/cancel all go over the existing `Control` channel (`ControlMessage`, JSON, internally tagged so it can carry more than just the old `Hello` profile message); the receiver sees a prompt with the filename and size before anything downloads, and a save-file dialog once it's verified. Whole-file-in-memory on both ends -- fine for what a voice app's file sharing is realistically used for, not a multi-gigabyte transfer tool. Verified with a real integration test (`crates/gui/src/file_transfer.rs`'s `integration_tests`) that runs two actual `PeerConnection`s over loopback UDP through a full handshake + offer + chunked transfer + hash verification + completion round-trip -- this couldn't be manually click-tested here, so that test is the actual evidence it works, not just that its pieces compile
+## Where it stands
 
-**Deliberately simplified (documented in code, not hidden):**
-- The ratchet is the *symmetric* half of Signal's Double Ratchet only -- no per-message DH step, so no post-compromise security within a call. Adding that is additive, not a rewrite (see `crates/crypto/src/handshake.rs`).
-- Push-to-talk uses `device_query` polling rather than the low-level OS hook the spec calls for to correctly capture Caps Lock as a momentary key -- Space is the default for exactly that reason. See `crates/app/src/ptt.rs`.
-- Voice activation is a simple peak-amplitude threshold on the raw mic signal, not a real VAD model.
-- The handshake retry loop is a fixed-interval resend, not a full retransmission scheme.
-- "Server mode" (GUI) means "auto-listen on startup instead of waiting for a click" -- there's no actual client/server split in a P2P call, so this is a convenience toggle, not an architecture change.
+The short version of [`FEATURES.md`](FEATURES.md):
 
-**The GUI is real, not a mockup**, but it's one increment of spec §7, not
-the "full UI editor" headline feature:
-- Tabs: **Call** (connect/listen/hang up, live mic meter, server mode) and **Settings** (a left sidebar with **General**, **Appearance**, **Audio**, **Keybinds**, **Profile** categories -- not one long stacked list)
-- **The profile widget is a real `FreeformPanel`, not a fixed bar.** It sits on the Call tab's canvas alongside Connect/Call controls/Mic level/Mic test/File Transfer, draggable and resizable exactly like them (`call_profile_rect` in config) -- except it's the one panel that's **never removable**: `FreeformPanel.removable` is `false` for it alone, which just skips rendering its `x` button (hit-testing/collision treats it as always-visible, so it isn't in the "Widgets" show/hide list either, and can't be). Avatar, name, and status live in the panel's top row; Mute and Deafen are real buttons inside it, not floating separately; a hamburger icon (three plain `Rectangle` bars, not a unicode glyph -- this session already hit a real bug once from a glyph that didn't render on the user's system, so icons here stay hand-drawn) opens a `ContextMenuArea`/`Menu` with **Settings**, a checkable **Edit layout** toggle, and a **Widgets** submenu (checkable show/hide for the other five panels) -- consolidating what used to be a separate always-visible toolbar above the canvas into one menu on the one widget that's always there. The top bar's old "Settings" tab button is gone; the hamburger's Settings entry is the one way in now, and the top bar only shows a "< Back to Call" link, and only while actually in Settings. One interaction wrinkle worth recording: the panel's avatar/name/status row has **two copies** in the markup, one wrapped in a click handler (opens the profile popup) and one not, swapped by `if call-editing-layout`/`if !call-editing-layout` -- a single always-present `TouchArea` there would sit on top of (and steal from) the canvas-level drag-detection layer used while editing, since a nested `TouchArea` always wins hit-testing over a sibling declared earlier/further out. Two near-identical rows was simpler and more obviously correct than trying to make one `TouchArea` conditionally transparent to hits.
-- Clicking the avatar/name/status area (not Mute/Deafen/the hamburger) opens a **profile popup**: a floating card with a larger avatar, full name and status, and an "Edit Profile" button that jumps straight to Settings > Profile and closes the popup. `MainWindow`'s own direct child (so it floats above everything instead of being clipped to the panel's own bounds -- the panel can be resized small or dragged anywhere, which would make a nested popup unusable), with a full-window invisible dismiss layer behind it so clicking anywhere else closes it, and anchored to a fixed window corner rather than tracking the panel's own draggable position (simpler, and still predictable once you know where to look). Its height is an explicit, capped expression (`min(320px, parent.height - 24px)`) with an internal vertical-only `ScrollView` for overflow, not sized implicitly from content -- the first version derived both its height *and* its `y` position from that same implicit height in one binding, which is circular against content that isn't fixed-size (a long status message, in particular), and made the popup's actual on-screen height unpredictable enough to run taller than the window and get clipped at the top.
-- **What the compact panel row shows is configurable** (General tab: "Profile widget: show on the bar" -- Avatar / Display name / Status message, each independently toggleable) -- the popup always shows everything regardless, since it's the "full detail" view; only the compact row's contents are optional, never the widget, its controls, or its menu.
-- **Profile pictures animate now, background images too.** "Choose image..." (Settings > Profile, and Appearance > Theme > Custom for the background) accepts PNG/JPEG/BMP/GIF/WebP/TIFF, and an animated GIF actually plays -- full loop, per-frame timing, everywhere the image is shown (the compact panel's avatar, the popup's avatar, the Settings preview; same for the background layer). Slint's own `Image` element only ever displays a GIF's first frame, so this is hand-built: `animated_image.rs` decodes every frame up front with the `image` crate and drives playback with a self-rescheduling `slint::Timer::single_shot` per frame (not a fixed-interval repeating timer, since GIFs can give each frame its own delay). Two things made this trickier than "decode and swap images": `slint::Image` isn't `Send` (it wraps a non-atomic refcounted pointer), so decoding happens into plain `Vec<u8>` RGBA buffers on a background thread and gets turned into actual `slint::Image`s only after hopping back to the UI thread; and the "which animation is still current" generation counter had to live as a plain `int` property on `MainWindow` rather than a `Rc<Cell<u64>>`, for the identical `Send` reason -- a Rust-side `Rc` can't cross into a `slint::invoke_from_event_loop` closure that originated on a background thread any more than an `Image` can. No image set still falls back to the original colored-circle-plus-initial.
-- **The avatar gets the same fit/rotate/crop editor as the background image** (Settings > Profile, once an avatar is set) -- Fit (Cover/Fit/Stretch/Original), a -180..180° rotation slider, and four independent edge-crop sliders, applied via the same `image-fit`/`transform-rotation`/`source-clip-*` bindings as the theme background, just wrapped in a circle (`ProfileAvatar`'s `clip: true` + `border-radius: 50%`) instead of filling the window.
-- **In-call text chat (spec §4)** -- a "Chat" `FreeformPanel` on the Call tab canvas (hideable/movable/resizable like the rest). Messages ride the existing encrypted control channel as a new `ControlMessage::Chat` variant, so chat inherits the session's ChaCha20-Poly1305 encryption and replay rejection for free -- no second transport, no plaintext side channel. Lines are labeled "You" vs. the peer's display name (from their `Hello`), the input clears from one place in Rust so the Enter-key and Send-button paths can't drift, and the UI's message model only rebuilds when a revision counter on the Rust-side log actually moved, not on every 50ms UI tick. Deliberately not built: spec §4's tiered delivery/offline queueing -- chat here exists only while a call is up, because there is no relay or store-and-forward infrastructure to queue into (that's the same §3 gap documented below).
-- **Replay (spec §2)** -- the app always keeps a rolling ring of the last 30 seconds of *received* audio (~6MB of samples; cheap enough that Replay never needs arming in advance), captured before the deafen gate and volume scaling so it holds what the peer actually sent. "Save replay (last 30s)" in Call controls writes it out as a 16-bit PCM mono WAV via a native save dialog -- the RIFF header is hand-rolled (44 fixed bytes, unit-tested) rather than pulling in an audio-container crate for one write path.
-- **Connection-quality readout (spec §2)** -- the jitter buffer now counts frames delivered intact vs. concealed, and the Mic level panel shows a live line during a call: duration, frames received, frames concealed, and loss percent.
-- **Server mode is a console, and toggling it relaunches the app.** The switch moved out of the Connect panel into the profile widget's hamburger menu ("Server mode (console)"), and flipping it saves settings, spawns a fresh copy of the same executable, and quits the current one -- the relaunched instance reads `server_mode` from config at startup and comes up in the other surface. A restart rather than an in-place mode flip because the two surfaces share almost nothing, and because it exercises the same startup path a real boot-into-server-mode would; the old process's sockets close before the new one gets far enough to listen, so the port isn't contested. In server mode the entire widget UI (canvas, panels, profile widget, Settings) is replaced by a monospace green-on-black console: a live header (status, quality readout, connected peer), a scrolling log that interleaves chat messages with command output, and a working `>` prompt. Commands: `help`, `status`, `say <message>`, `mute`, `deafen`, `normal` (relaunches back into the full UI), `quit`. The log is capped at 200 lines so a long-running server doesn't grow it without bound.
-- Settings sidebar categories: **General** (whether Settings sections start expanded or collapsed, start-maximized), **Appearance** (accent color, theme, font, text size/reduce-animations, and settings export/import), **Audio** -- everything audio-related lives here, with Devices always expanded (it's the one section with nothing to gain from collapsing -- input device+gain and output device+volume side by side) and the rest as labeled, individually collapsible sections (noise gate, high-pass filter, de-esser, EQ, compressor, limiter, pitch shift, reverb), **Keybinds** (push-to-talk key rebind or voice-activation mode + sensitivity), **Profile** (display name + status, also collapsible sections). The sidebar itself is resizable -- a drag handle (`sidebar-width`, 110..280px, persisted) sits between it and the category content
-- Appearance follows the same collapsible-section layout as Audio and Profile: **Accent color**, **Theme**, **Text, font & motion**, and **Import / export settings** are all individually collapsible sections, same `SectionHeader` component and "start expanded/collapsed" General-tab preference as everywhere else. Font lives inside Text & motion rather than its own section -- one less section for a handful of controls that are all "how text looks/behaves"
-- **Edit layout**: every Settings tab with collapsible sections (Appearance, Audio, Profile) has an "Edit layout" button at the top that reveals `^`/`v` reorder buttons on each section header -- drag-and-drop isn't something Slint's layout system does, so this is the reorderable-panels part of spec §7 done with click-to-move instead. The order is per-tab, persisted (`audio_section_order` etc. in config), and sanitized against the canonical section-id list on load (`config::sanitize_order`) so a stale save from an older version can't make a section silently vanish -- unknown ids are dropped, missing ones are appended at the end. Mechanically, this is a `for section-id in <tab>-order : ...` loop with an if/else-if chain matching each id to its (unchanged) content block, since Slint has no dynamic-component-by-name lookup to reorder pre-declared elements directly
-- **The Call tab is a freeform, widget-based canvas** -- the other half of spec §7's "full UI editor," this time about position and size rather than order. Its own "Edit layout" toggle turns each panel (Connect, Call controls, Mic level, Mic test, File Transfer) into an independently draggable (grab the title bar) and resizable (grab the `//` handle, bottom-right corner) `FreeformPanel`, persisted per-panel as `{x, y, width, height}` (`call_connect_rect` etc. in config). Dragging/resizing **snaps to a 20px grid** (`snap_to_grid` in `main.rs`). The two gestures behave differently on purpose: a **drag** tracks the pointer freely (no collision-avoidance while it's live, so it stays 1:1 with the mouse), and only on release does `resolve_drop_position` check whether the drop point overlaps another visible panel -- if so, it searches outward on the grid, ring by ring, for the nearest open slot and **animates** the correction there (`FreeformPanel`'s `animating` property gates a 200ms transition that's otherwise off, so live dragging never itself animates -- only that one corrective settle does). A **resize**, by contrast, is collision-clamped continuously as it happens (`clamp_panel_resize` against the other panels' current rects) -- growing is what would create a new overlap out of nothing, so stopping it right at a neighbor's edge as it happens is simpler than resolving it after the fact. Net effect: panels can never end up stacked, but you're never fighting the drag itself to get there. (An intermediate version allowed free overlap with no resolution at all -- simpler code, but "place a widget under another" turned out to be something to actively prevent, not a feature.) Edit layout also has **add/remove**: each panel gets an `x` in its title bar to hide it, and a row of toggles ("Show: Connect / Controls / Mic level / Mic test / Files") brings any of them back -- visibility persists per panel (`call_connect_visible` etc.). Settings' section reordering (above) is the "what order" half of layout customization; this is the "where, how big, and whether at all" half -- applied to the Call tab specifically, where placing things by hand actually matters (a fixed vertical list of settings rows doesn't gain anything from freeform x/y)
-- Panel content doesn't get cut off vertically, and never scrolls sideways: each `FreeformPanel` wraps its body in a `ScrollView` with horizontal scrolling explicitly turned off (`horizontal-scrollbar-policy: ScrollBarPolicy.always-off`) and the inner content's width pinned to the panel's own width. That pinning turned out to be the whole fix for wrapping, too -- a `ScrollView` left to size its content at that content's natural width never gives `wrap: word-wrap` a narrower-than-natural width to actually wrap against, so text just stayed on one line and the view quietly grew sideways to fit it (which is also why disabling the horizontal scrollbar alone wouldn't have been enough). The minimum panel size is now two different numbers for two different reasons: `MIN_PANEL_WIDTH` (300px) is wide enough that every panel's widest row -- a label, a device picker, and a button -- stays fully visible left-to-right with no scrolling at all, while `MIN_PANEL_HEIGHT` (100px) only needs to be reasonable, since vertical overflow is explicitly fine to scroll. `ToggleSwitch` needed the same treatment as the panel itself: it had a fixed `height` and no `wrap` on its label, so a long one (the Connect panel's "Server mode -- listen automatically..." is the longest) would overflow instead of wrapping -- fixed by switching to `min-height` so a wrapped two-line label can actually grow the row.
-  - *Two real bugs, and how they got fixed*: the first version routed drag tracking through a second, canvas-wide `TouchArea` sitting behind the panels, reasoning that a panel's own title bar -- whose position is exactly what's being dragged -- couldn't reliably track its own gesture. That was backwards: Slint's pointer capture stays with whichever element received the press, so the background overlay's `moved` handler never actually fired during a drag, which is why clicks/drags "didn't always register" -- only clicks that happened to land off every panel reached it. The next version moved tracking onto each panel's own title bar/resize handle directly, reasoning (via a read of Slint's `handle_mouse_grab` source) that the self-referential geometry recompute would cancel out algebraically across a `pressed-x`/`mouse-x` delta. That compiled, ran, and *looked* right on paper, but in practice tracked slower than the pointer and stuttered -- panel-x/y/width/height changing *is* that element's own geometry changing mid-gesture, and empirically that wasn't as drift-free as the derivation suggested. The actual, working fix: hit-testing and all continuous drag/resize math now live on one stationary, canvas-sized `TouchArea` that manually checks each panel's *current* rect (`hits-title`/`hits-resize` in `app.slint`) rather than trusting any single panel's own local coordinates -- a frame that truly never moves has no drift to reason about, full stop. Two attempts, two different plausible-looking justifications, both wrong in ways that only showed up by actually watching it drag -- worth remembering next time something here looks correct on paper.
-- Theme (Appearance > Theme) has a fourth mode beyond System/Light/Dark: **Custom**, with the same swatch + hex + picker pattern as Accent color, setting a custom background color (`theme_bg_hex`). Independent of mode, two more controls apply everywhere: a **background image** ("Choose image..." -- PNG/JPEG/GIF/BMP/WebP/TIFF/SVG, animated GIFs included, see the profile-widget section above for how; the avatar picker's filter list is the same minus SVG) layered over the background color at its own opacity slider, with its own **fit** (Cover/Fit/Stretch/Original, `image-fit`), **rotation** (-180..180°, `transform-rotation`), and **crop** (four independent edge sliders in source-image percent, `source-clip-x/y/width/height`) -- and a **window opacity** slider that fades the whole background layer (color + image) toward see-through. The window is created with `background: transparent` and OS alpha compositing (winit already requests a transparent surface by default), so at low opacity the desktop genuinely shows through -- panels, text, and buttons sit in a separate, always-fully-opaque layer on top, so the UI stays legible even at maximum transparency. Both the background image and the custom color survive a restart the same way the imported font does: the color is just a hex string, and the image's file path is saved and silently reloaded on next launch (`theme_image_path` in config)
-- Output volume: received peer audio now has its own gain stage (-24..+12 dB, live-adjustable mid-call), next to the output device picker -- previously "gain" only meant the mic side
-- Theme actually reskins the custom-drawn parts of the UI, not just native widget chrome: tab/sidebar buttons, panel dividers, muted text, and meters all pull from a `Palette`-derived token set (`global Theme` in `app.slint`) instead of hardcoded dark-mode-only hex colors, so Light mode doesn't leave half the app looking wrong
-- Accent color: a real saturation/value-square-plus-hue-bar `ColorPicker` (click or drag to land on a color by eye) plus a hex text field (type or paste a code, Enter to apply) -- not a fixed set of swatches, and not three stacked R/G/B sliders either (the picker is a fixed, compact 200px wide rather than stretching to fill the pane). Both views stay in sync with each other and with a live preview swatch; the HSV<->RGB math lives in Rust (`hsv_to_rgb`/`rgb_to_hsv` in `main.rs`) since `.slint` expressions have no modulo/floor to do that conversion cleanly -- the picker component itself only owns the raw hue/saturation/value numbers and the pointer math to drag them. Plus a font family choice (System/Monospace/Serif, or an imported font -- see below), both real spec §7 "Color themes" / "Fonts" asks. The font choice binds to `Window.default-font-family`, which cascades to every text element window-wide, including native widget labels -- not just this app's own custom text
-- Every slider in the app (accent R/G/B, EQ band gain/Q, gate/compressor/limiter knobs, output gain, VA sensitivity, all of them) is a hand-built `AccentSlider` component, not Slint's std-widgets `Slider`. The native Fluent-style `Slider` derives its fill/thumb color from the *Windows OS* accent color (via `FluentPalette.accentify()`), completely bypassing this app's own accent picker -- so every slider showed up whatever color Windows was set to, regardless of what the user chose in Appearance. `AccentSlider` is a plain `Rectangle` + `TouchArea` (click-to-jump via `pressed-x`, drag via `mouse-x`) that pulls its color from `Theme.accent` like the rest of the custom-drawn UI, so the accent picker now actually reaches every slider
-- Every checkbox in the app is likewise a hand-built `ToggleSwitch`, not Slint's std-widgets `CheckBox` -- same OS-accent-color problem as `Slider`, plus it's the classic animated pill-and-knob switch rather than a checkmark-in-a-box: the knob slides (`animate x`) and the pill recolors between `Theme.track-background` and `Theme.accent` (`animate background`) on toggle, both respecting "Reduce animations"
-- Custom fonts: "Import font..." (Appearance > Font) opens a native file picker for a `.ttf`/`.otf`/`.ttc` file, registers it with Slint's text engine at runtime (`slint::fontique_010`, reading the family name back from the engine itself rather than guessing it), and switches `font-family-choice` to it immediately -- real spec §7 "custom font import," not just the three bundled choices. Font registration is in-memory only, so the imported file's path is saved (`custom_font_path` in config) and the font is silently re-registered from that path on the next launch, before the UI reads back the saved family name
-- **Known limitation, stated plainly**: there is no general "make everything N% bigger" UI scale independent of OS scaling -- Slint (this version) has no generic element-level scale transform to hang that off of. "Text size" only multiplies the font size on `Text` elements this app wrote directly; it does not resize `Button` chrome (native, fixed size) or `AccentSlider`/`ToggleSwitch` (custom-drawn, but also fixed size). A true independent-of-OS-scaling implementation would need either a future Slint API or manually re-deriving every native widget's metrics, neither of which happened here
-- Window size, position, and maximized state are remembered across restarts (captured on close/quit, restored before the window is first shown); "Start maximized" is a separate opt-in override for always opening full-size regardless of the remembered geometry
-- A system tray icon (`SystemTrayIcon`, Slint's built-in element -- no separate tray-icon toolkit needed) with Open/Mute/Quit; closing the window hides it to the tray rather than quitting, so "the app lives in the tray" is actually true, not just an icon that happens to appear
-- Accessibility: the custom tab/sidebar-nav buttons and the mic-level meter carry real `accessible-role`/`accessible-label` annotations (screen reader tools see "Settings, tab, selected", not an unlabeled clickable rectangle), on top of the reduce-motion and text-size toggles and Slint's built-in screen-reader plumbing. Still missing from §7: the drag/resize layout editor, arbitrary panel arrangement, full palette/font customization, profile *layout* editing (QR code position etc. -- Profile here is just two text fields), keyboard-only navigation (focus order/keyboard activation weren't part of this pass, just screen-reader labeling)
+- **Real:** the 1:1 encrypted call path end to end, the whole §1 audio
+  suite, lost-audio recovery (FEC, retransmit, adaptive jitter buffer,
+  replay history, catch-up), file transfer with resume and send-rate
+  control, chat persisted encrypted at rest with an outbox, QR / link
+  invites, verification codes, key-change warnings, the UI editor and
+  theming, presence, notification rules, data export, reproducible
+  build configuration with a CI pipeline for all three desktop targets.
+- **Reduced:** classical spectral noise suppression rather than an ML
+  model; a symmetric ratchet without the DH step (a session is per call,
+  so a compromised chain key is worth the rest of one call); keystore
+  sealing on Windows only; Caps Lock cannot be a push-to-talk key
+  (needs an OS-level hook, and is refused with the reason rather than
+  misbehaving).
+- **Not built:** anything that needs infrastructure the app does not
+  have -- relays, the DHT, group calls / MLS / SFU, mailbox nodes and the
+  tiered delivery routes, VPN integration, mobile clients, push
+  notifications. Each is a project on its own and is listed as such.
 
-**The CLI got a front door, not just flags:** run `voipcli` with no
-subcommand and it drops into an `inquire`-based arrow-key menu (listen /
-call / list devices / save a preset), prompting for port, address, PTT key
-(from a menu, not a string you have to know), and device -- the full flag
-syntax (`voipcli listen --port ... --input-device ...`) still works
-unchanged for scripting.
+## Building
 
-**Lost Audio Recovery (spec §2) -- the jitter buffer layer is real, the other three aren't:**
-- Implemented: an adaptive-position (fixed-timeout, not literally adaptive) jitter buffer in `voip_net::JitterBuffer`, shared by both the CLI and GUI's receive paths. Audio frames are reordered back into sequence using the crypto session's existing per-message counter (no second sequence number invented), and a frame that misses a ~60ms window is concealed by repeating the last good frame instead of leaving silence -- this is spec's "Replay" layer in its simplest form (a repeat, not real recovery)
-- Not implemented: forward error correction (redundant low-quality copies riding alongside each packet), retransmit requests (asking the sender to resend a specific lost chunk), and the user-facing Replay controls (auto-play/ask-me/off modes, a replay history panel, catch-up playback, a configurable buffer window) -- all real additional work on top of the jitter buffer that's there now
-
-**Not built (each is a substantial project on its own):**
-- Relay fallback, the DHT, anonymity routing, group calls / SFU, MLS (spec §3 for groups)
-- ML noise suppression and echo cancellation (spec §1) -- both need real-time adaptive/ML techniques, a different order of effort than the other DSP stages, which are all real and implemented
-- The tiered message delivery system (§8), VPN integration (§6)
-- A bundled dyslexia-friendly font (§7) -- font *family switching* and custom font import are real (Appearance settings), a specific bundled font is not
-- Pitch shift has no formant-preserving option (spec asks for one) -- it's chipmunk/demon-style only; formant preservation needs a fundamentally different technique (e.g. a phase vocoder), not a tweak to the current delay-line shifter
-
-## Running it
-
-Requires a Rust toolchain (this repo was built and tested against the
-`stable-x86_64-pc-windows-gnu` toolchain + a mingw-w64 GCC linker, since no
-MSVC install was available in this environment -- MSVC works fine too if you
-have Build Tools installed).
+Rust **1.97.0** (see [`BUILDING.md`](BUILDING.md) for why the version is
+stated rather than enforced, and for how to verify a release binary).
 
 ```bash
 cargo build --workspace
 cargo test --workspace
 ```
 
-### CLI
-
-Two-machine (or two-terminal, same machine) call, no flags needed:
-
-```bash
-cargo run -p voip-cli
-```
-
-...and follow the menu on each side. Or skip the menu with flags:
+**Linux** needs the development headers the audio and UI stacks link
+against:
 
 ```bash
-# Side A
-cargo run -p voip-cli -- listen --port 6001
-
-# Side B
-cargo run -p voip-cli -- call --remote <A's IP>:6001 --port 6002
+sudo apt-get install libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev
 ```
 
-Hold Space to talk on either side; Ctrl+C to hang up. `--no-ptt` makes the
-mic always-live. `voip-cli devices` lists input/output devices for
-`--input-device`/`--output-device`; `voip-cli preset --out mine.json` dumps
-the default chain as an editable preset, pass it back in with `--preset
-mine.json`.
+**Windows** builds with either the MSVC or the GNU toolchain. **macOS**
+needs nothing beyond Xcode's command-line tools. The
+[CI workflow](.github/workflows/ci.yml) builds and tests all three from
+the same commit.
+
+Two tests are ignored by default because they need something the test
+runner may not have: `discovers_a_public_address_from_a_real_server`
+(internet access and a STUN server) and `a_large_file_streams_through`
+(a 64 MB transfer, run on purpose when measuring throughput):
+
+```bash
+cargo test -p voip-gui large_file -- --ignored --nocapture
+```
+
+## Running it
 
 ### GUI
 
@@ -137,24 +89,38 @@ mine.json`.
 cargo run -p voip-gui
 ```
 
-It opens a window and puts an icon in the system tray (right-click for
-Open/Mute/Quit; closing the window just hides it -- quit from the tray).
-Enter a listen port and click Listen on one instance (or turn on "Server
-mode" to do that automatically at startup), then the other's address and
-click Call on the second. Settings changes -- audio chain, devices,
-keybind -- apply live to a running call and persist across restarts.
+Opens a window and puts an icon in the system tray; closing the window
+hides it there. An identity is generated silently on first run. Share your
+QR code or `voip://` invite link from the Connect panel, or add a contact
+by address; one side listens, the other calls. Settings -- the audio
+chain, devices, keybinds, theme -- apply live to a running call and
+persist across restarts. `--profile <name>` keeps a separate identity and
+settings directory.
+
+### CLI
+
+```bash
+cargo run -p voip-cli            # interactive menu
+cargo run -p voip-cli -- listen --port 6001
+cargo run -p voip-cli -- call --remote <A's IP>:6001 --port 6002
+```
+
+Hold Space to talk; Ctrl+C hangs up. `--no-ptt` keeps the mic open,
+`devices` lists audio devices, `preset` exports the chain as an editable
+JSON file, `identity restore` recovers an identity from its 24-word
+phrase.
 
 ## Layout
 
 ```
 crates/
-  crypto/     session establishment + per-message encryption
+  crypto/     identity, handshake, ratchet, trust, backup
   protocol/   wire framing
-  net/        UDP transport
-  audio/      DSP chain + device I/O
-  app/        voip-cli binary (flags + interactive menu)
-  gui/        voip-gui binary (Slint desktop UI + tray icon)
+  net/        UDP transport, NAT traversal, recovery, file chunks
+  audio/      DSP chain, echo cancellation, device I/O
+  app/        voip-cli
+  gui/        voip-gui (Slint UI) + build.rs compiling ui/app.slint
+docs/         the feature spec
+notes/        where work stopped, for picking up on another machine
+.github/      CI: build + test on Linux/Windows/macOS; reproducible release builds
 ```
-
-Each crate's `lib.rs` doc comment states its scope relative to the spec.
-Start there.

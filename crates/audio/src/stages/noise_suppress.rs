@@ -311,8 +311,8 @@ impl NoiseSuppressor {
         // Overlap-add. A Hann window applied on analysis and again on
         // synthesis sums to unity at 50% overlap, which is what makes the
         // seams inaudible.
-        for i in 0..FRAME {
-            self.overlap[i] += re[i] * self.window[i];
+        for (acc, (sample, w)) in self.overlap.iter_mut().zip(re.iter().zip(&self.window)) {
+            *acc += sample * w;
         }
         self.output.extend_from_slice(&self.overlap[..HOP]);
         self.overlap.copy_within(HOP.., 0);

@@ -78,19 +78,14 @@ impl Status {
 ///
 /// The sender controls this and nothing else about delivery (spec §8):
 /// where mail may be deposited is the *recipient's* decision, not theirs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum GiveUp {
+    /// The default: a message you meant to send is still a message you
+    /// meant to send a week later. Expiring by default would silently
+    /// discard things people believe they have sent.
+    #[default]
     Never,
     AfterSecs(u64),
-}
-
-impl Default for GiveUp {
-    fn default() -> Self {
-        // A message you meant to send is still a message you meant to
-        // send a week later. Expiring by default would silently discard
-        // things people believe they have sent.
-        GiveUp::Never
-    }
 }
 
 impl GiveUp {

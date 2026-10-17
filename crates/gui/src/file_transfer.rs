@@ -11,6 +11,7 @@
 //! file -- hashing it, verifying it -- runs on a blocking thread, never on
 //! the task that is also carrying the call's audio.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,10 +23,14 @@ use voip_net::PeerConnection;
 use crate::content_store::{DiskReassembly, MAX_REQUEST};
 use crate::control::ControlMessage;
 use crate::file_integrity::FileSource;
+use crate::pacer::Pacer;
 
-/// What the sender keeps so it can answer repair requests: which transfer,
-/// and where its bytes come from.
-pub type ResendSource = Arc<Mutex<Option<(u64, Arc<FileSource>)>>>;
+/// The most chunks a sender will hold queued for resending.
+///
+/// The queue is filled by the peer's requests, so it is bounded: a peer
+/// asking for the same file a hundred times over should cost a bounded
+/// amount of memory, not an unbounded one.
+const MAX_REPAIR_QUEUE: usize = 65_536;
 
 /// Monotonic and process-unique (not just per-call), so a stray late
 /// message from an earlier transfer can never be mistaken for a new one
@@ -55,10 +60,15 @@ pub struct OutgoingTransfer {
     /// resuming picks up where it stopped rather than starting over.
     pub paused: bool,
     pub error: Option<String>,
-    /// When the receiver last asked for chunks again. The sender waits for
-    /// confirmation for a while after its last send; a large transfer
-    /// being actively repaired is not one that has gone quiet.
-    pub last_repair: Option<Instant>,
+    /// Chunks the receiver asked for again, waiting to be resent.
+    ///
+    /// Served by the send loop itself, ahead of new chunks, rather than by
+    /// a task of their own. That puts repairs under the same pacing, limit
+    /// and pause as everything else -- a burst of 256 unpaced resends is
+    /// exactly the kind of spike that caused the losses being repaired.
+    pub repair_queue: VecDeque<u32>,
+    /// Chunks reported lost since the send loop last looked, for the pacer.
+    pub reported_lost: u64,
 }
 
 /// An offer that arrived from the peer, awaiting the user's Accept/Reject
@@ -120,7 +130,13 @@ impl FileTransferState {
     }
 }
 
-const MISSING_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the receiver asks for missing chunks.
+///
+/// Frequent, because a request covers at most `MAX_REQUEST` chunks and a
+/// damaged transfer needs many. Asking again for a chunk already asked for
+/// is prevented separately -- see `DiskReassembly::chunks_to_request` --
+/// which is what used to force this out to two seconds.
+const MISSING_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long the sender waits for confirmation after its last activity --
 /// the end of its first pass, or the most recent repair request.
@@ -163,7 +179,7 @@ pub fn decode_b64(text: &str) -> Option<Vec<u8>> {
     };
 
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -203,18 +219,15 @@ fn in_call() -> bool {
     CALL_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Offers `source` to the peer, waits (up to 30s) for acceptance, sends
-/// every chunk once, then keeps answering `FileMissing` repair requests
-/// (via `handle_control_message`, not this function) until the receiver
-/// confirms `FileComplete` or the transfer goes quiet. Meant to run as its
-/// own spawned task -- see `state::send_file` for how it's launched.
-///
-/// `resend` is the shared slot `handle_control_message` reads from when a
-/// repair request comes in; this function populates it.
+/// Offers `source` to the peer, waits (up to 30s) for acceptance, then
+/// streams it: every chunk once, and any the receiver reports missing
+/// again, all through one pacer. Ends when the receiver confirms
+/// `FileComplete`, or after a stretch with nothing to send and no word
+/// from them. Meant to run as its own spawned task -- see
+/// `state::send_file` for how it's launched.
 pub async fn send_file(
     peer: Arc<PeerConnection>,
     state: Arc<Mutex<FileTransferState>>,
-    resend: ResendSource,
     file_name: String,
     source: Arc<FileSource>,
     sha256: String,
@@ -224,7 +237,6 @@ pub async fn send_file(
     let transfer_id = next_transfer_id();
     let file_size = source.len();
     let total_chunks = chunk_count(file_size);
-    *resend.lock().unwrap() = Some((transfer_id, source.clone()));
 
     {
         let mut s = state.lock().unwrap();
@@ -239,7 +251,8 @@ pub async fn send_file(
             cancelled: false,
             paused: false,
             error: None,
-            last_repair: None,
+            repair_queue: VecDeque::new(),
+            reported_lost: 0,
         });
     }
 
@@ -274,27 +287,68 @@ pub async fn send_file(
         }
     }
 
+    let mut pacer = Pacer::default();
     // The upload limit, re-read periodically rather than per chunk. Per
     // chunk meant reading and parsing the whole settings file every 3.8 KB
-    // sent -- on a large file, tens of thousands of times, and a measurable
-    // share of the transfer's time spent on anything but transferring.
-    // Four times a second is still immediate as far as anyone moving a
-    // slider can tell.
+    // sent -- on a large file, tens of thousands of times. A quarter of a
+    // second is still immediate as far as anyone moving a slider can tell.
     let mut limits = crate::config::load().transfer_limits;
     let mut limits_read_at = Instant::now();
+    let mut next_new: u32 = 0;
+    let mut idle_since: Option<Instant> = None;
 
-    for index in 0..total_chunks {
-        // A pause is a wait, not an exit: the loop holds its place in the
-        // chunk sequence, so resuming continues rather than re-sending
-        // everything already delivered.
-        loop {
-            match outgoing_status(&state, transfer_id) {
-                Some(OutgoingStatus::Accepted) => break,
-                Some(OutgoingStatus::Paused) => {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                _ => return,
+    loop {
+        enum Next {
+            Wait,
+            Idle,
+            Send { index: u32, repair: bool },
+        }
+        let next = {
+            let mut s = state.lock().unwrap();
+            let Some(o) = s.outgoing.as_mut().filter(|o| o.transfer_id == transfer_id) else { return };
+            if o.done || o.cancelled || o.error.is_some() {
+                return;
             }
+            pacer.report_loss(std::mem::take(&mut o.reported_lost));
+            if o.paused {
+                // A pause is a wait, not an exit: the loop holds its place,
+                // so resuming continues rather than re-sending everything.
+                Next::Wait
+            } else if let Some(index) = o.repair_queue.pop_front() {
+                // Repairs first: the receiver is stuck behind them, while
+                // new chunks only extend a file it can already hold.
+                Next::Send { index, repair: true }
+            } else if next_new < total_chunks {
+                Next::Send { index: next_new, repair: false }
+            } else {
+                Next::Idle
+            }
+        };
+
+        let (index, repair) = match next {
+            Next::Wait => {
+                idle_since = None;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            Next::Idle => {
+                // Everything sent once and nothing queued: waiting for
+                // FileComplete, or for more repair requests. Given up on
+                // only after a stretch with neither, so a large transfer
+                // still being patched up is never declared lost while it
+                // is visibly still working.
+                if idle_since.get_or_insert_with(Instant::now).elapsed() > CONFIRMATION_WAIT {
+                    fail_outgoing(&state, transfer_id, "No confirmation from the other side -- it may not have received everything");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            Next::Send { index, repair } => (index, repair),
+        };
+        idle_since = None;
+        if !repair {
+            next_new += 1;
         }
 
         let bytes = match source.read_chunk(index) {
@@ -302,8 +356,7 @@ pub async fn send_file(
             Err(e) => {
                 // Stopped rather than sent on: the file no longer matches
                 // what was offered, and the receiver would only find out
-                // at the very end. Telling them now saves the rest of the
-                // transfer.
+                // at the very end. Telling them now saves the rest.
                 fail_outgoing(&state, transfer_id, &format!("Stopped sending: {e}"));
                 let _ = peer.send_control(&ControlMessage::FileCancel { transfer_id }.encode()).await;
                 return;
@@ -314,52 +367,25 @@ pub async fn send_file(
             fail_outgoing(&state, transfer_id, "Connection dropped mid-transfer");
             return;
         }
-        if let Ok(mut s) = state.lock() {
-            if let Some(o) = s.outgoing.as_mut().filter(|o| o.transfer_id == transfer_id) {
-                o.chunks_sent = (o.chunks_sent + 1).min(o.total_chunks);
+        if !repair {
+            if let Ok(mut s) = state.lock() {
+                if let Some(o) = s.outgoing.as_mut().filter(|o| o.transfer_id == transfer_id) {
+                    o.chunks_sent = (o.chunks_sent + 1).min(o.total_chunks);
+                }
             }
         }
 
-        // Spec §5 bandwidth controls. Paced per chunk rather than in
-        // bulk: a burst followed by a pause still spikes the link during
-        // the burst, and the spike is what disturbs the call.
-        //
-        // Starting a call mid-transfer takes effect on the very next chunk
-        // (it is a flag, not a file); a changed limit within a quarter of a
-        // second.
+        // Spec §5 bandwidth controls: the user's cap, the automatic one
+        // while a call is running, and -- with neither -- whatever rate
+        // the link turns out to sustain. Starting a call mid-transfer
+        // takes effect on the very next chunk (it is a flag, not a file).
         if limits_read_at.elapsed() >= Duration::from_millis(250) {
             limits = crate::config::load().transfer_limits;
             limits_read_at = Instant::now();
         }
-        let delay = limits.delay_after_chunk(chunk.len(), in_call());
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+        if let Some(wait) = pacer.after_send(chunk.len(), limits.limit_bytes_per_sec(in_call())) {
+            tokio::time::sleep(wait).await;
         }
-    }
-
-    // Every chunk sent once; from here it is repair requests (answered in
-    // `handle_control_message`) until FileComplete arrives. Given up on
-    // only after a stretch with neither -- measured from the most recent
-    // repair, so a big transfer that is still being patched up is not
-    // declared lost while it is visibly still working.
-    let first_pass_done = Instant::now();
-    loop {
-        match outgoing_status(&state, transfer_id) {
-            Some(OutgoingStatus::Accepted) | Some(OutgoingStatus::Paused) => {}
-            _ => return,
-        }
-        let last_activity = state
-            .lock()
-            .unwrap()
-            .outgoing
-            .as_ref()
-            .and_then(|o| o.last_repair)
-            .map_or(first_pass_done, |t| t.max(first_pass_done));
-        if last_activity.elapsed() > CONFIRMATION_WAIT {
-            fail_outgoing(&state, transfer_id, "No confirmation from the other side -- it may not have received everything");
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -408,7 +434,7 @@ fn send_complete(peer: &Arc<PeerConnection>, runtime: &tokio::runtime::Handle, t
 /// synchronously from the receive loop, which already runs on the tokio
 /// runtime, so follow-up work is spawned on the current runtime rather
 /// than awaited inline.
-pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransferState>>, peer: &Arc<PeerConnection>, resend: &ResendSource) {
+pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransferState>>, peer: &Arc<PeerConnection>) {
     match msg {
         // Hello, Chat and the friend-request messages are handled upstream
         // in `state::start_pipeline`'s receive loop; they only appear here
@@ -545,30 +571,27 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
             }
         }
         ControlMessage::FileMissing { transfer_id, indices } => {
-            let source = resend.lock().unwrap().clone();
-            let Some((id, source)) = source else { return };
-            if id != transfer_id {
-                return;
-            }
-            if let Ok(mut s) = state.lock() {
-                if let Some(o) = s.outgoing.as_mut().filter(|o| o.transfer_id == transfer_id) {
-                    o.last_repair = Some(Instant::now());
-                }
-            }
             #[cfg(test)]
             REPAIRS.fetch_add(1, Ordering::Relaxed);
-            let peer = peer.clone();
-            tokio::spawn(async move {
-                // Capped here as well as on the receiving side: the list
-                // comes from the peer, and a request for a million chunks
-                // should not be a way to make this side read a file a
-                // million times.
-                for index in indices.into_iter().take(MAX_REQUEST) {
-                    if let Ok(bytes) = source.read_chunk(index) {
-                        let _ = peer.send_file_chunk(&encode_chunk(transfer_id, index, &bytes)).await;
-                    }
+            let Ok(mut s) = state.lock() else { return };
+            let Some(o) = s.outgoing.as_mut().filter(|o| o.transfer_id == transfer_id && !o.done) else {
+                return;
+            };
+            // Only chunks already sent once count: asking for one the
+            // first pass has not reached yet is not a loss, and resending
+            // it early would send it twice. Capped here as well as on the
+            // receiving side, because the list comes from the peer.
+            let mut queued = 0;
+            for index in indices.into_iter().take(MAX_REQUEST) {
+                if index < o.chunks_sent
+                    && o.repair_queue.len() < MAX_REPAIR_QUEUE
+                    && !o.repair_queue.contains(&index)
+                {
+                    o.repair_queue.push_back(index);
+                    queued += 1;
                 }
-            });
+            }
+            o.reported_lost += queued;
         }
     }
 }
@@ -598,6 +621,21 @@ pub fn handle_file_chunk(plaintext: &[u8], state: &Arc<Mutex<FileTransferState>>
     }
     let received = reassembly.received();
     let complete = reassembly.is_complete();
+    // The periodic index save, off this path: it fsyncs, and an fsync in
+    // the receive loop is a burst of lost datagrams. The job is handed a
+    // snapshot, so holding the lock any longer is not needed either.
+    if !complete && reassembly.persist_due() {
+        match reassembly.persist_job() {
+            Ok(job) => {
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = job() {
+                        eprintln!("[files] could not save transfer progress: {e}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("[files] could not save transfer progress: {e}"),
+        }
+    }
     if let Some(incoming) = s.incoming.as_mut() {
         incoming.chunks_received = received;
     }
@@ -762,7 +800,7 @@ pub fn request_missing_chunks_if_needed(state: &Arc<Mutex<FileTransferState>>, p
     if !due {
         return;
     }
-    let Some(missing) = s.reassembly.as_ref().map(|r| r.chunks_to_request()) else { return };
+    let Some(missing) = s.reassembly.as_mut().map(|r| r.chunks_to_request()) else { return };
     if missing.is_empty() {
         return;
     }
@@ -810,7 +848,8 @@ mod pause_tests {
                 cancelled: false,
                 paused,
                 error: None,
-                last_repair: None,
+                repair_queue: VecDeque::new(),
+                reported_lost: 0,
             }),
             ..Default::default()
         }))
@@ -894,7 +933,6 @@ mod integration_tests {
     struct Pair {
         peer_a: Arc<PeerConnection>,
         state_a: Arc<Mutex<FileTransferState>>,
-        resend_a: ResendSource,
         state_b: Arc<Mutex<FileTransferState>>,
     }
 
@@ -919,18 +957,16 @@ mod integration_tests {
 
         let state_a = Arc::new(Mutex::new(FileTransferState::default()));
         let state_b = Arc::new(Mutex::new(FileTransferState { store_root: Some(store), ..Default::default() }));
-        let resend_a: ResendSource = Arc::new(Mutex::new(None));
-        let resend_b: ResendSource = Arc::new(Mutex::new(None));
 
         {
-            let (peer, state, resend) = (peer_a.clone(), state_a.clone(), resend_a.clone());
+            let (peer, state) = (peer_a.clone(), state_a.clone());
             tokio::spawn(async move {
                 let peer2 = peer.clone();
                 let _ = peer2
                     .recv_loop(move |msg| match msg {
                         Received::Control(bytes) => {
                             if let Some(m) = ControlMessage::decode(&bytes) {
-                                handle_control_message(m, &state, &peer, &resend);
+                                handle_control_message(m, &state, &peer);
                             }
                         }
                         Received::File(bytes) => handle_file_chunk(&bytes, &state, &peer),
@@ -940,7 +976,7 @@ mod integration_tests {
             });
         }
         {
-            let (peer, state, resend) = (peer_b.clone(), state_b.clone(), resend_b.clone());
+            let (peer, state) = (peer_b.clone(), state_b.clone());
             let seen: Arc<Mutex<std::collections::HashSet<u32>>> = Arc::default();
             tokio::spawn(async move {
                 let peer2 = peer.clone();
@@ -949,7 +985,7 @@ mod integration_tests {
                         Received::Control(bytes) => {
                             let Some(decoded) = ControlMessage::decode(&bytes) else { return };
                             let is_offer = matches!(decoded, ControlMessage::FileOffer { .. });
-                            handle_control_message(decoded, &state, &peer, &resend);
+                            handle_control_message(decoded, &state, &peer);
                             if is_offer {
                                 let runtime = tokio::runtime::Handle::current();
                                 if let Some(Ok(transfer_id)) = accept_offer(&state, &peer, &runtime) {
@@ -984,7 +1020,7 @@ mod integration_tests {
                 }
             });
         }
-        Pair { peer_a, state_a, resend_a, state_b }
+        Pair { peer_a, state_a, state_b }
     }
 
     async fn run_transfer(pair: &Pair, path: &std::path::Path, seconds: u64) -> PathBuf {
@@ -992,7 +1028,6 @@ mod integration_tests {
         tokio::spawn(send_file(
             pair.peer_a.clone(),
             pair.state_a.clone(),
-            pair.resend_a.clone(),
             "integration.bin".to_string(),
             Arc::new(source),
             hash,

@@ -811,8 +811,10 @@ mod tests {
 
     #[test]
     fn saved_layouts_round_trip_through_json() {
-        let mut config = AppConfig::default();
-        config.saved_layouts = vec![sample_layout("Compact"), sample_layout("Everything")];
+        let config = AppConfig {
+            saved_layouts: vec![sample_layout("Compact"), sample_layout("Everything")],
+            ..Default::default()
+        };
 
         let json = serde_json::to_string(&config).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();

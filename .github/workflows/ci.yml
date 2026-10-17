@@ -1,0 +1,108 @@
+# One pipeline, every desktop target, from the same commit (spec §10).
+#
+# Two jobs:
+#   test     -- build + test + clippy on Linux, Windows and macOS for every
+#               push and pull request.
+#   release  -- on a tag, build the release binaries the reproducible way
+#               (BUILDING.md), twice on each platform, and refuse to publish
+#               unless both builds hash identically. That turns "reproducible
+#               in principle" into something checked on every release.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # BUILDING.md: the stated toolchain. Pinned here, per target, rather than
+  # in a rust-toolchain.toml -- see that file for why.
+  RUST_VERSION: "1.97.0"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev libgtk-3-dev
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  release:
+    name: release (${{ matrix.os }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev libgtk-3-dev
+      - name: Reproducible environment
+        shell: bash
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=--remap-path-prefix=$PWD=/build --remap-path-prefix=$HOME/.cargo=/cargo" >> "$GITHUB_ENV"
+      - name: Build once
+        shell: bash
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          mkdir -p out/first
+          cp target/${{ matrix.target }}/release/voip-gui${{ matrix.ext }} target/${{ matrix.target }}/release/voip-cli${{ matrix.ext }} out/first/
+      - name: Build again from clean
+        shell: bash
+        run: |
+          cargo clean
+          cargo build --release --locked --target ${{ matrix.target }}
+          mkdir -p out/second
+          cp target/${{ matrix.target }}/release/voip-gui${{ matrix.ext }} target/${{ matrix.target }}/release/voip-cli${{ matrix.ext }} out/second/
+      - name: Refuse to ship anything that does not reproduce
+        shell: bash
+        run: |
+          cd out
+          for bin in voip-gui${{ matrix.ext }} voip-cli${{ matrix.ext }}; do
+            cmp first/$bin second/$bin || { echo "::error::$bin differs between two builds of the same commit"; exit 1; }
+          done
+          cd first && shasum -a 256 * > ../SHA256SUMS-${{ matrix.target }}.txt && cat ../SHA256SUMS-${{ matrix.target }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antiphon-${{ matrix.target }}
+          path: |
+            out/first/*
+            out/SHA256SUMS-${{ matrix.target }}.txt

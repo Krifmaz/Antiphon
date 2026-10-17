@@ -94,10 +94,8 @@ fn parse_binding_response(bytes: &[u8], txid: &TransactionId) -> Option<SocketAd
                     return Some(addr);
                 }
             }
-            ATTR_MAPPED_ADDRESS => {
-                if fallback.is_none() {
-                    fallback = parse_address(value, txid, false);
-                }
+            ATTR_MAPPED_ADDRESS if fallback.is_none() => {
+                fallback = parse_address(value, txid, false);
             }
             _ => {}
         }

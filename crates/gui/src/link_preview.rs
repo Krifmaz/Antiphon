@@ -43,7 +43,7 @@ pub fn find_links(text: &str) -> Vec<Link> {
     let mut out = Vec::new();
     for token in text.split_whitespace() {
         // Trailing punctuation is part of the sentence, not the URL.
-        let trimmed = token.trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '!' | '?' | ';' | ':' | '"' | '\''));
+        let trimmed = token.trim_end_matches(['.', ',', ')', ']', '!', '?', ';', ':', '"', '\'']);
         let lower = trimmed.to_lowercase();
 
         let rest = if let Some(r) = lower.strip_prefix("https://") {

@@ -16,8 +16,6 @@
 //! transfer loop means the rule can be tested without sockets, which is
 //! the part worth being sure about.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
 /// How fast a transfer is allowed to go.
@@ -62,19 +60,14 @@ impl TransferLimits {
         }
     }
 
-    /// How long to wait after sending `chunk_bytes` to stay within the cap.
-    ///
-    /// Returns zero when unlimited. Paced per chunk rather than by
-    /// sleeping in bulk: a transfer that sends a burst and then stops for
-    /// a second still spikes the link during the burst, which is exactly
-    /// what disturbs a call.
-    pub fn delay_after_chunk(&self, chunk_bytes: usize, in_call: bool) -> Duration {
-        let kbps = self.effective_kbps(in_call);
-        if kbps == 0 {
-            return Duration::ZERO;
+    /// The cap that applies right now, in bytes per second, or `None`
+    /// when there is none. Handed to the pacer, which turns it into send
+    /// times -- see `crate::pacer` for why per-chunk sleeps did not work.
+    pub fn limit_bytes_per_sec(&self, in_call: bool) -> Option<f64> {
+        match self.effective_kbps(in_call) {
+            0 => None,
+            kbps => Some(kbps as f64 * 1024.0),
         }
-        let bytes_per_second = kbps as f64 * 1024.0;
-        Duration::from_secs_f64(chunk_bytes as f64 / bytes_per_second)
     }
 
     /// A human description of what is currently in force, for the UI.
@@ -120,53 +113,22 @@ mod tests {
     }
 
     #[test]
-    fn an_unlimited_transfer_waits_for_nothing() {
+    fn an_unlimited_transfer_has_no_limit_to_hand_the_pacer() {
         let limits = TransferLimits { upload_kbps: 0, throttle_during_calls: false, in_call_kbps: 0 };
-        assert_eq!(limits.delay_after_chunk(4096, false), Duration::ZERO);
+        assert_eq!(limits.limit_bytes_per_sec(false), None);
     }
 
     #[test]
-    fn the_delay_matches_the_cap() {
-        // 100 KB/s and a 1 KB chunk means roughly 10 ms per chunk.
+    fn the_limit_is_the_cap_in_bytes() {
         let limits = TransferLimits { upload_kbps: 100, throttle_during_calls: false, in_call_kbps: 0 };
-        let delay = limits.delay_after_chunk(1024, false);
-
-        assert!(
-            (delay.as_secs_f64() - 0.01).abs() < 1e-6,
-            "expected ~10ms, got {delay:?}"
-        );
+        assert_eq!(limits.limit_bytes_per_sec(false), Some(100.0 * 1024.0));
     }
 
     #[test]
-    fn halving_the_cap_doubles_the_wait() {
-        let fast = TransferLimits { upload_kbps: 200, throttle_during_calls: false, in_call_kbps: 0 };
-        let slow = TransferLimits { upload_kbps: 100, throttle_during_calls: false, in_call_kbps: 0 };
-
-        let f = fast.delay_after_chunk(4096, false).as_secs_f64();
-        let s = slow.delay_after_chunk(4096, false).as_secs_f64();
-        assert!((s / f - 2.0).abs() < 1e-6, "{s} is not twice {f}");
-    }
-
-    #[test]
-    fn a_bigger_chunk_waits_proportionally_longer() {
-        let limits = TransferLimits { upload_kbps: 100, throttle_during_calls: false, in_call_kbps: 0 };
-        let small = limits.delay_after_chunk(1024, false).as_secs_f64();
-        let big = limits.delay_after_chunk(4096, false).as_secs_f64();
-
-        assert!((big / small - 4.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn being_on_a_call_changes_the_pacing() {
+    fn being_on_a_call_changes_the_limit() {
         let limits = TransferLimits::default();
-        assert_eq!(limits.delay_after_chunk(3800, false), Duration::ZERO);
-        assert!(limits.delay_after_chunk(3800, true) > Duration::ZERO);
-    }
-
-    #[test]
-    fn a_zero_byte_chunk_does_not_wait() {
-        let limits = TransferLimits { upload_kbps: 100, throttle_during_calls: false, in_call_kbps: 0 };
-        assert_eq!(limits.delay_after_chunk(0, false), Duration::ZERO);
+        assert_eq!(limits.limit_bytes_per_sec(false), None);
+        assert_eq!(limits.limit_bytes_per_sec(true), Some(256.0 * 1024.0));
     }
 
     #[test]

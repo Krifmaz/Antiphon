@@ -12,6 +12,25 @@ use crate::error::NetError;
 
 const MAX_DATAGRAM: usize = 4096;
 
+/// What the socket is asked to hold while the receive loop is busy.
+///
+/// The OS default (about 200 KB on Linux and Windows) is some fifty file
+/// chunks: a quarter of a second at the rate a modest link carries, and
+/// well under a tenth at the rate a sender on the same LAN reaches. Any
+/// pause on the receiving side longer than that -- the UI thread taking
+/// the CPU, a disk write, the GC of nothing in particular -- drops
+/// datagrams, and every drop is a repair round and a rate cut. Measured
+/// on loopback at the default: about one datagram in sixteen lost. A
+/// megabyte rides out pauses of a quarter second at LAN speed. The OS is
+/// free to grant less (Linux caps at `net.core.rmem_max`), and this is a
+/// hint about tolerance, not a correctness requirement, so a refusal is
+/// not an error.
+const RECEIVE_BUFFER: usize = 1024 * 1024;
+
+fn widen_receive_buffer(socket: &UdpSocket) {
+    let _ = socket2::SockRef::from(socket).set_recv_buffer_size(RECEIVE_BUFFER);
+}
+
 /// A "known contact -> direct P2P" connection (spec §3): one UDP socket
 /// talking to exactly one peer, after an authenticated triple-DH handshake
 /// has established an encrypted [`Session`]. Relay fallback, the DHT, and
@@ -52,6 +71,7 @@ impl PeerConnection {
         remote: SocketAddr,
         identity: &IdentityKeyPair,
     ) -> Result<Self, NetError> {
+        widen_receive_buffer(&socket);
         let hs = HandshakeInit::new();
         let packet = encode(FrameType::Handshake, 0, &hs.message(identity).encode());
 
@@ -102,6 +122,7 @@ impl PeerConnection {
         timeout: Duration,
         identity: &IdentityKeyPair,
     ) -> Result<Self, NetError> {
+        widen_receive_buffer(&socket);
         let hs = HandshakeInit::new();
         let my_public = hs.ephemeral_public();
         let packet = encode(FrameType::Handshake, 0, &hs.message(identity).encode());
@@ -153,6 +174,7 @@ impl PeerConnection {
         socket: Arc<UdpSocket>,
         identity: &IdentityKeyPair,
     ) -> Result<Self, NetError> {
+        widen_receive_buffer(&socket);
         let mut buf = vec![0u8; MAX_DATAGRAM];
         loop {
             let (n, from) = socket.recv_from(&mut buf).await?;

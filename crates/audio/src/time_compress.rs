@@ -121,9 +121,9 @@ impl TimeCompressor {
             let segment = &self.pending[offset..];
 
             if self.started {
-                for i in 0..self.overlap {
+                for (i, (tail, new)) in self.tail.iter().zip(segment).take(self.overlap).enumerate() {
                     let w = (i + 1) as f32 / (self.overlap + 1) as f32;
-                    out.push(self.tail[i] * (1.0 - w) + segment[i] * w);
+                    out.push(tail * (1.0 - w) + new * w);
                 }
                 out.extend_from_slice(&segment[self.overlap..self.synthesis_hop]);
             } else {

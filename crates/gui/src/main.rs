@@ -13,6 +13,7 @@ mod link_preview;
 mod moderation;
 mod notify;
 mod outbox;
+mod pacer;
 mod presence;
 mod reachability;
 mod reactions;
@@ -290,11 +291,10 @@ fn main() -> anyhow::Result<()> {
             // A silent-call marker arrives just after the connection, so
             // the ring decision made at connect time is revisited once --
             // the flag can only lower what was already decided.
-            if active.peer_wants_silent.swap(false, Ordering::Relaxed) {
-                if ring_outcome(&active.peer_identity().identity_key, true) != notify::Outcome::Ring
-                {
-                    app.set_status_text("Connected (they knocked quietly)".into());
-                }
+            if active.peer_wants_silent.swap(false, Ordering::Relaxed)
+                && ring_outcome(&active.peer_identity().identity_key, true) != notify::Outcome::Ring
+            {
+                app.set_status_text("Connected (they knocked quietly)".into());
             }
 
             // Spec §9: a knock escalated to a ring, without the call being
@@ -1989,7 +1989,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 let Some(path) = rfd::FileDialog::new()
                     .set_title("Export voice preset")
                     .add_filter("voip-app preset", &["json"])
-                    .set_file_name(&format!("{}.json", preset.name))
+                    .set_file_name(format!("{}.json", preset.name))
                     .save_file()
                 else {
                     return;
@@ -2983,6 +2983,9 @@ fn set_status(app: &MainWindow, tray_weak: &slint::Weak<AppTrayIcon>, text: &str
     }
 }
 
+// Every handle the connect path produces, passed once; bundling them into a
+// struct for a single call site would be shape without substance.
+#[allow(clippy::too_many_arguments)]
 fn finish_connect(
     window_weak: slint::Weak<MainWindow>,
     tray_weak: slint::Weak<AppTrayIcon>,
@@ -4060,7 +4063,7 @@ fn model_to_string_vec(model: ModelRc<SharedString>) -> Vec<String> {
 /// Swaps `id` with its neighbor in `dir` (-1 up, 1 down) if that neighbor
 /// exists; a no-op at either end rather than wrapping, matching the
 /// disabled-at-the-boundary up/down buttons in the UI.
-fn move_order_item(order: &mut Vec<String>, id: &str, dir: i32) {
+fn move_order_item(order: &mut [String], id: &str, dir: i32) {
     let Some(pos) = order.iter().position(|x| x == id) else { return };
     let new_pos = pos as i32 + dir;
     if new_pos < 0 || new_pos as usize >= order.len() {

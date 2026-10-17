@@ -30,6 +30,10 @@ const RESEND_CACHE_FRAMES: usize = 64;
 use crate::control::{ControlMessage, Hello};
 use crate::file_transfer::{self, FileTransferState};
 
+/// Recently sent audio frames by sequence number, kept so a peer's
+/// `AudioMissing` request can be answered (spec §2 retransmit).
+type ResendCache = Arc<Mutex<std::collections::VecDeque<(u32, Vec<u8>)>>>;
+
 /// How the mic decides when to actually transmit (spec §1 "Push-to-Talk /
 /// Voice Activation"), and the settings for each mode. Lives in [`AppState`]
 /// rather than [`ActiveCall`] because it's a standing user preference, not
@@ -212,10 +216,6 @@ pub struct ActiveCall {
     /// File transfer (spec §5) progress/offer state for this call -- see
     /// `crate::file_transfer` for the actual send/receive logic.
     pub file_transfer: Arc<Mutex<FileTransferState>>,
-    /// Where the active outgoing transfer's bytes come from, kept so a
-    /// `FileMissing` repair request can read them again -- see
-    /// `file_transfer::send_file`.
-    file_resend_data: file_transfer::ResendSource,
 
     // Device Hot-Swap (spec §1 Utility: "change microphone or headphones
     // mid-call without dropping"). The stream handles live behind a Mutex
@@ -348,11 +348,9 @@ impl ActiveCall {
     ) {
         let peer = self.peer.clone();
         let ft = self.file_transfer.clone();
-        let resend = self.file_resend_data.clone();
         runtime.spawn(file_transfer::send_file(
             peer,
             ft,
-            resend,
             file_name,
             Arc::new(source),
             sha256,
@@ -1127,6 +1125,9 @@ pub fn start_loopback(
 /// devices and starts the call running. Mirrors `voip-cli`'s `run_call`,
 /// but returns live handles instead of blocking, since the GUI needs to
 /// keep going (settings can change mid-call, mute/deafen can toggle, etc).
+// One call site, and every argument is a distinct live handle the call
+// needs -- a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub fn start_pipeline(
     peer: PeerConnection,
     config: ChainConfig,
@@ -1168,7 +1169,6 @@ pub fn start_pipeline(
     let soundboard_queue: Arc<Mutex<std::collections::VecDeque<f32>>> =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let file_transfer_state = Arc::new(Mutex::new(FileTransferState::default()));
-    let file_resend_data: file_transfer::ResendSource = Arc::new(Mutex::new(None));
     // Anything queued for this contact in an earlier session (spec §8).
     // Loaded before the pipeline starts so a flush has something to send
     // the moment the call is up.
@@ -1240,8 +1240,7 @@ pub fn start_pipeline(
     let replay_clips: Arc<Mutex<crate::replay_history::ReplayHistory>> =
         Arc::new(Mutex::new(crate::replay_history::ReplayHistory::default()));
     // Recently sent audio, so a peer's resend request can be answered.
-    let resend_cache: Arc<Mutex<std::collections::VecDeque<(u32, Vec<u8>)>>> =
-        Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let resend_cache: ResendCache = Arc::new(Mutex::new(std::collections::VecDeque::new()));
 
     let (monitor_playback, monitor_sink) = start_playback(output_device.as_deref(), MONITOR_LATENCY_MS as f32 / 1000.0)?;
     let monitor_sink = Arc::new(Mutex::new(monitor_sink));
@@ -1459,7 +1458,6 @@ pub fn start_pipeline(
     let recv_profile = peer_profile.clone();
     let recv_ft_state = file_transfer_state.clone();
     let recv_ft_peer = peer.clone();
-    let recv_ft_resend = file_resend_data.clone();
     let recv_chat_log = chat_log.clone();
     let recv_chat_rev = chat_rev.clone();
     let recv_reactions = reactions.clone();
@@ -1602,7 +1600,7 @@ pub fn start_pipeline(
                         *recv_friend_accepted.lock().unwrap() = Some(display_name);
                     }
                     Some(ControlMessage::FriendReject) => {}
-                    Some(other) => file_transfer::handle_control_message(other, &recv_ft_state, &recv_ft_peer, &recv_ft_resend),
+                    Some(other) => file_transfer::handle_control_message(other, &recv_ft_state, &recv_ft_peer),
                     None => {}
                 },
                 Received::File(bytes) => file_transfer::handle_file_chunk(&bytes, &recv_ft_state, &recv_ft_peer),
@@ -1820,7 +1818,6 @@ pub fn start_pipeline(
         replay,
         replay_clips,
         file_transfer: file_transfer_state,
-        file_resend_data,
         capture: Mutex::new(capture),
         capture_tx,
         playback: Mutex::new(playback),
