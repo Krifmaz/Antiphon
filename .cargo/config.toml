@@ -1,0 +1,16 @@
+# Reproducible builds on the MSVC toolchain (BUILDING.md).
+#
+# link.exe and lld-link stamp the current time into the PE header's
+# TimeDateStamp field and a fresh GUID into the debug directory, so two
+# builds of one commit differ in the header even when every byte of code
+# matches. SOURCE_DATE_EPOCH does not reach the linker. /Brepro replaces
+# both with a hash of the output instead.
+#
+# Note that any RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS in the environment
+# replaces this entirely, so a build that sets those for path remapping
+# must carry the flag itself -- as the release pipeline does.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/Brepro"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/Brepro"]

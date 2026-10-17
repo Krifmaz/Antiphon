@@ -98,9 +98,15 @@ jobs:
         # in the binary. See BUILDING.md.
         run: |
           echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
-          SRC="$PWD"; CH="${CARGO_HOME:-$HOME/.cargo}"
-          if [ "$RUNNER_OS" = Windows ]; then SRC="$(cygpath -w "$SRC")"; CH="$(cygpath -w "$CH")"; fi
-          printf 'CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo\n' "$SRC" "$CH" >> "$GITHUB_ENV"
+          SRC="$PWD"; CH="${CARGO_HOME:-$HOME/.cargo}"; EXTRA=""
+          if [ "$RUNNER_OS" = Windows ]; then
+            SRC="$(cygpath -w "$SRC")"; CH="$(cygpath -w "$CH")"
+            # The MSVC linker stamps the current time into the PE header
+            # unless told otherwise; see .cargo/config.toml. Setting the
+            # environment variable replaces that file's flags, so repeat it.
+            EXTRA=$'\x1f-Clink-arg=/Brepro'
+          fi
+          printf 'CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo%s\n' "$SRC" "$CH" "$EXTRA" >> "$GITHUB_ENV"
       - name: Build once
         shell: bash
         run: |
@@ -119,7 +125,10 @@ jobs:
         run: |
           cd out
           for bin in antiphon${{ matrix.ext }} antiphon-cli${{ matrix.ext }}; do
-            cmp first/$bin second/$bin || { echo "::error::$bin differs between two builds of the same commit"; exit 1; }
+            cmp first/$bin second/$bin || {
+              echo "::error::$bin differs between two builds of the same commit ($(cmp -l first/$bin second/$bin | wc -l) bytes, first at offset $(cmp -l first/$bin second/$bin | head -1 | awk '{print $1}'))"
+              exit 1
+            }
           done
           cd first && shasum -a 256 * > ../SHA256SUMS-${{ matrix.target }}.txt && cat ../SHA256SUMS-${{ matrix.target }}.txt
       - uses: actions/upload-artifact@v4

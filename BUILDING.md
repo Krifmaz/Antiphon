@@ -96,6 +96,7 @@ the binary is the source — no trust required.
 | `codegen-units = 1` | Work is split across threads; symbol ordering depends on scheduling, so the same machine can produce different bytes twice |
 | `--remap-path-prefix` | The build directory is baked into panic messages, so `C:\Users\Alice\...` differs from `/home/bob/...` — and the builder's username ships inside the binary |
 | `SOURCE_DATE_EPOCH` | Build timestamps embed the moment of compilation |
+| `/Brepro` (MSVC linker, via `.cargo/config.toml`) | link.exe writes the current time into the PE header and a fresh GUID into the debug directory; `SOURCE_DATE_EPOCH` does not reach it. Two otherwise identical builds differed at byte 257, the header timestamp, until this was set. Any `RUSTFLAGS` you set yourself replaces the config file's flags, so include `-Clink-arg=/Brepro` in them on MSVC |
 | `strip = true` | On the Windows GNU toolchain, import-library symbol names embed a temporary build folder's full path — username and a random suffix — which path remapping does not reach |
 | `--locked` | Dependency versions drift, so you are verifying different source than was released |
 
