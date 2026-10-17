@@ -77,17 +77,17 @@ fn platform_wrap(plaintext: &[u8]) -> Option<Vec<u8>> {
         CryptProtectData, CRYPT_INTEGER_BLOB,
     };
 
-    let mut input = blob(plaintext);
-    let mut entropy = blob(ENTROPY);
+    let input = blob(plaintext);
+    let entropy = blob(ENTROPY);
     let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
 
     // SAFETY: all three blobs point at live buffers for the duration of
     // the call, and `output` is written by the OS and freed below.
     let ok = unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             std::ptr::null(),
-            &mut entropy,
+            &entropy,
             std::ptr::null(),
             std::ptr::null(),
             0,
@@ -103,16 +103,16 @@ fn platform_unwrap(sealed: &[u8]) -> Option<Vec<u8>> {
         CryptUnprotectData, CRYPT_INTEGER_BLOB,
     };
 
-    let mut input = blob(sealed);
-    let mut entropy = blob(ENTROPY);
+    let input = blob(sealed);
+    let entropy = blob(ENTROPY);
     let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
 
     // SAFETY: as above.
     let ok = unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             std::ptr::null_mut(),
-            &mut entropy,
+            &entropy,
             std::ptr::null(),
             std::ptr::null(),
             0,
