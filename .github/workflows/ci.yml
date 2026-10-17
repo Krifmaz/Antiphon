@@ -9,7 +9,8 @@
 #               in principle" into something checked on every release.
 #   publish  -- attach every platform's binaries and checksums to a GitHub
 #               Release for the tag. A pre-release when the tag says so
-#               (v0.1.0-rc1), a release otherwise.
+#               (v0.1.0-rc1), a release otherwise. Also reachable by hand
+#               through workflow_dispatch, which creates the tag too.
 name: CI
 
 on:
@@ -17,6 +18,15 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+  # Manual release from any branch: builds exactly as a tag push would,
+  # and the publish job creates the tag at this commit along with the
+  # Release. For when a tag cannot be pushed directly.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v0.1.0-rc1)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -53,7 +63,7 @@ jobs:
 
   release:
     name: release (${{ matrix.os }})
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ${{ matrix.os }}
     strategy:
@@ -121,7 +131,9 @@ jobs:
 
   publish:
     name: publish
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     needs: release
     runs-on: ubuntu-latest
     steps:
@@ -139,7 +151,9 @@ jobs:
           ls -l
       - uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ contains(env.TAG, '-') }}
           generate_release_notes: true
           files: |
             artifacts/*.zip
