@@ -52,18 +52,9 @@ The short version of [`FEATURES.md`](FEATURES.md):
 
 ## Installing
 
-Releases carry one archive per platform (`antiphon` and `antiphon-cli`
-inside), built twice from clean and published only when both builds match
-byte for byte, plus `SHA256SUMS.txt`.
-
-For a one-click installer, use [Omnistall](https://github.com/Krifmaz/Omnistall):
-`packaging/antiphon.omnistall.toml` is the manifest. Copied into Omnistall's
-`manifests/` and set as that repository's `OMNISTALL_MANIFEST`, its release
-workflow produces a Windows `.exe`, a macOS `.dmg` and a Linux AppImage/`.deb`
-that each download the matching Antiphon archive from the release here,
-verify it against `SHA256SUMS.txt`, install it per-user and create the
-shortcuts. Platforms without a prebuilt archive are built from source by the
-installer.
+Releases carry one archive per platform with `antiphon` and `antiphon-cli`
+inside, plus `SHA256SUMS.txt`. Each release binary is built twice from a
+clean tree and published only when both builds match byte for byte.
 
 ## Building
 
