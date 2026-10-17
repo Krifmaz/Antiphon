@@ -1,12 +1,15 @@
 # One pipeline, every desktop target, from the same commit (spec §10).
 #
-# Two jobs:
+# Three jobs:
 #   test     -- build + test + clippy on Linux, Windows and macOS for every
 #               push and pull request.
 #   release  -- on a tag, build the release binaries the reproducible way
 #               (BUILDING.md), twice on each platform, and refuse to publish
 #               unless both builds hash identically. That turns "reproducible
 #               in principle" into something checked on every release.
+#   publish  -- attach every platform's binaries and checksums to a GitHub
+#               Release for the tag. A pre-release when the tag says so
+#               (v0.1.0-rc1), a release otherwise.
 name: CI
 
 on:
@@ -14,6 +17,9 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -106,3 +112,30 @@ jobs:
           path: |
             out/first/*
             out/SHA256SUMS-${{ matrix.target }}.txt
+
+  publish:
+    name: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package per platform
+        run: |
+          cd artifacts
+          for d in antiphon-*/; do
+            d=${d%/}
+            case $d in *windows*) (cd $d && zip -r ../$d.zip .) ;; *) tar czf $d.tar.gz -C $d . ;; esac
+          done
+          cat antiphon-*/SHA256SUMS-*.txt > SHA256SUMS.txt
+          ls -l
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
