@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use antiphon_crypto::file_seal::{self, FileId, FileKey, CHUNK};
 use antiphon_relay::files::{FileHost, FileStore, HostPolicy, Scope};
 use serde::{Deserialize, Serialize};
+use antiphon_net::vpn::TrafficKind;
 use tokio::net::UdpSocket;
 
 use crate::delivery::{hex, unhex32};
@@ -235,9 +236,12 @@ pub async fn pin(path: &Path, key: &FileKey, nodes: &[String], code: &str) -> (V
     };
     let id = file_seal::file_id(size, &hashes);
     let token = file_seal::read_token(key);
-    let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else { return (took, problems) };
+    let socket = match crate::vpn::bind(TrafficKind::Files, 0).await {
+        Ok(s) => s,
+        Err(e) => return (took, vec![e.to_string()]),
+    };
     for node in nodes {
-        let Some(addr) = crate::delivery::resolve(node).await else {
+        let Some(addr) = crate::delivery::resolve(TrafficKind::Files, node).await else {
             problems.push(format!("{node}: can't find it"));
             continue;
         };

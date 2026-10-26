@@ -127,6 +127,13 @@ pub fn export_all(
                 .to_string(),
         );
     }
+    if config_dir.join("vpn-configs").exists() {
+        summary.omitted.push(
+            "vpn-configs -- your WireGuard configs, left out on purpose: each one is a private \
+             key. Import the .conf files again on the new device."
+                .to_string(),
+        );
+    }
     if config_dir.join("partial").exists() {
         summary
             .omitted

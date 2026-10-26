@@ -25,7 +25,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use crate::socket::Datagram;
 
 use crate::error::NetError;
 
@@ -250,7 +250,7 @@ impl Message {
 
 /// Sends `request` until a reply `accept` takes, or the timeout passes.
 async fn exchange<T>(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     node: SocketAddr,
     request: &Message,
     timeout: Duration,
@@ -279,7 +279,7 @@ async fn exchange<T>(
 /// Registers (or refreshes) an inbox. Returns how long it lasts before
 /// it must be refreshed.
 pub async fn register(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     node: SocketAddr,
     label: Label,
     fetch_hash: [u8; 32],
@@ -297,7 +297,7 @@ pub async fn register(
 
 /// Drops a sealed blob into someone's inbox.
 pub async fn deposit(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     node: SocketAddr,
     label: Label,
     id: MailId,
@@ -318,7 +318,7 @@ pub async fn deposit(
 
 /// Collects what is waiting. Nothing is deleted until [`ack`].
 pub async fn fetch(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     node: SocketAddr,
     label: Label,
     secret: [u8; 32],
@@ -343,7 +343,7 @@ pub async fn fetch(
 
 /// Deletes one fetched blob from the node.
 pub async fn ack(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     node: SocketAddr,
     label: Label,
     secret: [u8; 32],
@@ -361,7 +361,7 @@ pub async fn ack(
 
 /// The owner's view of their inbox at a node.
 pub async fn status(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     node: SocketAddr,
     label: Label,
     secret: [u8; 32],

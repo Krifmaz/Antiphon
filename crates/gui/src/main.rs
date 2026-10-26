@@ -33,6 +33,7 @@ mod control;
 mod delivery;
 mod swarm;
 mod sharing;
+mod vpn;
 mod file_transfer;
 mod state;
 mod wav;
@@ -187,6 +188,7 @@ fn main() -> anyhow::Result<()> {
     }
     delivery::set_hosting(&app_state.runtime, loaded.hold_mail_for_devices, loaded.hold_mail_port);
     sharing::set_seeding(&app_state.runtime, loaded.seeding, loaded.seed_port);
+    apply_vpn(&app_state.runtime, &loaded);
 
     let main_window = MainWindow::new()?;
     main_window.set_my_share_id(share_id(&app_state.identity.public().identity_key).into());
@@ -264,6 +266,8 @@ fn main() -> anyhow::Result<()> {
     let mut peer_routes_saved = String::new();
     let mut delivery_round_seen = 0u64;
     let mut sharing_seen = u64::MAX;
+    let mut vpn_seen = u64::MAX;
+    let mut vpn_ticks = 0u32;
     _meter_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let Some(app) = meter_window.upgrade() else { return };
         // Spec §8: what the courier did since the last tick.
@@ -275,6 +279,16 @@ fn main() -> anyhow::Result<()> {
                 app.set_delivery_notice(notices.join("\n").into());
             }
             apply_routes_to_ui(&app, &config::load());
+        }
+        // Spec §6: the VPN list on change, its status line once a second
+        // (a handshake going stale changes it without any event).
+        vpn_ticks = vpn_ticks.wrapping_add(1);
+        let vpn_now = vpn::revision();
+        if vpn_now != vpn_seen {
+            vpn_seen = vpn_now;
+            apply_vpn_to_ui(&app, &config::load());
+        } else if vpn_ticks.is_multiple_of(20) {
+            app.set_vpn_status(vpn::status_line().into());
         }
         let sharing_now = sharing::revision();
         if sharing_now != sharing_seen {
@@ -2787,6 +2801,72 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         main_window.on_check_shared_files(move || sharing::check_all(&state.runtime));
     }
     {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_vpn_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            config::save(&config);
+            apply_vpn(&state.runtime, &config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_import_vpn_config(move || {
+            let window_weak = window_weak.clone();
+            let runtime = state.runtime.clone();
+            // The dialog blocks, so not on the UI thread.
+            std::thread::spawn(move || {
+                let Some(path) = rfd::FileDialog::new()
+                    .set_title("Import a WireGuard config")
+                    .add_filter("WireGuard config", &["conf"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                let message = match vpn::import(&path) {
+                    Ok(entry) => {
+                        // The first one imported becomes the active one.
+                        let mut config = config::load();
+                        if config.vpn_active.is_empty() || !vpn::load().iter().any(|c| c.id == config.vpn_active) {
+                            config.vpn_active = entry.id.clone();
+                            config::save(&config);
+                            apply_vpn(&runtime, &config);
+                        }
+                        format!("Imported {}.", entry.name)
+                    }
+                    Err(e) => format!("Couldn't import that file: {e}"),
+                };
+                let _ = window_weak.upgrade_in_event_loop(move |app| app.set_vpn_message(message.into()));
+            });
+        });
+    }
+    {
+        let state = app_state.clone();
+        main_window.on_select_vpn_config(move |id| {
+            let mut config = config::load();
+            config.vpn_active = id.to_string();
+            config::save(&config);
+            apply_vpn(&state.runtime, &config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_delete_vpn_config(move |id| {
+            let message = match vpn::delete(&id) {
+                Ok(()) => String::new(),
+                Err(e) => format!("Couldn't delete it: {e}"),
+            };
+            let config = config::load();
+            apply_vpn(&state.runtime, &config);
+            if let Some(app) = window_weak.upgrade() {
+                app.set_vpn_message(message.into());
+            }
+        });
+    }
+    {
         let state = app_state.clone();
         main_window.on_download_shared_file(move |file_id| {
             let state = state.clone();
@@ -4651,6 +4731,38 @@ fn apply_routes_to_ui(app: &MainWindow, config: &config::AppConfig) {
     app.set_pin_code(config.pin_code.clone().into());
 }
 
+/// Spec §6: hands the VPN settings to the router, starting or stopping
+/// the tunnel as needed.
+fn apply_vpn(runtime: &tokio::runtime::Handle, config: &config::AppConfig) {
+    let routes = antiphon_net::vpn::Routes {
+        voice: config.vpn_route_voice,
+        files: config.vpn_route_files,
+        messages: config.vpn_route_messages,
+    };
+    vpn::apply(runtime, config.vpn_enabled, &config.vpn_active, routes, config.vpn_kill_switch);
+}
+
+/// Spec §6: the VPN section -- stored configs (never their keys), which
+/// is active, routing, and the status line.
+fn apply_vpn_to_ui(app: &MainWindow, config: &config::AppConfig) {
+    let entries: Vec<VpnConfigEntry> = vpn::load()
+        .iter()
+        .map(|c| VpnConfigEntry {
+            id: c.id.clone().into(),
+            name: c.name.clone().into(),
+            detail: vpn::describe(c).into(),
+            active: c.id == config.vpn_active,
+        })
+        .collect();
+    app.set_vpn_configs(ModelRc::new(VecModel::from(entries)));
+    app.set_vpn_enabled(config.vpn_enabled);
+    app.set_vpn_route_voice(config.vpn_route_voice);
+    app.set_vpn_route_files(config.vpn_route_files);
+    app.set_vpn_route_messages(config.vpn_route_messages);
+    app.set_vpn_kill_switch(config.vpn_kill_switch);
+    app.set_vpn_status(vpn::status_line().into());
+}
+
 /// Spec §5: the shared-files list, with what's known about each.
 fn apply_shared_files_to_ui(app: &MainWindow, config: &config::AppConfig) {
     let entries: Vec<SharedFileEntry> = sharing::load()
@@ -5114,6 +5226,7 @@ fn apply_section_defaults(app: &MainWindow, expanded: bool) {
     app.set_sec_notifications(expanded);
     app.set_sec_transferlimits(expanded);
     app.set_sec_sharedfiles(expanded);
+    app.set_sec_vpn(expanded);
 }
 
 /// Computes the profile bar's avatar-circle letter from the current
@@ -5551,6 +5664,12 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
             .filter(|n| !n.is_empty())
             .collect(),
         pin_code: app.get_pin_code().trim().to_string(),
+        vpn_enabled: app.get_vpn_enabled(),
+        vpn_active: previous.vpn_active.clone(),
+        vpn_route_voice: app.get_vpn_route_voice(),
+        vpn_route_files: app.get_vpn_route_files(),
+        vpn_route_messages: app.get_vpn_route_messages(),
+        vpn_kill_switch: app.get_vpn_kill_switch(),
         ptt_toggle: app.get_ptt_toggle(),
         mute_hold: app.get_mute_hold(),
         deafen_hold: app.get_deafen_hold(),

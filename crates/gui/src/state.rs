@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use device_query::{DeviceQuery, DeviceState, Keycode};
-use tokio::net::UdpSocket;
+use antiphon_net::vpn::TrafficKind;
+use antiphon_net::AppSocket;
 use tokio::task::JoinHandle;
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -869,7 +870,7 @@ pub struct AppState {
     pub echo_canceller: Arc<Mutex<EchoCanceller>>,
     /// The socket STUN discovery ran on, held so the follow-up punch can
     /// reuse it -- see `establish_punch`. Cleared once a call starts.
-    pub punch_socket: Mutex<Option<Arc<UdpSocket>>>,
+    pub punch_socket: Mutex<Option<Arc<AppSocket>>>,
     /// The running port-forward renewal task (spec §10), if one is up.
     ///
     /// Held so it can be stopped -- and the mapping released -- when the
@@ -899,7 +900,7 @@ pub async fn establish_listen(
     identity: Arc<IdentityKeyPair>,
     relay: Option<(SocketAddr, RelayTokens)>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, port).await?);
     if let Some((relay_addr, tokens)) = relay {
         // Holds only a weak handle: once the listen (or the call it
         // became) drops the socket, the refresh stops on its own.
@@ -915,12 +916,10 @@ pub async fn establish_listen(
     Ok(PeerConnection::listen(socket, &identity).await?)
 }
 
-/// Resolves a `host:port` the user typed, for a relay.
+/// Resolves a `host:port` the user typed, for a relay -- through the
+/// VPN's DNS when calls go through the VPN (spec §6).
 pub async fn resolve(address: &str) -> Result<SocketAddr> {
-    tokio::net::lookup_host(address)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("{address} did not resolve to any address"))
+    Ok(crate::vpn::resolve(TrafficKind::Voice, address).await?)
 }
 
 /// Calls someone through a relay (spec §3 "Everyone else -> Relay"): asks
@@ -932,7 +931,7 @@ pub async fn establish_relayed_call(
     local_port: u16,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
     antiphon_net::relay::dial(&socket, relay, token, Duration::from_secs(5)).await?;
     match tokio::time::timeout(Duration::from_secs(15), PeerConnection::connect(socket, relay, &identity)).await {
         Ok(result) => Ok(result?),
@@ -945,7 +944,7 @@ pub async fn establish_call(
     local_port: u16,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
     Ok(PeerConnection::connect(socket, remote, &identity).await?)
 }
 
@@ -958,8 +957,8 @@ pub const PUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// that socket as. The socket is returned alongside the answer because the
 /// discovered mapping belongs to *this* socket -- calling on a different
 /// one would get a different (and useless) public port.
-pub async fn discover_public_address(local_port: u16) -> Result<(SocketAddr, Arc<UdpSocket>)> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+pub async fn discover_public_address(local_port: u16) -> Result<(SocketAddr, Arc<AppSocket>)> {
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
     let public = antiphon_net::stun::discover_public_addr_default(&socket).await?;
     Ok((public, socket))
 }
@@ -1056,12 +1055,12 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
 pub async fn establish_punch(
     remote: SocketAddr,
     local_port: u16,
-    existing: Option<Arc<UdpSocket>>,
+    existing: Option<Arc<AppSocket>>,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
     let socket = match existing {
         Some(s) => s,
-        None => Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?),
+        None => Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?),
     };
     Ok(PeerConnection::punch(socket, remote, PUNCH_TIMEOUT, &identity).await?)
 }

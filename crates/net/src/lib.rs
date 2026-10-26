@@ -12,8 +12,11 @@ pub mod port_map;
 pub mod blob;
 pub mod mailbox;
 pub mod relay;
+mod socket;
 pub mod stun;
+pub mod vpn;
 
 pub use error::NetError;
 pub use jitter::{JitterBuffer, PopResult};
 pub use peer::{PeerConnection, Received};
+pub use socket::{AppSocket, Datagram};

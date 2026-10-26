@@ -105,6 +105,27 @@ pub struct AppConfig {
     /// The code a members-only pin node asks for.
     #[serde(default)]
     pub pin_code: String,
+    /// Bring your own VPN (spec §6). Off by default. The configs
+    /// themselves -- private keys -- are in their own sealed file (see
+    /// `vpn.rs`), never here: settings export copies this file verbatim.
+    #[serde(default)]
+    pub vpn_enabled: bool,
+    /// Id of the stored config to use.
+    #[serde(default)]
+    pub vpn_active: String,
+    /// Which traffic goes through the VPN. Calls default to direct,
+    /// because a tunnel adds latency and voice notices it first; files
+    /// and offline messages default to the tunnel.
+    #[serde(default)]
+    pub vpn_route_voice: bool,
+    #[serde(default = "default_true")]
+    pub vpn_route_files: bool,
+    #[serde(default = "default_true")]
+    pub vpn_route_messages: bool,
+    /// When the VPN is down, refuse to send the routed traffic rather
+    /// than sending it from your real address. Off by default.
+    #[serde(default)]
+    pub vpn_kill_switch: bool,
     #[serde(default)]
     pub deafen_hold: bool,
     /// Milliseconds the mic stays open after the push-to-talk key comes up,
@@ -601,7 +622,7 @@ pub const AUDIO_SECTION_IDS: &[&str] =
 pub const APPEARANCE_SECTION_IDS: &[&str] = &["accent", "theme", "textmotion", "importexport"];
 pub const PROFILE_SECTION_IDS: &[&str] = &["profile", "about"];
 pub const CALL_SECTION_IDS: &[&str] =
-    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "callparticipants", "outbox", "calladvanced"];
+    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "callparticipants", "outbox", "calladvanced", "vpn"];
 
 fn default_audio_order() -> Vec<String> {
     AUDIO_SECTION_IDS.iter().map(|s| s.to_string()).collect()
@@ -735,6 +756,12 @@ impl Default for AppConfig {
             seed_port: default_seed_port(),
             pin_nodes: Vec::new(),
             pin_code: String::new(),
+            vpn_enabled: false,
+            vpn_active: String::new(),
+            vpn_route_voice: false,
+            vpn_route_files: true,
+            vpn_route_messages: true,
+            vpn_kill_switch: false,
             deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,

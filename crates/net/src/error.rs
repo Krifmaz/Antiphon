@@ -26,6 +26,8 @@ pub enum NetError {
     FileRefused(crate::blob::Refusal),
     #[error("nobody holding that file answered")]
     FileHolderTimeout,
+    #[error("the VPN is down and the kill switch is on, so this was not sent over your real connection")]
+    KillSwitch,
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }

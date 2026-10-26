@@ -33,7 +33,8 @@ use std::time::Duration;
 
 use antiphon_crypto::IdentityKeyPair;
 use antiphon_net::{JitterBuffer, PeerConnection, Received};
-use tokio::net::UdpSocket;
+use antiphon_net::vpn::TrafficKind;
+use antiphon_net::AppSocket;
 use tokio::task::JoinHandle;
 
 use crate::connection_mode::{decode_hex32, encode_hex32};
@@ -94,7 +95,7 @@ pub struct Group {
     pub inbox: Mutex<Vec<(Link, ControlMessage)>>,
     /// Fresh sockets that reported a public address, awaiting the other
     /// member's, by pair.
-    punch_sockets: Mutex<HashMap<u64, Arc<UdpSocket>>>,
+    punch_sockets: Mutex<HashMap<u64, Arc<AppSocket>>>,
     /// Pairs this machine introduced without a relay.
     punch_pairs: Mutex<HashMap<u64, PunchPair>>,
     /// The latest thing worth telling the user, cleared once shown.
@@ -333,7 +334,7 @@ impl Context {
                 }
                 let result = async {
                     let relay_addr = crate::state::resolve(&relay).await.map_err(|e| e.to_string())?;
-                    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await.map_err(|e| e.to_string())?);
+                    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, 0).await.map_err(|e| e.to_string())?);
                     let peer = if dial {
                         dial_with_retry(&socket, relay_addr, token).await?;
                         tokio::time::timeout(CONNECT_TIMEOUT, PeerConnection::connect(socket, relay_addr, &self.identity))
@@ -421,7 +422,7 @@ impl Context {
     }
 }
 
-async fn dial_with_retry(socket: &UdpSocket, relay: SocketAddr, token: [u8; 32]) -> Result<(), String> {
+async fn dial_with_retry(socket: &AppSocket, relay: SocketAddr, token: [u8; 32]) -> Result<(), String> {
     // The listener may register a moment after we're told to dial.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -446,6 +447,7 @@ fn random_u64() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UdpSocket;
 
     fn hello(name: &str) -> Hello {
         Hello {
@@ -461,8 +463,8 @@ mod tests {
     async fn connected_pair() -> (PeerConnection, PeerConnection) {
         let a_id = IdentityKeyPair::generate();
         let b_id = IdentityKeyPair::generate();
-        let a_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let b_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let a_sock = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
+        let b_sock = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
         let b_addr = b_sock.local_addr().unwrap();
         let listen = tokio::spawn(async move { PeerConnection::listen(b_sock, &b_id).await.unwrap() });
         let a = PeerConnection::connect(a_sock, b_addr, &a_id).await.unwrap();
@@ -529,8 +531,8 @@ mod tests {
     }
 
     async fn pair_between(a: &Arc<IdentityKeyPair>, b: &Arc<IdentityKeyPair>) -> (PeerConnection, PeerConnection) {
-        let a_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let b_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let a_sock = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
+        let b_sock = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
         let b_addr = b_sock.local_addr().unwrap();
         let b2 = b.clone();
         let listen = tokio::spawn(async move { PeerConnection::listen(b_sock, &b2).await.unwrap() });

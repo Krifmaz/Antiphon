@@ -98,6 +98,7 @@ pub const INDEX: &[Entry] = &[
     Entry { category: Category::Call, id: "transferlimits", title: "File transfer speed", keywords: "bandwidth upload cap throttle limit slow data", always_visible: false },
     Entry { category: Category::Call, id: "calladvanced", title: "Knock instead of ringing", keywords: "silent knock quiet shift click ring notify attention", always_visible: false },
     Entry { category: Category::Call, id: "sharedfiles", title: "Shared files", keywords: "seed seeding pin pinning share download files swarm torrent holders available offline", always_visible: false },
+    Entry { category: Category::Call, id: "vpn", title: "VPN", keywords: "vpn wireguard tunnel privacy ip address hide kill switch route mullvad proton conf", always_visible: false },
     Entry { category: Category::Call, id: "outbox", title: "Undelivered messages", keywords: "outbox queue offline retry give up pending unsent delivery waiting", always_visible: false },
     Entry { category: Category::Call, id: "callparticipants", title: "Participants", keywords: "mute others volume per user disable people", always_visible: false },
     Entry { category: Category::Call, id: "calladvanced", title: "Advanced", keywords: "ip direct calling address host port relay privacy", always_visible: false },
