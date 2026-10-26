@@ -65,6 +65,19 @@ export struct ReachabilityRow {
     meaning: string,
 }
 
+/// One delivery route (spec §8), for the route list.
+export struct RouteEntry {
+    title: string,
+    description: string,
+    enabled: bool,
+    is-direct: bool,
+    /// Node addresses, comma-separated.
+    nodes: string,
+    code: string,
+    /// Live status of each node, one per line.
+    status: string,
+}
+
 export struct ContactEntry {
     name: string,
     address: string,
@@ -83,6 +96,10 @@ export struct ContactEntry {
     connection-mode: int,
     /// They have shared a relay, so a relayed call is possible.
     via-relay: bool,
+    /// Spec §8 per-contact override: 0 their routes, 1 direct only.
+    message-route: int,
+    /// They publish somewhere mail can be left for them.
+    has-mailbox: bool,
 }
 
 // A from-scratch slider, standing in for std-widgets' `Slider`. That one's
@@ -1487,6 +1504,22 @@ export component MainWindow inherits Window {
     // Spec §8: how long an undelivered message keeps trying. 0 is never
     // give up, which is the default.
     in-out property <int> outbox-give-up-hours: 0;
+    in-out property <[RouteEntry]> routes: [];
+    in-out property <bool> strict-mode: false;
+    in-out property <bool> route-fan-out: false;
+    in-out property <bool> hold-mail: false;
+    in-out property <int> hold-mail-port: 3480;
+    in-out property <string> found-nodes: "";
+    in-out property <string> delivery-notice: "";
+    in-out property <string> leave-message-text: "";
+    callback route-toggled(int, bool);
+    callback route-move(int, int);
+    callback route-nodes-edited(int, string);
+    callback route-code-edited(int, string);
+    callback delivery-settings-changed();
+    callback find-nodes();
+    callback set-contact-message-route(int, int);
+    callback leave-message(int);
     /// Shown when audio was recovered, if the mode asks for it.
     in-out property <string> replay-notice: "";
     // Spec §2 "Ask me": a clip is waiting behind a Replay button.
@@ -2690,6 +2723,15 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    if delivery-notice != "" : Text {
+                        text: delivery-notice;
+                        wrap: word-wrap;
+                        font-size: 11px * text-scale;
+                    }
+                    LineEdit {
+                        text <=> leave-message-text;
+                        placeholder-text: "Write a message, then press Leave message on a contact";
+                    }
                     if contacts.length == 0 : Text {
                         text: "No saved contacts yet. Add one below, or press \"Add current peer\" while on a call.";
                         wrap: word-wrap;
@@ -2732,6 +2774,17 @@ export component MainWindow inherits Window {
                             model: ["Auto", "Direct", "Relay"];
                             current-index: c.connection-mode;
                             selected(v) => { set-contact-connection-mode(i, self.current-index); }
+                        }
+                        // Spec §8 per-contact override for messages.
+                        ComboBox {
+                            model: ["Mail: their routes", "Mail: direct only"];
+                            current-index: c.message-route;
+                            selected(v) => { set-contact-message-route(i, self.current-index); }
+                        }
+                        Button {
+                            text: "Leave message";
+                            enabled: leave-message-text != "" && c.key != "";
+                            clicked => { leave-message(i); }
                         }
                         Button {
                             text: "Introduce";
@@ -4588,7 +4641,7 @@ export component MainWindow inherits Window {
                                 SectionHeader {
                                     help: "A message you send while the other person is offline stays on this device and sends itself the next time you are both connected. It is stored encrypted, and it leaves the queue only once the connection confirms it went.";
                                     text-scale: text-scale;
-                                    title: "Undelivered messages"; reduced-motion: reduced-motion; expanded <=> sec-outbox;
+                                    title: "Message delivery"; reduced-motion: reduced-motion; expanded <=> sec-outbox;
                                 }
                                 if sec-outbox : VerticalBox {
                                     padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
@@ -4603,6 +4656,98 @@ export component MainWindow inherits Window {
                                         minimum: 0; maximum: 336;
                                         value: outbox-give-up-hours;
                                         changed(v) => { outbox-give-up-hours = round(v); settings-changed(); }
+                                    }
+
+                                    Rectangle { height: 1px; background: Theme.divider; }
+                                    SettingLabel {
+                                        text: "Where your mail waits";
+                                        help: "Your route list is your inbox: it is sent to your contacts, and when they message you while you're offline their app leaves the sealed message at the highest route you've made available. Nobody can leave your mail somewhere you didn't choose. Every node holds only sealed messages it can't read.";
+                                        text-scale: text-scale;
+                                    }
+                                    ToggleSwitch {
+                                        text: "Strict mode";
+                                        checked <=> strict-mode;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Turns off every route except Direct. Messages only ever move when both of you are online at the same moment, and nothing is stored anywhere, ever.";
+                                        toggled => { delivery-settings-changed(); }
+                                    }
+                                    if !strict-mode : ComboBox {
+                                        model: ["First available (least metadata)", "Fan out (most reliable)"];
+                                        current-index: route-fan-out ? 1 : 0;
+                                        selected(v) => { route-fan-out = self.current-index == 1; delivery-settings-changed(); }
+                                    }
+                                    if !strict-mode : Text {
+                                        text: route-fan-out
+                                            ? "The same sealed message is left at several nodes; the first copy to arrive wins and the rest expire. No single operator sees all your traffic, but more nodes know something arrived."
+                                            : "Each message goes to the first route that takes it, so as few nodes as possible know anything arrived.";
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
+                                    for r[ri] in routes : Rectangle {
+                                        border-width: 1px;
+                                        border-color: Theme.divider;
+                                        border-radius: 6px;
+                                        opacity: strict-mode && !r.is-direct ? 0.45 : 1.0;
+                                        VerticalBox {
+                                            padding: 8px;
+                                            spacing: 4px;
+                                            HorizontalBox {
+                                                padding: 0px;
+                                                spacing: 6px;
+                                                Text { text: (ri + 1) + ". " + r.title; font-weight: 600; font-size: 12px * text-scale; vertical-alignment: center; horizontal-stretch: 1; }
+                                                Button { text: "Up"; enabled: ri > 0; clicked => { route-move(ri, -1); } }
+                                                Button { text: "Down"; enabled: ri < routes.length - 1; clicked => { route-move(ri, 1); } }
+                                                ToggleSwitch {
+                                                    text: "";
+                                                    checked: r.enabled;
+                                                    enabled: !strict-mode;
+                                                    reduced-motion: reduced-motion;
+                                                    text-scale: text-scale;
+                                                    toggled => { route-toggled(ri, self.checked); }
+                                                }
+                                            }
+                                            Text { text: r.description; wrap: word-wrap; color: Theme.muted-text; font-size: 10px * text-scale; }
+                                            if !r.is-direct : LineEdit {
+                                                text: r.nodes;
+                                                placeholder-text: "node addresses, e.g. home.example.org:3479";
+                                                enabled: !strict-mode && r.enabled;
+                                                accepted(t) => { route-nodes-edited(ri, t); }
+                                            }
+                                            if !r.is-direct && r.title == "Community node" : LineEdit {
+                                                text: r.code;
+                                                placeholder-text: "community code, if the node asks for one";
+                                                enabled: !strict-mode && r.enabled;
+                                                accepted(t) => { route-code-edited(ri, t); }
+                                            }
+                                            if r.status != "" : Text { text: r.status; wrap: word-wrap; font-size: 10px * text-scale; font-family: "Consolas"; }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Press Enter after editing a node list. Removing a node is safe: senders keep messages until another route takes them.";
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        spacing: 6px;
+                                        Button { text: "Find nodes on my network"; clicked => { find-nodes(); } }
+                                    }
+                                    if found-nodes != "" : Text { text: found-nodes; wrap: word-wrap; font-size: 10px * text-scale; }
+                                    ToggleSwitch {
+                                        text: "Hold mail for my other devices";
+                                        checked <=> hold-mail;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Makes this device a node for your own other devices: while your phone is asleep, this one holds the sealed messages and hands them over when it wakes. Add this device's address under \"My other devices\" on each of your devices. Only your own devices can register here.";
+                                        toggled => { delivery-settings-changed(); }
+                                    }
+                                    if hold-mail : Text {
+                                        text: "Holding mail on port " + hold-mail-port + ".";
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
                                     }
                                 }
                             }

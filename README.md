@@ -24,7 +24,7 @@ A Cargo workspace, one crate per concern:
 | [`crates/net`](crates/net) | §2, §3, §5, §6 | UDP peer connection, STUN discovery + hole punching, NAT-PMP port mapping with renewal, adaptive jitter buffer, forward error correction, audio retransmit requests, file chunking with per-chunk hashes |
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
 | [`crates/app`](crates/app) | §1 Utility | `antiphon-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
-| [`crates/relay`](crates/relay) | §3 Relay | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry |
+| [`crates/relay`](crates/relay) | §3 Relay, §8 mailbox | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry. With `--mailbox`, also holds sealed mail for registered inboxes |
 | [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon`: the Slint desktop app -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
 Every crate's `lib.rs` doc comment states its scope against the spec.
@@ -37,17 +37,17 @@ The short version of [`FEATURES.md`](FEATURES.md):
   five, direct or through a self-hosted relay, the whole §1 audio
   suite, lost-audio recovery (FEC, retransmit, adaptive jitter buffer,
   replay history, catch-up), file transfer with resume and send-rate
-  control, chat persisted encrypted at rest with an outbox, QR / link
+  control, chat persisted encrypted at rest with an outbox and offline
+  delivery through mailbox nodes on your own route list, QR / link
   invites, verification codes, key-change warnings, the UI editor and
   theming, presence, notification rules, data export, reproducible
   build configuration with a CI pipeline for all three desktop targets.
-- **Reduced:** classical spectral noise suppression rather than an ML
-  model; keystore
-  sealing on Windows only; Caps Lock as push-to-talk works on Windows
-  and X11 but not yet on macOS or Wayland.
+- **Reduced:** Caps Lock as push-to-talk works on Windows and X11 but
+  not yet on macOS or Wayland; no project-run mailbox node ships as a
+  default.
 - **Not built:** anything that needs infrastructure the app does not
-  have yet -- the DHT, large group calls / MLS / SFU, mailbox nodes and the
-  tiered delivery routes, VPN integration, mobile clients, push
+  have yet -- the DHT, large group calls / MLS / SFU, VPN integration,
+  mobile clients, push
   notifications. Each is a project on its own and is listed as such.
 
 ## Installing
@@ -128,6 +128,13 @@ the app registers there, and anyone without a direct route -- strangers
 by default, any contact you set to Relay -- reaches you through it
 without either side seeing the other's IP address. Invite links then
 carry the relay too.
+
+To also hold sealed mail for people who are offline, add `--mailbox`
+(off by default). `--mailbox-code <code>` limits it to your own
+community; `--mailbox-storage-mb`, `--mailbox-inbox-kb`,
+`--mailbox-rate` and `--mailbox-expiry-days` set the limits, and
+`--stats-every 60` prints totals. Then add its address to a route
+under Settings > Call > Message delivery.
 
 ## Layout
 

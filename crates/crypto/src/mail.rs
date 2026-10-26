@@ -39,17 +39,26 @@ const FETCH_SALT: &[u8] = b"antiphon/mail/fetch/v1";
 /// public identity, the signature and the AEAD tag.
 pub const OVERHEAD: usize = 32 + PublicIdentity::ENCODED_LEN + 64 + 16;
 
-/// Seals `body` for `recipient`, signed by `sender`.
-pub fn seal(sender: &IdentityKeyPair, recipient: &PublicIdentity, body: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    recipient.verify()?;
+/// Seals `body` for the person with this identity key and prekey,
+/// signed by `sender`.
+///
+/// The prekey must be one already checked against the identity -- learned
+/// from a verified handshake or a [`PublicIdentity::verify`] -- since
+/// sealing to an unverified prekey seals to whoever supplied it.
+pub fn seal(
+    sender: &IdentityKeyPair,
+    recipient_identity: &[u8; 32],
+    recipient_prekey: &[u8; 32],
+    body: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     let mut eph_seed = [0u8; 32];
     getrandom::fill(&mut eph_seed).expect("OS randomness is unavailable");
     let eph = StaticSecret::from(eph_seed);
     let eph_pub = PublicKey::from(&eph).to_bytes();
-    let shared = eph.diffie_hellman(&PublicKey::from(recipient.prekey));
-    let cipher = cipher(shared.as_bytes(), &eph_pub, &recipient.identity_key);
+    let shared = eph.diffie_hellman(&PublicKey::from(*recipient_prekey));
+    let cipher = cipher(shared.as_bytes(), &eph_pub, recipient_identity);
 
-    let signature = sender.sign(&signed_bytes(&recipient.identity_key, &eph_pub, body));
+    let signature = sender.sign(&signed_bytes(recipient_identity, &eph_pub, body));
     let mut plain = Vec::with_capacity(PublicIdentity::ENCODED_LEN + 64 + body.len());
     plain.extend_from_slice(&sender.public().encode());
     plain.extend_from_slice(&signature);
@@ -137,7 +146,7 @@ mod tests {
     fn the_recipient_opens_it_and_learns_the_sender() {
         let alice = IdentityKeyPair::generate();
         let bob = IdentityKeyPair::generate();
-        let sealed = seal(&alice, &bob.public(), b"see you at eight").unwrap();
+        let sealed = seal(&alice, &bob.public().identity_key, &bob.public().prekey, b"see you at eight").unwrap();
         assert_eq!(sealed.len(), b"see you at eight".len() + OVERHEAD);
         let (from, body) = open(&bob, &sealed).unwrap();
         assert_eq!(from.identity_key, alice.public().identity_key);
@@ -149,7 +158,7 @@ mod tests {
         let alice = IdentityKeyPair::generate();
         let bob = IdentityKeyPair::generate();
         let eve = IdentityKeyPair::generate();
-        let sealed = seal(&alice, &bob.public(), b"hi").unwrap();
+        let sealed = seal(&alice, &bob.public().identity_key, &bob.public().prekey, b"hi").unwrap();
         assert!(open(&eve, &sealed).is_err());
     }
 
@@ -157,7 +166,7 @@ mod tests {
     fn a_tampered_blob_is_refused() {
         let alice = IdentityKeyPair::generate();
         let bob = IdentityKeyPair::generate();
-        let mut sealed = seal(&alice, &bob.public(), b"hi").unwrap();
+        let mut sealed = seal(&alice, &bob.public().identity_key, &bob.public().prekey, b"hi").unwrap();
         let last = sealed.len() - 1;
         sealed[last] ^= 1;
         assert!(open(&bob, &sealed).is_err());
@@ -168,7 +177,7 @@ mod tests {
     fn the_blob_does_not_name_the_sender() {
         let alice = IdentityKeyPair::generate();
         let bob = IdentityKeyPair::generate();
-        let sealed = seal(&alice, &bob.public(), b"hi").unwrap();
+        let sealed = seal(&alice, &bob.public().identity_key, &bob.public().prekey, b"hi").unwrap();
         let key = alice.public().identity_key;
         assert!(!sealed.windows(32).any(|w| w == key));
     }

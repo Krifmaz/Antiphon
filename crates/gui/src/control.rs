@@ -30,6 +30,10 @@ pub struct Hello {
     /// exchanging another link. Defaulted for peers on older builds.
     #[serde(default)]
     pub relay: String,
+    /// This person's signed route list (spec §8), hex: where to leave
+    /// mail for them while they're offline. Defaulted for older builds.
+    #[serde(default)]
+    pub routes: String,
 }
 
 /// Note on trust: none of these messages are authenticated beyond the
@@ -186,6 +190,7 @@ mod tests {
             presence: Some(1),
             wants_silent: true,
             relay: "relay.example:3479".to_string(),
+            routes: String::new(),
         });
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();
         match decoded {

@@ -454,6 +454,7 @@ mod tests {
             presence: None,
             wants_silent: false,
             relay: String::new(),
+            routes: String::new(),
         }
     }
 

@@ -67,6 +67,27 @@ pub struct AppConfig {
     /// first use; replacing it revokes every link handed out before.
     #[serde(default)]
     pub relay_invite_secret: String,
+    /// Your delivery routes (spec §8), in order -- your inbox
+    /// configuration, published to contacts. See `crate::delivery`.
+    #[serde(default = "crate::delivery::default_routes")]
+    pub routes: Vec<crate::delivery::RouteConfig>,
+    /// Fan out: leave each message at every node instead of the first
+    /// that takes it.
+    #[serde(default)]
+    pub route_fan_out: bool,
+    /// Strict mode: Direct only, nothing ever stored anywhere.
+    #[serde(default)]
+    pub strict_mode: bool,
+    /// Bumped whenever the route list changes, so contacts replace the
+    /// old one and can't be rolled back to it.
+    #[serde(default)]
+    pub route_sequence: u64,
+    /// This device holds mail for your other devices (spec §8 "My other
+    /// devices"). Off by default.
+    #[serde(default)]
+    pub hold_mail_for_devices: bool,
+    #[serde(default = "default_hold_mail_port")]
+    pub hold_mail_port: u16,
     #[serde(default)]
     pub deafen_hold: bool,
     /// Milliseconds the mic stays open after the push-to-talk key comes up,
@@ -464,6 +485,17 @@ pub struct Contact {
     /// See `crate::connection_mode`.
     #[serde(default)]
     pub connection_mode: i32,
+    /// Their signed route list (spec §8), hex, as they last sent it: where
+    /// to leave mail for them while they're offline. They decide it.
+    #[serde(default)]
+    pub route_record: String,
+    /// The sequence of `route_record`, so an older one can't replace it.
+    #[serde(default)]
+    pub route_sequence: Option<u64>,
+    /// Per-contact override (spec §8): 0 use their routes, 1 direct only
+    /// -- messages to them wait until you're both online.
+    #[serde(default)]
+    pub message_route: i32,
 }
 
 /// A freeform panel's position and size in logical pixels, relative to its
@@ -675,6 +707,12 @@ impl Default for AppConfig {
             mute_hold: false,
             relay_server: String::new(),
             relay_invite_secret: String::new(),
+            routes: crate::delivery::default_routes(),
+            route_fan_out: false,
+            strict_mode: false,
+            route_sequence: 0,
+            hold_mail_for_devices: false,
+            hold_mail_port: default_hold_mail_port(),
             deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,
@@ -785,6 +823,10 @@ fn config_path() -> Option<std::path::PathBuf> {
 /// Loads the saved config, if any. Missing file or parse failure both just
 /// mean "start from defaults" -- a corrupt settings file shouldn't block
 /// the app from opening.
+fn default_hold_mail_port() -> u16 {
+    3480
+}
+
 pub fn load() -> AppConfig {
     let Some(path) = config_path() else { return AppConfig::default() };
     let Ok(text) = std::fs::read_to_string(&path) else { return AppConfig::default() };

@@ -31,7 +31,7 @@ async fn a_message_waits_at_the_node_until_its_recipient_collects_it() {
 
     // Bob goes offline. Alice writes.
     let alice_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let blob = mail::seal(&alice, &bob.public(), b"call me when you're back").unwrap();
+    let blob = mail::seal(&alice, &bob.public().identity_key, &bob.public().prekey, b"call me when you're back").unwrap();
     mailbox::deposit(&alice_sock, node, label, [1; 16], &blob, T).await.unwrap();
     assert_eq!(mailbox.lock().unwrap().stats().held, 1);
 

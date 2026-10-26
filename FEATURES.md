@@ -12,7 +12,7 @@ are clean on Linux and Windows.
 | `[~]` | **Partial** — a real but reduced version exists; the gap is stated on the line |
 | `[ ]` | **Not started** — no code for it |
 
-**Score: 135 done · 30 partial · 67 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
+**Score: 153 done · 29 partial · 50 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
 
 **§0 Core Principles: 5 of 6 done.** The sixth needs infrastructure, not code in this repo.
 
@@ -283,27 +283,27 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 
 ## 8. Message Delivery
 
-- [~] **Text chat, persisted** — encrypted over the control channel in call ([`ControlMessage::Chat`](crates/gui/src/control.rs)) and stored per-identity, encrypted at rest under the backup key ([`history.rs`](crates/gui/src/history.rs)), so a conversation reopens where it left off. Messages still only *move* while both are online — none of the delivery model below is built
-- [~] **Outbox** ([`outbox.rs`](crates/gui/src/outbox.rs)) — a per-contact queue, encrypted at rest under the same key as history, flushed the moment that contact is reachable again (including across restarts). A message leaves the queue **only when the transport confirms it went** — before this, `send_control`'s error was discarded and a message handed to a dying connection was shown in the sender's own log as though it arrived, which is the one failure a messaging app must not have. Full offline *composition* still needs a contact-selection view that does not exist yet, so today this catches sends that fail rather than letting you write to someone who was never online
-- [ ] **Multi-device catch-up** — a desktop holds messages while your phone sleeps, then hands them over
-- [ ] **Delivery Routes** — a single ordered list, walked top to bottom
-- [x] Route 1: Direct — the only route that needs no infrastructure, and the only one built
-- [ ] Route 2: My other devices
-- [ ] Route 3: A node you trust
-- [ ] Route 4: Community node
-- [ ] Route 5: Project relay
-- [ ] Per-route on / off and drag-to-reorder
-- [ ] Node picker — add by address, QR, or auto-detect on the local network
-- [ ] Live per-node status: reachable, response time, last used, storage used, storage cap
-- [ ] Remove or replace a node with waiting messages re-routed, not lost
-- [ ] **Redundancy setting** — first available vs. fan out
-- [ ] **Strict mode** — every route off except Direct, nothing stored anywhere ever
-- [ ] **Per-contact route overrides**
-- [ ] **Server-side opt-in** — a self-hosted node chooses whether it relays or holds mail, off by default
-- [ ] Operator controls: storage caps, per-label rate limits, expiry, own-community-only
-- [ ] Writes accepted only to labels registered with that node, so strangers can't fill a public node
-- [ ] Operator dashboard with no ability to see contents or identities
-- [~] **The recipient's published route list decides where mail is deposited**, not the sender — the signed, sequenced record is implemented and rollback-resistant ([`route.rs`](crates/crypto/src/route.rs)); nothing publishes or routes on it yet
+- [x] **Text chat, persisted** — encrypted over the control channel in call ([`ControlMessage::Chat`](crates/gui/src/control.rs)) and stored per-identity, encrypted at rest under the backup key ([`history.rs`](crates/gui/src/history.rs)), so a conversation reopens where it left off. Messages to someone offline go through the delivery routes below
+- [x] **Outbox** ([`outbox.rs`](crates/gui/src/outbox.rs)) — a per-contact queue, encrypted at rest under the same key as history, flushed the moment that contact is reachable again (including across restarts). A message leaves the queue **only when the transport confirms it went** — before this, `send_control`'s error was discarded and a message handed to a dying connection was shown in the sender's own log as though it arrived, which is the one failure a messaging app must not have. **Leave message** on any contact queues a message without a call; a background courier ([`delivery.rs`](crates/gui/src/delivery.rs)) leaves it at their mailbox or sends it on the next call
+- [x] **Multi-device catch-up** — *Hold mail for my other devices* runs a mailbox inside the app, open only to your own devices (the registration code comes from your seed). It reads what arrives there but leaves it in place, so your phone still collects it when it wakes
+- [x] **Delivery Routes** — a single ordered list, walked top to bottom ([`delivery.rs`](crates/gui/src/delivery.rs)). Your list is signed into a route record, sent to contacts in every `Hello`, and checked against their pinned key and sequence on arrival
+- [x] Route 1: Direct — the only route that needs no infrastructure
+- [x] Route 2: My other devices
+- [x] Route 3: A node you trust — any `antiphon-relay --mailbox`
+- [x] Route 4: Community node — the same node with `--mailbox-code`, joined with the community's code
+- [~] Route 5: Project relay — the tier exists and works with any node address; there is no project-run node to point it at by default
+- [x] Per-route on / off and reorder (Up / Down buttons rather than dragging)
+- [~] Node picker — by address, and **Find nodes on my network** broadcasts and lists every mailbox node that answers. Not by QR yet
+- [x] Live per-node status: reachable, response time, messages waiting, storage used and the inbox cap, refreshed each courier round (every minute)
+- [x] Remove or replace a node with waiting messages re-routed, not lost — senders keep a message in their outbox until a node accepts it, so a removed node only stops new deposits
+- [x] **Redundancy setting** — first available vs. fan out; fan-out copies are dropped on arrival by sender and message id
+- [x] **Strict mode** — publishes Direct only and stops this device leaving mail anywhere
+- [x] **Per-contact route overrides** — *Mail: their routes* or *Mail: direct only* on each contact
+- [x] **Server-side opt-in** — `antiphon-relay --mailbox`; off by default, and a node without it answers "doesn't hold mail" ([`relay/src/mailbox.rs`](crates/relay/src/mailbox.rs))
+- [x] Operator controls: total and per-inbox storage caps, per-inbox deposits a minute, expiry in days, and own-community-only via a members code
+- [x] Writes accepted only to labels registered with that node, so strangers can't fill a public node. Reading and deleting take a fetch secret the node holds only a hash of
+- [x] Operator dashboard with no ability to see contents or identities — `--stats-every` prints inboxes, messages and bytes held, bandwidth and refusals; the node never has an identity or a plaintext to show
+- [x] **The recipient's published route list decides where mail is deposited**, not the sender — the signed, sequenced record ([`route.rs`](crates/crypto/src/route.rs)) is published in every `Hello`, and senders deposit only at the nodes it lists, in its order. Labels are derived per node from your seed, so two nodes can't tell they hold mail for the same person; mail is sealed to your prekey with the sender's identity and signature inside ([`mail.rs`](crates/crypto/src/mail.rs)), so a node sees neither who sent it nor what it says
 - [x] **Sender controls only the outbox** — a "keep trying" window from forever (the default) to 14 days, under Call → Undelivered messages. Forever by default because a message you meant to send is still one you meant to send a week later; when the window does run out, the messages dropped are reported rather than disappearing quietly. Where mail may be *deposited* stays the recipient's decision, not the sender's
 - [x] **Delivery status wording** — the spec's exact three, shown against a message only while it is still queued: labelling every delivered line "Delivered" is noise, and noise is what stops people noticing the one that says otherwise. Three states and not two, because "sent" and "delivered" being one word is how an app claims something arrived when it only left
 

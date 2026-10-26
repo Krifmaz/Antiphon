@@ -30,6 +30,7 @@ mod voice_message;
 mod theme_presets;
 mod transfer_limits;
 mod control;
+mod delivery;
 mod file_transfer;
 mod state;
 mod wav;
@@ -171,6 +172,19 @@ fn main() -> anyhow::Result<()> {
         relay_addr: Mutex::new(None),
     });
 
+    // Spec §8: collect mail waiting at your nodes, and leave queued
+    // messages at contacts' nodes, in the background.
+    delivery::set_identity(app_state.identity.clone());
+    {
+        let weak = Arc::downgrade(&app_state);
+        delivery::start(&app_state.runtime, move || {
+            let state = weak.upgrade()?;
+            let call = state.call.lock().unwrap();
+            call.as_ref().map(|a| a.peer_identity().identity_key)
+        });
+    }
+    delivery::set_hosting(&app_state.runtime, loaded.hold_mail_for_devices, loaded.hold_mail_port);
+
     let main_window = MainWindow::new()?;
     main_window.set_my_share_id(share_id(&app_state.identity.public().identity_key).into());
     main_window.set_eq_preset_names(string_vec_to_model(
@@ -244,8 +258,20 @@ fn main() -> anyhow::Result<()> {
     // The relay this call's peer said they listen at, once saved, so it is
     // written once per call rather than on every tick.
     let mut peer_relay_saved = String::new();
+    let mut peer_routes_saved = String::new();
+    let mut delivery_round_seen = 0u64;
     _meter_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let Some(app) = meter_window.upgrade() else { return };
+        // Spec §8: what the courier did since the last tick.
+        let round = delivery::rounds();
+        if round != delivery_round_seen {
+            delivery_round_seen = round;
+            let notices = delivery::take_notices();
+            if !notices.is_empty() {
+                app.set_delivery_notice(notices.join("\n").into());
+            }
+            apply_routes_to_ui(&app, &config::load());
+        }
 
         // Keyboard shortcuts, raised as flags by the poller thread (which
         // has no handle to the window). Handled here, before the call lock
@@ -299,6 +325,12 @@ fn main() -> anyhow::Result<()> {
                 if !peer.relay.is_empty() && peer.relay != peer_relay_saved {
                     peer_relay_saved = peer.relay.clone();
                     save_peer_relay(&active.peer_identity().identity_key, &peer.relay);
+                }
+                // Spec §8: their route list, so mail can be left for them
+                // while they're offline. Checked against who they are.
+                if !peer.routes.is_empty() && peer.routes != peer_routes_saved {
+                    peer_routes_saved = peer.routes.clone();
+                    save_peer_routes(&active.peer_identity().identity_key, &peer.routes);
                 }
             }
             update_file_transfer_ui(&app, active, &meter_app_state, &meter_window2);
@@ -621,6 +653,7 @@ fn local_hello(app: &MainWindow) -> Hello {
         // answering is not something you do quietly.
         wants_silent: app.get_start_call_silently(),
         relay: app.get_relay_server().trim().to_string(),
+        routes: delivery::my_record_hex(),
     }
 }
 
@@ -690,6 +723,20 @@ fn group_context(app: &MainWindow, state: &Arc<AppState>, active: &state::Active
 }
 
 /// Records the relay a saved contact listens at. Strangers are not saved.
+/// Stores a contact's route list if it is theirs and newer than ours.
+fn save_peer_routes(identity_key: &[u8; 32], encoded: &str) {
+    let mut config = config::load();
+    let key = encode_identity_key(identity_key);
+    let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == key) else { return };
+    if contact.route_record == encoded {
+        return;
+    }
+    let Some(record) = delivery::accept_record(encoded, identity_key, contact.route_sequence) else { return };
+    contact.route_record = encoded.to_string();
+    contact.route_sequence = Some(record.record.sequence);
+    config::save(&config);
+}
+
 fn save_peer_relay(identity_key: &[u8; 32], relay: &str) {
     let mut config = config::load();
     let key = encode_identity_key(identity_key);
@@ -807,6 +854,9 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 active.group.announce_leaving(&active.peer);
             }
             *state.call.lock().unwrap() = None; // Drop tears the call down.
+            // Spec §8: anything still queued for them can now go to their
+            // mailbox, and mail held back during the call can come in.
+            delivery::kick();
             file_transfer::set_call_active(false);
             app.set_connected(false);
             app.set_muted(false);
@@ -2599,6 +2649,134 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
     }
     {
         let window_weak = main_window.as_weak();
+        main_window.on_set_contact_message_route(move |index, mode| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| config.contacts.get_mut(i)) else { return };
+            contact.message_route = mode.clamp(0, 1);
+            let message = if contact.message_route == 1 {
+                format!("Messages to {} wait until you're both online. Nothing is left anywhere.", contact.name)
+            } else {
+                format!("Messages to {} use the routes they chose.", contact.name)
+            };
+            config::save(&config);
+            apply_contacts_to_ui(&app, &config.contacts);
+            app.set_contacts_message(message.into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_leave_message(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = config::load();
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| config.contacts.get(i)) else { return };
+            let text = app.get_leave_message_text().to_string();
+            // On a call with them: it is just a chat message.
+            let in_call = {
+                let call = state.call.lock().unwrap();
+                match call.as_ref() {
+                    Some(active) if encode_identity_key(&active.peer_identity().identity_key) == contact.identity_key => {
+                        active.send_chat(&state.runtime, text.clone());
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            let result = if in_call { Ok(()) } else { delivery::leave_message(&contact.identity_key, &text, contact.expire_after_secs) };
+            match result {
+                Ok(()) => {
+                    app.set_leave_message_text("".into());
+                    let how = if in_call {
+                        "Sent.".to_string()
+                    } else if contact.message_route == 1 || config.strict_mode {
+                        format!("Waiting for {} to come online.", contact.name)
+                    } else {
+                        format!("Queued for {}; it will be left at their mailbox if they have one, or sent when you're both online.", contact.name)
+                    };
+                    app.set_contacts_message(how.into());
+                }
+                Err(e) => app.set_contacts_message(e.into()),
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_toggled(move |index, on| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(r) = usize::try_from(index).ok().and_then(|i| config.routes.get_mut(i)) else { return };
+            r.enabled = on;
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_move(move |index, by| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Ok(from) = usize::try_from(index) else { return };
+            let Ok(to) = usize::try_from(index + by) else { return };
+            if from >= config.routes.len() || to >= config.routes.len() {
+                return;
+            }
+            config.routes.swap(from, to);
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_nodes_edited(move |index, text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(r) = usize::try_from(index).ok().and_then(|i| config.routes.get_mut(i)) else { return };
+            r.nodes = text.split([',', ' ', '\n']).map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect();
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_code_edited(move |index, text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(r) = usize::try_from(index).ok().and_then(|i| config.routes.get_mut(i)) else { return };
+            r.code = text.trim().to_string();
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_delivery_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            delivery::set_hosting(&state.runtime, config.hold_mail_for_devices, config.hold_mail_port);
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_find_nodes(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_found_nodes("Looking on your network...".into());
+            let window_weak = window_weak.clone();
+            state.runtime.spawn(async move {
+                let found = delivery::discover(Duration::from_secs(2)).await;
+                let text = if found.is_empty() {
+                    "No mailbox nodes answered on your network.".to_string()
+                } else {
+                    format!(
+                        "Found: {}. Paste one into a route above.",
+                        found.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+                    )
+                };
+                let _ = window_weak.upgrade_in_event_loop(move |app| app.set_found_nodes(text.into()));
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
         main_window.on_set_contact_connection_mode(move |index, mode| {
             let Some(app) = window_weak.upgrade() else { return };
             let mut config = config::load();
@@ -4382,9 +4560,53 @@ fn apply_contacts_to_ui(app: &MainWindow, contacts: &[config::Contact]) {
             key: c.identity_key.clone().into(),
             connection_mode: c.connection_mode,
             via_relay: !c.relay.is_empty(),
+            message_route: c.message_route,
+            has_mailbox: delivery::decode_identity(&c.identity_key)
+                .and_then(|k| delivery::accept_record(&c.route_record, &k, None))
+                .is_some_and(|r| !delivery::mailboxes_in(&r).is_empty()),
         })
         .collect();
     app.set_contacts(ModelRc::new(VecModel::from(entries)));
+}
+
+/// Pushes the route list (spec §8) into the UI, with each node's last
+/// known status.
+fn apply_routes_to_ui(app: &MainWindow, config: &config::AppConfig) {
+    let report = delivery::node_report();
+    let entries: Vec<RouteEntry> = config
+        .routes
+        .iter()
+        .map(|r| RouteEntry {
+            title: r.kind.title().into(),
+            description: r.kind.description().into(),
+            enabled: r.enabled,
+            is_direct: r.kind == delivery::RouteKind::Direct,
+            nodes: r.nodes.join(", ").into(),
+            code: r.code.clone().into(),
+            status: r
+                .nodes
+                .iter()
+                .filter_map(|n| report.iter().find(|(node, _)| node == n.trim()).map(|(node, s)| format!("{node}: {s}")))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        })
+        .collect();
+    app.set_routes(ModelRc::new(VecModel::from(entries)));
+    app.set_strict_mode(config.strict_mode);
+    app.set_route_fan_out(config.route_fan_out);
+    app.set_hold_mail(config.hold_mail_for_devices);
+    app.set_hold_mail_port(config.hold_mail_port as i32);
+}
+
+/// Saves a changed route list: bumps its sequence so contacts take the
+/// new one over the old, and tells the courier.
+fn save_routes(app: &MainWindow, mut config: config::AppConfig) {
+    delivery::normalize(&mut config.routes);
+    config.route_sequence = (config.route_sequence + 1).max(now_secs());
+    config::save(&config);
+    apply_routes_to_ui(app, &config);
+    delivery::kick();
 }
 
 /// A contact's pinned key as a short fingerprint, or "" if nothing is
@@ -4455,6 +4677,9 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 relay: previous.map(|p| p.relay.clone()).unwrap_or_default(),
                 relay_secret: previous.map(|p| p.relay_secret.clone()).unwrap_or_default(),
                 connection_mode: c.connection_mode,
+                route_record: previous.map(|p| p.route_record.clone()).unwrap_or_default(),
+                route_sequence: previous.and_then(|p| p.route_sequence),
+                message_route: c.message_route,
             }
         })
         .collect()
@@ -4946,6 +5171,7 @@ fn apply_config_to_ui(app: &MainWindow, config: &config::AppConfig) {
     app.set_replay_seconds(config.replay_seconds as i32);
     app.set_replay_mode(config.replay_mode);
     app.set_outbox_give_up_hours(config.outbox_give_up_hours as i32);
+    apply_routes_to_ui(app, config);
     app.set_silent_call_mode(config.silent_call_mode);
     app.set_start_call_silently(config.start_call_silently);
     app.set_echo_cancel(config.echo_cancel);
@@ -5221,6 +5447,12 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         ip_direct_calling: app.get_ip_direct_calling(),
         relay_server: app.get_relay_server().trim().to_string(),
         relay_invite_secret: previous.relay_invite_secret.clone(),
+        routes: previous.routes.clone(),
+        route_sequence: previous.route_sequence,
+        route_fan_out: app.get_route_fan_out(),
+        strict_mode: app.get_strict_mode(),
+        hold_mail_for_devices: app.get_hold_mail(),
+        hold_mail_port: u16::try_from(app.get_hold_mail_port()).unwrap_or(3480),
         ptt_toggle: app.get_ptt_toggle(),
         mute_hold: app.get_mute_hold(),
         deafen_hold: app.get_deafen_hold(),
