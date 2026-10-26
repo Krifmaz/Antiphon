@@ -53,7 +53,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS only for main and release tags. On branch and PR runs the
+        # macOS job was cancelled after 15 minutes without ever getting a
+        # runner, run after run (three runs per commit queue for scarce Mac
+        # runners), and a cancelled job turns the run red even with
+        # continue-on-error. Release builds still build macOS.
+        os: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && github.event_name != 'pull_request' && fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') || fromJSON('["ubuntu-latest", "windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
