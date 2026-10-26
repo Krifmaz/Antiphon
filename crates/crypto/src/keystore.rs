@@ -223,7 +223,16 @@ mod keyring_key {
         if std::env::var_os("ANTIPHON_NO_KEYSTORE").is_some() {
             return None;
         }
+        #[cfg(not(target_os = "ios"))]
         let entry = keyring::Entry::new(SERVICE, ACCOUNT).ok()?;
+        // keyring's front end has no iOS store, so install the app's own
+        // keychain (the "protected data" store) and use keyring-core's
+        // entry, which has the same calls and the same errors.
+        #[cfg(target_os = "ios")]
+        let entry = {
+            keyring_core::set_default_store(apple_native_keyring_store::protected::Store::new().ok()?);
+            keyring_core::Entry::new(SERVICE, ACCOUNT).ok()?
+        };
         match entry.get_secret() {
             Ok(bytes) => {
                 let bytes = Zeroizing::new(bytes);

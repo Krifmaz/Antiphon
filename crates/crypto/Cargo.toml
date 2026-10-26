@@ -21,6 +21,14 @@ zeroize = "1.9.0"
 # libdbus to install. See `keystore.rs`.
 keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+# iOS has one keychain, the "protected data" store, and keyring's `v1`
+# front end refuses the platform at run time, so `keystore.rs` installs
+# this store itself. Naming the feature here also fixes the copy keyring
+# pulls in, which will not build for iOS without it.
+apple-native-keyring-store = { version = "1.0.2", features = ["protected"] }
+keyring-core = "1.0.1"
+
 [target.'cfg(windows)'.dependencies]
 # DPAPI, for spec §6's "private keys in the OS keystore".
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
