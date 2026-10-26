@@ -18,6 +18,12 @@ pub enum NetError {
     RelayNotFound,
     #[error("the relay did not answer")]
     RelayTimeout,
+    #[error("an anonymity circuit needs two or three hops")]
+    OnionPathLength,
+    #[error("a hop refused the circuit: it does not offer hops, is full, or will not exit there")]
+    OnionRefused,
+    #[error("the circuit could not be built: a hop did not answer")]
+    OnionTimeout,
     #[error("the mailbox refused: {}", .0.describe())]
     MailboxRefused(crate::mailbox::Refusal),
     #[error("the mailbox did not answer")]
