@@ -25,9 +25,12 @@
 //!   pinned on first use, with a key change surfaced rather than resolved
 //!   silently.
 //!
+//! - **Sessions are a Double Ratchet** ([`Session`]): symmetric chains for
+//!   forward secrecy, plus DH steps every few seconds of traffic so a
+//!   stolen chain key stops working (post-compromise security).
+//!
 //! Not yet implemented, each a larger piece of work building on
-//! [`Session`]: the DH ratchet step (post-compromise security), MLS for
-//! groups, and SFrame for relayed media.
+//! [`Session`]: MLS for groups, and SFrame for relayed media.
 //!
 //! # Frozen labels
 //!

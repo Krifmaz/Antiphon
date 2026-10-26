@@ -19,7 +19,7 @@ A Cargo workspace, one crate per concern:
 
 | Crate | Spec section | What it does |
 |---|---|---|
-| [`crates/crypto`](crates/crypto) | §3 Connection & Trust | Persistent Ed25519 identity + signed X25519 prekey, authenticated triple-DH handshake, symmetric KDF ratchet with ChaCha20-Poly1305 (fresh key per message, reorder-tolerant), trust-on-first-use key pinning, 40-digit verification codes, 24-word recovery phrase, cross-signed device list, OS keystore sealing (DPAPI on Windows) |
+| [`crates/crypto`](crates/crypto) | §3 Connection & Trust | Persistent Ed25519 identity + signed X25519 prekey, authenticated triple-DH handshake, Double Ratchet with ChaCha20-Poly1305 (fresh key per message, DH steps every few seconds, reorder-tolerant), trust-on-first-use key pinning, 40-digit verification codes, 24-word recovery phrase, cross-signed device list, OS keystore sealing (DPAPI on Windows) |
 | [`crates/protocol`](crates/protocol) | §3 | Binary wire framing binding encrypted sessions to UDP datagrams (`Handshake` / `Audio` / `Control` / `File`, each with its own AAD) |
 | [`crates/net`](crates/net) | §2, §3, §5, §6 | UDP peer connection, STUN discovery + hole punching, NAT-PMP port mapping with renewal, adaptive jitter buffer, forward error correction, audio retransmit requests, file chunking with per-chunk hashes |
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
@@ -42,8 +42,7 @@ The short version of [`FEATURES.md`](FEATURES.md):
   theming, presence, notification rules, data export, reproducible
   build configuration with a CI pipeline for all three desktop targets.
 - **Reduced:** classical spectral noise suppression rather than an ML
-  model; a symmetric ratchet without the DH step (a session is per call,
-  so a compromised chain key is worth the rest of one call); keystore
+  model; keystore
   sealing on Windows only; Caps Lock as push-to-talk works on Windows
   and X11 but not yet on macOS or Wayland.
 - **Not built:** anything that needs infrastructure the app does not
