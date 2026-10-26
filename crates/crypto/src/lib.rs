@@ -29,6 +29,10 @@
 //!   forward secrecy, plus DH steps every few seconds of traffic so a
 //!   stolen chain key stops working (post-compromise security).
 //!
+//! - **Push wake-ups name nobody** ([`push`]): sealed to the woken
+//!   device's own push key, constant size, so a push service relays a
+//!   knock without learning who knocked or why.
+//!
 //! Not yet implemented, each a larger piece of work building on
 //! [`Session`]: MLS for groups, and SFrame for relayed media.
 //!
@@ -57,6 +61,7 @@ pub mod file_seal;
 pub mod mail;
 pub mod memory_seal;
 pub mod mnemonic;
+pub mod push;
 mod ratchet;
 pub mod relay_token;
 pub mod shamir;
