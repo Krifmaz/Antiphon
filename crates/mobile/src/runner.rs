@@ -325,6 +325,7 @@ impl ApplicationHandler<Wake> for Runner {
         self.fingers = 0;
         if let Some(app) = self.app.as_mut() {
             app.touch_ended();
+            app.suspended();
         }
     }
 
@@ -378,6 +379,17 @@ impl ApplicationHandler<Wake> for Runner {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Every wake ends here, including the call engine's and a
+        // transfer's while the window is gone, so this is where what the
+        // call delivered is taken in -- in the background too, where a
+        // message still has to reach the history and a notification.
+        if let Some(app) = self.app.as_mut() {
+            if app.poll() {
+                if let Some(graphics) = &self.graphics {
+                    graphics.window.request_redraw();
+                }
+            }
+        }
         let animating = self.app.as_ref().is_some_and(App::is_animating);
         let flow = if self.graphics.is_none() {
             ControlFlow::Wait

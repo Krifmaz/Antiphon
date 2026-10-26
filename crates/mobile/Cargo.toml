@@ -5,7 +5,8 @@ edition.workspace = true
 version.workspace = true
 
 # Everything is phone-only, so `cargo build --workspace` on a desktop
-# compiles an empty crate rather than a second GUI toolkit.
+# compiles only the two plain-std rule modules (for their tests) rather
+# than a second GUI toolkit.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 log = "0.4"
 iced_wgpu = "0.14.0"
@@ -23,4 +24,11 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "s
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
+# The desktop's chat history, outbox and file-transfer modules are compiled
+# into this crate as they are (see `lib.rs`); these are their dependencies
+# rather than choices made here.
+anyhow = "1.0.104"
+# Only for the sender-side thumbnail on an offered picture, so only the
+# formats a phone's gallery hands over, and nothing that pulls in threads.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 

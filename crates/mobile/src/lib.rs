@@ -17,6 +17,12 @@
 //! each platform crate implements and installs before starting
 //! [`runner::Runner`].
 //!
+//! Chat, its history, and file transfer are the desktop's own modules,
+//! compiled in here by path rather than rewritten: a phone and a desktop
+//! must agree on every byte of the control messages, the chunk format and
+//! the history file, and one copy of that code is the only way to be sure
+//! they always will.
+//!
 //! Everything that touches the phone is `cfg`'d to Android and iOS, so
 //! `cargo build --workspace` on a desktop does not build a second GUI
 //! toolkit. The two rule modules, [`queue`] and [`data_rules`], are plain
@@ -28,7 +34,15 @@ pub mod queue;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod call;
 #[cfg(any(target_os = "android", target_os = "ios"))]
+mod call_log;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod contacts;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod conversation;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod convert;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod files;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod platform;
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -37,3 +51,90 @@ pub mod runner;
 mod settings;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod ui;
+
+// The desktop's wire-level modules, shared by path. Each is used only in
+// part here (the desktop has screens for things a phone does not offer
+// yet), hence `dead_code`; none of them is edited for the phone's sake.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/content_store.rs"]
+mod content_store;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/control.rs"]
+mod control;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/file_integrity.rs"]
+mod file_integrity;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/file_preview.rs"]
+mod file_preview;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/file_transfer.rs"]
+mod file_transfer;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/history.rs"]
+mod history;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/outbox.rs"]
+mod outbox;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/pacer.rs"]
+mod pacer;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/reactions.rs"]
+mod reactions;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+#[path = "../../gui/src/transfer_limits.rs"]
+mod transfer_limits;
+
+/// What `file_transfer` asks of the desktop's `config` module, answered
+/// from the phone's own storage.
+///
+/// The desktop's `config.rs` is the whole desktop settings file -- push to
+/// talk keys, soundboard clips, delivery routes -- and cannot be compiled
+/// here without most of the desktop app. `file_transfer` only needs two
+/// things from it: where to keep received files, and the upload limits.
+/// So this is a stand-in with exactly those two, filled in by the app.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod config {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    use crate::transfer_limits::TransferLimits;
+
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    static LIMITS: Mutex<Option<TransferLimits>> = Mutex::new(None);
+
+    /// The slice of the desktop's `Config` that `file_transfer` reads.
+    pub struct Config {
+        pub transfer_limits: TransferLimits,
+    }
+
+    /// Set once at start-up to the app's private storage.
+    pub fn set_dir(dir: PathBuf) {
+        let _ = DIR.set(dir);
+    }
+
+    /// Replaced whenever the network or the data settings change, and
+    /// picked up by a running transfer within a quarter of a second.
+    pub fn set_transfer_limits(limits: TransferLimits) {
+        *LIMITS.lock().unwrap() = Some(limits);
+    }
+
+    pub fn config_dir() -> Option<PathBuf> {
+        DIR.get().cloned()
+    }
+
+    pub fn load() -> Config {
+        Config { transfer_limits: LIMITS.lock().unwrap().unwrap_or_default() }
+    }
+}
