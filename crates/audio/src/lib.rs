@@ -23,4 +23,4 @@ pub use chain::AudioChain;
 pub use device::{list_input_devices, list_output_devices, start_capture, start_playback, AudioError, CaptureHandle, PlaybackHandle, PlaybackSink};
 pub use echo_cancel::EchoCanceller;
 pub use time_compress::{TimeCompressor, MAX_SPEED, MIN_SPEED};
-pub use stages::{NoiseSuppressor, THIN_VOICE_WARNING_STRENGTH, AutoGain, BandType, Compressor, DeEsser, Gain, HighPassFilter, Limiter, LowPassFilter, NoiseGate, PeakingEq, PitchShift, Reverb, Stage};
+pub use stages::{NeuralSuppressor, NoiseSuppressor, THIN_VOICE_WARNING_STRENGTH, AutoGain, BandType, Compressor, DeEsser, Gain, HighPassFilter, Limiter, LowPassFilter, NoiseGate, PeakingEq, PitchShift, Reverb, Stage};

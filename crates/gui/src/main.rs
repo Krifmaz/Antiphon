@@ -5003,6 +5003,7 @@ fn apply_chain_to_ui(app: &MainWindow, chain: &ChainConfig) {
     let c = chain;
     app.set_ns_enabled(c.noise_suppress.enabled);
     app.set_ns_strength(c.noise_suppress.strength);
+    app.set_ns_neural(c.noise_suppress.neural);
     app.set_gate_enabled(c.noise_gate.enabled);
     app.set_gate_threshold(c.noise_gate.threshold_db);
     app.set_gate_attack(c.noise_gate.attack_ms);
@@ -5444,6 +5445,7 @@ fn read_chain_config(app: &MainWindow) -> ChainConfig {
         noise_suppress: antiphon_audio::NoiseSuppressConfig {
             enabled: app.get_ns_enabled(),
             strength: app.get_ns_strength(),
+            neural: app.get_ns_neural(),
         },
         noise_gate: NoiseGateConfig {
             enabled: app.get_gate_enabled(),

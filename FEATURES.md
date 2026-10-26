@@ -12,7 +12,7 @@ are clean on Linux and Windows.
 | `[~]` | **Partial** — a real but reduced version exists; the gap is stated on the line |
 | `[ ]` | **Not started** — no code for it |
 
-**Score: 116 done · 42 partial · 79 not started** (237 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
+**Score: 131 done · 34 partial · 67 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
 
 **§0 Core Principles: 5 of 6 done.** The sixth needs infrastructure, not code in this repo.
 
@@ -42,7 +42,7 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 
 - [x] **Noise Gate** — threshold, attack, hold, release, all four exposed in the UI ([`stages/noise_gate.rs`](crates/audio/src/stages/noise_gate.rs))
 - [x] **Live meter showing what's passing through the gate** — the gate reports its own attenuation through the same `Stage::gain_reduction_db` channel the compressor uses ([`noise_gate.rs`](crates/audio/src/stages/noise_gate.rs))
-- [~] **Noise Suppression** ([`stages/noise_suppress.rs`](crates/audio/src/stages/noise_suppress.rs)) — spectral subtraction with a strength slider, placed **before** the gate so the gate judges your voice rather than your fan. **Not the RNNoise-class model the spec names**: this is classical STFT-domain suppression with minimum-statistics noise tracking, so it removes what is steadily *there* — a fan, a hiss, an air conditioner, including underneath speech, which is the gap a gate cannot close — and will not remove a dog barking. Measured across the slider: 1.8 dB of broadband noise removed at 10%, 23 dB at 100%, while a modulated voice keeps 85–100% of its energy. Radix-2 FFT written in-crate rather than adding a dependency to an audio path for a textbook butterfly
+- [x] **Noise Suppression** ([`stages/neural_suppress.rs`](crates/audio/src/stages/neural_suppress.rs)) — the RNNoise model the spec names, through `nnnoiseless` (pure Rust, weights built in, no C toolchain), on by default and placed **before** the gate so the gate judges your voice rather than your fan. The strength slider blends the cleaned signal with the original, aligned to the model's one-frame lag (measured: 479–480 samples) so the blend doesn't comb-filter. Removes over 10 dB of steady hiss in the test, and unlike the old method also takes out sound that comes and goes. The model only runs at 48 kHz, so at other device rates it falls back to the previous spectral-subtraction suppressor ([`stages/noise_suppress.rs`](crates/audio/src/stages/noise_suppress.rs)), which is also a switch in the UI for anyone who prefers it. Adds 20 ms of mic latency
 - [x] **Warning at high suppression strength** — shown next to the slider, and only once past the strength that actually causes it, with the reason: speech and background share frequencies, so removing more of one removes more of the other
 - [x] **High-Pass Filter** — adjustable cutoff, default ~80 Hz ([`stages/biquad.rs`](crates/audio/src/stages/biquad.rs))
 - [x] **Low-Pass Filter** — adjustable cutoff, now reachable from the UI ([`stages/biquad.rs`](crates/audio/src/stages/biquad.rs))

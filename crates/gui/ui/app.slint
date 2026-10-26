@@ -1622,8 +1622,9 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-callcontrols: true;
     in-out property <bool> sec-aec: true;
     in-out property <bool> sec-denoise: true;
-    in-out property <bool> ns-enabled: false;
-    in-out property <float> ns-strength: 0.4;
+    in-out property <bool> ns-enabled: true;
+    in-out property <float> ns-strength: 1.0;
+    in-out property <bool> ns-neural: true;
     in-out property <bool> sec-gate: true;
     in-out property <bool> sec-hpf: true;
     in-out property <bool> sec-lpf: true;
@@ -3883,16 +3884,24 @@ export component MainWindow inherits Window {
                                 if sec-denoise : VerticalBox {
                                     padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
                                     ToggleSwitch {
-                                        text: "Remove steady background sound";
+                                        text: "Remove background sound";
                                         checked <=> ns-enabled;
                                         reduced-motion: reduced-motion;
                                         text-scale: text-scale;
-                                        help: "Works out which frequencies are constant background and turns those down, so a fan under your voice goes quiet without your voice going with it. The noise gate below only silences the gaps between sentences; this works during them too. Not the machine-learning kind: it will not remove a dog barking or a door closing, only sound that is steadily there.";
+                                        help: "Takes background sound out of your mic while you talk, not just between sentences like the noise gate below.";
+                                        toggled => { settings-changed(); }
+                                    }
+                                    if ns-enabled : ToggleSwitch {
+                                        text: "Use the voice model";
+                                        checked <=> ns-neural;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "On: a trained model (RNNoise) that knows what a voice sounds like, so it also removes keyboards, dogs and doors. Off: classic spectral subtraction, which only removes sound that is steadily there, like a fan or hiss. The model needs your mic at 48 kHz; at other rates the classic method is used.";
                                         toggled => { settings-changed(); }
                                     }
                                     if ns-enabled : SettingLabel {
                                         text: "Strength: " + round(ns-strength * 100) + "%";
-                                        help: "How much of the background to take out. Low settings barely touch anything; high settings remove a lot of it. Speech and background share the same frequencies, so past about 70% you start removing the parts of your voice that live in the same place -- which is what makes it sound thin.";
+                                        help: ns-neural ? "How much of the cleaned sound replaces the original. 100% is the model's output; lower keeps some of the room in." : "How much of the background to take out. Low settings barely touch anything; high settings remove a lot of it. Speech and background share the same frequencies, so past about 70% you start removing the parts of your voice that live in the same place -- which is what makes it sound thin.";
                                         text-scale: text-scale;
                                     }
                                     if ns-enabled : AccentSlider {
@@ -3902,7 +3911,7 @@ export component MainWindow inherits Window {
                                     }
                                     // Spec §1 asks for this warning specifically, and it
                                     // belongs next to the number that causes it.
-                                    if ns-enabled && ns-strength >= 0.7 : Text {
+                                    if ns-enabled && !ns-neural && ns-strength >= 0.7 : Text {
                                         text: "At this strength your voice may start to sound thin -- speech and background share frequencies, so removing more of one removes more of the other.";
                                         color: Theme.muted-text;
                                         font-size: 10px * text-scale;
