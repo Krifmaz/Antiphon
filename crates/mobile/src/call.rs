@@ -477,6 +477,9 @@ async fn run(
     shared.set_phase(generation, Phase::Connected { remote: peer.remote_addr().to_string(), code, peer_key });
     facts.connected_secs = Some(now_secs());
     platform::set_call_audio(true, shared.speaker.load(Ordering::Relaxed));
+    // CallKit keeps showing "Calling..." (or keeps ringing an incoming
+    // call answered in the app) until told the call connected.
+    platform::call_connected();
     wake();
 
     let peer = Arc::new(peer);
