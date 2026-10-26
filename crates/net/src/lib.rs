@@ -1,6 +1,7 @@
 //! UDP transport for direct P2P calls (spec §3 "Known contacts -> Direct
 //! P2P"): handshake + encrypted send/receive over a single peer connection,
-//! and the client side of a relay ([`relay`]) for "everyone else -> Relay".
+//! the client side of a relay ([`relay`]) for "everyone else -> Relay", and
+//! anonymity-mode circuits through several relays ([`onion`]).
 //! The DHT and SFU group transport are not implemented here.
 
 mod error;
@@ -11,6 +12,7 @@ mod peer;
 pub mod port_map;
 pub mod blob;
 pub mod mailbox;
+pub mod onion;
 pub mod relay;
 pub mod stun;
 
