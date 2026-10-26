@@ -195,6 +195,10 @@ pub enum ControlMessage {
     MlsKeyPackage(MlsPart),
     MlsWelcome(MlsPart),
     MlsCommit(MlsPart),
+    /// A piece of a group chat or community message (spec §9) for the
+    /// person at the other end, base64 -- the same fragments that would
+    /// otherwise go to their mailbox. See `crate::community`.
+    Community { data: String },
 }
 
 /// One piece of an MLS message. A Welcome carries the whole ratchet tree

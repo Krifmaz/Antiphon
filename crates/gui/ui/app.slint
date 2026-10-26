@@ -83,6 +83,58 @@ export struct SharedFileEntry {
     mine: bool,
 }
 
+/// A group chat or community you're in (spec §9).
+export struct SpaceEntry {
+    id: string,
+    name: string,
+    detail: string,
+    unread: int,
+}
+
+/// An invitation to a group chat or community, waiting for an answer.
+export struct SpaceInviteEntry {
+    name: string,
+    detail: string,
+}
+
+/// One message in a channel or thread (spec §9). Ids are text because
+/// they are 64-bit and Slint's integers are not.
+export struct SpaceMessage {
+    id: string,
+    sender: string,
+    sender-key: string,
+    text: string,
+    time: string,
+    mine: bool,
+    deleted: bool,
+    /// Replies in its thread; only counted in the channel view.
+    replies: int,
+    /// Its author, or a moderator who outranks them.
+    can-delete: bool,
+    /// Yours, a text message (not a shared file), and not deleted.
+    can-edit: bool,
+    /// The text without the "(edited)" marker, to edit from.
+    plain: string,
+}
+
+/// One member, with what *you* may do to them -- worked out from the
+/// signed manifest, the same rules every other member checks.
+export struct SpaceMember {
+    key: string,
+    name: string,
+    role: string,
+    role-index: int,
+    me: bool,
+    can-kick: bool,
+    can-ban: bool,
+    can-role: bool,
+}
+
+export struct SpaceBan {
+    key: string,
+    detail: string,
+}
+
 /// A community listed in a directory (spec §4).
 export struct DirectoryEntry {
     name: string,
@@ -1436,6 +1488,7 @@ export component MainWindow inherits Window {
     in-out property <bool> monitor-enabled: false;
     in-out property <int> monitor-latency-ms: 120;
     in-out property <int> current-tab: 0;
+    in-out property <int> spaces-unread: 0;
     in-out property <int> settings-category: 0;
 
     // Settings search (spec §0). Rust owns the filtering and writes the
@@ -1565,6 +1618,66 @@ export component MainWindow inherits Window {
     in-out property <string> pin-nodes: "";
     in-out property <string> pin-code: "";
     in-out property <[SharedFileEntry]> shared-files: [];
+    // Spec §9: group chats and communities.
+    in-out property <[SpaceEntry]> spaces: [];
+    in-out property <[SpaceInviteEntry]> space-invites: [];
+    in-out property <string> selected-space: "";
+    in-out property <string> space-title: "";
+    in-out property <string> space-subtitle: "";
+    in-out property <bool> space-is-community: false;
+    in-out property <bool> space-removed: false;
+    in-out property <[string]> space-channel-names: [];
+    in-out property <int> space-channel-index: 0;
+    in-out property <string> space-thread-root: "";
+    /// The id of your own message being edited, or "" when composing.
+    in-out property <string> space-editing: "";
+    in-out property <[SpaceMessage]> space-messages: [];
+    in-out property <[SpaceMember]> space-members: [];
+    in-out property <[string]> space-role-names: [];
+    in-out property <[SpaceBan]> space-bans: [];
+    in-out property <[string]> space-contact-names: [];
+    in-out property <int> space-invite-index: 0;
+    in-out property <bool> space-can-post: false;
+    in-out property <bool> space-can-invite: false;
+    in-out property <bool> space-can-ban: false;
+    in-out property <bool> space-can-manage: false;
+    in-out property <bool> space-can-manage-channels: false;
+    in-out property <bool> space-server-hosted: false;
+    /// 0 = your default, then RingRule + 1 (always, silent only, never).
+    in-out property <int> space-ring-rule: 0;
+    in-out property <string> space-mailbox-node: "";
+    in-out property <string> space-mailbox-code: "";
+    in-out property <string> space-files-node: "";
+    in-out property <string> space-files-code: "";
+    in-out property <string> space-dht-node: "";
+    in-out property <string> space-status: "";
+    in-out property <string> space-input: "";
+    in-out property <string> space-new-name: "";
+    in-out property <string> space-new-channel: "";
+    in-out property <string> space-ban-reason: "";
+    callback open-communities();
+    callback refresh-space();
+    callback create-space(string, bool);
+    callback select-space(string);
+    callback accept-space-invite(int);
+    callback decline-space-invite(int);
+    callback select-space-channel(int);
+    callback space-send(string);
+    callback space-edit-message(string, string);
+    callback space-delete-message(string, string);
+    callback space-invite(int);
+    callback space-kick(string);
+    callback space-ban(string, string);
+    callback space-unban(string);
+    callback space-set-role(string, int);
+    callback space-add-channel(string);
+    callback space-remove-channel();
+    callback space-save-settings();
+    callback space-set-ring-rule(int);
+    callback space-use-nodes();
+    callback space-share-file();
+    callback space-leave();
+    callback space-forget();
     callback sharing-settings-changed();
     // Spec §6: bring your own VPN.
     in-out property <bool> sec-vpn: true;
@@ -1938,7 +2051,15 @@ export component MainWindow inherits Window {
             // Settings button from the top left since there's one in the
             // profile widget"), so there's nothing to show here on the
             // Call tab itself.
-            if current-tab == 1 : TabButton { label: "Return"; active: false; reduced-motion: reduced-motion; clicked => { current-tab = 0; } }
+            if current-tab != 0 : TabButton { label: "Return"; active: false; reduced-motion: reduced-motion; clicked => { current-tab = 0; } }
+            // Spec §9. Its own page rather than a call-screen widget: a
+            // community is somewhere you go, not something beside a call.
+            if current-tab == 0 : TabButton {
+                label: spaces-unread > 0 ? "Groups & communities (" + spaces-unread + ")" : "Groups & communities";
+                active: false;
+                reduced-motion: reduced-motion;
+                clicked => { current-tab = 2; open-communities(); }
+            }
             Rectangle { horizontal-stretch: 1; }
         }
 
@@ -3105,6 +3226,272 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        if current-tab == 2 && !server-mode : HorizontalBox {
+            padding: 0px;
+            spacing: 10px;
+
+            // Yours, invitations, and making a new one.
+            VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                width: 230px;
+                horizontal-stretch: 0;
+                Text { text: "Groups & communities"; font-weight: 700; font-size: 13px * text-scale; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 2px;
+                        if spaces.length == 0 && space-invites.length == 0 : Text {
+                            text: "None yet. Name one below to start it, or accept an invitation. Everything is end-to-end encrypted and there is no server: messages go over calls and through each member's own mailboxes.";
+                            wrap: word-wrap;
+                            color: Theme.muted-text;
+                            font-size: 11px * text-scale;
+                        }
+                        for s in spaces : SideNavButton {
+                            label: s.unread > 0 ? s.name + "  (" + s.unread + ")" : s.name;
+                            active: s.id == selected-space;
+                            reduced-motion: reduced-motion;
+                            clicked => { select-space(s.id); }
+                        }
+                        if space-invites.length > 0 : Text { text: "Invitations"; font-weight: 700; font-size: 11px * text-scale; }
+                        for inv[i] in space-invites : VerticalBox {
+                            padding: 0px;
+                            spacing: 2px;
+                            Text { text: inv.name; font-weight: 700; wrap: word-wrap; font-size: 12px * text-scale; }
+                            Text { text: inv.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: 4px;
+                                Button { text: "Join"; clicked => { accept-space-invite(i); } }
+                                Button { text: "Decline"; clicked => { decline-space-invite(i); } }
+                            }
+                        }
+                    }
+                }
+                LineEdit { text <=> space-new-name; placeholder-text: "Name for a new one"; }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 4px;
+                    Button { text: "New group"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, false); } }
+                    Button { text: "New community"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, true); } }
+                }
+                Text {
+                    text: "A group is one conversation of up to 100 where anyone may invite. A community has channels, and admins and moderators who can remove and ban.";
+                    wrap: word-wrap;
+                    color: Theme.muted-text;
+                    font-size: 10px * text-scale;
+                }
+            }
+
+            // The channel, or one thread in it.
+            VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                horizontal-stretch: 1;
+                if selected-space == "" : Text { text: "Pick one on the left."; color: Theme.muted-text; }
+                if selected-space != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 6px;
+                    vertical-stretch: 0;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 0px;
+                        Text { text: space-title; font-weight: 700; font-size: 14px * text-scale; }
+                        Text { text: space-subtitle; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if space-is-community && space-thread-root == "" : ComboBox {
+                        model: space-channel-names;
+                        current-index <=> space-channel-index;
+                        selected(v) => { select-space-channel(self.current-index); }
+                    }
+                    if space-thread-root != "" : Button { text: "Back to the channel"; clicked => { space-thread-root = ""; refresh-space(); } }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 6px;
+                        if selected-space != "" && space-messages.length == 0 : Text {
+                            text: space-removed ? "You're no longer in this." : "Nothing here yet.";
+                            color: Theme.muted-text;
+                            font-size: 11px * text-scale;
+                        }
+                        for m in space-messages : VerticalBox {
+                            padding: 0px;
+                            spacing: 1px;
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: 6px;
+                                Text { text: m.sender; font-weight: 700; color: m.mine ? Theme.accent-text : Theme.muted-text; font-size: 10px * text-scale; vertical-alignment: center; }
+                                Text { text: m.time; color: Theme.muted-text; font-size: 9px * text-scale; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                if space-thread-root == "" && !m.deleted : Text {
+                                    text: m.replies == 1 ? "1 reply" : m.replies > 1 ? m.replies + " replies" : "reply";
+                                    color: thread-touch.has-hover ? Theme.accent-text : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    thread-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-thread-root = m.id; refresh-space(); }
+                                    }
+                                }
+                                if m.can-edit && space-can-post : Text {
+                                    text: "edit";
+                                    color: space-edit-touch.has-hover ? Theme.accent-text : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    space-edit-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-editing = m.id; space-input = m.plain; }
+                                    }
+                                }
+                                if m.can-delete && !m.deleted : Text {
+                                    text: m.mine ? "delete" : "remove";
+                                    color: rm-touch.has-hover ? #e05252 : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    rm-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-delete-message(m.id, m.sender-key); }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: m.text;
+                                wrap: word-wrap;
+                                font-size: 12px * text-scale;
+                                font-italic: m.deleted;
+                                color: m.deleted ? Theme.muted-text : Palette.foreground;
+                            }
+                        }
+                    }
+                }
+                if space-status != "" : Text { text: space-status; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                if selected-space != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 6px;
+                    vertical-stretch: 0;
+                    LineEdit {
+                        text <=> space-input;
+                        enabled: space-can-post;
+                        placeholder-text: space-editing != "" ? "Edit your message..." : space-thread-root != "" ? "Reply in this thread..." : "Message...";
+                        accepted(v) => { if space-editing != "" { space-edit-message(space-editing, v); } else { space-send(v); } }
+                    }
+                    if space-editing != "" : Button { text: "Cancel"; clicked => { space-editing = ""; space-input = ""; } }
+                    if space-editing == "" : Button { text: "Share file"; enabled: space-can-post; clicked => { space-share-file(); } }
+                    Button {
+                        text: space-editing != "" ? "Save" : "Send";
+                        enabled: space-can-post && space-input != "";
+                        clicked => { if space-editing != "" { space-edit-message(space-editing, space-input); } else { space-send(space-input); } }
+                    }
+                }
+            }
+
+            // Members, and what you may do about them.
+            if selected-space != "" : ScrollView {
+                width: 290px;
+                horizontal-stretch: 0;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 4px;
+                    Text { text: "Members"; font-weight: 700; font-size: 12px * text-scale; }
+                    for mem in space-members : VerticalBox {
+                        padding: 0px;
+                        spacing: 2px;
+                        HorizontalBox {
+                            padding: 0px;
+                            spacing: 4px;
+                            Text { text: mem.me ? mem.name + " (you)" : mem.name; wrap: word-wrap; horizontal-stretch: 1; font-size: 11px * text-scale; }
+                            Text { text: mem.role; color: Theme.muted-text; font-size: 10px * text-scale; }
+                        }
+                        if mem.can-role || mem.can-kick || mem.can-ban : HorizontalBox {
+                            padding: 0px;
+                            spacing: 4px;
+                            if mem.can-role : ComboBox {
+                                model: space-role-names;
+                                current-index: mem.role-index;
+                                selected(v) => { space-set-role(mem.key, self.current-index); }
+                            }
+                            if mem.can-kick : Button { text: "Remove"; clicked => { space-kick(mem.key); } }
+                            if mem.can-ban : Button { text: "Ban"; clicked => { space-ban(mem.key, space-ban-reason); } }
+                        }
+                    }
+                    if space-can-ban : LineEdit { text <=> space-ban-reason; placeholder-text: "Reason, for the ban list (optional)"; }
+                    if space-can-invite : Text { text: "Invite a contact"; font-weight: 700; font-size: 11px * text-scale; }
+                    if space-can-invite : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        ComboBox { model: space-contact-names; current-index <=> space-invite-index; }
+                        Button { text: "Invite"; enabled: space-contact-names.length > 0; clicked => { space-invite(space-invite-index); } }
+                    }
+                    if space-bans.length > 0 : Text { text: "Banned"; font-weight: 700; font-size: 11px * text-scale; }
+                    for b in space-bans : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        Text { text: b.detail; wrap: word-wrap; horizontal-stretch: 1; font-size: 10px * text-scale; color: Theme.muted-text; }
+                        if space-can-ban : Button { text: "Lift"; clicked => { space-unban(b.key); } }
+                    }
+                    if space-is-community && space-can-manage-channels : Text { text: "Channels"; font-weight: 700; font-size: 11px * text-scale; }
+                    if space-is-community && space-can-manage-channels : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        LineEdit { text <=> space-new-channel; placeholder-text: "new channel"; }
+                        Button { text: "Add"; enabled: space-new-channel != ""; clicked => { space-add-channel(space-new-channel); } }
+                    }
+                    if space-is-community && space-can-manage-channels && space-channel-names.length > 1 : Button {
+                        text: "Remove this channel";
+                        clicked => { space-remove-channel(); }
+                    }
+                    if space-is-community : Text {
+                        text: "Its nodes";
+                        font-weight: 700;
+                        font-size: 11px * text-scale;
+                    }
+                    if space-is-community : Text {
+                        text: "Mailbox, file and DHT nodes the community runs (antiphon-relay with --mailbox-code / --files-code). Signed into its manifest, so every member sees the same ones.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    if space-is-community : LineEdit { text <=> space-mailbox-node; enabled: space-can-manage; placeholder-text: "mailbox node host:port"; }
+                    if space-is-community : LineEdit { text <=> space-mailbox-code; enabled: space-can-manage; placeholder-text: "its members code"; }
+                    if space-is-community : LineEdit { text <=> space-files-node; enabled: space-can-manage; placeholder-text: "file node host:port"; }
+                    if space-is-community : LineEdit { text <=> space-files-code; enabled: space-can-manage; placeholder-text: "its members code"; }
+                    if space-is-community : LineEdit { text <=> space-dht-node; enabled: space-can-manage; placeholder-text: "DHT node host:port"; }
+                    if space-is-community : ToggleSwitch {
+                        text: "Server-hosted files";
+                        enabled: space-can-manage;
+                        checked <=> space-server-hosted;
+                        reduced-motion: reduced-motion;
+                        text-scale: text-scale;
+                        help: "Off by default. When on, a file shared in this community is also uploaded, encrypted, to its file node, so it stays fetchable when the person who shared it is offline. The node holds bytes it cannot read.";
+                    }
+                    if space-is-community && space-can-manage : Button { text: "Save community settings"; clicked => { space-save-settings(); } }
+                    if space-is-community && space-mailbox-node != "" : Button { text: "Use its mailbox for my mail"; clicked => { space-use-nodes(); } }
+                    Text { text: "Calls and notifications"; font-weight: 700; font-size: 11px * text-scale; }
+                    Text {
+                        text: "For calls from members who aren't your contacts (a contact's own setting wins), and for message notices. If you share several, the quietest applies.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    ComboBox {
+                        model: ["My default", "Always ring", "Silent only", "Never (mute)"];
+                        current-index <=> space-ring-rule;
+                        selected => { space-set-ring-rule(self.current-index); }
+                    }
+                    Rectangle { height: 1px; background: Theme.divider; }
+                    if !space-removed : Button { text: "Leave"; clicked => { space-leave(); } }
+                    if space-removed : Button { text: "Forget it and its history"; clicked => { space-forget(); } }
                 }
             }
         }
@@ -4737,9 +5124,9 @@ export component MainWindow inherits Window {
                                     }
                                     if seeding : HorizontalBox {
                                         padding: 0px; spacing: 6px;
-                                        SettingLabel { text: "Hand them to"; help: "Only the conversation: whoever has the link from the chat. Contacts: those people, only if they're also your contacts. Anyone: anyone with the file's id -- they still can't read it without the key."; text-scale: text-scale; }
+                                        SettingLabel { text: "Hand them to"; help: "Where it was shared: whoever has the link from that chat -- in a community, only people its signed member list names right now, so a ban stops them. Contacts: those people, only if they're also your contacts (in a community, its members). Anyone: anyone with the file's id -- they still can't read it without the key."; text-scale: text-scale; }
                                         ComboBox {
-                                            model: ["This conversation only", "My contacts", "Anyone"];
+                                            model: ["Where it was shared only", "My contacts", "Anyone"];
                                             current-index: seed-scope;
                                             selected(v) => { seed-scope = self.current-index; sharing-settings-changed(); }
                                         }

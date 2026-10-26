@@ -32,6 +32,9 @@
 //! - **Groups are MLS** ([`group`]): RFC 9420 through `openmls`, with
 //!   every member's credential being their identity key, so a group member
 //!   is the same verified person as a 1:1 contact.
+//! - **Communities are signed manifests** ([`community`]): versioned,
+//!   each version signed by someone allowed to make it, so roles, bans and
+//!   membership are enforced by every client with no server to ask.
 //! - **Media a relay forwards is SFrame** ([`sframe`]): RFC 9605, keyed
 //!   per epoch and per sender from the MLS exporter, so a forwarder never
 //!   holds a key and someone who left can't hear what follows.
@@ -54,6 +57,7 @@ mod contact;
 mod device;
 pub mod dht_record;
 mod error;
+pub mod community;
 pub mod group;
 mod handshake;
 mod identity;

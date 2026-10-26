@@ -457,6 +457,7 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
         | ControlMessage::GroupPunchPeer { .. }
         | ControlMessage::GroupLeave
         | ControlMessage::GroupSfu { .. }
+        | ControlMessage::Community { .. }
         | ControlMessage::MlsKeyPackage(_)
         | ControlMessage::MlsWelcome(_)
         | ControlMessage::MlsCommit(_)

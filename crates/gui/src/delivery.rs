@@ -202,6 +202,10 @@ pub struct MailBody {
     pub id: u64,
     pub text: String,
     pub at_secs: u64,
+    /// A piece of a group chat or community message (spec §9), base64,
+    /// instead of a 1:1 text. See `crate::community`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// How a message went out.
@@ -470,7 +474,7 @@ pub fn node_report() -> Vec<(String, String)> {
     NODE_REPORT.lock().unwrap().clone()
 }
 
-fn notice(line: String) {
+pub(crate) fn notice(line: String) {
     let mut n = NOTICES.lock().unwrap();
     n.push(line);
     let excess = n.len().saturating_sub(20);
@@ -537,7 +541,14 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
     let busy = in_call_with().map(|k| hex(&k));
     let mut arrived: Vec<String> = Vec::new();
     let mut strangers = 0;
+    let community = crate::community::Store::app();
     let report = collect(&identity, &config.routes, config.strict_mode, config.hold_mail_for_devices, |r| {
+        // A piece of a group chat or community message (spec §9): from
+        // members who need not be your contacts. Whether they really are
+        // members is the community's to check once it is whole.
+        if let Some(fragment) = &r.body.group {
+            return community.as_ref().is_none_or(|c| c.receive_fragment(r.from, fragment));
+        }
         let hex_key = hex(&r.from);
         let Some(contact) = contacts.iter().find(|c| c.identity_key == hex_key) else {
             // Not someone you saved. Dropped, as a call from a stranger
@@ -563,6 +574,7 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
             deleted: false,
             pinned: false,
             expires_at_secs: contact.expire_after_secs.map(|ttl| r.body.at_secs + ttl),
+            ..Default::default()
         });
         if crate::history::save(&dir, &hex_key, &key, &log).is_err() {
             return false; // leave it at the node and try again
@@ -594,6 +606,12 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
         notice(format!("{strangers} message(s) from people not in your contacts were discarded."));
     }
 
+    // Group chats and communities: over live calls, and -- unless strict
+    // mode keeps everything off mailboxes -- to members' mailboxes.
+    if let Some(c) = &community {
+        c.flush(config.route_fan_out, !config.strict_mode).await;
+    }
+
     // Then the outbox, for everyone not on a live call.
     if config.strict_mode {
         return;
@@ -616,7 +634,7 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
         let mut left = 0;
         let mut failure = None;
         for message in queue.clone() {
-            let body = MailBody { id: message.id, text: message.text.clone(), at_secs: message.queued_at_secs };
+            let body = MailBody { id: message.id, text: message.text.clone(), at_secs: message.queued_at_secs, group: None };
             match send(&identity, &their_key, &their_prekey, &record, &body, config.route_fan_out).await {
                 Sent::Deposited(_) => {
                     crate::outbox::mark_delivered(&mut queue, message.id);
@@ -677,6 +695,7 @@ pub fn leave_message(contact_key_hex: &str, text: &str, expire_after_secs: Optio
         deleted: false,
         pinned: false,
         expires_at_secs: expire_after_secs.map(|t| now + t),
+        ..Default::default()
     });
     crate::history::save(&dir, contact_key_hex, &key, &log).map_err(|e| e.to_string())?;
     let mut queue = crate::outbox::load(&dir, contact_key_hex, &key);
@@ -790,7 +809,7 @@ mod tests {
         assert!(report[0].1.is_ok(), "{:?}", report[0].1);
 
         let record = my_record(&bob, &routes, false, 1);
-        let body = MailBody { id: 7, text: "back at six".into(), at_secs: 1 };
+        let body = MailBody { id: 7, text: "back at six".into(), at_secs: 1, group: None };
         let sent = send(&alice, &bob.public().identity_key, &bob.public().prekey, &record, &body, false).await;
         assert_eq!(sent, Sent::Deposited(1));
 

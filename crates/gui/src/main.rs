@@ -35,6 +35,7 @@ mod voice_message;
 mod theme_presets;
 mod transfer_limits;
 mod control;
+mod community;
 mod delivery;
 mod swarm;
 mod sharing;
@@ -273,6 +274,7 @@ fn main() -> anyhow::Result<()> {
     let mut peer_routes_saved = String::new();
     let mut delivery_round_seen = 0u64;
     let mut sharing_seen = u64::MAX;
+    let mut spaces_seen = u64::MAX;
     let mut vpn_seen = u64::MAX;
     let mut vpn_ticks = 0u32;
     let mut discovery_seen = 0u64;
@@ -297,6 +299,12 @@ fn main() -> anyhow::Result<()> {
             apply_vpn_to_ui(&app, &config::load());
         } else if vpn_ticks.is_multiple_of(20) {
             app.set_vpn_status(vpn::status_line().into());
+        }
+        // Spec §9: a message, an invite, a change to a group or community.
+        let spaces_now = community::revision();
+        if spaces_now != spaces_seen {
+            spaces_seen = spaces_now;
+            apply_spaces_to_ui(&app);
         }
         let sharing_now = sharing::revision();
         if sharing_now != sharing_seen {
@@ -2917,6 +2925,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         let state = app_state.clone();
         main_window.on_check_shared_files(move || sharing::check_all(&state.runtime));
     }
+    wire_communities(main_window, app_state);
     {
         let window_weak = main_window.as_weak();
         let state = app_state.clone();
@@ -4624,7 +4633,7 @@ fn apply_onboarding(app: &MainWindow, config: &config::AppConfig) {
 /// What an incoming call from this identity is allowed to do (spec §9).
 ///
 /// Reads the receiver's own settings only. A contact's rule overrides the
-/// default; quiet hours can lower the result but never raise it.
+/// per-community rules, which override the default; quiet hours can lower the result but never raise it.
 fn ring_outcome(peer_identity_key: &[u8; 32], caller_wants_silent: bool) -> notify::Outcome {
     let hex = encode_identity_key(peer_identity_key);
     let config = config::load();
@@ -4632,11 +4641,14 @@ fn ring_outcome(peer_identity_key: &[u8; 32], caller_wants_silent: bool) -> noti
         .contacts
         .iter()
         .find(|c| c.identity_key == hex)
-        .map(|c| c.ring_rule)
-        .unwrap_or(config.default_ring_rule);
+        .map(|c| notify::RingRule::from_i32(c.ring_rule))
+        // Not a contact: the rules you set on group chats and communities
+        // you share with them, then your default.
+        .or_else(|| community::Store::app().and_then(|s| notify::shared_rule(s.rules_for(peer_identity_key))))
+        .unwrap_or(notify::RingRule::from_i32(config.default_ring_rule));
 
     notify::decide(
-        notify::RingRule::from_i32(rule),
+        rule,
         config.quiet_hours,
         notify::current_minute_of_day(),
         caller_wants_silent,
@@ -4956,11 +4968,18 @@ fn apply_shared_files_to_ui(app: &MainWindow, config: &config::AppConfig) {
     let entries: Vec<SharedFileEntry> = sharing::load()
         .into_iter()
         .map(|f| {
+            let community = f
+                .with
+                .strip_prefix("community:")
+                .and_then(connection_mode::decode_hex32)
+                .and_then(|id| community::Store::app()?.load(&antiphon_crypto::community::Key(id)))
+                .map(|s| s.manifest().name.clone());
             let who = config
                 .contacts
                 .iter()
                 .find(|c| c.identity_key.eq_ignore_ascii_case(&f.with))
                 .map(|c| c.name.clone())
+                .or(community)
                 .unwrap_or_else(|| "someone not in your contacts".to_string());
             let holders = match f.holders.len() {
                 0 => "no one else holds it".to_string(),
@@ -4993,6 +5012,11 @@ fn save_routes(app: &MainWindow, mut config: config::AppConfig) {
     config.route_sequence = (config.route_sequence + 1).max(now_secs());
     config::save(&config);
     apply_routes_to_ui(app, &config);
+    // Members of your groups who aren't your contacts learn the new list
+    // from your card (spec §9), as contacts do from your next Hello.
+    if let Some(card) = my_space_card() {
+        std::thread::spawn(move || community::refresh_cards(card));
+    }
     delivery::kick();
 }
 
@@ -6171,6 +6195,549 @@ fn read_chain_config(app: &MainWindow) -> ChainConfig {
             damping: app.get_reverb_damping(),
             wet_dry: app.get_reverb_wet(),
         },
+    }
+}
+
+// ---- Spec §9: group chats and communities -----------------------------------
+
+/// How you appear to members: your prekey, route list and display name.
+fn my_space_card() -> Option<community::Card> {
+    let identity = delivery::identity()?;
+    let config = config::load();
+    Some(community::Card::mine(&identity, delivery::my_record_hex(), &config.profile.display_name))
+}
+
+fn selected_space(app: &MainWindow) -> Option<antiphon_crypto::community::Key> {
+    connection_mode::decode_hex32(&app.get_selected_space()).map(antiphon_crypto::community::Key)
+}
+
+/// Contacts who could be invited: saved with a pinned key and a prekey,
+/// so an invite can be sealed to them. The same order every time, so a
+/// combo box index maps back.
+fn invitable_contacts(config: &config::AppConfig) -> Vec<config::Contact> {
+    config
+        .contacts
+        .iter()
+        .filter(|c| connection_mode::decode_hex32(&c.identity_key).is_some() && connection_mode::decode_hex32(&c.prekey).is_some())
+        .cloned()
+        .collect()
+}
+
+fn ago(at_secs: u64) -> String {
+    let d = now_secs().saturating_sub(at_secs);
+    match d {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", d / 60),
+        3600..=86_399 => format!("{} h ago", d / 3600),
+        _ => format!("{} d ago", d / 86_400),
+    }
+}
+
+/// Runs an action on the selected space and shows how it went.
+fn space_action(app: &MainWindow, f: impl FnOnce(&community::Store, &antiphon_crypto::community::Key) -> Result<(), String>) {
+    let (Some(store), Some(id)) = (community::Store::app(), selected_space(app)) else { return };
+    match f(&store, &id) {
+        Ok(()) => app.set_space_status("".into()),
+        Err(e) => app.set_space_status(e.into()),
+    }
+    apply_spaces_to_ui(app);
+}
+
+/// Runs a manifest change on the selected space.
+fn space_update(app: &MainWindow, change: impl FnOnce(&mut antiphon_crypto::community::Manifest)) {
+    space_action(app, |store, id| {
+        store.with_space(id, |space, identity| Ok(((), space.update(identity, change)?, vec![community::Event::Changed])))
+    });
+}
+
+fn apply_spaces_to_ui(app: &MainWindow) {
+    use antiphon_crypto::community::{perm, Kind};
+    let Some(store) = community::Store::app() else { return };
+    let me = store.identity.public().identity_key;
+    let config = config::load();
+    let mut spaces: Vec<community::Space> = store.ids().iter().filter_map(|id| store.load(id)).collect();
+    spaces.sort_by_key(|s| s.manifest().name.to_lowercase());
+    let selected = selected_space(app);
+    let viewing = app.get_current_tab() == 2;
+    let mut total_unread = 0;
+    let mut entries = Vec::new();
+    for s in &spaces {
+        let m = s.manifest();
+        let unread = if viewing && Some(s.id()) == selected {
+            store.mark_read(&s.id());
+            0
+        } else {
+            store.unread(&s.id())
+        };
+        total_unread += unread;
+        let kind = if m.kind == Kind::Group { "Group" } else { "Community" };
+        entries.push(SpaceEntry {
+            id: delivery::hex(&s.id().0).into(),
+            name: m.name.clone().into(),
+            detail: format!("{kind} · {} members", m.members.len()).into(),
+            unread: unread as i32,
+        });
+    }
+    app.set_spaces(ModelRc::new(VecModel::from(entries)));
+    app.set_spaces_unread(total_unread as i32);
+    let invites: Vec<SpaceInviteEntry> = store
+        .invites()
+        .into_iter()
+        .map(|i| {
+            let from = config
+                .contacts
+                .iter()
+                .find(|c| c.identity_key.eq_ignore_ascii_case(&delivery::hex(&i.from.0)))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| format!("{} (not a contact; a member of something you're in)", i.card.name));
+            let kind = if i.kind == Kind::Group { "Group chat" } else { "Community" };
+            SpaceInviteEntry { name: i.name.into(), detail: format!("{kind} · invited by {from} · {}", ago(i.at_secs)).into() }
+        })
+        .collect();
+    app.set_space_invites(ModelRc::new(VecModel::from(invites)));
+
+    let Some(space) = selected.and_then(|id| spaces.iter().find(|s| s.id() == id)) else {
+        app.set_selected_space("".into());
+        app.set_space_messages(ModelRc::default());
+        app.set_space_members(ModelRc::default());
+        return;
+    };
+    let m = space.manifest();
+    let community = m.kind == Kind::Community;
+    let joined = space.joining.is_none() && !space.removed;
+    app.set_space_title(m.name.clone().into());
+    let subtitle = if space.joining.is_some() {
+        "Waiting to be let in: whoever invited you adds you when their app next collects mail or you're next on a call.".to_string()
+    } else if space.removed {
+        "You're no longer in this.".to_string()
+    } else {
+        format!(
+            "{} · {} members · group key {} · {} waiting to send",
+            if community { "Community" } else { "Group chat" },
+            m.members.len(),
+            space.epoch().unwrap_or(0),
+            store.queued()
+        )
+    };
+    app.set_space_subtitle(subtitle.into());
+    app.set_space_is_community(community);
+    app.set_space_removed(space.removed);
+    let channel_index = (app.get_space_channel_index().max(0) as usize).min(m.channels.len() - 1);
+    app.set_space_channel_names(ModelRc::new(VecModel::from(
+        m.channels.iter().map(|c| SharedString::from(format!("#{}", c.name))).collect::<Vec<_>>(),
+    )));
+    app.set_space_channel_index(channel_index as i32);
+    let channel = m.channels[channel_index].id;
+
+    let log = history::load(&store.dir, &community::channel_log(&space.id(), channel), &store.key);
+    let root: Option<u64> = app.get_space_thread_root().parse().ok();
+    let to_entry = |msg: &history::StoredMessage, replies: i32| {
+        let sender = msg.sender.as_deref().and_then(connection_mode::decode_hex32).unwrap_or(me);
+        SpaceMessage {
+            id: msg.id.to_string().into(),
+            sender: if sender == me { "You".into() } else { space.name_of(&sender).into() },
+            sender_key: delivery::hex(&sender).into(),
+            text: msg.display_text().into(),
+            time: ago(msg.at_secs).into(),
+            mine: sender == me,
+            deleted: msg.deleted,
+            replies,
+            can_delete: joined && (sender == me || m.can(&me, perm::MANAGE_MESSAGES, Some(&sender))),
+            can_edit: joined && sender == me && !msg.deleted && !msg.text.starts_with("[file] "),
+            plain: msg.text.clone().into(),
+        }
+    };
+    let shown: Vec<SpaceMessage> = match root {
+        Some(r) => log.iter().filter(|x| x.id == r || x.reply_to == Some(r)).map(|x| to_entry(x, 0)).collect(),
+        None => log
+            .iter()
+            // A reply whose root isn't here (expired, or from before we
+            // joined) is shown in the channel rather than lost.
+            .filter(|x| x.reply_to.is_none_or(|r| !log.iter().any(|y| y.id == r)))
+            .map(|x| to_entry(x, log.iter().filter(|y| y.reply_to == Some(x.id)).count() as i32))
+            .collect(),
+    };
+    app.set_space_messages(ModelRc::new(VecModel::from(shown)));
+
+    let members: Vec<SpaceMember> = m
+        .members
+        .iter()
+        .map(|x| {
+            let k = x.key.0;
+            let owner = m.is_owner(&k);
+            SpaceMember {
+                key: delivery::hex(&k).into(),
+                name: space.name_of(&k).into(),
+                role: if owner { "Owner".into() } else { m.roles.get(x.role as usize).map(|r| r.name.clone()).unwrap_or_default().into() },
+                role_index: x.role as i32,
+                me: k == me,
+                can_kick: joined && k != me && m.can(&me, perm::KICK, Some(&k)),
+                can_ban: joined && k != me && m.can(&me, perm::BAN, Some(&k)),
+                can_role: joined && community && k != me && !owner && m.can(&me, perm::MANAGE_ROLES, Some(&k)),
+            }
+        })
+        .collect();
+    app.set_space_members(ModelRc::new(VecModel::from(members)));
+    app.set_space_role_names(ModelRc::new(VecModel::from(m.roles.iter().map(|r| SharedString::from(r.name.as_str())).collect::<Vec<_>>())));
+    let bans: Vec<SpaceBan> = m
+        .bans
+        .iter()
+        .map(|b| SpaceBan {
+            key: delivery::hex(&b.key.0).into(),
+            detail: format!(
+                "{}{} -- by {}",
+                space.name_of(&b.key.0),
+                if b.reason.is_empty() { String::new() } else { format!(": {}", b.reason) },
+                space.name_of(&b.by.0)
+            )
+            .into(),
+        })
+        .collect();
+    app.set_space_bans(ModelRc::new(VecModel::from(bans)));
+    let names: Vec<SharedString> =
+        invitable_contacts(&config).iter().filter(|c| !m.is_member(&connection_mode::decode_hex32(&c.identity_key).unwrap_or_default())).map(|c| c.name.as_str().into()).collect();
+    app.set_space_contact_names(ModelRc::new(VecModel::from(names)));
+    app.set_space_can_post(joined && m.can(&me, perm::POST, None));
+    app.set_space_can_invite(joined && m.can(&me, perm::INVITE, None));
+    app.set_space_can_ban(joined && m.can(&me, perm::BAN, None));
+    app.set_space_can_manage(joined && m.can(&me, perm::MANAGE_COMMUNITY, None));
+    app.set_space_can_manage_channels(joined && m.can(&me, perm::MANAGE_CHANNELS, None));
+    app.set_space_server_hosted(m.server_hosted_files);
+    app.set_space_ring_rule(store.ring_rule(&space.id()).map_or(0, |r| r.to_i32() + 1));
+    let first = |v: &[antiphon_crypto::community::NodeRef]| v.first().cloned().unwrap_or_default();
+    let (mailbox, files) = (first(&m.nodes.mailbox), first(&m.nodes.files));
+    app.set_space_mailbox_node(mailbox.addr.into());
+    app.set_space_mailbox_code(mailbox.code.into());
+    app.set_space_files_node(files.addr.into());
+    app.set_space_files_code(files.code.into());
+    app.set_space_dht_node(m.nodes.dht.first().cloned().unwrap_or_default().into());
+}
+
+fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_open_communities(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_refresh_space(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_select_space(move |id| {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_selected_space(id);
+            app.set_space_thread_root("".into());
+            app.set_space_channel_index(0);
+            app.set_space_status("".into());
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_select_space_channel(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_space_channel_index(index);
+            app.set_space_thread_root("".into());
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_create_space(move |name, is_community| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let (Some(store), Some(card)) = (community::Store::app(), my_space_card()) else { return };
+            let kind = if is_community { antiphon_crypto::community::Kind::Community } else { antiphon_crypto::community::Kind::Group };
+            match store.create(kind, &name, card) {
+                Ok(id) => {
+                    app.set_space_new_name("".into());
+                    app.set_selected_space(delivery::hex(&id.0).into());
+                    app.set_space_status("".into());
+                }
+                Err(e) => app.set_space_status(e.into()),
+            }
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_accept_space_invite(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let (Some(store), Some(card)) = (community::Store::app(), my_space_card()) else { return };
+            match store.accept_invite(index.max(0) as usize, card) {
+                Ok(id) => {
+                    app.set_selected_space(delivery::hex(&id.0).into());
+                    app.set_space_status("Accepted. You'll be let in when they next collect their mail.".into());
+                }
+                Err(e) => app.set_space_status(e.into()),
+            }
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_decline_space_invite(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            if let Some(store) = community::Store::app() {
+                store.decline_invite(index.max(0) as usize);
+            }
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_send(move |text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let channel_index = app.get_space_channel_index().max(0) as usize;
+            let reply_to: Option<u64> = app.get_space_thread_root().parse().ok();
+            let mut sent = false;
+            space_action(&app, |store, id| {
+                store.with_space(id, |space, _| {
+                    let channel = space.manifest().channels.get(channel_index).map(|c| c.id).unwrap_or(0);
+                    let (outs, event) = space.post(channel, &text, reply_to)?;
+                    Ok(((), outs, vec![event]))
+                })?;
+                sent = true;
+                Ok(())
+            });
+            if sent {
+                app.set_space_input("".into());
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_edit_message(move |id, text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Ok(id) = id.parse::<u64>() else { return };
+            let mut done = false;
+            space_action(&app, |store, sid| {
+                store.with_space(sid, |space, identity| {
+                    let me = identity.public().identity_key;
+                    let outs = space.edit(id, &text)?;
+                    Ok(((), outs, vec![community::Event::Edited { id, sender: me, text: text.trim().to_string() }]))
+                })?;
+                done = true;
+                Ok(())
+            });
+            if done {
+                app.set_space_editing("".into());
+                app.set_space_input("".into());
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_delete_message(move |id, sender| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let (Ok(id), Some(author)) = (id.parse::<u64>(), connection_mode::decode_hex32(&sender)) else { return };
+            space_action(&app, |store, sid| {
+                store.with_space(sid, |space, _| Ok(((), space.delete(id, author)?, vec![community::Event::Deleted { id, author }])))
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_invite(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = config::load();
+            space_action(&app, |store, id| {
+                let space = store.load(id).ok_or("couldn't open it")?;
+                let candidates: Vec<config::Contact> = invitable_contacts(&config)
+                    .into_iter()
+                    .filter(|c| !space.manifest().is_member(&connection_mode::decode_hex32(&c.identity_key).unwrap_or_default()))
+                    .collect();
+                let contact = candidates.get(index.max(0) as usize).ok_or("pick a contact")?;
+                let key = connection_mode::decode_hex32(&contact.identity_key).ok_or("no key for them")?;
+                store.with_space(id, |space, identity| Ok(((), space.invite(identity, key, &contact.name)?, vec![community::Event::Changed])))
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_kick(move |key| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_action(&app, |store, id| store.with_space(id, |space, identity| Ok(((), space.kick(identity, key)?, vec![]))));
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_ban(move |key, reason| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_action(&app, |store, id| store.with_space(id, |space, identity| Ok(((), space.ban(identity, key, &reason)?, vec![]))));
+            app.set_space_ban_reason("".into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_unban(move |key| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_update(&app, |m| m.bans.retain(|b| b.key.0 != key));
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_set_role(move |key, role| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_update(&app, |m| {
+                if let Some(x) = m.members.iter_mut().find(|x| x.key.0 == key) {
+                    x.role = role.max(0) as u16;
+                }
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_add_channel(move |name| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let name: String = name.trim().trim_start_matches('#').chars().take(80).collect();
+            if name.is_empty() {
+                return;
+            }
+            space_update(&app, |m| {
+                let id = m.channels.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+                m.channels.push(antiphon_crypto::community::Channel { id, name, topic: String::new() });
+            });
+            app.set_space_new_channel("".into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_remove_channel(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let index = app.get_space_channel_index().max(0) as usize;
+            space_update(&app, |m| {
+                if m.channels.len() > 1 && index < m.channels.len() {
+                    m.channels.remove(index);
+                }
+            });
+            app.set_space_channel_index(0);
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_save_settings(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let node = |addr: SharedString, code: SharedString| {
+                let addr = addr.trim().to_string();
+                (!addr.is_empty()).then(|| antiphon_crypto::community::NodeRef { addr, code: code.trim().to_string() })
+            };
+            let mailbox = node(app.get_space_mailbox_node(), app.get_space_mailbox_code());
+            let files = node(app.get_space_files_node(), app.get_space_files_code());
+            let dht = app.get_space_dht_node().trim().to_string();
+            let hosted = app.get_space_server_hosted();
+            space_update(&app, |m| {
+                m.nodes.mailbox = mailbox.into_iter().collect();
+                m.nodes.files = files.into_iter().collect();
+                m.nodes.dht = if dht.is_empty() { Vec::new() } else { vec![dht] };
+                m.server_hosted_files = hosted;
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_set_ring_rule(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let rule = (index > 0).then(|| notify::RingRule::from_i32(index - 1));
+            space_action(&app, |store, id| {
+                store.set_ring_rule(id, rule);
+                Ok(())
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_use_nodes(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(m) = community::Store::app().zip(selected_space(&app)).and_then(|(s, id)| s.load(&id)).map(|s| s.manifest().clone()) else { return };
+            let mut config = config::load();
+            let Some(tier) = config.routes.iter_mut().find(|r| r.kind == delivery::RouteKind::CommunityNode) else { return };
+            let Some(node) = m.nodes.mailbox.first() else { return };
+            if !tier.code.is_empty() && tier.code != node.code && !tier.nodes.is_empty() {
+                app.set_space_status("Your Community node route already uses another community's code; edit it under Call → Delivery routes.".into());
+                return;
+            }
+            if !tier.nodes.contains(&node.addr) {
+                tier.nodes.push(node.addr.clone());
+            }
+            tier.code = node.code.clone();
+            tier.enabled = true;
+            for d in &m.nodes.dht {
+                if !config.dht_bootstrap.contains(d) {
+                    config.dht_bootstrap.push(d.clone());
+                }
+            }
+            save_routes(&app, config);
+            app.set_space_status(format!("{} now holds your mail too; your contacts and fellow members get your new route list.", node.addr).into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let runtime = app_state.runtime.clone();
+        main_window.on_space_share_file(move || {
+            let window_weak = window_weak.clone();
+            let runtime = runtime.clone();
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(id) = selected_space(&app) else { return };
+            let channel_index = app.get_space_channel_index().max(0) as usize;
+            // The dialog and the sealing block, so not on the UI thread.
+            std::thread::spawn(move || {
+                let Some(path) = rfd::FileDialog::new().set_title("Share a file here").pick_file() else { return };
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+                let result = (|| {
+                    let store = community::Store::app().ok_or("not ready")?;
+                    let manifest = store.load(&id).ok_or("couldn't open it")?.manifest().clone();
+                    let (name, size, file_id, key, holders) = sharing::share_in_community(&runtime, &path, &name, &manifest)?;
+                    store.with_space(&id, |space, _| {
+                        let channel = space.manifest().channels.get(channel_index).map(|c| c.id).unwrap_or(0);
+                        let at_secs = now_secs();
+                        let mut b = [0u8; 8];
+                        getrandom::fill(&mut b).map_err(|e| e.to_string())?;
+                        let mid = u64::from_le_bytes(b) >> 1;
+                        let post = community::Post::File { id: mid, channel, name: name.clone(), size, file_id: file_id.clone(), key: key.clone(), holders: holders.clone(), at_secs };
+                        let outs = space.share_file(post)?;
+                        Ok(((), outs, vec![community::Event::File { channel, id: mid, sender: store.identity.public().identity_key, name, size, file_id, key, holders, at_secs }]))
+                    })
+                })();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(app) = window_weak.upgrade() else { return };
+                    match result {
+                        Ok(()) => app.set_space_status("Shared. It's under Shared files too.".into()),
+                        Err(e) => app.set_space_status(SharedString::from(e)),
+                    }
+                    apply_spaces_to_ui(&app);
+                });
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_leave(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            space_action(&app, |store, id| store.with_space(id, |space, identity| Ok(((), space.leave(identity)?, vec![]))));
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_forget(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            if let (Some(store), Some(id)) = (community::Store::app(), selected_space(&app)) {
+                store.forget(&id);
+            }
+            app.set_selected_space("".into());
+            apply_spaces_to_ui(&app);
+        });
     }
 }
 
