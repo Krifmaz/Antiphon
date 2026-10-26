@@ -43,6 +43,13 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The user chose this (2026-10-26): GitHub's macOS runners are scarce,
+    # and a job can sit queued until it is cancelled without running a
+    # line. macOS still builds and tests on every push, but a missing Mac
+    # runner no longer turns the pipeline red or holds back the release of
+    # the other platforms and the APK.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -128,9 +135,17 @@ jobs:
 
   release:
     name: release (${{ matrix.os }})
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # always(): a macOS test job GitHub cancelled for want of a runner
+    # must not skip the release of everything else. A real test failure
+    # on Linux or Windows still stops it.
+    if: >-
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
+      !contains(needs.*.result, 'failure')
     needs: test
     runs-on: ${{ matrix.os }}
+    # As in test: the macOS build never holds back the other platforms.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -208,7 +223,13 @@ jobs:
 
   publish:
     name: publish
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Still runs when only the macOS leg of release failed or never got a
+    # runner, so the other platforms and the APK ship; a failed APK stops it.
+    if: >-
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') &&
+      needs.android.result == 'success' &&
+      needs.release.result != 'skipped'
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     needs: [release, android]
