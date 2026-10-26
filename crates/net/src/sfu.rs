@@ -48,7 +48,6 @@ use std::time::Duration;
 
 use hkdf::Hkdf;
 use sha2::Sha256;
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 
 use crate::error::NetError;
@@ -307,7 +306,7 @@ pub const EVENT_QUEUE: usize = 512;
 /// it stops the refreshes, and the SFU forgets the member after its idle
 /// expiry; [`SfuClient::leave`] says goodbye straight away.
 pub struct SfuClient {
-    socket: Arc<UdpSocket>,
+    socket: Arc<crate::AppSocket>,
     sfu: SocketAddr,
     room: RoomToken,
     member: MemberTag,
@@ -320,7 +319,7 @@ impl SfuClient {
     /// confirmed and sent the roster. Events arrive on the returned
     /// receiver until the client is dropped or leaves.
     pub async fn join(
-        socket: Arc<UdpSocket>,
+        socket: Arc<crate::AppSocket>,
         sfu: SocketAddr,
         room: RoomToken,
         member: MemberTag,
@@ -415,7 +414,7 @@ fn others(roster: &[MemberTag], me: &MemberTag) -> Vec<MemberTag> {
 /// The background half of a member: refreshes, answers challenges after
 /// an SFU restart, and turns datagrams into events.
 async fn run_member(
-    socket: Arc<UdpSocket>,
+    socket: Arc<crate::AppSocket>,
     sfu: SocketAddr,
     room: RoomToken,
     member: MemberTag,

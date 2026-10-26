@@ -38,6 +38,10 @@ pub enum NetError {
     SfuTimeout,
     #[error("a group-call frame must be 1 to {max} bytes, not {0}", max = crate::sfu::MAX_MEDIA_PAYLOAD)]
     SfuPayloadSize(usize),
+    #[error("the VPN is down and the kill switch is on, so this was not sent over your real connection")]
+    KillSwitch,
+    #[error("none of the DHT bootstrap nodes answered")]
+    DhtUnreachable,
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }

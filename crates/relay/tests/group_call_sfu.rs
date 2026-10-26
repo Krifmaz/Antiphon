@@ -1,5 +1,5 @@
 //! Group calls through a real SFU over loopback sockets: members join a
-//! room by its blinded token, seal their frames with per-sender keys the
+//! room by its blinded token, seal their frames with SFrame keys the
 //! SFU never sees, and each frame reaches every other member of that room
 //! -- and nobody in any other room.
 
@@ -8,7 +8,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use antiphon_net::media_seal::{generate_sender_key, MediaSealer, SenderKey, SenderKeySealer};
+use antiphon_crypto::sframe::SframeContext;
+use antiphon_net::media_seal::{MediaSealer, SframeSealer};
 use antiphon_net::sfu::{self, MemberTag, Refusal, RoomToken, SfuClient, SfuEvent};
 use antiphon_net::NetError;
 use antiphon_relay::sfu::{Sfu, SfuLimits};
@@ -33,32 +34,35 @@ async fn start_sfu(limits: SfuLimits) -> (SocketAddr, Arc<Mutex<Sfu>>) {
 }
 
 async fn join(sfu: SocketAddr, room: RoomToken) -> Result<(SfuClient, mpsc::Receiver<SfuEvent>), NetError> {
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let socket = Arc::new(antiphon_net::AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
     SfuClient::join(socket, sfu, room, sfu::new_member_tag(), WAIT).await
 }
 
 struct Member {
     client: SfuClient,
     events: mpsc::Receiver<SfuEvent>,
-    sealer: SenderKeySealer,
+    sealer: SframeSealer,
 }
 
-/// Joins `n` members to `room`, each with its own sender key handed to
-/// everyone else -- standing in for the out-of-band key distribution.
+/// Joins `n` members to `room`, keyed into one SFrame epoch as an MLS
+/// group would key them, member `i` speaking as leaf `i`.
 async fn members(sfu: SocketAddr, room: RoomToken, n: usize) -> Vec<Member> {
+    let base_key = [42u8; 16];
     let mut joined = Vec::new();
     for _ in 0..n {
-        let (client, events) = join(sfu, room).await.unwrap();
-        joined.push((client, events, generate_sender_key()));
+        joined.push(join(sfu, room).await.unwrap());
     }
-    let keys: Vec<(MemberTag, SenderKey)> = joined.iter().map(|(c, _, k)| (c.member(), *k)).collect();
+    let tags: Vec<MemberTag> = joined.iter().map(|(c, _)| c.member()).collect();
     joined
         .into_iter()
-        .map(|(client, events, key)| {
-            let mut sealer = SenderKeySealer::new(client.member(), key);
-            for (tag, k) in &keys {
-                if *tag != client.member() {
-                    sealer.add_sender(*tag, *k);
+        .enumerate()
+        .map(|(i, (client, events))| {
+            let mut ctx = SframeContext::new(i as u32);
+            ctx.install_epoch(1, i as u32, &base_key);
+            let mut sealer = SframeSealer::new(ctx);
+            for (j, tag) in tags.iter().enumerate() {
+                if j != i {
+                    sealer.set_sender(*tag, j as u32);
                 }
             }
             Member { client, events, sealer }
@@ -98,7 +102,7 @@ async fn eight_members_hear_each_other_through_one_sfu() {
     for (i, m) in group.iter_mut().enumerate() {
         for f in 0..FRAMES {
             let plain = format!("member {i} frame {f}");
-            let sealed = m.sealer.seal(plain.as_bytes());
+            let sealed = m.sealer.seal(plain.as_bytes()).unwrap();
             // What the SFU carries is not the audio.
             assert!(!sealed.windows(plain.len()).any(|w| w == plain.as_bytes()));
             m.client.send_media(&sealed).await.unwrap();
@@ -137,7 +141,7 @@ async fn rooms_are_isolated_from_each_other() {
     }
     assert_eq!(state.lock().unwrap().stats().rooms, 2);
 
-    let sealed = a[0].sealer.seal(b"for room a only");
+    let sealed = a[0].sealer.seal(b"for room a only").unwrap();
     a[0].client.send_media(&sealed).await.unwrap();
 
     for m in a.iter_mut().skip(1) {
@@ -186,7 +190,7 @@ async fn a_full_room_refuses_and_a_leave_frees_the_seat() {
 #[tokio::test]
 async fn one_address_cannot_hold_too_many_rooms() {
     let (addr, _) = start_sfu(SfuLimits { max_rooms_per_addr: 2, ..SfuLimits::default() }).await;
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let socket = Arc::new(antiphon_net::AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
     // A client owns its socket's receive side, so drop each one once it
     // has joined; the SFU still counts the membership until it idles out.
     for g in 0..2u8 {

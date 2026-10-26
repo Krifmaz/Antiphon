@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use antiphon_audio::{list_input_devices, list_output_devices, start_capture, start_playback, AudioChain, ChainConfig};
 use antiphon_crypto::{verification_code, IdentityKeyPair};
-use antiphon_net::{JitterBuffer, PeerConnection, PopResult};
+use antiphon_net::{AppSocket, JitterBuffer, PeerConnection, PopResult};
 
 /// Loads this machine's long-term identity, generating one on first run
 /// (spec §4). Shared by every call path so both the CLI and the
@@ -294,7 +294,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Listen { port, preset, ptt_key, no_ptt, input_device, output_device } => {
-            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
             println!("Listening on {}", socket.local_addr()?);
             let identity = load_identity()?;
             let peer = PeerConnection::listen(socket, &identity).await?;
@@ -303,7 +303,7 @@ async fn main() -> Result<()> {
             run_call(peer, preset, &ptt_key, no_ptt, input_device, output_device).await?;
         }
         Command::Call { remote, port, preset, ptt_key, no_ptt, input_device, output_device } => {
-            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
             println!("Calling {remote} from {}...", socket.local_addr()?);
             let identity = load_identity()?;
             let peer = PeerConnection::connect(socket, remote, &identity).await?;

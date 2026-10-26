@@ -457,6 +457,9 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
         | ControlMessage::GroupPunchPeer { .. }
         | ControlMessage::GroupLeave
         | ControlMessage::GroupSfu { .. }
+        | ControlMessage::MlsKeyPackage(_)
+        | ControlMessage::MlsWelcome(_)
+        | ControlMessage::MlsCommit(_)
         | ControlMessage::FileLink { .. } => {}
         ControlMessage::FileOffer {
             transfer_id,
@@ -947,8 +950,8 @@ mod integration_tests {
     /// offers, and `drop_chunk` decides which of the first-pass chunks B
     /// pretends never arrived -- to exercise the repair path for real.
     async fn connected_pair(store: PathBuf, drop_chunk: fn(u32) -> bool) -> Pair {
-        let socket_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let socket_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_a = Arc::new(antiphon_net::AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
+        let socket_b = Arc::new(antiphon_net::AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
         let addr_b = socket_b.local_addr().unwrap();
 
         // Two distinct identities, so this exercises the same authenticated

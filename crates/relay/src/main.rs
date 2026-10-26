@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use antiphon_relay::files::{FileHost, FileStore, HostPolicy, Retention};
 use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
+use antiphon_net::dht::{self, DhtNode, ListingEntry, NodeKey};
 use antiphon_relay::onion::{load_or_create_hop_key, HopLimits, HopNode};
 use antiphon_relay::sfu::{Sfu, SfuLimits};
 use antiphon_relay::{run_node_full, Limits, Relay, COMMITMENT};
@@ -115,6 +116,35 @@ struct Args {
     /// Let circuits reach private and loopback addresses (a LAN-only node).
     #[arg(long)]
     hops_allow_private: bool,
+    /// Also be a DHT node, so contacts can find each other again after
+    /// an address changes (spec §4). Off by default. Stores only sealed
+    /// records under keys that change daily.
+    #[arg(long)]
+    dht: bool,
+    /// Another DHT node to join through. Repeat for several. A node with
+    /// none waits to be joined.
+    #[arg(long = "dht-bootstrap", requires = "dht")]
+    dht_bootstrap: Vec<String>,
+    /// Where this node's DHT key is kept, so its id (and the work behind
+    /// it) survives a restart.
+    #[arg(long, default_value = "antiphon-dht.key")]
+    dht_key: std::path::PathBuf,
+    /// Serve a directory of public communities from this file: one per
+    /// line, `name | description | invite link`. Opt-in for each
+    /// community; never lists people.
+    #[arg(long, requires = "dht")]
+    directory: Option<std::path::PathBuf>,
+}
+
+/// Loads the node's DHT key, or makes and saves one.
+fn load_dht_key(path: &std::path::Path) -> anyhow::Result<NodeKey> {
+    if let Ok(bytes) = std::fs::read(path) {
+        return NodeKey::from_bytes(&bytes, dht::POW_BITS)
+            .ok_or_else(|| anyhow::anyhow!("{} is not a valid DHT key; move it aside to make a new one", path.display()));
+    }
+    let key = NodeKey::generate(dht::POW_BITS);
+    std::fs::write(path, key.to_bytes())?;
+    Ok(key)
 }
 
 #[tokio::main]
@@ -212,10 +242,54 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let dht_node = if args.dht {
+        let mut node = DhtNode::new(load_dht_key(&args.dht_key)?, dht::Config::default());
+        if let Some(path) = &args.directory {
+            let listing = ListingEntry::parse_file(&std::fs::read_to_string(path)?)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            node.set_listing(listing);
+        }
+        let mut bootstrap = Vec::new();
+        for b in &args.dht_bootstrap {
+            match tokio::net::lookup_host(b.as_str()).await?.next() {
+                Some(a) => bootstrap.push(a),
+                None => anyhow::bail!("{b} did not resolve"),
+            }
+        }
+        let out = node.bootstrap(&bootstrap, std::time::Instant::now());
+        for (to, bytes) in out {
+            let _ = socket.send_to(&bytes, to).await;
+        }
+        Some(Arc::new(Mutex::new(node)))
+    } else {
+        None
+    };
     println!("antiphon-relay listening on {}\n\n{COMMITMENT}", socket.local_addr()?);
     if let Some(h) = &hops {
         let key: String = h.lock().unwrap().public_key().iter().map(|b| format!("{b:02x}")).collect();
         println!("\nHops on: carrying anonymity circuits. Hop key {key}");
+    }
+    if let Some(d) = &dht_node {
+        let id: String = d.lock().unwrap().id().iter().take(8).map(|b| format!("{b:02x}")).collect();
+        println!("\nDHT node on (id {id}...).");
+    }
+    if args.directory.is_some() {
+        println!("Serving a directory of public communities.");
+    }
+
+    // The DHT's timers: verification timeouts, record expiry, refresh.
+    if let Some(d) = dht_node.clone() {
+        let socket = socket.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let out = d.lock().unwrap().tick(std::time::Instant::now());
+                for (to, bytes) in out {
+                    let _ = socket.send_to(&bytes, to).await;
+                }
+            }
+        });
     }
     if args.files {
         println!("\nHosting files in {}: sealed copies this node cannot read.", args.files_dir.display());
@@ -254,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
         let files = files.clone();
         let sfu = sfu.clone();
         let hops = hops.clone();
+        let dht_node = dht_node.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(secs.max(1)));
             loop {
@@ -272,6 +347,10 @@ async fn main() -> anyhow::Result<()> {
                     let s = s.lock().unwrap().stats();
                     println!("sfu rooms={} members={} packets_forwarded={}", s.rooms, s.members, s.forwarded);
                 }
+                if let Some(d) = &dht_node {
+                    let s = d.lock().unwrap().stats();
+                    println!("dht nodes={} records={} stores_refused={}", s.nodes, s.records, s.stores_refused);
+                }
                 if let Some(f) = &files {
                     let u = f.lock().unwrap().usage();
                     println!(
@@ -288,7 +367,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::select! {
-        result = run_node_full(socket, relay, mailbox, files.clone(), sfu, hops) => result?,
+        result = run_node_full(socket, relay, mailbox, files.clone(), sfu, hops, dht_node) => result?,
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())

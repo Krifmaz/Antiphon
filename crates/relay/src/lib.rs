@@ -255,7 +255,21 @@ pub async fn run_node(
     mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
 ) -> std::io::Result<()> {
-    run_node_full(socket, relay, mailbox, files, None, None).await
+    run_node_full(socket, relay, mailbox, files, None, None, None).await
+}
+
+/// [`run_node`], also serving as a DHT node (spec §4) when `dht` is given.
+/// Off unless the operator asks: a node that isn't one stays silent to
+/// DHT traffic rather than refusing it, so it can't be mapped as one.
+/// The caller drives [`antiphon_net::dht::DhtNode::tick`] on a timer.
+pub async fn run_node_with_dht(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
+    dht: Option<Arc<std::sync::Mutex<antiphon_net::dht::DhtNode>>>,
+) -> std::io::Result<()> {
+    run_node_full(socket, relay, mailbox, files, None, None, dht).await
 }
 
 /// [`run_node`], plus group-call forwarding if `sfu` is given. SFU
@@ -268,7 +282,7 @@ pub async fn run_node_with_sfu(
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
     sfu: Option<Arc<std::sync::Mutex<sfu::Sfu>>>,
 ) -> std::io::Result<()> {
-    run_node_full(socket, relay, mailbox, files, sfu, None).await
+    run_node_full(socket, relay, mailbox, files, sfu, None, None).await
 }
 
 /// [`run_node`], and if `hops` is given, this node as a hop on anonymity
@@ -280,7 +294,7 @@ pub async fn run_node_with_hops(
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
     hops: Option<Arc<std::sync::Mutex<onion::HopNode>>>,
 ) -> std::io::Result<()> {
-    run_node_full(socket, relay, mailbox, files, None, hops).await
+    run_node_full(socket, relay, mailbox, files, None, hops, None).await
 }
 
 /// Every service on one socket: relay, and each optional one if given.
@@ -294,6 +308,7 @@ pub async fn run_node_full(
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
     sfu: Option<Arc<std::sync::Mutex<sfu::Sfu>>>,
     hops: Option<Arc<std::sync::Mutex<onion::HopNode>>>,
+    dht: Option<Arc<std::sync::Mutex<antiphon_net::dht::DhtNode>>>,
 ) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65_536];
     let mut last_sweep = Instant::now();
@@ -334,7 +349,12 @@ pub async fn run_node_full(
             }
             continue;
         }
-        let out = if antiphon_net::sfu::Message::is_sfu_datagram(&buf[..n]) {
+        let out = if antiphon_net::dht::Message::is_dht_datagram(&buf[..n]) {
+            match &dht {
+                Some(d) => d.lock().unwrap().handle(from, &buf[..n], now),
+                None => vec![],
+            }
+        } else if antiphon_net::sfu::Message::is_sfu_datagram(&buf[..n]) {
             match &sfu {
                 Some(s) => s.lock().unwrap().handle(from, &buf[..n], now),
                 None => match antiphon_net::sfu::Message::decode(&buf[..n]) {
@@ -471,7 +491,9 @@ If it forwards group calls, it sees a room token that changes daily and a
 random tag per member per call, never a group, a name or a word: the audio
 is sealed by the members and forwarded as it came.
 If it offers hops for anonymity mode, its hop key only peels routing layers:
-it never decrypts a call, and learns only the hop before and the hop after.";
+it never decrypts a call, and learns only the hop before and the hop after.
+If it is a DHT node, it stores records filed under keys that change daily,
+sealed so it can read neither whose they are nor the address inside.";
 
 #[cfg(test)]
 mod tests {

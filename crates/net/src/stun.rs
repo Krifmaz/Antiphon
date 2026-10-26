@@ -15,7 +15,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use crate::socket::Datagram;
 
 use crate::error::NetError;
 
@@ -147,7 +147,7 @@ fn parse_address(value: &[u8], txid: &TransactionId, xor: bool) -> Option<Socket
 /// Asks one STUN server what public address it sees `socket` coming from.
 /// Retries a few times, since a lost UDP request is ordinary rather than
 /// exceptional.
-pub async fn discover_public_addr(socket: &UdpSocket, server: SocketAddr) -> Result<SocketAddr, NetError> {
+pub async fn discover_public_addr(socket: &impl Datagram, server: SocketAddr) -> Result<SocketAddr, NetError> {
     let txid = random_transaction_id();
     let request = build_binding_request(&txid);
     let mut buf = vec![0u8; 1024];
@@ -180,7 +180,7 @@ pub async fn discover_public_addr(socket: &UdpSocket, server: SocketAddr) -> Res
 }
 
 /// Tries each of [`DEFAULT_STUN_SERVERS`] until one answers.
-pub async fn discover_public_addr_default(socket: &UdpSocket) -> Result<SocketAddr, NetError> {
+pub async fn discover_public_addr_default(socket: &impl Datagram) -> Result<SocketAddr, NetError> {
     for name in DEFAULT_STUN_SERVERS {
         let Ok(addrs) = tokio::net::lookup_host(name).await else { continue };
         for server in addrs {
@@ -229,7 +229,7 @@ pub fn classify_mapping(first: SocketAddr, second: SocketAddr) -> NatMapping {
 /// classifies the mapping. Errors when fewer than two servers answer --
 /// one answer says nothing about the mapping, and guessing would put the
 /// wrong line in front of people.
-pub async fn discover_mapping(socket: &UdpSocket) -> Result<(SocketAddr, NatMapping), NetError> {
+pub async fn discover_mapping(socket: &impl crate::Datagram) -> Result<(SocketAddr, NatMapping), NetError> {
     let mut seen: Vec<(SocketAddr, SocketAddr)> = Vec::new();
     for name in DEFAULT_STUN_SERVERS {
         let Ok(addrs) = tokio::net::lookup_host(name).await else { continue };
@@ -346,7 +346,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires internet access"]
     async fn discovers_a_public_address_from_a_real_server() {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.expect("bind a local socket");
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.expect("bind a local socket");
         let local = socket.local_addr().unwrap();
         let public = discover_public_addr_default(&socket).await.expect("a STUN server should answer");
         println!("local {local}  ->  public {public}");

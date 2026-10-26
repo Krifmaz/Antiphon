@@ -24,7 +24,7 @@ A Cargo workspace, one crate per concern:
 | [`crates/net`](crates/net) | §2, §3, §5, §6 | UDP peer connection, STUN discovery + hole punching, NAT-PMP port mapping with renewal, adaptive jitter buffer, forward error correction, audio retransmit requests, file chunking with per-chunk hashes |
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
 | [`crates/app`](crates/app) | §1 Utility | `antiphon-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
-| [`crates/relay`](crates/relay) | §3 Relay, §8 mailbox | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry. With `--mailbox`, also holds sealed mail for registered inboxes; with `--files`, sealed copies of pinned files |
+| [`crates/relay`](crates/relay) | §3 Relay, §8 mailbox | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry. With `--mailbox`, also holds sealed mail for registered inboxes; with `--files`, sealed copies of pinned files; with `--dht`, a DHT node and an optional community directory |
 | [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon`: the Slint desktop app -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
 Every crate's `lib.rs` doc comment states its scope against the spec.
@@ -40,17 +40,18 @@ The short version of [`FEATURES.md`](FEATURES.md):
   control, shared files that outlive the call (per-file keys, seeding,
   pinning, multi-peer download), chat persisted encrypted at rest with
   an outbox and offline delivery through mailbox nodes on your own
-  route list, QR / link
-  invites, verification codes, key-change warnings, the UI editor and
+  route list, contacts found again through a DHT when their address
+  changes, an in-app WireGuard tunnel with per-mode routing and a kill
+  switch, QR / link invites, verification codes, key-change warnings, the UI editor and
   theming, presence, notification rules, data export, reproducible
   build configuration with a CI pipeline for all three desktop targets.
 - **Reduced:** Caps Lock as push-to-talk works on Windows and X11 but
   not yet on macOS or Wayland; no project-run mailbox node ships as a
   default.
-- **Not built:** anything that needs infrastructure the app does not
-  have yet -- the DHT, large group calls / MLS / SFU, VPN integration,
-  mobile clients, push
-  notifications. Each is a project on its own and is listed as such.
+- **Not built yet:** communities and group chats, large group calls
+  through an SFU (small mesh group calls are keyed with MLS and SFrame
+  already), mobile clients, push notifications, packaging. Each is
+  listed as such in FEATURES.md.
 
 ## Installing
 
@@ -145,6 +146,16 @@ and `--files-per-user-mb` set the limits; `--files-expire-days N` or
 `--files-expire-unopened-days N` set retention (default: keep);
 `--files-list` and `--files-purge <id|all>` are the admin view. Then
 add its address under Settings > Call > Shared files > Pin nodes.
+
+To be a DHT node, so contacts can find each other again after an
+address changes, add `--dht` (off by default). It stores only sealed
+records under keys that change daily, and can't tell whose they are.
+`--dht-bootstrap <host:port>` (repeatable) joins other nodes;
+`--dht-key <path>` keeps the node's key (default `antiphon-dht.key`).
+`--directory <file>` also serves a directory of public communities, one
+per line as `name | description | invite link`. In the app: Settings >
+Call > Finding contacts -- switch the DHT on and add bootstrap nodes
+(none are built in), or add a directory and press Browse.
 
 ## Layout
 

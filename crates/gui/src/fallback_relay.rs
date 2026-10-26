@@ -22,7 +22,6 @@ use std::time::Duration;
 
 use antiphon_net::relay::{dial, RelayToken};
 use antiphon_net::NetError;
-use tokio::net::UdpSocket;
 
 /// Relays run by the project, tried last. Empty until the project runs
 /// nodes of its own: an address here is a promise to keep a machine up,
@@ -58,7 +57,9 @@ pub fn parse_list(text: &str) -> Vec<String> {
 
 /// Whether a relay at `addr` is up.
 pub async fn probe(addr: SocketAddr) -> bool {
-    let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)).await else { return false };
+    // Through the VPN when voice goes that way: a probe that slips past
+    // the kill switch would be the leak the switch exists to stop.
+    let Ok(socket) = crate::vpn::bind(antiphon_net::vpn::TrafficKind::Voice, 0).await else { return false };
     let mut token: RelayToken = [0; 32];
     if getrandom::fill(&mut token).is_err() {
         return false;
@@ -69,8 +70,7 @@ pub async fn probe(addr: SocketAddr) -> bool {
 /// The first candidate that resolves and answers, if any.
 pub async fn first_live(candidates: &[String]) -> Option<String> {
     for candidate in candidates {
-        let Ok(mut addrs) = tokio::net::lookup_host(candidate.as_str()).await else { continue };
-        let Some(addr) = addrs.find(|a| a.is_ipv4()) else { continue };
+        let Ok(addr) = crate::state::resolve(candidate).await else { continue };
         if probe(addr).await {
             return Some(candidate.clone());
         }
@@ -96,7 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_live_relay_answers_the_probe_and_a_dead_one_does_not() {
-        let socket = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let addr = socket.local_addr().unwrap();
         let relay = std::sync::Arc::new(std::sync::Mutex::new(antiphon_relay::Relay::default()));
         let server = tokio::spawn(antiphon_relay::run(socket, relay));

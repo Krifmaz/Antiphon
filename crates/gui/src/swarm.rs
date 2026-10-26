@@ -19,7 +19,7 @@ use std::time::Duration;
 use antiphon_crypto::file_seal::{self, FileId, FileKey, CHUNK};
 use antiphon_crypto::IdentityKeyPair;
 use antiphon_net::blob;
-use tokio::net::UdpSocket;
+use antiphon_net::vpn::TrafficKind;
 
 pub const TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -43,7 +43,7 @@ impl Availability {
 
 /// Asks every holder; the best answer wins.
 pub async fn availability(holders: &[SocketAddr], file: FileId, token: [u8; 32]) -> Availability {
-    let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else { return Availability::SenderOffline };
+    let Ok(socket) = crate::vpn::bind(TrafficKind::Files, 0).await else { return Availability::SenderOffline };
     let mut removed = false;
     for h in holders {
         match blob::info(&socket, *h, file, token, Duration::from_millis(1500)).await {
@@ -83,7 +83,10 @@ pub async fn download(
     progress: Arc<Mutex<Progress>>,
 ) -> Result<(), String> {
     let token = file_seal::read_token(&key);
-    let probe = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| e.to_string())?;
+    // Shared-file traffic goes through the VPN when the user routed it
+    // there, and is refused rather than sent direct under the kill switch
+    // (spec §6).
+    let probe = crate::vpn::bind(TrafficKind::Files, 0).await.map_err(|e| e.to_string())?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
     // Find who has it, and the hash list from the first that does.
@@ -139,7 +142,7 @@ pub async fn download(
         // address only for the first holder; the rest claim afresh.
         let me = me.clone();
         workers.push(tokio::spawn(async move {
-            let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else { return };
+            let Ok(socket) = crate::vpn::bind(TrafficKind::Files, 0).await else { return };
             if let Some(me) = &me {
                 let sig = me.sign(&blob::claim_bytes(&file, now));
                 let _ = blob::claim(&socket, holder, file, me.public().identity_key, now, sig, TIMEOUT).await;
@@ -200,6 +203,7 @@ pub async fn download(
 mod tests {
     use super::*;
     use antiphon_relay::files::{FileHost, FileStore, HostPolicy, Scope};
+    use tokio::net::UdpSocket;
 
     fn temp(tag: &str) -> std::path::PathBuf {
         let mut r = [0u8; 6];

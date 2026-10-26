@@ -25,7 +25,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use crate::socket::Datagram;
 
 use crate::error::NetError;
 pub use antiphon_crypto::file_seal::{ChunkHash, FileId, CHUNK, TAG};
@@ -288,7 +288,7 @@ impl Message {
 }
 
 async fn exchange<T>(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     holder: SocketAddr,
     request: &Message,
     timeout: Duration,
@@ -323,7 +323,7 @@ fn refused<T>(m: &Message) -> Option<Result<T, NetError>> {
 
 /// Size and chunk count, from one holder.
 pub async fn info(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     holder: SocketAddr,
     file: FileId,
     token: [u8; 32],
@@ -339,7 +339,7 @@ pub async fn info(
 /// Every chunk hash, page by page. Not checked here: the caller checks
 /// them against the file id, which is the only thing it can trust.
 pub async fn hashes(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     holder: SocketAddr,
     file: FileId,
     token: [u8; 32],
@@ -361,7 +361,7 @@ pub async fn hashes(
 
 /// One sealed chunk.
 pub async fn chunk(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     holder: SocketAddr,
     file: FileId,
     token: [u8; 32],
@@ -378,7 +378,7 @@ pub async fn chunk(
 /// Proves an identity to a contacts-only holder. The holder remembers
 /// this socket address for the file for a few minutes.
 pub async fn claim(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     holder: SocketAddr,
     file: FileId,
     identity: [u8; 32],
@@ -396,7 +396,7 @@ pub async fn claim(
 /// Uploads a sealed copy to a node (spec §5 "Pinning").
 #[allow(clippy::too_many_arguments)]
 pub async fn put(
-    socket: &UdpSocket,
+    socket: &impl Datagram,
     node: SocketAddr,
     file: FileId,
     size: u64,

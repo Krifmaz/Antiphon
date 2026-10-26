@@ -88,6 +88,8 @@ use std::time::Duration;
 
 use antiphon_crypto::onion::{client_keys, LayerKeys};
 use tokio::net::UdpSocket;
+
+use crate::AppSocket;
 use tokio::task::JoinHandle;
 
 use crate::error::NetError;
@@ -299,7 +301,7 @@ fn random_u32() -> u32 {
 ///
 /// Trust: the answer is whatever came back from `node`'s address. See the
 /// module docs on pinning.
-pub async fn fetch_hop_key(socket: &UdpSocket, node: SocketAddr, timeout: Duration) -> Result<[u8; 32], NetError> {
+pub async fn fetch_hop_key(socket: &impl crate::Datagram, node: SocketAddr, timeout: Duration) -> Result<[u8; 32], NetError> {
     let request = Cell::HopKeyRequest.encode();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut buf = [0u8; 128];
@@ -324,7 +326,7 @@ pub async fn fetch_hop_key(socket: &UdpSocket, node: SocketAddr, timeout: Durati
 /// The caller's end of a built circuit: its [`Layers`], and the socket
 /// that talks to the entry.
 pub struct Circuit {
-    socket: Arc<UdpSocket>,
+    socket: Arc<AppSocket>,
     entry: SocketAddr,
     layers: Layers,
 }
@@ -426,13 +428,13 @@ impl Circuit {
             Some(SocketAddr::V6(_)) => (Ipv6Addr::UNSPECIFIED, 0).into(),
             _ => (Ipv4Addr::UNSPECIFIED, 0).into(),
         };
-        let socket = Arc::new(UdpSocket::bind(any).await?);
+        let socket = Arc::new(AppSocket::bind_direct(any).await?);
         Self::build_on(socket, hops, exit_target, BUILD_TIMEOUT).await
     }
 
     /// [`Self::build`] on a socket of the caller's choosing.
     pub async fn build_on(
-        socket: Arc<UdpSocket>,
+        socket: Arc<AppSocket>,
         hops: &[(SocketAddr, [u8; 32])],
         exit_target: SocketAddr,
         timeout: Duration,
@@ -517,7 +519,7 @@ impl Circuit {
     /// unchanged. See [`OnionShim`].
     pub async fn into_shim(self) -> Result<OnionShim, NetError> {
         let pump = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let user = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?);
+        let user = Arc::new(AppSocket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?));
         let relay_addr = pump.local_addr()?;
         let user_addr = user.local_addr()?;
         let circuit_addr = self.local_addr()?;
@@ -564,15 +566,15 @@ async fn pump_loop(mut circuit: Circuit, pump: UdpSocket, user: SocketAddr) {
 ///
 /// Dropping it stops the pump and tells the hops to forget the circuit.
 pub struct OnionShim {
-    socket: Arc<UdpSocket>,
+    socket: Arc<AppSocket>,
     relay_addr: SocketAddr,
     circuit_addr: SocketAddr,
     task: JoinHandle<()>,
-    destroy: (Arc<UdpSocket>, SocketAddr, Vec<u8>),
+    destroy: (Arc<AppSocket>, SocketAddr, Vec<u8>),
 }
 
 impl OnionShim {
-    pub fn socket(&self) -> Arc<UdpSocket> {
+    pub fn socket(&self) -> Arc<AppSocket> {
         self.socket.clone()
     }
 
@@ -590,7 +592,20 @@ impl Drop for OnionShim {
     fn drop(&mut self) {
         self.task.abort();
         let (socket, entry, cell) = &self.destroy;
-        let _ = socket.try_send_to(cell, *entry);
+        match socket.as_udp() {
+            Some(udp) => {
+                let _ = udp.try_send_to(cell, *entry);
+            }
+            // A tunneled socket can only send from a task.
+            None => {
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    let (socket, entry, cell) = (socket.clone(), *entry, cell.clone());
+                    rt.spawn(async move {
+                        let _ = socket.send_to(&cell, entry).await;
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -693,7 +708,7 @@ mod tests {
         assert!(plan.confirms(&Cell::Created { circ: plan.circ, layer: back.clone() }.encode()));
         assert!(!plan.confirms(&Cell::Created { circ: plan.circ ^ 1, layer: back }.encode()));
 
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
         let circ = plan.circ;
         let mut circuit = Circuit { socket, entry: hops[0].0, layers: plan.into_layers() };
 

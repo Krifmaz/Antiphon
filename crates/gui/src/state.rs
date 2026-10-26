@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use device_query::{DeviceQuery, DeviceState, Keycode};
-use tokio::net::UdpSocket;
+use antiphon_net::vpn::TrafficKind;
+use antiphon_net::AppSocket;
 use tokio::task::JoinHandle;
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -869,7 +870,7 @@ pub struct AppState {
     pub echo_canceller: Arc<Mutex<EchoCanceller>>,
     /// The socket STUN discovery ran on, held so the follow-up punch can
     /// reuse it -- see `establish_punch`. Cleared once a call starts.
-    pub punch_socket: Mutex<Option<Arc<UdpSocket>>>,
+    pub punch_socket: Mutex<Option<Arc<AppSocket>>>,
     /// The running port-forward renewal task (spec §10), if one is up.
     ///
     /// Held so it can be stopped -- and the mapping released -- when the
@@ -899,7 +900,7 @@ pub async fn establish_listen(
     identity: Arc<IdentityKeyPair>,
     relay: Option<(SocketAddr, RelayTokens)>,
 ) -> Result<PeerConnection> {
-    let mut socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+    let mut socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, port).await?);
     if let Some((mut relay_addr, tokens)) = relay {
         // Spec §3 anonymity mode: register through a circuit, so the relay
         // only ever sees the last hop. The direct port stays unused --
@@ -921,12 +922,10 @@ pub async fn establish_listen(
     Ok(PeerConnection::listen(socket, &identity).await?)
 }
 
-/// Resolves a `host:port` the user typed, for a relay.
+/// Resolves a `host:port` the user typed, for a relay -- through the
+/// VPN's DNS when calls go through the VPN (spec §6).
 pub async fn resolve(address: &str) -> Result<SocketAddr> {
-    tokio::net::lookup_host(address)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("{address} did not resolve to any address"))
+    Ok(crate::vpn::resolve(TrafficKind::Voice, address).await?)
 }
 
 /// Calls someone through a relay (spec §3 "Everyone else -> Relay"): asks
@@ -941,7 +940,7 @@ pub async fn establish_relayed_call(
     let (socket, relay) = match crate::anonymity::configured_hops() {
         // Spec §3 anonymity mode: the relay sees the circuit's last hop.
         Some(hops) => crate::anonymity::route_to(&hops, relay).await?,
-        None => (Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?), relay),
+        None => (Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?), relay),
     };
     antiphon_net::relay::dial(&socket, relay, token, Duration::from_secs(5)).await?;
     match tokio::time::timeout(Duration::from_secs(15), PeerConnection::connect(socket, relay, &identity)).await {
@@ -955,7 +954,7 @@ pub async fn establish_call(
     local_port: u16,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
     Ok(PeerConnection::connect(socket, remote, &identity).await?)
 }
 
@@ -968,8 +967,8 @@ pub const PUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// that socket as. The socket is returned alongside the answer because the
 /// discovered mapping belongs to *this* socket -- calling on a different
 /// one would get a different (and useless) public port.
-pub async fn discover_public_address(local_port: u16) -> Result<(SocketAddr, Arc<UdpSocket>)> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+pub async fn discover_public_address(local_port: u16) -> Result<(SocketAddr, Arc<AppSocket>)> {
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
     let public = antiphon_net::stun::discover_public_addr_default(&socket).await?;
     Ok((public, socket))
 }
@@ -979,6 +978,10 @@ pub struct PortMapHandle {
     pub gateway: std::net::Ipv4Addr,
     pub internal_port: u16,
     pub external_port: u16,
+    /// The port the router forwards *now*: a renewal may come back with
+    /// a different one (spec §6), and this follows it so the DHT record
+    /// is republished with the new address.
+    current_external: Arc<std::sync::atomic::AtomicU16>,
     renewal: tokio::task::JoinHandle<()>,
 }
 
@@ -991,6 +994,11 @@ impl PortMapHandle {
     fn stop(self) -> (std::net::Ipv4Addr, u16) {
         self.renewal.abort();
         (self.gateway, self.internal_port)
+    }
+
+    /// The forwarded port as of the latest renewal.
+    pub fn current_external_port(&self) -> u16 {
+        self.current_external.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Stops renewing and asks the router to drop the mapping, without
@@ -1035,12 +1043,17 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
         .ok_or_else(|| anyhow::anyhow!("this machine has no IPv4 address on a local network"))?;
     let (gateway, mapping) = antiphon_net::port_map::open_port(local, local_port).await?;
 
+    let current_external = Arc::new(std::sync::atomic::AtomicU16::new(mapping.external_port));
+    let follow = current_external.clone();
     let renewal = tokio::spawn(async move {
         let mut interval = mapping.renew_after();
         loop {
             tokio::time::sleep(interval).await;
             match antiphon_net::port_map::request_mapping(gateway, local_port).await {
-                Ok(renewed) => interval = renewed.renew_after(),
+                Ok(renewed) => {
+                    interval = renewed.renew_after();
+                    follow.store(renewed.external_port, std::sync::atomic::Ordering::Relaxed);
+                }
                 // Kept trying rather than given up on: a router that was
                 // rebooting a moment ago will answer the next one, and
                 // stopping here would silently end the user's
@@ -1055,6 +1068,7 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
         gateway,
         internal_port: mapping.internal_port,
         external_port: mapping.external_port,
+        current_external,
         renewal,
     })
 }
@@ -1066,12 +1080,12 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
 pub async fn establish_punch(
     remote: SocketAddr,
     local_port: u16,
-    existing: Option<Arc<UdpSocket>>,
+    existing: Option<Arc<AppSocket>>,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
     let socket = match existing {
         Some(s) => s,
-        None => Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?),
+        None => Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?),
     };
     Ok(PeerConnection::punch(socket, remote, PUNCH_TIMEOUT, &identity).await?)
 }
@@ -1590,18 +1604,21 @@ pub fn start_pipeline(
                 }
                 sequence = sequence.wrapping_add(1);
                 if let Some(sfu) = send_group.sfu_call() {
-                    // Spec §3 past the mesh: one upload, and the SFU
-                    // forwards it to everyone.
+                    // Spec §3 past the mesh: one SFrame-sealed upload, and
+                    // the SFU forwards it to everyone.
                     sfu.send_audio(&bytes).await;
                 } else {
-                    if let Err(e) = send_peer.send_audio(&bytes).await {
+                    // Spec §3 SFrame: in a group call with MLS keys, sealed
+                    // once under this epoch's key for everyone keyed in.
+                    let sealed = send_group.keys.seal_audio(&bytes);
+                    let to_primary =
+                        send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                    if let Err(e) = send_peer.send_audio(to_primary).await {
                         eprintln!("[net] send error: {e}");
                     }
-                    // Spec §3 group mesh: the same sealed-per-person frame
-                    // to everyone else in the call, one upload each.
-                    for leg in send_group.leg_peers() {
-                        let _ = leg.send_audio(&bytes).await;
-                    }
+                    // Spec §3 group mesh: the same frame to everyone else in
+                    // the call, one upload each.
+                    send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
                 }
             } else {
                 // Cleared while not transmitting, so the first frame after
@@ -1627,6 +1644,7 @@ pub fn start_pipeline(
     let recv_jitter = jitter.clone();
     let recv_profile = peer_profile.clone();
     let recv_group = group.clone();
+    let recv_primary_key = peer.peer_identity().identity_key;
     let recv_ft_state = file_transfer_state.clone();
     let recv_ft_peer = peer.clone();
     let recv_chat_log = chat_log.clone();
@@ -1644,6 +1662,9 @@ pub fn start_pipeline(
         let result = recv_peer
             .recv_loop(move |msg| match msg {
                 Received::Audio { counter: _, plaintext } => {
+                    // Spec §3 SFrame: a group member's audio is opened
+                    // under the MLS epoch key; anything refused is lost.
+                    let Some(plaintext) = recv_group.keys.open_audio(&recv_primary_key, &plaintext) else { return };
                     // A frame that won't parse is dropped like a lost one;
                     // the buffer already knows how to handle a gap.
                     //
@@ -1690,9 +1711,14 @@ pub fn start_pipeline(
                                 .collect()
                         };
                         let peer = recv_resend_peer.clone();
+                        let group = recv_group.clone();
                         tokio::spawn(async move {
                             for bytes in to_send {
-                                let _ = peer.send_audio(&bytes).await;
+                                // Sealed afresh: a resend gets a new SFrame
+                                // counter, like it gets a new crypto one.
+                                let sealed = group.keys.seal_audio(&bytes);
+                                let frame = group.keys.frame_for(&peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                                let _ = peer.send_audio(frame).await;
                             }
                         });
                     }

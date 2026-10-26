@@ -109,7 +109,7 @@ async fn a_call_through_two_hops_never_shows_the_caller_to_the_target_relay() {
     let token = relay_token::pairwise(&bob, &alice.public().prekey, 20_000);
 
     // Bob listens at the target relay the ordinary way.
-    let bob_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let bob_socket = Arc::new(antiphon_net::AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
     relay::register(&bob_socket, target, &[token]).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let bob_listen = {

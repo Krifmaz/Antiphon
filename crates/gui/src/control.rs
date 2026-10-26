@@ -188,6 +188,25 @@ pub enum ControlMessage {
     /// Sent only over the call's own end-to-end sessions, so the SFU never
     /// learns the secret. See `crate::sfu_call`.
     GroupSfu { sfu: String, secret: String, day: u64 },
+    /// Spec §3 "Groups -- MLS": the group call's key agreement, run over
+    /// each member's existing encrypted link. A member not yet in the MLS
+    /// group offers a KeyPackage; the committer answers with a Welcome and
+    /// tells everyone else with a Commit. See `group.rs`.
+    MlsKeyPackage(MlsPart),
+    MlsWelcome(MlsPart),
+    MlsCommit(MlsPart),
+}
+
+/// One piece of an MLS message. A Welcome carries the whole ratchet tree
+/// and outgrows one datagram, so every MLS message is split the same way:
+/// `msg` names it, and the receiver reassembles `parts` pieces.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MlsPart {
+    pub msg: u64,
+    pub part: u16,
+    pub parts: u16,
+    /// Base64 of this piece of the MLS wire encoding.
+    pub data: String,
 }
 
 impl ControlMessage {

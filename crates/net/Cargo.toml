@@ -4,10 +4,19 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
+# WireGuard (spec §6 "userspace WireGuard"): BLAKE2s, ChaCha20-Poly1305 and
+# X25519 are the protocol's own primitives. Pure Rust on purpose: boringtun
+# pulls in ring, whose C build breaks the Windows cross-build.
+blake2 = "=0.11.0"
 chacha20poly1305 = "0.11.0"
+# Node keys for the DHT (`dht.rs`); both already in the tree via crypto.
+ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 sha2 = "0.11.0"
+x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+zeroize = "1.9.0"
 # Only for SO_RCVBUF; already in the tree underneath tokio.
 socket2 = "0.6.5"
 thiserror = "2.0.20"

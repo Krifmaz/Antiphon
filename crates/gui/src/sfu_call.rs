@@ -4,48 +4,54 @@
 //!
 //! A mesh call stays a mesh up to [`crate::group::MAX_PEOPLE`]. When the
 //! person adding a sixth finds the call full, they move it: they make a
-//! fresh group secret, join a room on their relay's SFU (`antiphon-relay
+//! fresh room secret, join a room on their relay's SFU (`antiphon-relay
 //! --sfu`), and hand the SFU's address, the secret and the day to everyone
 //! over the pairwise connections the call already has -- end to end
 //! encrypted and authenticated, so the SFU never sees any of it. Each
 //! member then joins the same room and sends their audio there once,
 //! instead of once per person.
 //!
-//! Inside the room, every member:
+//! Inside the room:
 //!
-//! - makes a **sender key** of its own and seals each audio frame with it
-//!   (`antiphon_net::media_seal`, the stopgap until MLS-derived SFrame keys
-//!   replace it behind the same trait);
-//! - **announces** that key, its identity key and name, signed by its
-//!   identity and sealed under a key derived from the group secret, so
-//!   only members can read it and nobody can speak as someone else;
-//! - mixes everyone it hears through the same mixer the mesh uses.
+//! - **Audio is SFrame**, under the call's MLS keys (`crate::group_keys`):
+//!   the same epoch key the mesh uses, so a member removed from the MLS
+//!   group can't read what follows. A frame's KID names the sender's MLS
+//!   leaf, and it is only opened if that leaf belongs to the identity that
+//!   announced the room tag it came under. Until someone is keyed in, they
+//!   are silent in the room rather than sending anything in the clear.
+//! - **The room is a link for MLS.** People past the mesh are connected
+//!   to nobody but the person who added them, so KeyPackages, Welcomes and
+//!   Commits travel through the room too, addressed to one member and
+//!   sealed under the room secret. That keeps the "lowest linked leaf
+//!   commits" rule consistent for everyone in the room.
+//! - **Announcements** say which identity is behind a room tag and its
+//!   name, signed by that identity and sealed under the room secret, so
+//!   only members can read them and nobody can speak as someone else.
 //!
 //! What the SFU sees: a room token that changes daily, a random tag per
 //! member per call, and sealed bytes. Not a name, a key or a word.
 //!
-//! Known limits, said plainly: the group secret is shared by everyone in
-//! the call, so it gives no post-compromise security (MLS will); and
-//! someone removed from the call keeps the secret until the call ends.
+//! The room secret only hides who is in the room from the SFU and from
+//! strangers; it is not what keeps the audio private. MLS is.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use antiphon_crypto::IdentityKeyPair;
-use antiphon_net::media_seal::{generate_sender_key, MediaSealer, SenderKey, SenderKeySealer};
-use antiphon_net::sfu::{room_token, new_member_tag, MemberTag, SfuClient, SfuEvent};
+use antiphon_net::media_seal::MediaSealer;
+use antiphon_net::sfu::{new_member_tag, room_token, MemberTag, SfuClient, SfuEvent};
 use antiphon_net::JitterBuffer;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
 use sha2::Sha256;
-use tokio::net::UdpSocket;
-use tokio::task::JoinHandle;
 
-use crate::group::BlockCheck;
+use crate::control::ControlMessage;
+use crate::group::{BlockCheck, Group, Link};
+use crate::group_keys::SFRAME_AUDIO_TAG;
 
 /// Most people in an SFU call, matching the relay's default room size.
 pub const MAX_PEOPLE: usize = 50;
@@ -55,10 +61,12 @@ pub const SOURCE_BASE: u64 = 1 << 32;
 
 const KIND_MEDIA: u8 = 0;
 const KIND_ANNOUNCE: u8 = 1;
+const KIND_CONTROL: u8 = 2;
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(5);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const JITTER_MAX_WAIT: Duration = Duration::from_millis(80);
-const ANNOUNCE_CONTEXT: &[u8] = b"antiphon/sfu/announce/v1";
+const ANNOUNCE_CONTEXT: &[u8] = b"antiphon/sfu/announce/v2";
+const CONTROL_CONTEXT: &[u8] = b"antiphon/sfu/control/v1";
 
 /// Where and how to join, as handed from member to member.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,16 +92,41 @@ struct Member {
     jitter: Arc<Mutex<JitterBuffer>>,
 }
 
+type Members = Arc<Mutex<HashMap<MemberTag, Member>>>;
+
+/// SFrame through the room, as a [`MediaSealer`]: the call's MLS keys,
+/// with each room tag tied to the identity that announced it.
+pub struct RoomSealer {
+    group: Weak<Group>,
+    members: Members,
+}
+
+impl MediaSealer for RoomSealer {
+    fn seal(&mut self, plain: &[u8]) -> Option<Vec<u8>> {
+        self.group.upgrade()?.keys.seal_audio(plain)
+    }
+
+    fn open(&mut self, sender: MemberTag, sealed: &[u8]) -> Option<Vec<u8>> {
+        // Only SFrame: the room never carries audio in the clear.
+        if sealed.first() != Some(&SFRAME_AUDIO_TAG) {
+            return None;
+        }
+        let identity = self.members.lock().unwrap().get(&sender)?.identity_key;
+        self.group.upgrade()?.keys.open_audio(&identity, sealed)
+    }
+}
+
 /// This machine's place in an SFU call.
 pub struct SfuCall {
     pub invite: Invite,
     client: Arc<SfuClient>,
-    sealer: Arc<Mutex<SenderKeySealer>>,
-    members: Arc<Mutex<HashMap<MemberTag, Member>>>,
+    sealer: Mutex<RoomSealer>,
+    room_cipher: ChaCha20Poly1305,
+    members: Members,
     /// The person this machine's call started with, left out of the
     /// names list because the call screen already shows them.
     primary_key: [u8; 32],
-    tasks: Vec<JoinHandle<()>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for SfuCall {
@@ -106,26 +139,28 @@ impl Drop for SfuCall {
 
 impl SfuCall {
     /// Joins the room `invite` names and starts announcing and receiving.
+    /// MLS messages from the room land in `group`'s inbox as
+    /// [`Link::Room`].
     pub async fn join(
         invite: Invite,
+        group: &Arc<Group>,
         identity: Arc<IdentityKeyPair>,
         name: String,
         primary_key: [u8; 32],
         is_blocked: BlockCheck,
     ) -> anyhow::Result<Arc<SfuCall>> {
         let addr: SocketAddr = crate::state::resolve(&invite.sfu).await?;
-        let socket = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
+        let socket = Arc::new(crate::vpn::bind(antiphon_net::vpn::TrafficKind::Voice, 0).await?);
         let me = new_member_tag();
         let room = room_token(&invite.secret, invite.day);
         let (client, mut events) = SfuClient::join(socket, addr, room, me, JOIN_TIMEOUT)
             .await
             .map_err(|e| anyhow::anyhow!("the group relay at {} said no: {e}", invite.sfu))?;
         let client = Arc::new(client);
-        let sender_key = generate_sender_key();
-        let sealer = Arc::new(Mutex::new(SenderKeySealer::new(me, sender_key)));
-        let members: Arc<Mutex<HashMap<MemberTag, Member>>> = Arc::default();
-        let announce_cipher = announce_cipher(&invite.secret);
-        let announcement = Arc::new(seal_announce(&announce_cipher, &announce_body(&identity, &room, &me, &sender_key, &name)));
+        let members: Members = Arc::default();
+        let room_cipher = room_cipher(&invite.secret);
+        let announcement =
+            Arc::new(seal(&room_cipher, KIND_ANNOUNCE, ANNOUNCE_CONTEXT, &announce_body(&identity, &room, &me, &name)));
 
         let announcer = {
             let (client, announcement) = (client.clone(), announcement.clone());
@@ -138,15 +173,16 @@ impl SfuCall {
         };
 
         let receiver = {
-            let (client, sealer, members) = (client.clone(), sealer.clone(), members.clone());
+            let (client, members, cipher) = (client.clone(), members.clone(), room_cipher.clone());
+            let group = Arc::downgrade(group);
+            let mut sealer = RoomSealer { group: group.clone(), members: members.clone() };
             let next_id = AtomicU64::new(0);
             tokio::spawn(async move {
                 while let Some(event) = events.recv().await {
                     match event {
                         SfuEvent::Media { from, payload } => match payload.split_first() {
                             Some((&KIND_MEDIA, sealed)) => {
-                                let plain = sealer.lock().unwrap().open(from, sealed);
-                                let Some(plain) = plain else { continue };
+                                let Some(plain) = sealer.open(from, sealed) else { continue };
                                 let Some(decoded) = antiphon_net::fec::decode(&plain) else { continue };
                                 if let Some(m) = members.lock().unwrap().get(&from) {
                                     m.jitter.lock().unwrap().push_with_backup(
@@ -157,23 +193,17 @@ impl SfuCall {
                                 }
                             }
                             Some((&KIND_ANNOUNCE, sealed)) => {
-                                let Some(body) = open_announce(&announce_cipher, sealed) else { continue };
+                                let Some(body) = open(&cipher, ANNOUNCE_CONTEXT, sealed) else { continue };
                                 let Some(a) = parse_announce(&body, &room, &from) else { continue };
                                 if is_blocked(&a.identity_key) {
                                     continue;
                                 }
                                 let mut members = members.lock().unwrap();
-                                let known = members.get(&from).map(|m| m.identity_key);
-                                match known {
+                                match members.get_mut(&from) {
                                     // A tag can't change hands mid-call.
-                                    Some(k) if k != a.identity_key => continue,
-                                    Some(_) => {
-                                        if let Some(m) = members.get_mut(&from) {
-                                            m.name = a.name;
-                                        }
-                                    }
+                                    Some(m) if m.identity_key != a.identity_key => {}
+                                    Some(m) => m.name = a.name,
                                     None => {
-                                        sealer.lock().unwrap().add_sender(from, a.sender_key);
                                         members.insert(
                                             from,
                                             Member {
@@ -185,25 +215,34 @@ impl SfuCall {
                                         );
                                         // Say hello back at once, so a newcomer
                                         // doesn't wait out the timer to hear us.
-                                        drop(members);
-                                        let client = client.clone();
-                                        let announcement = announcement.clone();
+                                        let (client, announcement) = (client.clone(), announcement.clone());
                                         tokio::spawn(async move {
                                             let _ = client.send_media(&announcement).await;
                                         });
                                     }
                                 }
                             }
+                            Some((&KIND_CONTROL, sealed)) => {
+                                let Some(body) = open(&cipher, CONTROL_CONTEXT, sealed) else { continue };
+                                let Some((to, json)) = body.split_at_checked(16) else { continue };
+                                if to != me {
+                                    continue;
+                                }
+                                let Some(id) = members.lock().unwrap().get(&from).map(|m| m.id) else { continue };
+                                // Only MLS travels through the room; calls
+                                // and introductions stay on real links.
+                                let Some(m) = ControlMessage::decode(json).filter(crate::group_keys::is_mls_message)
+                                else {
+                                    continue;
+                                };
+                                if let Some(group) = group.upgrade() {
+                                    group.inbox.lock().unwrap().push((Link::Room(id), m));
+                                }
+                            }
                             _ => {}
                         },
                         SfuEvent::Roster(present) => {
-                            let mut members = members.lock().unwrap();
-                            let gone: Vec<MemberTag> =
-                                members.keys().filter(|t| !present.contains(t)).copied().collect();
-                            for tag in gone {
-                                members.remove(&tag);
-                                sealer.lock().unwrap().remove_sender(&tag);
-                            }
+                            members.lock().unwrap().retain(|t, _| present.contains(t));
                         }
                         SfuEvent::Refused(_) => {}
                     }
@@ -214,18 +253,31 @@ impl SfuCall {
         Ok(Arc::new(SfuCall {
             invite,
             client,
-            sealer,
+            sealer: Mutex::new(RoomSealer { group: Arc::downgrade(group), members: members.clone() }),
+            room_cipher,
             members,
             primary_key,
             tasks: vec![announcer, receiver],
         }))
     }
 
-    /// Seals and sends one encoded audio frame, once, for everyone.
+    /// Seals one encoded audio frame with SFrame and sends it once, for
+    /// everyone. Nothing goes out until MLS has keyed us in.
     pub async fn send_audio(&self, frame: &[u8]) {
-        let mut out = vec![KIND_MEDIA];
-        out.extend(self.sealer.lock().unwrap().seal(frame));
+        let Some(sealed) = self.sealer.lock().unwrap().seal(frame) else { return };
+        let mut out = Vec::with_capacity(sealed.len() + 1);
+        out.push(KIND_MEDIA);
+        out.extend(sealed);
         let _ = self.client.send_media(&out).await;
+    }
+
+    /// Sends a control message to the room member behind `id`.
+    pub async fn send_control(&self, id: u64, message: &ControlMessage) {
+        let Some(tag) = self.members.lock().unwrap().iter().find(|(_, m)| m.id == id).map(|(t, _)| *t) else {
+            return;
+        };
+        let body = [&tag[..], &message.encode()].concat();
+        let _ = self.client.send_media(&seal(&self.room_cipher, KIND_CONTROL, CONTROL_CONTEXT, &body)).await;
     }
 
     pub fn people(&self) -> usize {
@@ -235,6 +287,16 @@ impl SfuCall {
     /// Each member's mixer source id and jitter buffer.
     pub fn audio(&self) -> Vec<(u64, Arc<Mutex<JitterBuffer>>)> {
         self.members.lock().unwrap().values().map(|m| (SOURCE_BASE + m.id, m.jitter.clone())).collect()
+    }
+
+    /// Room members as links, for MLS, by identity key.
+    pub fn links(&self) -> Vec<(Link, [u8; 32])> {
+        self.members.lock().unwrap().values().map(|m| (Link::Room(m.id), m.identity_key)).collect()
+    }
+
+    /// The identity behind room member `id`.
+    pub fn identity_of(&self, id: u64) -> Option<[u8; 32]> {
+        self.members.lock().unwrap().values().find(|m| m.id == id).map(|m| m.identity_key)
     }
 
     /// Names of members not already shown: not the primary, not `skip`.
@@ -259,72 +321,61 @@ impl SfuCall {
     }
 }
 
-fn announce_cipher(secret: &[u8; 32]) -> ChaCha20Poly1305 {
+fn room_cipher(secret: &[u8; 32]) -> ChaCha20Poly1305 {
     let mut key = [0u8; 32];
     Hkdf::<Sha256>::new(Some(ANNOUNCE_CONTEXT), secret)
-        .expand(b"announce key", &mut key)
+        .expand(b"room key", &mut key)
         .expect("32 bytes is a valid HKDF length");
     ChaCha20Poly1305::new(&Key::from(key))
 }
 
-/// `[sender key 32][identity key 32][signature 64][name...]`, signed over
-/// the room and tag too so an announcement can't be replayed elsewhere.
-fn announce_body(identity: &IdentityKeyPair, room: &[u8; 32], tag: &MemberTag, key: &SenderKey, name: &str) -> Vec<u8> {
+/// `[identity key 32][signature 64][name...]`, signed over the room and
+/// tag too so an announcement can't be replayed elsewhere.
+fn announce_body(identity: &IdentityKeyPair, room: &[u8; 32], tag: &MemberTag, name: &str) -> Vec<u8> {
     let identity_key = identity.public().identity_key;
-    let signature = identity.sign(&signed_part(room, tag, key, &identity_key, name.as_bytes()));
-    let mut out = Vec::with_capacity(128 + name.len());
-    out.extend_from_slice(key);
-    out.extend_from_slice(&identity_key);
-    out.extend_from_slice(&signature);
-    out.extend_from_slice(name.as_bytes());
-    out
+    let signature = identity.sign(&signed_part(room, tag, &identity_key, name.as_bytes()));
+    [&identity_key[..], &signature, name.as_bytes()].concat()
 }
 
-fn signed_part(room: &[u8; 32], tag: &MemberTag, key: &SenderKey, identity_key: &[u8; 32], name: &[u8]) -> Vec<u8> {
-    [ANNOUNCE_CONTEXT, room, tag, key, identity_key, name].concat()
+fn signed_part(room: &[u8; 32], tag: &MemberTag, identity_key: &[u8; 32], name: &[u8]) -> Vec<u8> {
+    [ANNOUNCE_CONTEXT, room, tag, identity_key, name].concat()
 }
 
 struct Announcement {
-    sender_key: SenderKey,
     identity_key: [u8; 32],
     name: String,
 }
 
 fn parse_announce(body: &[u8], room: &[u8; 32], tag: &MemberTag) -> Option<Announcement> {
-    if body.len() < 128 {
+    if body.len() < 96 {
         return None;
     }
-    let sender_key: SenderKey = body[..32].try_into().ok()?;
-    let identity_key: [u8; 32] = body[32..64].try_into().ok()?;
-    let signature: [u8; 64] = body[64..128].try_into().ok()?;
-    let name = &body[128..];
-    antiphon_crypto::verify_signature(&identity_key, &signed_part(room, tag, &sender_key, &identity_key, name), &signature)
-        .ok()?;
+    let identity_key: [u8; 32] = body[..32].try_into().ok()?;
+    let signature: [u8; 64] = body[32..96].try_into().ok()?;
+    let name = &body[96..];
+    antiphon_crypto::verify_signature(&identity_key, &signed_part(room, tag, &identity_key, name), &signature).ok()?;
     let name: String = String::from_utf8_lossy(name).chars().take(64).collect();
-    Some(Announcement { sender_key, identity_key, name })
+    Some(Announcement { identity_key, name })
 }
 
-fn seal_announce(cipher: &ChaCha20Poly1305, body: &[u8]) -> Vec<u8> {
+fn seal(cipher: &ChaCha20Poly1305, kind: u8, context: &[u8], body: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; 12];
     getrandom::fill(&mut nonce).expect("OS randomness is unavailable");
     let sealed = cipher
-        .encrypt(&Nonce::from(nonce), Payload { msg: body, aad: ANNOUNCE_CONTEXT })
+        .encrypt(&Nonce::from(nonce), Payload { msg: body, aad: context })
         .expect("sealing never fails for in-memory data");
-    [&[KIND_ANNOUNCE][..], &nonce, &sealed].concat()
+    [&[kind][..], &nonce, &sealed].concat()
 }
 
-fn open_announce(cipher: &ChaCha20Poly1305, sealed: &[u8]) -> Option<Vec<u8>> {
-    if sealed.len() < 12 {
-        return None;
-    }
-    let (nonce, ct) = sealed.split_at(12);
+fn open(cipher: &ChaCha20Poly1305, context: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+    let (nonce, ct) = sealed.split_at_checked(12)?;
     let nonce: [u8; 12] = nonce.try_into().ok()?;
-    cipher.decrypt(&Nonce::from(nonce), Payload { msg: ct, aad: ANNOUNCE_CONTEXT }).ok()
+    cipher.decrypt(&Nonce::from(nonce), Payload { msg: ct, aad: context }).ok()
 }
 
 /// The control-message form of an invite: hex secret, so it rides in JSON.
-pub fn to_message(invite: &Invite) -> crate::control::ControlMessage {
-    crate::control::ControlMessage::GroupSfu {
+pub fn to_message(invite: &Invite) -> ControlMessage {
+    ControlMessage::GroupSfu {
         sfu: invite.sfu.clone(),
         secret: crate::connection_mode::encode_hex32(&invite.secret),
         day: invite.day,
@@ -342,34 +393,56 @@ mod tests {
     #[test]
     fn an_announcement_round_trips_and_binds_room_and_tag() {
         let me = IdentityKeyPair::generate();
-        let (room, tag, key) = ([1u8; 32], [2u8; 16], [3u8; 32]);
-        let cipher = announce_cipher(&[9; 32]);
-        let sealed = seal_announce(&cipher, &announce_body(&me, &room, &tag, &key, "Ana"));
-        let body = open_announce(&cipher, &sealed[1..]).unwrap();
+        let (room, tag) = ([1u8; 32], [2u8; 16]);
+        let cipher = room_cipher(&[9; 32]);
+        let sealed = seal(&cipher, KIND_ANNOUNCE, ANNOUNCE_CONTEXT, &announce_body(&me, &room, &tag, "Ana"));
+        let body = open(&cipher, ANNOUNCE_CONTEXT, &sealed[1..]).unwrap();
         let a = parse_announce(&body, &room, &tag).unwrap();
-        assert_eq!((a.sender_key, a.identity_key, a.name.as_str()), (key, me.public().identity_key, "Ana"));
+        assert_eq!((a.identity_key, a.name.as_str()), (me.public().identity_key, "Ana"));
         // Replayed under another tag or room, it no longer checks out.
         assert!(parse_announce(&body, &room, &[7u8; 16]).is_none());
         assert!(parse_announce(&body, &[8u8; 32], &tag).is_none());
+        // An announcement can't be passed off as a control message.
+        assert!(open(&cipher, CONTROL_CONTEXT, &sealed[1..]).is_none());
     }
 
     #[test]
-    fn an_announcement_is_unreadable_without_the_group_secret() {
+    fn an_announcement_is_unreadable_without_the_room_secret() {
         let me = IdentityKeyPair::generate();
-        let sealed = seal_announce(&announce_cipher(&[9; 32]), &announce_body(&me, &[1; 32], &[2; 16], &[3; 32], "Ana"));
-        assert!(open_announce(&announce_cipher(&[4; 32]), &sealed[1..]).is_none());
+        let sealed = seal(&room_cipher(&[9; 32]), KIND_ANNOUNCE, ANNOUNCE_CONTEXT, &announce_body(&me, &[1; 32], &[2; 16], "Ana"));
+        assert!(open(&room_cipher(&[4; 32]), ANNOUNCE_CONTEXT, &sealed[1..]).is_none());
     }
 
     #[test]
     fn invites_survive_the_control_message() {
         let invite = Invite::fresh("relay.example:3479".into(), 20_000);
-        let crate::control::ControlMessage::GroupSfu { sfu, secret, day } = to_message(&invite) else { panic!() };
+        let ControlMessage::GroupSfu { sfu, secret, day } = to_message(&invite) else { panic!() };
         assert_eq!(from_message(&sfu, &secret, day), Some(invite));
     }
 
+    /// One round of what `Context::poll` does, over the room alone: MLS
+    /// in from the inbox, out through the room.
+    async fn pump_mls(group: &Arc<Group>, sfu: &SfuCall) {
+        let linked = sfu.links();
+        let inbox: Vec<_> = std::mem::take(&mut *group.inbox.lock().unwrap());
+        let mut out = Vec::new();
+        for (link, m) in inbox {
+            let Link::Room(id) = link else { continue };
+            if let Some(from) = sfu.identity_of(id) {
+                out.extend(group.keys.handle(link, from, m, &linked));
+            }
+        }
+        out.extend(group.keys.upkeep(sfu.people(), &linked));
+        for (link, m) in out {
+            if let Link::Room(id) = link {
+                sfu.send_control(id, &m).await;
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn six_people_hear_each_other_through_one_sfu() {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    async fn six_people_key_in_over_mls_and_hear_each_other_as_sframe() {
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let addr = socket.local_addr().unwrap();
         let relay = Arc::new(Mutex::new(antiphon_relay::Relay::default()));
         let sfu = Arc::new(Mutex::new(antiphon_relay::sfu::Sfu::new(Default::default())));
@@ -377,35 +450,56 @@ mod tests {
 
         let invite = Invite::fresh(addr.to_string(), 1);
         let never: BlockCheck = Arc::new(|_| false);
-        let mut calls = Vec::new();
+        let mut people = Vec::new();
         for i in 0..6 {
             let id = Arc::new(IdentityKeyPair::generate());
-            calls.push(SfuCall::join(invite.clone(), id, format!("P{i}"), [0; 32], never.clone()).await.unwrap());
+            let group = Arc::new(Group::default());
+            group.keys.ensure(&id);
+            if i == 0 {
+                group.keys.start_group();
+            }
+            let call = SfuCall::join(invite.clone(), &group, id, format!("P{i}"), [0; 32], never.clone()).await.unwrap();
+            people.push((group, call));
         }
-        // Everyone learns everyone from the announcements.
-        for _ in 0..50 {
-            if calls.iter().all(|c| c.people() == 6) {
+        // Announcements, then MLS through the room until everyone shares
+        // one epoch.
+        let mut keyed = false;
+        for _ in 0..200 {
+            for (g, c) in &people {
+                pump_mls(g, c).await;
+            }
+            let epochs: Vec<_> = people.iter().map(|(g, _)| g.keys.epoch()).collect();
+            if people.iter().all(|(_, c)| c.people() == 6) && epochs.iter().all(|e| e.is_some() && *e == epochs[0]) {
+                keyed = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(calls.iter().all(|c| c.people() == 6), "{:?}", calls.iter().map(|c| c.people()).collect::<Vec<_>>());
+        assert!(keyed, "{:?}", people.iter().map(|(g, c)| (c.people(), g.keys.epoch())).collect::<Vec<_>>());
 
-        let frame = antiphon_net::fec::encode(0, &vec![0.25f32; 960], None);
-        calls[0].send_audio(&frame).await;
+        let frame = antiphon_net::fec::encode(0, &[0.25f32; 960], None);
+        people[3].1.send_audio(&frame).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        for c in &calls[1..] {
+        for (i, (_, c)) in people.iter().enumerate() {
             let heard: usize = c.audio().iter().map(|(_, j)| j.lock().unwrap().backlog_frames()).sum();
-            assert_eq!(heard, 1);
+            assert_eq!(heard, usize::from(i != 3), "person {i}");
         }
-        // A blocked person's voice is never mixed.
-        let blocked_id = Arc::new(IdentityKeyPair::generate());
-        let blocked_key = blocked_id.public().identity_key;
-        let blocks: BlockCheck = Arc::new(move |k| *k == blocked_key);
-        let wary = SfuCall::join(invite.clone(), Arc::new(IdentityKeyPair::generate()), "W".into(), [0; 32], blocks).await.unwrap();
-        let _blocked = SfuCall::join(invite, blocked_id, "B".into(), [0; 32], never).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(!wary.identity_keys().contains(&blocked_key));
         node.abort();
+    }
+
+    #[test]
+    fn the_room_never_opens_audio_in_the_clear() {
+        let group = Arc::new(Group::default());
+        let members: Members = Arc::default();
+        let key = IdentityKeyPair::generate().public().identity_key;
+        members.lock().unwrap().insert(
+            [1; 16],
+            Member { id: 0, identity_key: key, name: String::new(), jitter: Arc::new(Mutex::new(JitterBuffer::new(JITTER_MAX_WAIT))) },
+        );
+        let mut sealer = RoomSealer { group: Arc::downgrade(&group), members };
+        let plain = antiphon_net::fec::encode(0, &[0.1f32; 960], None);
+        assert!(sealer.open([1; 16], &plain).is_none());
+        // ...and with no MLS keys yet, there is nothing to send.
+        assert!(sealer.seal(&plain).is_none());
     }
 }

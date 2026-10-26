@@ -20,10 +20,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::Result;
-use antiphon_net::onion::{connect_via, fetch_hop_key, OnionShim};
-use tokio::net::UdpSocket;
+use antiphon_net::onion::{fetch_hop_key, Circuit, OnionShim};
+use antiphon_net::AppSocket;
+
+use antiphon_net::vpn::TrafficKind;
 
 const HOP_KEY_TIMEOUT: Duration = Duration::from_secs(3);
+const BUILD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The hop nodes to use, if anonymity mode is on and has enough of them.
 pub fn configured_hops() -> Option<Vec<String>> {
@@ -53,8 +56,11 @@ pub fn is_circuit(addr: SocketAddr) -> bool {
 /// Builds a circuit through `hops` to `relay` and returns the socket and
 /// address to use in place of the relay's. The circuit lives as long as
 /// the returned socket does.
-pub async fn route_to(hops: &[String], relay: SocketAddr) -> Result<(Arc<UdpSocket>, SocketAddr)> {
-    let probe = UdpSocket::bind(("0.0.0.0", 0)).await?;
+///
+/// The circuit's own socket goes through the VPN when voice does, so the
+/// kill switch holds for anonymous calls too.
+pub async fn route_to(hops: &[String], relay: SocketAddr) -> Result<(Arc<AppSocket>, SocketAddr)> {
+    let probe = crate::vpn::bind(TrafficKind::Voice, 0).await?;
     let mut path = Vec::with_capacity(hops.len());
     for hop in hops {
         let addr = crate::state::resolve(hop).await?;
@@ -63,7 +69,8 @@ pub async fn route_to(hops: &[String], relay: SocketAddr) -> Result<(Arc<UdpSock
             .map_err(|e| anyhow::anyhow!("hop {hop} didn't give its key: {e}"))?;
         path.push((addr, key));
     }
-    let shim = connect_via(&path, relay).await?;
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, 0).await?);
+    let shim = Circuit::build_on(socket, &path, relay, BUILD_TIMEOUT).await?.into_shim().await?;
     let socket = shim.socket();
     let stand_in = shim.relay_addr();
     keep_alive(shim, &socket);
@@ -72,7 +79,7 @@ pub async fn route_to(hops: &[String], relay: SocketAddr) -> Result<(Arc<UdpSock
 
 /// Holds the circuit open until nothing else holds its socket, then
 /// tears it down -- so it ends with the call or listen that used it.
-fn keep_alive(shim: OnionShim, socket: &Arc<UdpSocket>) {
+fn keep_alive(shim: OnionShim, socket: &Arc<AppSocket>) {
     let stand_in = shim.relay_addr();
     live().lock().unwrap().insert(stand_in);
     let weak = Arc::downgrade(socket);
