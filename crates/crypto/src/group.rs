@@ -49,7 +49,7 @@
 //! MLS needs commits applied in one order by everyone. There is no
 //! delivery service here, so the *caller* must make sure only one member
 //! commits at a time -- group calls pick the member at the lowest leaf
-//! index (see `antiphon` `group.rs`). Two concurrent commits for the same
+//! index (see the app's `group_keys.rs`). Two concurrent commits for the same
 //! epoch would fork the group; the second to arrive is refused by
 //! [`process`](GroupMember::process) with [`GroupError::Mls`], and the
 //! caller has to rejoin.

@@ -48,7 +48,8 @@ The short version of [`FEATURES.md`](FEATURES.md):
   not yet on macOS or Wayland; no project-run mailbox node ships as a
   default.
 - **Not built:** anything that needs infrastructure the app does not
-  have yet -- the DHT, large group calls / MLS / SFU, VPN integration,
+  have yet -- the DHT, large group calls through an SFU (small mesh
+  group calls are keyed with MLS and SFrame already), VPN integration,
   mobile clients, push
   notifications. Each is a project on its own and is listed as such.
 

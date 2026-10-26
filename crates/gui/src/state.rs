@@ -1579,14 +1579,17 @@ pub fn start_pipeline(
                     }
                 }
                 sequence = sequence.wrapping_add(1);
-                if let Err(e) = send_peer.send_audio(&bytes).await {
+                // Spec §3 SFrame: in a group call with MLS keys, sealed
+                // once under this epoch's key for everyone keyed in.
+                let sealed = send_group.keys.seal_audio(&bytes);
+                let to_primary =
+                    send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                if let Err(e) = send_peer.send_audio(to_primary).await {
                     eprintln!("[net] send error: {e}");
                 }
-                // Spec §3 group mesh: the same sealed-per-person frame to
-                // everyone else in the call, one upload each.
-                for leg in send_group.leg_peers() {
-                    let _ = leg.send_audio(&bytes).await;
-                }
+                // Spec §3 group mesh: the same frame to everyone else in
+                // the call, one upload each.
+                send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
             } else {
                 // Cleared while not transmitting, so the first frame after
                 // a pause doesn't offer a backup copy of audio from before
@@ -1611,6 +1614,7 @@ pub fn start_pipeline(
     let recv_jitter = jitter.clone();
     let recv_profile = peer_profile.clone();
     let recv_group = group.clone();
+    let recv_primary_key = peer.peer_identity().identity_key;
     let recv_ft_state = file_transfer_state.clone();
     let recv_ft_peer = peer.clone();
     let recv_chat_log = chat_log.clone();
@@ -1628,6 +1632,9 @@ pub fn start_pipeline(
         let result = recv_peer
             .recv_loop(move |msg| match msg {
                 Received::Audio { counter: _, plaintext } => {
+                    // Spec §3 SFrame: a group member's audio is opened
+                    // under the MLS epoch key; anything refused is lost.
+                    let Some(plaintext) = recv_group.keys.open_audio(&recv_primary_key, &plaintext) else { return };
                     // A frame that won't parse is dropped like a lost one;
                     // the buffer already knows how to handle a gap.
                     //
@@ -1674,9 +1681,14 @@ pub fn start_pipeline(
                                 .collect()
                         };
                         let peer = recv_resend_peer.clone();
+                        let group = recv_group.clone();
                         tokio::spawn(async move {
                             for bytes in to_send {
-                                let _ = peer.send_audio(&bytes).await;
+                                // Sealed afresh: a resend gets a new SFrame
+                                // counter, like it gets a new crypto one.
+                                let sealed = group.keys.seal_audio(&bytes);
+                                let frame = group.keys.frame_for(&peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                                let _ = peer.send_audio(frame).await;
                             }
                         });
                     }
