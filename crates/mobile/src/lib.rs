@@ -17,14 +17,23 @@
 //! each platform crate implements and installs before starting
 //! [`runner::Runner`].
 //!
-//! Everything is `cfg`'d to Android and iOS: on a desktop this crate is
-//! empty, so `cargo build --workspace` is unaffected.
+//! Everything that touches the phone is `cfg`'d to Android and iOS, so
+//! `cargo build --workspace` on a desktop does not build a second GUI
+//! toolkit. The two rule modules, [`queue`] and [`data_rules`], are plain
+//! std and compile everywhere, so their tests run on the host.
 
-#![cfg(any(target_os = "android", target_os = "ios"))]
+pub mod data_rules;
+pub mod queue;
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod call;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod convert;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod platform;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod runner;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod settings;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod ui;
