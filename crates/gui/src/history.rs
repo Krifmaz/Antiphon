@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use antiphon_crypto::BackupKey;
 
 /// One stored message.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct StoredMessage {
     /// Stable per-message id, so an edit or a delete can name which
     /// message it means (spec §13 "message lifecycle").
@@ -61,6 +61,15 @@ pub struct StoredMessage {
     /// conversation has disappearing messages switched on.
     #[serde(default)]
     pub expires_at_secs: Option<u64>,
+    /// Who wrote it, hex identity key, in a group chat or community
+    /// channel (spec §9), where "me or them" is not enough. `None` in a
+    /// 1:1 conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    /// The message this one replies to, making it part of that message's
+    /// thread (spec §9 "Threads and replies").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
 }
 
 impl StoredMessage {
@@ -357,6 +366,7 @@ impl HistorySink {
             deleted: false,
             pinned: false,
             expires_at_secs: self.expire_after_secs.map(|ttl| at_secs + ttl),
+            ..Default::default()
         };
         if let Err(e) = append(&self.dir, &self.peer_hex, &self.key, message) {
             eprintln!("[history] could not save message: {e}");
@@ -414,6 +424,7 @@ mod tests {
             deleted: false,
             pinned: false,
             expires_at_secs: None,
+            ..Default::default()
         }
     }
 
