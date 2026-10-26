@@ -118,7 +118,10 @@ mod tests {
 
     #[test]
     fn a_single_wrong_word_is_caught_by_the_checksum() {
-        let id = IdentityKeyPair::generate();
+        // A fixed seed, not a random one: a 24-word phrase carries an
+        // 8-bit checksum, so one random substitution in 256 still passes
+        // it, and a random seed made this test fail that often.
+        let id = IdentityKeyPair::from_master_seed([7u8; 32]);
         let phrase = phrase_from_seed(&id.master_seed());
 
         let mut words: Vec<&str> = phrase.split_whitespace().collect();
