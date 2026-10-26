@@ -88,6 +88,13 @@ pub struct AppConfig {
     pub hold_mail_for_devices: bool,
     #[serde(default = "default_hold_mail_port")]
     pub hold_mail_port: u16,
+    /// On-device live captions in the call view (spec §7). Off by
+    /// default; nothing is downloaded until the user asks.
+    #[serde(default)]
+    pub captions_enabled: bool,
+    /// Caption your own voice as well as everyone else's.
+    #[serde(default)]
+    pub captions_own_voice: bool,
     /// Keep sealed copies of files you share or download and hand them
     /// out (spec §5 "Seeding"). Off by default.
     #[serde(default)]
@@ -643,7 +650,7 @@ pub const AUDIO_SECTION_IDS: &[&str] =
 pub const APPEARANCE_SECTION_IDS: &[&str] = &["accent", "theme", "textmotion", "importexport"];
 pub const PROFILE_SECTION_IDS: &[&str] = &["profile", "about"];
 pub const CALL_SECTION_IDS: &[&str] =
-    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "discovery", "callparticipants", "outbox", "calladvanced", "vpn"];
+    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "captions", "discovery", "callparticipants", "outbox", "calladvanced", "vpn"];
 
 fn default_audio_order() -> Vec<String> {
     AUDIO_SECTION_IDS.iter().map(|s| s.to_string()).collect()
@@ -772,6 +779,8 @@ impl Default for AppConfig {
             route_sequence: 0,
             hold_mail_for_devices: false,
             hold_mail_port: default_hold_mail_port(),
+            captions_enabled: false,
+            captions_own_voice: false,
             seeding: false,
             seed_scope: 0,
             seed_port: default_seed_port(),

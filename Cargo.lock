@@ -370,6 +370,7 @@ name = "antiphon"
 version = "0.1.0"
 dependencies = [
  "antiphon-audio",
+ "antiphon-captions",
  "antiphon-crypto",
  "antiphon-net",
  "antiphon-protocol",
