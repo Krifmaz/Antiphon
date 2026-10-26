@@ -22,6 +22,7 @@ mod presence;
 mod reachability;
 mod fallback_relay;
 mod network_ui;
+mod anonymity;
 mod reactions;
 mod replay_history;
 mod sealed_ring;
@@ -3591,8 +3592,13 @@ fn finish_connect(
             let remote_addr = peer.remote_addr().to_string();
             // Spec §3: a connection that came from our relay's address is
             // a relayed one, and the address is the relay's, not theirs.
-            let relayed = *state.relay_addr.lock().unwrap() == Some(peer.remote_addr());
-            let mode = if relayed { reachability::Mode::Relayed } else { reachability::Mode::Direct };
+            let anonymous = anonymity::is_circuit(peer.remote_addr());
+            let relayed = anonymous || *state.relay_addr.lock().unwrap() == Some(peer.remote_addr());
+            let mode = match (anonymous, relayed) {
+                (true, _) => reachability::Mode::Anonymous,
+                (false, true) => reachability::Mode::Relayed,
+                (false, false) => reachability::Mode::Direct,
+            };
             let trust = evaluate_peer_trust(&remote_addr, &peer_identity, relayed);
             // Spec §1: this person's remembered volume trim and mute, so a
             // quiet microphone stays fixed across calls rather than being

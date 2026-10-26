@@ -899,8 +899,14 @@ pub async fn establish_listen(
     identity: Arc<IdentityKeyPair>,
     relay: Option<(SocketAddr, RelayTokens)>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
-    if let Some((relay_addr, tokens)) = relay {
+    let mut socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+    if let Some((mut relay_addr, tokens)) = relay {
+        // Spec §3 anonymity mode: register through a circuit, so the relay
+        // only ever sees the last hop. The direct port stays unused --
+        // listening on it would hand your address to whoever calls.
+        if let Some(hops) = crate::anonymity::configured_hops() {
+            (socket, relay_addr) = crate::anonymity::route_to(&hops, relay_addr).await?;
+        }
         // Holds only a weak handle: once the listen (or the call it
         // became) drops the socket, the refresh stops on its own.
         let weak = Arc::downgrade(&socket);
@@ -932,7 +938,11 @@ pub async fn establish_relayed_call(
     local_port: u16,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+    let (socket, relay) = match crate::anonymity::configured_hops() {
+        // Spec §3 anonymity mode: the relay sees the circuit's last hop.
+        Some(hops) => crate::anonymity::route_to(&hops, relay).await?,
+        None => (Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?), relay),
+    };
     antiphon_net::relay::dial(&socket, relay, token, Duration::from_secs(5)).await?;
     match tokio::time::timeout(Duration::from_secs(15), PeerConnection::connect(socket, relay, &identity)).await {
         Ok(result) => Ok(result?),
