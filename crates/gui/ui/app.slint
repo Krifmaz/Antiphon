@@ -65,6 +65,16 @@ export struct ReachabilityRow {
     meaning: string,
 }
 
+/// A file that stays fetchable after the call (spec §5).
+export struct SharedFileEntry {
+    name: string,
+    detail: string,
+    /// Availability, or how a download went.
+    status: string,
+    file-id: string,
+    mine: bool,
+}
+
 /// One delivery route (spec §8), for the route list.
 export struct RouteEntry {
     title: string,
@@ -1455,6 +1465,7 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-soundboard: true;
     in-out property <bool> sec-notifications: true;
     in-out property <bool> sec-transferlimits: true;
+    in-out property <bool> sec-sharedfiles: true;
     in-out property <bool> sec-outbox: true;
     in-out property <bool> sec-calladvanced: true;
     in-out property <bool> ip-direct-calling: false;
@@ -1518,6 +1529,17 @@ export component MainWindow inherits Window {
     callback route-code-edited(int, string);
     callback delivery-settings-changed();
     callback find-nodes();
+    // Spec §5 seeding and pinning.
+    in-out property <bool> seeding: false;
+    in-out property <int> seed-scope: 0;
+    in-out property <int> seed-port: 3481;
+    in-out property <string> pin-nodes: "";
+    in-out property <string> pin-code: "";
+    in-out property <[SharedFileEntry]> shared-files: [];
+    callback sharing-settings-changed();
+    callback check-shared-files();
+    callback download-shared-file(string);
+    callback forget-shared-file(string);
     callback set-contact-message-route(int, int);
     callback leave-message(int);
     /// Shown when audio was recovered, if the mode asks for it.
@@ -4608,6 +4630,67 @@ export component MainWindow inherits Window {
                                         color: Theme.muted-text;
                                         font-size: 10px * text-scale;
                                         wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            if section-id == "sharedfiles" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Files that can still be fetched after the call. Each is encrypted with its own key that only you and the person you sent it to have; whoever holds a copy -- you, them, a pin node -- can't read it.";
+                                    text-scale: text-scale;
+                                    title: "Shared files"; reduced-motion: reduced-motion; expanded <=> sec-sharedfiles;
+                                }
+                                if sec-sharedfiles : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Seed files I share and download";
+                                        checked <=> seeding;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Keeps an encrypted copy of each file and hands it out, so the other person can fetch it after the call, and from several people at once if they seed too. Off by default: it uses disk space and upload. Uses port " + seed-port + ".";
+                                        toggled => { sharing-settings-changed(); }
+                                    }
+                                    if seeding : HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        SettingLabel { text: "Hand them to"; help: "Only the conversation: whoever has the link from the chat. Contacts: those people, only if they're also your contacts. Anyone: anyone with the file's id -- they still can't read it without the key."; text-scale: text-scale; }
+                                        ComboBox {
+                                            model: ["This conversation only", "My contacts", "Anyone"];
+                                            current-index: seed-scope;
+                                            selected(v) => { seed-scope = self.current-index; sharing-settings-changed(); }
+                                        }
+                                    }
+                                    SettingLabel { text: "Pin nodes"; help: "Nodes that keep an encrypted copy of every file you share, for when neither of you is online. A node only does this if its operator turned on file hosting. Comma-separated, press Enter."; text-scale: text-scale; }
+                                    LineEdit {
+                                        text <=> pin-nodes;
+                                        placeholder-text: "node.example.org:3478, ...";
+                                        accepted(t) => { sharing-settings-changed(); }
+                                    }
+                                    LineEdit {
+                                        text <=> pin-code;
+                                        placeholder-text: "community code, if the node asks for one";
+                                        accepted(t) => { sharing-settings-changed(); }
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Button { text: "Check availability"; clicked => { check-shared-files(); } }
+                                    }
+                                    if shared-files.length == 0 : Text {
+                                        text: "Nothing shared yet. Files you send in a call land here when seeding or a pin node is on.";
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    for f in shared-files : VerticalBox {
+                                        padding: 4px; spacing: 2px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Text { text: f.name; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                            if !f.mine : Button { text: "Download"; clicked => { download-shared-file(f.file-id); } }
+                                            Button { text: f.mine ? "Stop sharing" : "Remove"; clicked => { forget-shared-file(f.file-id); } }
+                                        }
+                                        Text { text: f.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                                        if f.status != "" : Text { text: f.status; font-size: 10px * text-scale; wrap: word-wrap; }
                                     }
                                 }
                             }

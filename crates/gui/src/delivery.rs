@@ -366,16 +366,16 @@ pub async fn discover(wait: Duration) -> Vec<SocketAddr> {
     found
 }
 
-async fn resolve(node: &str) -> Option<SocketAddr> {
+pub(crate) async fn resolve(node: &str) -> Option<SocketAddr> {
     let with_port = if node.contains(':') { node.to_string() } else { format!("{node}:{DEFAULT_PORT}") };
     tokio::net::lookup_host(with_port).await.ok()?.next()
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex32(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn unhex32(s: &str) -> Option<[u8; 32]> {
     crate::connection_mode::decode_hex32(s)
 }
 
@@ -426,6 +426,10 @@ pub const COURIER_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn set_identity(identity: Arc<IdentityKeyPair>) {
     let _ = IDENTITY.set(identity);
+}
+
+pub fn identity() -> Option<Arc<IdentityKeyPair>> {
+    IDENTITY.get().cloned()
 }
 
 /// Your current route list, signed and hex-encoded for a `Hello`.
@@ -488,6 +492,7 @@ pub fn set_hosting(runtime: &tokio::runtime::Handle, on: bool, port: u16) {
             socket,
             Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default()))),
             Some(Arc::new(Mutex::new(mailbox))),
+            None,
         )
         .await;
     }));
@@ -758,6 +763,7 @@ mod tests {
             sock,
             Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default()))),
             Some(mb),
+            None,
         ));
 
         let alice = IdentityKeyPair::generate();

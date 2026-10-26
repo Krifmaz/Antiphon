@@ -72,6 +72,23 @@ pub enum ControlMessage {
         #[serde(default)]
         thumbnail_png_b64: String,
     },
+    /// A file that stays fetchable after the call (spec §5 seeding and
+    /// pinning): its own key, its id, and who holds sealed copies. Only
+    /// ever sent inside the call's encrypted channel -- the key is the
+    /// whole of the access.
+    FileLink {
+        name: String,
+        size: u64,
+        file_id: String,
+        key: String,
+        /// The sender's seeding port on the address the call came from,
+        /// or 0 when they aren't seeding.
+        #[serde(default)]
+        seed_port: u16,
+        /// Pin nodes that took a copy, as `ip:port`.
+        #[serde(default)]
+        holders: Vec<String>,
+    },
     /// Receiver agreed; the sender can start blasting `File` frames.
     FileAccept { transfer_id: u64 },
     /// Receiver declined; the sender should drop the transfer.

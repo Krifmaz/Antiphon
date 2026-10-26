@@ -88,6 +88,23 @@ pub struct AppConfig {
     pub hold_mail_for_devices: bool,
     #[serde(default = "default_hold_mail_port")]
     pub hold_mail_port: u16,
+    /// Keep sealed copies of files you share or download and hand them
+    /// out (spec §5 "Seeding"). Off by default.
+    #[serde(default)]
+    pub seeding: bool,
+    /// Who seeded files go to: 0 the conversation it was shared in,
+    /// 1 your contacts, 2 anyone with the link.
+    #[serde(default)]
+    pub seed_scope: i32,
+    #[serde(default = "default_seed_port")]
+    pub seed_port: u16,
+    /// Nodes that keep a sealed copy of files you share (spec §5
+    /// "Pinning"), `host[:port]`.
+    #[serde(default)]
+    pub pin_nodes: Vec<String>,
+    /// The code a members-only pin node asks for.
+    #[serde(default)]
+    pub pin_code: String,
     #[serde(default)]
     pub deafen_hold: bool,
     /// Milliseconds the mic stays open after the push-to-talk key comes up,
@@ -584,7 +601,7 @@ pub const AUDIO_SECTION_IDS: &[&str] =
 pub const APPEARANCE_SECTION_IDS: &[&str] = &["accent", "theme", "textmotion", "importexport"];
 pub const PROFILE_SECTION_IDS: &[&str] = &["profile", "about"];
 pub const CALL_SECTION_IDS: &[&str] =
-    &["callstart", "notifications", "soundboard", "transferlimits", "callparticipants", "outbox", "calladvanced"];
+    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "callparticipants", "outbox", "calladvanced"];
 
 fn default_audio_order() -> Vec<String> {
     AUDIO_SECTION_IDS.iter().map(|s| s.to_string()).collect()
@@ -713,6 +730,11 @@ impl Default for AppConfig {
             route_sequence: 0,
             hold_mail_for_devices: false,
             hold_mail_port: default_hold_mail_port(),
+            seeding: false,
+            seed_scope: 0,
+            seed_port: default_seed_port(),
+            pin_nodes: Vec::new(),
+            pin_code: String::new(),
             deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,
@@ -825,6 +847,10 @@ fn config_path() -> Option<std::path::PathBuf> {
 /// the app from opening.
 fn default_hold_mail_port() -> u16 {
     3480
+}
+
+fn default_seed_port() -> u16 {
+    3481
 }
 
 pub fn load() -> AppConfig {

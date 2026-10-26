@@ -53,6 +53,7 @@ mod handshake;
 mod identity;
 mod invite;
 pub mod keystore;
+pub mod file_seal;
 pub mod mail;
 pub mod memory_seal;
 pub mod mnemonic;

@@ -24,6 +24,7 @@
 //! The core is a plain state machine ([`Relay::handle`]) so it can be
 //! tested without sockets; [`run`] is the thin loop around it.
 
+pub mod files;
 pub mod mailbox;
 
 use std::collections::HashMap;
@@ -234,7 +235,7 @@ impl Relay {
 
 /// Serves `relay` on `socket` until the socket fails.
 pub async fn run(socket: Arc<UdpSocket>, relay: Arc<std::sync::Mutex<Relay>>) -> std::io::Result<()> {
-    run_node(socket, relay, None).await
+    run_node(socket, relay, None, None).await
 }
 
 /// Serves the relay and, if given, the mailbox on one socket. Mailbox
@@ -244,13 +245,28 @@ pub async fn run_node(
     socket: Arc<UdpSocket>,
     relay: Arc<std::sync::Mutex<Relay>>,
     mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
 ) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65_536];
     let mut last_sweep = Instant::now();
     loop {
         let (n, from) = socket.recv_from(&mut buf).await?;
         let now = Instant::now();
-        let out = if antiphon_net::mailbox::Message::is_mailbox_datagram(&buf[..n]) {
+        let out = if antiphon_net::blob::Message::is_blob_datagram(&buf[..n]) {
+            match &files {
+                Some(f) => {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    f.lock().unwrap().handle(from, &buf[..n], now, secs)
+                }
+                None => vec![(
+                    from,
+                    antiphon_net::blob::Message::Refused(antiphon_net::blob::Refusal::Disabled).encode(),
+                )],
+            }
+        } else if antiphon_net::mailbox::Message::is_mailbox_datagram(&buf[..n]) {
             match &mailbox {
                 Some(m) => {
                     let mut m = m.lock().unwrap();

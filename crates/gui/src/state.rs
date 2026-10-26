@@ -476,6 +476,14 @@ impl ActiveCall {
         });
     }
 
+    /// Sends a control message as is, best effort.
+    pub fn send_control(&self, runtime: &tokio::runtime::Handle, message: ControlMessage) {
+        let peer = self.peer.clone();
+        runtime.spawn(async move {
+            let _ = peer.send_control(&message.encode()).await;
+        });
+    }
+
     pub fn send_chat(&self, runtime: &tokio::runtime::Handle, text: String) {
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -1599,6 +1607,7 @@ pub fn start_pipeline(
     let jitter = Arc::new(Mutex::new(JitterBuffer::new(JITTER_MAX_WAIT)));
 
     let recv_peer = peer.clone();
+    let recv_link_peer = peer.clone();
     let recv_jitter = jitter.clone();
     let recv_profile = peer_profile.clone();
     let recv_group = group.clone();
@@ -1684,6 +1693,19 @@ pub fn start_pipeline(
                     }
                     Some(ControlMessage::SilentCall) => {
                         recv_silent.store(true, Ordering::Relaxed);
+                    }
+                    Some(ControlMessage::FileLink { name, size, file_id, key, seed_port, holders }) => {
+                        // Their seeder is on the address this call came
+                        // from. A relayed call's address is the relay's,
+                        // where a seeder won't answer; asking costs only
+                        // a timeout.
+                        let seeder = (seed_port != 0).then(|| {
+                            let mut a = recv_link_peer.remote_addr();
+                            a.set_port(seed_port);
+                            a
+                        });
+                        let with = crate::delivery::hex(&recv_link_peer.peer_identity().identity_key);
+                        crate::sharing::receive_link(name, size, file_id, key, holders, seeder, with);
                     }
                     Some(ControlMessage::Chat { id, text }) => {
                         if let Some(history) = &recv_history {

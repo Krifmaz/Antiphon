@@ -421,6 +421,9 @@ dependencies = [
  "antiphon-protocol",
  "anyhow",
  "clap",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

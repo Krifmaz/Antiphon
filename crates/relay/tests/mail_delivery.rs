@@ -18,7 +18,7 @@ async fn a_message_waits_at_the_node_until_its_recipient_collects_it() {
     let node_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let node = node_socket.local_addr().unwrap();
     let mailbox = Arc::new(Mutex::new(Mailbox::new(MailboxLimits { enabled: true, ..Default::default() })));
-    tokio::spawn(run_node(node_socket, Arc::new(Mutex::new(Relay::new(Limits::default()))), Some(mailbox.clone())));
+    tokio::spawn(run_node(node_socket, Arc::new(Mutex::new(Relay::new(Limits::default()))), Some(mailbox.clone()), None));
 
     let alice = IdentityKeyPair::generate();
     let bob = IdentityKeyPair::generate();
@@ -53,7 +53,7 @@ async fn a_message_waits_at_the_node_until_its_recipient_collects_it() {
 async fn a_relay_without_a_mailbox_says_so() {
     let node_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let node = node_socket.local_addr().unwrap();
-    tokio::spawn(run_node(node_socket, Arc::new(Mutex::new(Relay::new(Limits::default()))), None));
+    tokio::spawn(run_node(node_socket, Arc::new(Mutex::new(Relay::new(Limits::default()))), None, None));
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let err = mailbox::deposit(&sock, node, [0; 32], [0; 16], b"x", T).await.unwrap_err();
     assert!(matches!(err, antiphon_net::NetError::MailboxRefused(mailbox::Refusal::Disabled)), "{err:?}");

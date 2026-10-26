@@ -22,6 +22,10 @@ pub enum NetError {
     MailboxRefused(crate::mailbox::Refusal),
     #[error("the mailbox did not answer")]
     MailboxTimeout,
+    #[error("{}", .0.describe())]
+    FileRefused(crate::blob::Refusal),
+    #[error("nobody holding that file answered")]
+    FileHolderTimeout,
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }

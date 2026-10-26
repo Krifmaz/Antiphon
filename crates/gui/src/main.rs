@@ -31,6 +31,8 @@ mod theme_presets;
 mod transfer_limits;
 mod control;
 mod delivery;
+mod swarm;
+mod sharing;
 mod file_transfer;
 mod state;
 mod wav;
@@ -184,6 +186,7 @@ fn main() -> anyhow::Result<()> {
         });
     }
     delivery::set_hosting(&app_state.runtime, loaded.hold_mail_for_devices, loaded.hold_mail_port);
+    sharing::set_seeding(&app_state.runtime, loaded.seeding, loaded.seed_port);
 
     let main_window = MainWindow::new()?;
     main_window.set_my_share_id(share_id(&app_state.identity.public().identity_key).into());
@@ -260,6 +263,7 @@ fn main() -> anyhow::Result<()> {
     let mut peer_relay_saved = String::new();
     let mut peer_routes_saved = String::new();
     let mut delivery_round_seen = 0u64;
+    let mut sharing_seen = u64::MAX;
     _meter_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let Some(app) = meter_window.upgrade() else { return };
         // Spec §8: what the courier did since the last tick.
@@ -271,6 +275,11 @@ fn main() -> anyhow::Result<()> {
                 app.set_delivery_notice(notices.join("\n").into());
             }
             apply_routes_to_ui(&app, &config::load());
+        }
+        let sharing_now = sharing::revision();
+        if sharing_now != sharing_seen {
+            sharing_seen = sharing_now;
+            apply_shared_files_to_ui(&app, &config::load());
         }
 
         // Keyboard shortcuts, raised as flags by the poller thread (which
@@ -1985,11 +1994,20 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 let thumbnail = file_preview::generate(&path)
                     .map(|png| file_transfer::encode_b64(&png))
                     .unwrap_or_default();
-                let call = state2.call.lock().unwrap();
-                if let Some(active) = call.as_ref() {
-                    active.send_file(&state2.runtime, file_name, source, sha256, thumbnail);
+                let with = {
+                    let call = state2.call.lock().unwrap();
+                    let Some(active) = call.as_ref() else { return };
+                    active.send_file(&state2.runtime, file_name.clone(), source, sha256, thumbnail);
+                    crate::delivery::hex(&active.peer_identity().identity_key)
+                };
+                // Spec §5: also seed and pin it, so it can be fetched
+                // after the call. Sealing a big file takes a while; the
+                // direct transfer is already under way meanwhile.
+                if let Some(link) = sharing::share(&state2.runtime, &path, &file_name, &with) {
+                    if let Some(active) = state2.call.lock().unwrap().as_ref() {
+                        active.send_control(&state2.runtime, link);
+                    }
                 }
-                drop(call);
                 let weak = window_weak2.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
@@ -2754,6 +2772,35 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             save_routes(&app, config);
         });
     }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_sharing_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            sharing::set_seeding(&state.runtime, config.seeding, config.seed_port);
+            config::save(&config);
+        });
+    }
+    {
+        let state = app_state.clone();
+        main_window.on_check_shared_files(move || sharing::check_all(&state.runtime));
+    }
+    {
+        let state = app_state.clone();
+        main_window.on_download_shared_file(move |file_id| {
+            let state = state.clone();
+            let file_id = file_id.to_string();
+            let name = sharing::load().into_iter().find(|f| f.file_id == file_id).map(|f| f.name).unwrap_or_default();
+            std::thread::spawn(move || {
+                let Some(dest) = rfd::FileDialog::new().set_title("Save the shared file").set_file_name(&name).save_file() else {
+                    return;
+                };
+                sharing::download(&state.runtime, &file_id, dest);
+            });
+        });
+    }
+    main_window.on_forget_shared_file(move |file_id| sharing::forget(&file_id));
     {
         let window_weak = main_window.as_weak();
         let state = app_state.clone();
@@ -4597,6 +4644,46 @@ fn apply_routes_to_ui(app: &MainWindow, config: &config::AppConfig) {
     app.set_route_fan_out(config.route_fan_out);
     app.set_hold_mail(config.hold_mail_for_devices);
     app.set_hold_mail_port(config.hold_mail_port as i32);
+    app.set_seeding(config.seeding);
+    app.set_seed_scope(config.seed_scope);
+    app.set_seed_port(config.seed_port as i32);
+    app.set_pin_nodes(config.pin_nodes.join(", ").into());
+    app.set_pin_code(config.pin_code.clone().into());
+}
+
+/// Spec §5: the shared-files list, with what's known about each.
+fn apply_shared_files_to_ui(app: &MainWindow, config: &config::AppConfig) {
+    let entries: Vec<SharedFileEntry> = sharing::load()
+        .into_iter()
+        .map(|f| {
+            let who = config
+                .contacts
+                .iter()
+                .find(|c| c.identity_key.eq_ignore_ascii_case(&f.with))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "someone not in your contacts".to_string());
+            let holders = match f.holders.len() {
+                0 => "no one else holds it".to_string(),
+                1 => "1 holder".to_string(),
+                n => format!("{n} holders"),
+            };
+            SharedFileEntry {
+                name: f.name.clone().into(),
+                detail: format!(
+                    "{} · {} {} · {}",
+                    human_size(f.size),
+                    if f.mine { "shared with" } else { "from" },
+                    who,
+                    holders
+                )
+                .into(),
+                status: sharing::status(&f.file_id).into(),
+                file_id: f.file_id.into(),
+                mine: f.mine,
+            }
+        })
+        .collect();
+    app.set_shared_files(ModelRc::new(VecModel::from(entries)));
 }
 
 /// Saves a changed route list: bumps its sequence so contacts take the
@@ -5026,6 +5113,7 @@ fn apply_section_defaults(app: &MainWindow, expanded: bool) {
     app.set_sec_soundboard(expanded);
     app.set_sec_notifications(expanded);
     app.set_sec_transferlimits(expanded);
+    app.set_sec_sharedfiles(expanded);
 }
 
 /// Computes the profile bar's avatar-circle letter from the current
@@ -5453,6 +5541,16 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         strict_mode: app.get_strict_mode(),
         hold_mail_for_devices: app.get_hold_mail(),
         hold_mail_port: u16::try_from(app.get_hold_mail_port()).unwrap_or(3480),
+        seeding: app.get_seeding(),
+        seed_scope: app.get_seed_scope().clamp(0, 2),
+        seed_port: previous.seed_port,
+        pin_nodes: app
+            .get_pin_nodes()
+            .split(',')
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect(),
+        pin_code: app.get_pin_code().trim().to_string(),
         ptt_toggle: app.get_ptt_toggle(),
         mute_hold: app.get_mute_hold(),
         deafen_hold: app.get_deafen_hold(),
