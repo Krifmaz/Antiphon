@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use antiphon_relay::files::{FileHost, FileStore, HostPolicy, Retention};
 use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
-use antiphon_relay::{run_node, Limits, Relay, COMMITMENT};
+use antiphon_relay::onion::{load_or_create_hop_key, HopLimits, HopNode};
+use antiphon_relay::{run_node_with_hops, Limits, Relay, COMMITMENT};
 use clap::Parser;
 use tokio::net::UdpSocket;
 
@@ -81,6 +82,23 @@ struct Args {
     /// Remove a hosted file by id, or "all", and exit.
     #[arg(long)]
     files_purge: Option<String>,
+    /// Be a hop on anonymity-mode circuits: peel one routing layer and pass
+    /// the rest on, or deliver it to the relay it names. Off by default.
+    #[arg(long)]
+    hops: bool,
+    /// Keep the hop key in this file (created if missing) so it survives
+    /// restarts. Without it, a new key is made at every start.
+    #[arg(long)]
+    hop_key: Option<std::path::PathBuf>,
+    /// Most circuits held at once.
+    #[arg(long, default_value_t = HopLimits::default().max_circuits)]
+    hops_max_circuits: usize,
+    /// Most circuits any one neighbouring address may hold.
+    #[arg(long, default_value_t = HopLimits::default().max_circuits_per_addr)]
+    hops_max_per_addr: usize,
+    /// Let circuits reach private and loopback addresses (a LAN-only node).
+    #[arg(long)]
+    hops_allow_private: bool,
 }
 
 #[tokio::main]
@@ -156,7 +174,26 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let hops = if args.hops {
+        let secret = match &args.hop_key {
+            Some(path) => load_or_create_hop_key(path)?,
+            None => antiphon_crypto::onion::HopSecret::generate(),
+        };
+        let limits = HopLimits {
+            max_circuits: args.hops_max_circuits,
+            max_circuits_per_addr: args.hops_max_per_addr,
+            allow_private: args.hops_allow_private,
+            ..HopLimits::default()
+        };
+        Some(Arc::new(Mutex::new(HopNode::new(secret, limits))))
+    } else {
+        None
+    };
     println!("antiphon-relay listening on {}\n\n{COMMITMENT}", socket.local_addr()?);
+    if let Some(h) = &hops {
+        let key: String = h.lock().unwrap().public_key().iter().map(|b| format!("{b:02x}")).collect();
+        println!("\nHops on: carrying anonymity circuits. Hop key {key}");
+    }
     if args.files {
         println!("\nHosting files in {}: sealed copies this node cannot read.", args.files_dir.display());
     }
@@ -188,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         let relay = relay.clone();
         let mailbox = mailbox.clone();
         let files = files.clone();
+        let hops = hops.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(secs.max(1)));
             loop {
@@ -209,12 +247,16 @@ async fn main() -> anyhow::Result<()> {
                         u.files, u.stored_bytes, u.chunks_served, u.bytes_served, u.refused
                     );
                 }
+                if let Some(h) = &hops {
+                    let s = h.lock().unwrap().stats();
+                    println!("hops circuits={} exits={} cells={} refused={}", s.circuits, s.exits, s.cells, s.refused);
+                }
             }
         });
     }
 
     tokio::select! {
-        result = run_node(socket, relay, mailbox, files.clone()) => result?,
+        result = run_node_with_hops(socket, relay, mailbox, files.clone(), hops) => result?,
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())

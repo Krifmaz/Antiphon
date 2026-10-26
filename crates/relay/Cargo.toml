@@ -9,13 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+getrandom = "0.4.3"
+antiphon-protocol = { version = "0.1.0", path = "../protocol" }
 clap = { version = "4.6.6", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 antiphon-net = { version = "0.1.0", path = "../net" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-
-[dev-dependencies]
-getrandom = "0.4.3"
-antiphon-protocol = { version = "0.1.0", path = "../protocol" }
