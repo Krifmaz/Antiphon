@@ -210,6 +210,19 @@ enum Command {
         #[arg(long)]
         output_device: Option<String>,
     },
+    /// Headless test peer: answer every call and send its audio straight
+    /// back, one call at a time, forever. No microphone, speaker or
+    /// keyboard is touched, so it runs on a server or in a container
+    /// (see docker/README.md).
+    Echo {
+        #[arg(long, default_value_t = 5000)]
+        port: u16,
+        /// Seconds without a frame before a call counts as hung up and the
+        /// next one is answered. The wire has no hang-up message, so
+        /// silence is the only signal.
+        #[arg(long, default_value_t = 5)]
+        idle_secs: u64,
+    },
     /// List available audio input/output devices.
     Devices,
     /// Print (or save) the default audio chain preset as JSON, so it can be
@@ -301,6 +314,16 @@ async fn main() -> Result<()> {
             println!("Connected to {}", peer.remote_addr());
             announce_peer(&identity, &peer.peer_identity());
             run_call(peer, preset, &ptt_key, no_ptt, input_device, output_device).await?;
+        }
+        Command::Echo { port, idle_secs } => {
+            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+            let identity = load_identity()?;
+            println!("Echo peer on {}", socket.local_addr()?);
+            println!("Identity: {}", hex(&identity.public().identity_key));
+            tokio::select! {
+                result = run_echo(socket, &identity, Duration::from_secs(idle_secs)) => result?,
+                _ = tokio::signal::ctrl_c() => println!("Shutting down."),
+            }
         }
         Command::Call { remote, port, preset, ptt_key, no_ptt, input_device, output_device } => {
             let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
@@ -453,6 +476,38 @@ pub(crate) async fn run_call(
     Ok(())
 }
 
+/// Answers calls on `socket` one after another, echoing each caller's
+/// audio frames back unchanged. The FEC payload is returned as is, so the
+/// caller's own sequence numbers and backup copies survive the round trip
+/// and its jitter buffer sees an ordinary stream. Control messages and
+/// file chunks are dropped, as `run_call` drops them.
+async fn run_echo(socket: Arc<UdpSocket>, identity: &IdentityKeyPair, idle: Duration) -> Result<()> {
+    loop {
+        let peer = Arc::new(PeerConnection::listen(socket.clone(), identity).await?);
+        println!("Call from {}", peer.remote_addr());
+        announce_peer(identity, &peer.peer_identity());
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let recv_task = tokio::spawn(peer.clone().recv_loop(move |msg| {
+            if let antiphon_net::Received::Audio { plaintext, .. } = msg {
+                let _ = tx.send(plaintext);
+            }
+        }));
+
+        let mut frames: u64 = 0;
+        while let Ok(Some(frame)) = tokio::time::timeout(idle, rx.recv()).await {
+            if let Err(e) = peer.send_audio(&frame).await {
+                eprintln!("[net] send error: {e}");
+            }
+            frames += 1;
+        }
+        // Stops the receive loop before the next listen reads the socket.
+        recv_task.abort();
+        let _ = recv_task.await;
+        println!("Call from {} ended after {frames} frames.", peer.remote_addr());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +521,34 @@ mod tests {
     fn every_ptt_key_choice_parses() {
         for choice in PTT_KEY_CHOICES {
             assert!(ptt::parse_key(choice).is_ok(), "PTT_KEY_CHOICES entry '{choice}' doesn't parse");
+        }
+    }
+
+    /// The echo peer hands a caller's frame back byte for byte, and after
+    /// the idle timeout answers a fresh call on the same socket.
+    #[tokio::test]
+    async fn echo_returns_audio_and_answers_the_next_call() {
+        let server = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr = server.local_addr().unwrap();
+        let echo_identity = IdentityKeyPair::generate();
+        tokio::spawn(async move { run_echo(server, &echo_identity, Duration::from_millis(200)).await });
+
+        for round in 0..2u8 {
+            let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let caller = Arc::new(PeerConnection::connect(socket, addr, &IdentityKeyPair::generate()).await.unwrap());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let recv = tokio::spawn(caller.clone().recv_loop(move |msg| {
+                if let antiphon_net::Received::Audio { plaintext, .. } = msg {
+                    let _ = tx.send(plaintext);
+                }
+            }));
+            let frame = vec![round, 1, 2, 3];
+            caller.send_audio(&frame).await.unwrap();
+            let echoed = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+            assert_eq!(echoed, frame);
+            recv.abort();
+            // Let the echo peer time the call out before the next one.
+            tokio::time::sleep(Duration::from_millis(400)).await;
         }
     }
 }

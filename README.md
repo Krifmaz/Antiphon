@@ -158,6 +158,13 @@ per line as `name | description | invite link`. In the app: Settings >
 Call > Finding contacts -- switch the DHT on and add bootstrap nodes
 (none are built in), or add a directory and press Browse.
 
+### Test peer
+
+`antiphon-cli echo --port 5000` is a headless peer that answers every call
+and sends your audio back, so a client has someone to call without a
+second person. [`docker/README.md`](docker/README.md) runs it in Docker;
+the image is published as `ghcr.io/krifmaz/antiphon-echo`.
+
 ## Layout
 
 ```

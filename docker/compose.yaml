@@ -1,0 +1,17 @@
+# Runs the headless echo peer. From the repo root:
+#   docker compose -f docker/compose.yaml up -d
+# Or skip the build and use the published image by swapping `build:` for
+#   image: ghcr.io/krifmaz/antiphon-echo:latest
+services:
+  echo:
+    build:
+      context: ..
+    restart: unless-stopped
+    ports:
+      - "5000:5000/udp"
+    volumes:
+      # Keeps the identity key, so clients pin it once.
+      - antiphon-data:/data
+
+volumes:
+  antiphon-data:
