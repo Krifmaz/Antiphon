@@ -18,8 +18,13 @@
 //!   written: [`Relay`] has no logging at all, and the binary prints only
 //!   aggregate counters, and only when asked to.
 //!
+//! The same node can also hold sealed mail for people who are offline
+//! ([`mailbox`]). That is off unless the operator switches it on.
+//!
 //! The core is a plain state machine ([`Relay::handle`]) so it can be
 //! tested without sockets; [`run`] is the thin loop around it.
+
+pub mod mailbox;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -229,10 +234,40 @@ impl Relay {
 
 /// Serves `relay` on `socket` until the socket fails.
 pub async fn run(socket: Arc<UdpSocket>, relay: Arc<std::sync::Mutex<Relay>>) -> std::io::Result<()> {
+    run_node(socket, relay, None).await
+}
+
+/// Serves the relay and, if given, the mailbox on one socket. Mailbox
+/// requests are told apart by their magic before the relay sees them, so
+/// a client with a live relayed call can still use the mailbox.
+pub async fn run_node(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65_536];
+    let mut last_sweep = Instant::now();
     loop {
         let (n, from) = socket.recv_from(&mut buf).await?;
-        let out = relay.lock().unwrap().handle(from, &buf[..n], Instant::now());
+        let now = Instant::now();
+        let out = if antiphon_net::mailbox::Message::is_mailbox_datagram(&buf[..n]) {
+            match &mailbox {
+                Some(m) => {
+                    let mut m = m.lock().unwrap();
+                    if now.duration_since(last_sweep) > Duration::from_secs(60) {
+                        m.sweep(now);
+                        last_sweep = now;
+                    }
+                    m.handle(from, &buf[..n], now)
+                }
+                None => vec![(
+                    from,
+                    antiphon_net::mailbox::Message::Refused(antiphon_net::mailbox::Refusal::Disabled).encode(),
+                )],
+            }
+        } else {
+            relay.lock().unwrap().handle(from, &buf[..n], now)
+        };
         for (to, bytes) in out {
             // One unreachable peer must not stop the relay for everyone.
             let _ = socket.send_to(&bytes, to).await;
@@ -245,7 +280,9 @@ pub async fn run(socket: Arc<UdpSocket>, relay: Arc<std::sync::Mutex<Relay>>) ->
 pub const COMMITMENT: &str = "\
 This relay forwards encrypted packets it cannot read. It never holds a key.
 It sees rotating blinded tokens, never who you are. It keeps addresses only
-while a call or registration is live, and writes no connection logs.";
+while a call or registration is live, and writes no connection logs.
+If it holds mail, the mail is sealed end to end: it sees an inbox label it
+cannot link to anyone, and never a sender, a recipient or a word.";
 
 #[cfg(test)]
 mod tests {

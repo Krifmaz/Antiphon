@@ -18,6 +18,10 @@ pub enum NetError {
     RelayNotFound,
     #[error("the relay did not answer")]
     RelayTimeout,
+    #[error("the mailbox refused: {}", .0.describe())]
+    MailboxRefused(crate::mailbox::Refusal),
+    #[error("the mailbox did not answer")]
+    MailboxTimeout,
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }

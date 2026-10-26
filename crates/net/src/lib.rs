@@ -9,6 +9,7 @@ pub mod file_transfer;
 mod jitter;
 mod peer;
 pub mod port_map;
+pub mod mailbox;
 pub mod relay;
 pub mod stun;
 

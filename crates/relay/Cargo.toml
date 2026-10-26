@@ -12,7 +12,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 antiphon-net = { version = "0.1.0", path = "../net" }
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 
 [dev-dependencies]
-antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-protocol = { version = "0.1.0", path = "../protocol" }
