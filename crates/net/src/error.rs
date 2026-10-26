@@ -26,6 +26,12 @@ pub enum NetError {
     FileRefused(crate::blob::Refusal),
     #[error("nobody holding that file answered")]
     FileHolderTimeout,
+    #[error("the group-call server refused: {}", .0.describe())]
+    SfuRefused(crate::sfu::Refusal),
+    #[error("the group-call server did not answer")]
+    SfuTimeout,
+    #[error("a group-call frame must be 1 to {max} bytes, not {0}", max = crate::sfu::MAX_MEDIA_PAYLOAD)]
+    SfuPayloadSize(usize),
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }
