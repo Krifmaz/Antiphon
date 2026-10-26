@@ -51,6 +51,27 @@
 //!   the winner, and if the loser was theirs they make their change again
 //!   on top.
 //!
+//! # How you appear, and as whom (spec §7 "per-community identity")
+//!
+//! Each space has its own [`Appearance`] -- name, status line, a small
+//! picture -- carried in your [`Card`] there; empty means your profile's.
+//! Separately, you can be in a space under a **separate identity**
+//! ([`antiphon_crypto::persona`]), chosen when you create it or accept the
+//! invite: a key derived for that space that is your MLS credential,
+//! manifest entry, card and mailbox there, so no two spaces (and none of
+//! your contacts) can match you up. To keep that true:
+//!
+//! - An invite is an [`Offer`]: nobody is written into the manifest until
+//!   they answer, and then under the key they answer with. Your Join goes
+//!   to the inviter sealed with your main key -- they alone see both.
+//! - What you send as a separate identity goes by mailbox, sealed as that
+//!   identity, and never over a live call (which is with your main key).
+//! - The courier collects that identity's own inboxes, and takes only
+//!   community traffic there.
+//! - Shared files from that space are fetched as that identity.
+//!
+//! The tradeoffs are spelled out in `antiphon_crypto::persona`.
+//!
 //! Not handled: a member who misses a commit for good (offline longer than
 //! the mailboxes keep mail) is stuck in an old epoch until someone invites
 //! them again; nothing detects that for them.
@@ -1837,6 +1858,15 @@ pub fn clear_live(key: &[u8; 32]) {
 
 fn live(key: &[u8; 32]) -> Option<Arc<antiphon_net::PeerConnection>> {
     LIVE.lock().unwrap().iter().find(|(k, _)| k == key).map(|(_, p)| p.clone())
+}
+
+/// The separate identity to fetch a shared file as, when its link came
+/// from a community (`with` is `community:<id hex>`) we are in under one.
+pub fn identity_for_link(with: &str) -> Option<Arc<IdentityKeyPair>> {
+    let id = crate::connection_mode::decode_hex32(with.strip_prefix("community:")?).map(Key)?;
+    let store = Store::app()?;
+    let space = store.load(&id).filter(|s| s.persona)?;
+    Some(Arc::new(store.identity_in(&space)))
 }
 
 /// For the seeding holder (spec §5 "this community"): is this identity a
