@@ -178,10 +178,90 @@ const OP_PING: u8 = 0x01;
 const OP_FIND_NODE: u8 = 0x02;
 const OP_FIND_VALUE: u8 = 0x03;
 const OP_STORE: u8 = 0x04;
+const OP_GET_LISTING: u8 = 0x05;
 const OP_PONG: u8 = 0x81;
 const OP_NODES: u8 = 0x82;
 const OP_VALUE: u8 = 0x83;
 const OP_STORED: u8 = 0x84;
+const OP_LISTING: u8 = 0x85;
+
+/// One community in a node's directory (spec §4 "Opt-in directories for
+/// public communities only"). A community is listed because its owner
+/// asked the node's operator to list it; nobody is listed by default,
+/// and people are never listed at all -- only communities, by their
+/// invite link.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ListingEntry {
+    pub name: String,
+    pub description: String,
+    /// An `antiphon://` invite link to the community's host.
+    pub invite: String,
+}
+
+const MAX_NAME: usize = 64;
+const MAX_DESCRIPTION: usize = 240;
+const MAX_INVITE: usize = 400;
+/// Entry bytes per page, so a page and its signature fit in a datagram.
+const PAGE_BYTES: usize = 1000;
+
+impl ListingEntry {
+    /// Whether it fits the limits a node will serve.
+    pub fn fits(&self) -> bool {
+        !self.name.trim().is_empty()
+            && self.name.len() <= MAX_NAME
+            && self.description.len() <= MAX_DESCRIPTION
+            && self.invite.len() <= MAX_INVITE
+    }
+
+    fn encoded_len(&self) -> usize {
+        6 + self.name.len() + self.description.len() + self.invite.len()
+    }
+
+    /// Parses an operator's directory file: one community per line,
+    /// `name | description | invite link`; `#` starts a comment.
+    pub fn parse_file(text: &str) -> Result<Vec<Self>, String> {
+        let mut out = Vec::new();
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, '|').map(str::trim).collect();
+            let [name, description, invite] = parts[..] else {
+                return Err(format!("line {}: expected `name | description | invite link`", n + 1));
+            };
+            let entry = Self { name: name.into(), description: description.into(), invite: invite.into() };
+            if !entry.fits() {
+                return Err(format!(
+                    "line {}: a name (up to {MAX_NAME} bytes), a description up to {MAX_DESCRIPTION} and a link up to {MAX_INVITE}",
+                    n + 1
+                ));
+            }
+            out.push(entry);
+        }
+        Ok(out)
+    }
+}
+
+/// Splits a listing into pages that each fit one reply.
+fn pages(entries: &[ListingEntry]) -> Vec<&[ListingEntry]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (i, e) in entries.iter().enumerate() {
+        if i > start && bytes + e.encoded_len() > PAGE_BYTES {
+            out.push(&entries[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += e.encoded_len();
+    }
+    if start < entries.len() {
+        out.push(&entries[start..]);
+    }
+    out.truncate(255);
+    out
+}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Request {
@@ -189,6 +269,8 @@ pub enum Request {
     FindNode(NodeId),
     FindValue(DhtKey),
     Store(DhtRecord),
+    /// A page of the node's community directory, if it keeps one.
+    GetListing { page: u8 },
 }
 
 /// What a node says to a [`Request::Store`].
@@ -232,6 +314,8 @@ pub enum Reply {
     Nodes(Vec<NodeInfo>),
     Value { record: Option<DhtRecord>, nodes: Vec<NodeInfo> },
     Stored(StoreResult),
+    /// `pages` is 0 for a node with no directory.
+    Listing { page: u8, pages: u8, entries: Vec<ListingEntry> },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -341,6 +425,7 @@ impl Message {
             Request::FindNode(_) => OP_FIND_NODE,
             Request::FindValue(_) => OP_FIND_VALUE,
             Request::Store(_) => OP_STORE,
+            Request::GetListing { .. } => OP_GET_LISTING,
         });
         out.extend_from_slice(&txid);
         match sender {
@@ -355,6 +440,7 @@ impl Message {
             Request::Ping => {}
             Request::FindNode(t) | Request::FindValue(t) => out.extend_from_slice(t),
             Request::Store(r) => put_record(&mut out, r),
+            Request::GetListing { page } => out.push(*page),
         }
         out
     }
@@ -366,6 +452,7 @@ impl Message {
             Reply::Nodes(_) => OP_NODES,
             Reply::Value { .. } => OP_VALUE,
             Reply::Stored(_) => OP_STORED,
+            Reply::Listing { .. } => OP_LISTING,
         });
         out.extend_from_slice(&txid);
         out.extend_from_slice(&key.public());
@@ -384,6 +471,17 @@ impl Message {
                 put_nodes(&mut out, nodes);
             }
             Reply::Stored(result) => out.push(result.code()),
+            Reply::Listing { page, pages, entries } => {
+                out.push(*page);
+                out.push(*pages);
+                out.push(entries.len() as u8);
+                for e in entries {
+                    for field in [&e.name, &e.description, &e.invite] {
+                        out.extend_from_slice(&(field.len() as u16).to_be_bytes());
+                        out.extend_from_slice(field.as_bytes());
+                    }
+                }
+            }
         }
         let signature = key.signing.sign(&reply_signing_bytes(&out));
         out.extend_from_slice(&signature.to_bytes());
@@ -408,6 +506,7 @@ impl Message {
                 OP_FIND_NODE => Request::FindNode(r.arr32()?),
                 OP_FIND_VALUE => Request::FindValue(r.arr32()?),
                 OP_STORE => Request::Store(r.record()?),
+                OP_GET_LISTING => Request::GetListing { page: r.u8()? },
                 _ => return None,
             };
             Message::Request { txid, sender, body }
@@ -431,6 +530,21 @@ impl Message {
                     Reply::Value { record, nodes: r.nodes()? }
                 }
                 OP_STORED => Reply::Stored(StoreResult::from_code(r.u8()?)?),
+                OP_LISTING => {
+                    let page = r.u8()?;
+                    let pages = r.u8()?;
+                    let count = r.u8()? as usize;
+                    let mut entries = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let mut field = || -> Option<String> {
+                            let len = u16::from_be_bytes(r.take(2)?.try_into().ok()?) as usize;
+                            String::from_utf8(r.take(len)?.to_vec()).ok()
+                        };
+                        let (name, description, invite) = (field()?, field()?, field()?);
+                        entries.push(ListingEntry { name, description, invite });
+                    }
+                    Reply::Listing { page, pages, entries }
+                }
                 _ => return None,
             };
             if !r.rest.is_empty() {
@@ -642,6 +756,7 @@ pub struct DhtNode {
     bootstrap: Vec<SocketAddr>,
     last_refresh: Option<Instant>,
     stores_refused: u64,
+    listing: Vec<ListingEntry>,
 }
 
 pub type Out = Vec<(SocketAddr, Vec<u8>)>;
@@ -659,7 +774,14 @@ impl DhtNode {
             bootstrap: Vec::new(),
             last_refresh: None,
             stores_refused: 0,
+            listing: Vec::new(),
         }
+    }
+
+    /// Sets the community directory this node serves. Empty -- the
+    /// default -- serves none.
+    pub fn set_listing(&mut self, entries: Vec<ListingEntry>) {
+        self.listing = entries.into_iter().filter(ListingEntry::fits).collect();
     }
 
     pub fn id(&self) -> NodeId {
@@ -719,6 +841,14 @@ impl DhtNode {
                         nodes: self.table.closest(&key, K),
                     },
                     Request::Store(record) => Reply::Stored(self.store_record(record, &from, now)),
+                    Request::GetListing { page } => {
+                        let pages = pages(&self.listing);
+                        Reply::Listing {
+                            page,
+                            pages: pages.len() as u8,
+                            entries: pages.get(page as usize).map(|p| p.to_vec()).unwrap_or_default(),
+                        }
+                    }
                 };
                 out.push((from, Message::encode_reply(txid, &self.key, &reply)));
             }
@@ -1046,7 +1176,7 @@ pub async fn lookup(
                         result.observed.get_or_insert(observed);
                         (None, vec![])
                     }
-                    Reply::Stored(_) => (None, vec![]),
+                    Reply::Stored(_) | Reply::Listing { .. } => (None, vec![]),
                 };
                 if let Some(record) = record {
                     if record.key == target && record.verify().is_ok() && seen_records.insert(record.encode()) {
@@ -1149,6 +1279,51 @@ pub async fn publish(
     Ok(stored)
 }
 
+/// Reads a node's whole community directory. Returns the node's public
+/// key with it: every page is signed by that key, so a caller that pins
+/// it on first use (as the app does) notices if a different machine
+/// starts answering at that address.
+pub async fn fetch_listing(
+    socket: &UdpSocket,
+    node: SocketAddr,
+    timeout: Duration,
+) -> Result<([u8; 32], Vec<ListingEntry>), NetError> {
+    let mut entries = Vec::new();
+    let mut signer: Option<[u8; 32]> = None;
+    let mut page = 0u8;
+    let mut buf = vec![0u8; 65_536];
+    loop {
+        let txid = new_txid();
+        let request = Message::encode_request(txid, None, &Request::GetListing { page });
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut answer = None;
+        'retry: while tokio::time::Instant::now() < deadline {
+            socket.send_to(&request, node).await?;
+            let wait = (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline);
+            while let Ok(Ok((n, from))) = tokio::time::timeout_at(wait, socket.recv_from(&mut buf)).await {
+                if from != node {
+                    continue;
+                }
+                if let Some(Message::Reply { txid: t, responder, body: Reply::Listing { pages, entries: got, .. }, .. }) =
+                    Message::decode(&buf[..n])
+                {
+                    if t == txid && signer.is_none_or(|s| s == responder) {
+                        answer = Some((responder, pages, got));
+                        break 'retry;
+                    }
+                }
+            }
+        }
+        let Some((responder, pages, got)) = answer else { return Err(NetError::DhtUnreachable) };
+        signer = Some(responder);
+        entries.extend(got);
+        page += 1;
+        if page >= pages {
+            return Ok((responder, entries));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,7 +1344,13 @@ mod tests {
         let key = NodeKey::generate(TEST_BITS);
         let alice = antiphon_crypto::IdentityKeyPair::generate();
         let record = DhtRecord::seal(&alice, 1, 1, b"x").unwrap();
-        for body in [Request::Ping, Request::FindNode([1; 32]), Request::FindValue([2; 32]), Request::Store(record.clone())] {
+        for body in [
+            Request::Ping,
+            Request::FindNode([1; 32]),
+            Request::FindValue([2; 32]),
+            Request::Store(record.clone()),
+            Request::GetListing { page: 3 },
+        ] {
             for sender in [None, Some(&key)] {
                 let bytes = Message::encode_request([7; 8], sender, &body);
                 let expected = Message::Request { txid: [7; 8], sender: sender.map(|k| (k.public(), k.nonce())), body: body.clone() };
@@ -1183,6 +1364,11 @@ mod tests {
             Reply::Value { record: Some(record), nodes: nodes.clone() },
             Reply::Value { record: None, nodes: vec![] },
             Reply::Stored(StoreResult::Stale),
+            Reply::Listing {
+                page: 1,
+                pages: 2,
+                entries: vec![ListingEntry { name: "Chess club".into(), description: "Thursdays".into(), invite: "antiphon://ab@x:1".into() }],
+            },
         ] {
             let mut bytes = Message::encode_reply([9; 8], &key, &body);
             let expected = Message::Reply { txid: [9; 8], responder: key.public(), nonce: key.nonce(), body };
@@ -1309,5 +1495,42 @@ mod tests {
         // ...and from the claimed one, admitted.
         node.handle(from, &Message::encode_reply(txid, &other, &Reply::Pong { observed: from }), now);
         assert_eq!(node.stats().nodes, 1);
+    }
+
+    #[test]
+    fn a_directory_file_parses_and_pages_fit_a_datagram() {
+        let text = "# communities on this node\nChess club | Thursdays at eight | antiphon://aa@chess.example:3479\n\n";
+        let parsed = ListingEntry::parse_file(text).unwrap();
+        assert_eq!(parsed[0].name, "Chess club");
+        assert!(ListingEntry::parse_file("just a name").is_err());
+        let many: Vec<ListingEntry> = (0..40)
+            .map(|i| ListingEntry { name: format!("Community {i}"), description: "d".repeat(200), invite: "i".repeat(300) })
+            .collect();
+        let split = pages(&many);
+        assert!(split.len() > 1);
+        assert_eq!(split.iter().map(|p| p.len()).sum::<usize>(), 40);
+        let key = NodeKey::generate(TEST_BITS);
+        for (i, p) in split.iter().enumerate() {
+            let body = Reply::Listing { page: i as u8, pages: split.len() as u8, entries: p.to_vec() };
+            let bytes = Message::encode_reply([0; 8], &key, &body);
+            assert!(bytes.len() < 1400, "{}", bytes.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_listing_is_fetched_page_by_page_from_a_real_node() {
+        let mut node = DhtNode::new(NodeKey::generate(TEST_BITS), Config { pow_bits: TEST_BITS, ..Config::default() });
+        let entries: Vec<ListingEntry> = (0..12)
+            .map(|i| ListingEntry { name: format!("Community {i}"), description: "x".repeat(150), invite: "antiphon://y".into() })
+            .collect();
+        node.set_listing(entries.clone());
+        let public = node.info(addr(0, 0, 0)).public;
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let at = socket.local_addr().unwrap();
+        tokio::spawn(serve(socket, Arc::new(Mutex::new(node))));
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (signer, got) = fetch_listing(&client, at, Duration::from_secs(2)).await.unwrap();
+        assert_eq!(signer, public);
+        assert_eq!(got, entries);
     }
 }
