@@ -17,6 +17,23 @@ pub struct Settings {
     pub open_mic: bool,
     pub speaker: bool,
     pub chain: ChainConfig,
+    /// The name sent to the people you call.
+    pub display_name: String,
+    /// Hold file transfers while on mobile data.
+    pub wifi_only_transfers: bool,
+    /// Megabytes of mobile data file transfers may use per month; 0 for
+    /// no limit. Only matters with `wifi_only_transfers` off.
+    pub cellular_limit_mb: u32,
+    /// On mobile data: no spare audio copy, no thumbnails, slower uploads.
+    pub data_saver: bool,
+    /// Keep waiting for calls after switching away from the app.
+    pub keep_listening_in_background: bool,
+    /// Keep listening in the background even with battery saver on.
+    pub listen_on_battery_saver: bool,
+    /// Mobile data used by transfers this month, kept across restarts so
+    /// the limit means a month rather than a session.
+    pub cellular_month: u32,
+    pub cellular_used_bytes: u64,
 }
 
 impl Default for Settings {
@@ -27,6 +44,17 @@ impl Default for Settings {
             open_mic: false,
             speaker: false,
             chain: ChainConfig::default_preset(),
+            display_name: String::new(),
+            // On by default: a large file quietly eating a data plan is
+            // the surprise people do not forgive, and the queue says
+            // plainly why a file is waiting.
+            wifi_only_transfers: true,
+            cellular_limit_mb: 0,
+            data_saver: true,
+            keep_listening_in_background: true,
+            listen_on_battery_saver: false,
+            cellular_month: 0,
+            cellular_used_bytes: 0,
         }
     }
 }
