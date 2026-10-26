@@ -1,17 +1,27 @@
 //! Antiphon on Android: the shared phone app in `antiphon-mobile`, started
-//! from the platform's own `android.app.NativeActivity`.
+//! from `AntiphonActivity`, a few lines of Java around the platform's own
+//! `android.app.NativeActivity`.
 //!
 //! `android-activity` hands this crate the activity and `winit` turns it
 //! into a window; everything above that is shared with iOS. What is
 //! Android's own lives in [`platform`]: the framework calls a
-//! NativeActivity cannot make from the NDK alone, made through JNI.
+//! NativeActivity cannot make from the NDK alone, made through JNI. The
+//! little Java there is (`java/org/antiphon/app`) exists because a
+//! service, a broadcast receiver and an activity result can only be
+//! received by a Java class; each hands what it gets to [`native`].
+//!
+//! Audio needs nothing here: cpal's Android backend is AAudio, through the
+//! `ndk` crate, with no C++ runtime to ship.
 //!
 //! Everything is `cfg(target_os = "android")`: on a desktop this crate is
 //! empty, so `cargo build --workspace` is unaffected.
 
 #![cfg(target_os = "android")]
 
+mod native;
 mod platform;
+
+use std::sync::atomic::Ordering;
 
 use android_activity::AndroidApp;
 use antiphon_mobile::runner::{Runner, Wake};
@@ -41,7 +51,9 @@ fn android_main(app: AndroidApp) {
     };
     let data_dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
     let mut runner = Runner::new(data_dir, event_loop.create_proxy());
+    native::APP_RUNNING.store(true, Ordering::Release);
     if let Err(e) = event_loop.run_app(&mut runner) {
         log::error!("event loop ended with an error: {e}");
     }
+    native::APP_RUNNING.store(false, Ordering::Release);
 }
