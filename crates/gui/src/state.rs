@@ -83,6 +83,12 @@ pub struct TransmitSettings {
     /// is not cut off." Milliseconds the mic stays open after the key comes
     /// up.
     pub ptt_release_ms: AtomicU32,
+    /// The other half of "PTT or mute/deafen switched to toggle behavior
+    /// per user": mute and deafen toggle by default, and either can be
+    /// switched to *hold* -- muted only while the key is down
+    /// (push-to-mute), deafened only while it is down.
+    pub mute_hold: AtomicBool,
+    pub deafen_hold: AtomicBool,
 }
 
 impl TransmitSettings {
@@ -102,8 +108,25 @@ impl TransmitSettings {
             ptt_toggle: AtomicBool::new(false),
             ptt_latched: AtomicBool::new(false),
             ptt_release_ms: AtomicU32::new(0),
+            mute_hold: AtomicBool::new(false),
+            deafen_hold: AtomicBool::new(false),
         }
     }
+}
+
+/// Every key physically down right now. The polling backend's answer, plus
+/// Caps Lock when the push-to-talk hook is swallowing it -- a swallowed key
+/// never reaches the backend (see `caps_lock.rs`).
+pub fn keys_down(device_state: &DeviceState) -> HashSet<Keycode> {
+    let mut down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+    if crate::caps_lock::hooked() {
+        if crate::caps_lock::held() {
+            down.insert(Keycode::CapsLock);
+        } else {
+            down.remove(&Keycode::CapsLock);
+        }
+    }
+    down
 }
 
 /// Waits (up to `timeout`) for the next key press and returns it, for the
@@ -113,9 +136,9 @@ impl TransmitSettings {
 pub fn capture_next_key(timeout: Duration) -> Option<Keycode> {
     let device_state = DeviceState::new();
     let start = Instant::now();
-    let mut previously_down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+    let mut previously_down = keys_down(&device_state);
     while start.elapsed() < timeout {
-        let now_down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+        let now_down = keys_down(&device_state);
         if let Some(key) = now_down.iter().find(|k| !previously_down.contains(k)) {
             return Some(*key);
         }
@@ -668,6 +691,11 @@ impl ActiveCall {
         history.get(index).map(|c| (c.sample_rate, c.samples.clone()))
     }
 
+    /// How many clips this call has cut so far (spec §2 replay modes).
+    pub fn replay_clips_cut(&self) -> u64 {
+        self.replay_clips.lock().unwrap().cut()
+    }
+
     pub fn clear_replay_clips(&self) {
         self.replay_clips.lock().unwrap().clear();
     }
@@ -1023,7 +1051,7 @@ pub fn watch_for_key(key: Keycode, timeout: Duration) -> bool {
     let device_state = DeviceState::new();
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if device_state.get_keys().contains(&key) {
+        if keys_down(&device_state).contains(&key) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -1077,6 +1105,41 @@ impl Drop for LoopbackHandle {
 /// but hand samples to a channel, and a worker thread does the DSP. Audio
 /// callbacks run on a realtime thread, so doing filter work (or taking a
 /// lock someone else might hold) inside one is how you get dropouts.
+/// How long the spec §1 mic test records for.
+pub const MIC_TEST_SECONDS: u64 = 5;
+
+/// Records `seconds` of microphone and returns it processed through the
+/// chain, exactly as a call would send it (spec §1 "Mic Test & Record
+/// Preview": "Record five seconds and play it back so you hear exactly
+/// what everyone else hears").
+///
+/// The chain runs over the recording after the fact rather than live, so
+/// nothing is heard while recording -- which is the point: you listen back
+/// once, without your own voice in your ears confusing the comparison.
+/// Blocks for the whole recording, so call it from `spawn_blocking`.
+pub fn record_mic_test(input_device: Option<&str>, config: &ChainConfig, seconds: u64) -> Result<(u32, Vec<f32>)> {
+    let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let sink = recorded.clone();
+    let capture = start_capture(input_device, move |samples: &[f32]| {
+        if let Ok(mut buf) = sink.lock() {
+            buf.extend_from_slice(samples);
+        }
+    })?;
+    let sample_rate = capture.sample_rate;
+    std::thread::sleep(Duration::from_secs(seconds));
+    drop(capture);
+
+    let mut samples = std::mem::take(&mut *recorded.lock().unwrap());
+    let mut chain = AudioChain::from_config(sample_rate, config);
+    // Same 10 ms blocks a device callback hands the chain, so stages with
+    // per-block state (meters, envelopes) behave as they do live.
+    let block = (sample_rate as usize / 100).max(1);
+    for chunk in samples.chunks_mut(block) {
+        chain.process(chunk);
+    }
+    Ok((sample_rate, samples))
+}
+
 pub fn start_loopback(
     input_device: Option<&str>,
     output_device: Option<&str>,
@@ -1269,10 +1332,15 @@ pub fn start_pipeline(
             // running. `None` when not in a release.
             let mut release_pending_since: Option<Instant> = None;
             while !stop.load(Ordering::Relaxed) {
-                let down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+                let down = keys_down(&device_state);
 
                 let ptt = *transmit.ptt_key.lock().unwrap();
                 let held = down.contains(&ptt);
+                // Caps Lock as push-to-talk flips the lock on platforms
+                // where it can't be swallowed; put it back on release.
+                if ptt == Keycode::CapsLock && !held && previously_down.contains(&ptt) {
+                    crate::caps_lock::after_release();
+                }
 
                 if transmit.ptt_toggle.load(Ordering::Relaxed) {
                     // Toggle mode: latch on the press edge. Level-triggering
@@ -1310,10 +1378,20 @@ pub fn start_pipeline(
                 let newly_pressed = |k: &Mutex<Option<Keycode>>| {
                     k.lock().unwrap().is_some_and(|key| down.contains(&key) && !previously_down.contains(&key))
                 };
-                if newly_pressed(&transmit.mute_key) {
+                // Hold mode toggles on both edges: press mutes, release
+                // unmutes, through the same pending flag the UI already acts
+                // on, so the two modes cannot drift apart.
+                let newly_released = |k: &Mutex<Option<Keycode>>| {
+                    k.lock().unwrap().is_some_and(|key| !down.contains(&key) && previously_down.contains(&key))
+                };
+                if newly_pressed(&transmit.mute_key)
+                    || (transmit.mute_hold.load(Ordering::Relaxed) && newly_released(&transmit.mute_key))
+                {
                     transmit.pending_mute.store(true, Ordering::Relaxed);
                 }
-                if newly_pressed(&transmit.deafen_key) {
+                if newly_pressed(&transmit.deafen_key)
+                    || (transmit.deafen_hold.load(Ordering::Relaxed) && newly_released(&transmit.deafen_key))
+                {
                     transmit.pending_deafen.store(true, Ordering::Relaxed);
                 }
                 if newly_pressed(&transmit.hangup_key) {

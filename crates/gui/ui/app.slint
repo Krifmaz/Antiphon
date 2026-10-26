@@ -1373,9 +1373,15 @@ export component MainWindow inherits Window {
     in-out property <bool> ptt-held: false;
     in-out property <float> mic-level: 0;
     in-out property <bool> ptt-toggle: false;
+    in-out property <bool> mute-hold: false;
+    in-out property <bool> deafen-hold: false;
     in-out property <float> ptt-release-ms: 0;
     in-out property <bool> loopback-enabled: false;
     in-out property <string> loopback-message: "";
+    // Spec §1 "Mic Test & Record Preview".
+    in-out property <string> mic-test-message: "";
+    in-out property <bool> mic-test-running: false;
+    callback mic-test();
     callback toggle-loopback();
     in-out property <bool> monitor-enabled: false;
     in-out property <int> monitor-latency-ms: 120;
@@ -1473,6 +1479,8 @@ export component MainWindow inherits Window {
     in-out property <int> outbox-give-up-hours: 0;
     /// Shown when audio was recovered, if the mode asks for it.
     in-out property <string> replay-notice: "";
+    // Spec §2 "Ask me": a clip is waiting behind a Replay button.
+    in-out property <bool> replay-ask: false;
     callback replay-settings-changed();
 
     in-out property <int> my-presence: 0;
@@ -2261,6 +2269,24 @@ export component MainWindow inherits Window {
                             color: Theme.muted-text;
                             font-size: 10px * text-scale;
                             wrap: word-wrap;
+                        }
+                    }
+                    // Spec §2 "Ask me (popup button)".
+                    if connected && replay-ask : HorizontalBox {
+                        padding: 0px;
+                        spacing: 6px;
+                        Text {
+                            text: "Their audio dropped out.";
+                            font-size: 11px * text-scale;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "Replay it";
+                            clicked => { replay-ask = false; play-replay-clip(0); }
+                        }
+                        Button {
+                            text: "Dismiss";
+                            clicked => { replay-ask = false; replay-notice = ""; }
                         }
                     }
                     if connected && peer-display-name != "" : Text {
@@ -3515,6 +3541,25 @@ export component MainWindow inherits Window {
                                         color: Theme.muted-text;
                                         font-size: 10px * text-scale;
                                     }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        spacing: 6px;
+                                        Button {
+                                            text: "Mic test (5 s)";
+                                            enabled: !connected && !loopback-enabled && !mic-test-running;
+                                            clicked => { mic-test(); }
+                                        }
+                                        HelpIcon {
+                                            text-scale: text-scale;
+                                            text: "Records five seconds of you, then plays it back through your full processing chain -- exactly what other people hear. Nothing is kept afterwards.";
+                                        }
+                                    }
+                                    if mic-test-message != "" : Text {
+                                        text: mic-test-message;
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
                                 }
                                 VerticalBox {
                                     padding: 0px;
@@ -3707,12 +3752,12 @@ export component MainWindow inherits Window {
                                         changed(v) => { replay-seconds = round(v); replay-settings-changed(); }
                                     }
                                     SettingLabel {
-                                        text: "When audio is recovered";
-                                        help: "A lost moment can sometimes be rebuilt from the backup copy the next packet carries. This decides whether you are told when that happens -- the audio itself is already played either way, seamlessly.";
+                                        text: "When their audio drops out";
+                                        help: "When the network damages a moment badly enough to be worth a second listen, the seconds around it are kept. Auto-play replays that moment straight away; Ask me shows a Replay button on the call screen; Off keeps it quietly in the list below. Small losses are repaired invisibly either way.";
                                         text-scale: text-scale;
                                     }
                                     ComboBox {
-                                        model: ["Don't mention it", "Tell me it happened", "Tell me and count it"];
+                                        model: ["Off", "Ask me", "Auto-play"];
                                         current-index: replay-mode;
                                         selected(v) => { replay-mode = self.current-index; replay-settings-changed(); }
                                     }
@@ -3778,7 +3823,7 @@ export component MainWindow inherits Window {
                                         checked <=> echo-cancel;
                                         reduced-motion: reduced-motion;
                                         text-scale: text-scale;
-                                        help: "Without headphones, what you hear from the other person is picked up by your microphone and sent back, so they hear themselves. This learns how your speakers reach your microphone and subtracts it. Off by default: it has been tested against simulated echo, not against real rooms, and a misbehaving echo canceller damages your own voice -- which is worse than the echo. Turn it on, check the meter below moves, and ask the other person whether it helped.";
+                                        help: "Without headphones, what you hear from the other person is picked up by your microphone and sent back, so they hear themselves. This learns how your speakers reach your microphone and subtracts it. On by default; if you always wear headphones you can turn it off for the lowest possible processing.";
                                         toggled => { settings-changed(); }
                                     }
                                     if echo-cancel : Text {
@@ -4215,7 +4260,7 @@ export component MainWindow inherits Window {
                         Rectangle { height: 6px; }
 
                         KeybindRow {
-                            label: "Push to talk (hold)";
+                            label: ptt-toggle ? "Push to talk (toggle)" : "Push to talk (hold)";
                             id: "ptt";
                             key-name: ptt-key-name;
                             capturing: capturing-binding == "ptt";
@@ -4224,7 +4269,7 @@ export component MainWindow inherits Window {
                             change => { capture-binding("ptt"); }
                         }
                         KeybindRow {
-                            label: "Toggle mute";
+                            label: mute-hold ? "Mute (hold)" : "Toggle mute";
                             id: "mute";
                             key-name: mute-key-name;
                             capturing: capturing-binding == "mute";
@@ -4232,14 +4277,30 @@ export component MainWindow inherits Window {
                             change => { capture-binding("mute"); }
                             clear => { clear-binding("mute"); }
                         }
+                        ToggleSwitch {
+                            text: "Mute only while the key is held";
+                            checked <=> mute-hold;
+                            reduced-motion: reduced-motion;
+                            text-scale: text-scale;
+                            help: "Push-to-mute: you are muted while you hold the key and unmuted the moment you let go, instead of pressing once to mute and again to unmute.";
+                            toggled => { settings-changed(); }
+                        }
                         KeybindRow {
-                            label: "Toggle deafen";
+                            label: deafen-hold ? "Deafen (hold)" : "Toggle deafen";
                             id: "deafen";
                             key-name: deafen-key-name;
                             capturing: capturing-binding == "deafen";
                             text-scale: text-scale;
                             change => { capture-binding("deafen"); }
                             clear => { clear-binding("deafen"); }
+                        }
+                        ToggleSwitch {
+                            text: "Deafen only while the key is held";
+                            checked <=> deafen-hold;
+                            reduced-motion: reduced-motion;
+                            text-scale: text-scale;
+                            help: "You hear nothing while you hold the key, and everything comes back the moment you let go, instead of pressing once to deafen and again to undeafen.";
+                            toggled => { settings-changed(); }
                         }
                         KeybindRow {
                             label: "Hang up";

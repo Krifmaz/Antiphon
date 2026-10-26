@@ -1,4 +1,5 @@
 mod animated_image;
+mod caps_lock;
 mod config;
 mod content_store;
 mod crash_report;
@@ -114,7 +115,9 @@ fn main() -> anyhow::Result<()> {
     std::mem::forget(runtime);
 
     let loaded = config::load();
-    let ptt_key = Keycode::from_str(&loaded.ptt_key).unwrap_or(Keycode::Space);
+    let ptt_key = Keycode::from_str(&loaded.ptt_key)
+        .or_else(|_| Keycode::from_str(caps_lock::default_ptt_key()))
+        .unwrap_or(Keycode::Space);
     // Validate rather than cast: a hand-edited config could hold any
     // integer, and an unrecognised mode should mean push-to-talk (the
     // option that transmits least) rather than something arbitrary.
@@ -124,6 +127,7 @@ fn main() -> anyhow::Result<()> {
         _ => MODE_PTT,
     };
     let transmit = Arc::new(TransmitSettings::new(ptt_key, transmit_mode, loaded.va_threshold));
+    caps_lock::set_bound(ptt_key == Keycode::CapsLock && transmit_mode == MODE_PTT);
     let output_gain_db = Arc::new(Mutex::new(loaded.output_gain_db));
 
     // Spec §4: identity is a keypair this machine holds, generated on
@@ -229,9 +233,9 @@ fn main() -> anyhow::Result<()> {
     // counter restarts at 0).
     let mut last_chat_rev: u32 = u32::MAX;
     // `u64::MAX` means "not started yet", so the first tick of a call
-    // establishes a baseline instead of announcing every recovery that
-    // happened before anyone was looking.
-    let mut recovered_last: u64 = u64::MAX;
+    // establishes a baseline instead of offering every clip cut before
+    // anyone was looking.
+    let mut clips_cut_last: u64 = u64::MAX;
     _meter_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let Some(app) = meter_window.upgrade() else { return };
 
@@ -334,24 +338,27 @@ fn main() -> anyhow::Result<()> {
                 app.set_echo_erle_db(aec.erle_db());
             }
 
-            // Spec §2 replay modes. The recovered audio is always played
-            // -- that is the point of FEC, and suppressing it to ask
-            // permission would defeat it. What the mode controls is
-            // whether the user is *told*.
-            if recovered_last != u64::MAX {
-                let mode = app.get_replay_mode();
-                let now = active.jitter.lock().unwrap().recovered();
-                if mode > 0 && now > recovered_last {
-                    app.set_replay_notice(if mode >= 2 {
-                        format!("Recovered {now} lost moment(s) so far on this call.")
-                    } else {
-                        "A lost moment was just recovered.".to_string()
+            // Spec §2 replay modes: Off / Ask me / Auto-play. What is
+            // offered is a *clip* -- the seconds around a moment the
+            // network damaged badly enough to be worth a second listen
+            // (`replay_history.rs`) -- not every frame FEC quietly fixed,
+            // which plays seamlessly with nothing to replay.
+            {
+                let cut = active.replay_clips_cut();
+                if clips_cut_last != u64::MAX && cut > clips_cut_last {
+                    match app.get_replay_mode() {
+                        1 => {
+                            app.set_replay_ask(true);
+                            app.set_replay_notice("Their audio dropped out and was recovered.".into());
+                        }
+                        2 => {
+                            app.set_replay_notice("Their audio dropped out -- replaying it now.".into());
+                            app.invoke_play_replay_clip(0);
+                        }
+                        _ => {}
                     }
-                    .into());
                 }
-                recovered_last = now;
-            } else {
-                recovered_last = active.jitter.lock().unwrap().recovered();
+                clips_cut_last = cut;
             }
 
             // Spec §2 replay history. Rebuilt only when the count moves:
@@ -467,10 +474,11 @@ fn main() -> anyhow::Result<()> {
             app.set_call_stats("".into());
             app.set_friend_request_from("".into());
             last_chat_rev = u32::MAX;
-            // Reset the baseline so the next call does not announce
-            // recoveries carried over from this one.
-            recovered_last = u64::MAX;
+            // Reset the baseline so the next call does not offer clips
+            // carried over from this one.
+            clips_cut_last = u64::MAX;
             app.set_replay_notice("".into());
+            app.set_replay_ask(false);
         }
     });
 
@@ -559,6 +567,7 @@ fn local_hello(app: &MainWindow) -> Hello {
 }
 
 fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Arc<AppState>) {
+    wire_mic_test(main_window, app_state);
     {
         let window_weak = main_window.as_weak();
         let tray_weak = tray.as_weak();
@@ -2928,6 +2937,54 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
     }
 }
 
+/// Spec §1 mic test: record five seconds, then play it back processed.
+fn wire_mic_test(main_window: &MainWindow, app_state: &Arc<AppState>) {
+    let window_weak = main_window.as_weak();
+    let state = app_state.clone();
+    main_window.on_mic_test(move || {
+        let Some(app) = window_weak.upgrade() else { return };
+        if app.get_connected() || app.get_loopback_enabled() {
+            // One capture stream per device, and something already has it.
+            app.set_mic_test_message("Not while a call or loopback is using your microphone.".into());
+            return;
+        }
+        let (input, output) = selected_devices(&app);
+        let config = read_chain_config(&app);
+        app.set_mic_test_running(true);
+        app.set_mic_test_message(
+            format!("Recording for {} seconds -- say something.", state::MIC_TEST_SECONDS).into(),
+        );
+        let weak = window_weak.clone();
+        state.runtime.spawn_blocking(move || {
+            let result = state::record_mic_test(input.as_deref(), &config, state::MIC_TEST_SECONDS)
+                .and_then(|(rate, samples)| {
+                    let handle = state::play_clip(output.as_deref(), rate, &samples)?;
+                    let weak = weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(app) = weak.upgrade() {
+                            app.set_mic_test_message("Playing it back -- this is what others hear.".into());
+                        }
+                    })
+                    .ok();
+                    // Held until playback finishes; dropping it cuts the
+                    // sound off.
+                    std::thread::sleep(Duration::from_secs_f32(samples.len() as f32 / rate.max(1) as f32 + 0.3));
+                    drop(handle);
+                    Ok(())
+                });
+            slint::invoke_from_event_loop(move || {
+                let Some(app) = weak.upgrade() else { return };
+                app.set_mic_test_running(false);
+                app.set_mic_test_message(match result {
+                    Ok(()) => "".into(),
+                    Err(e) => format!("Mic test failed: {e}").into(),
+                });
+            })
+            .ok();
+        });
+    });
+}
+
 /// Sets the status line without touching the tray tooltip -- for transient,
 /// local-only notices (a mic test failing) that don't reflect call state.
 fn set_status_only(app: &MainWindow, text: &str) {
@@ -4531,6 +4588,8 @@ fn apply_config_to_ui(app: &MainWindow, config: &config::AppConfig) {
     )));
     app.set_ip_direct_calling(config.ip_direct_calling);
     app.set_ptt_toggle(config.ptt_toggle);
+    app.set_mute_hold(config.mute_hold);
+    app.set_deafen_hold(config.deafen_hold);
     app.set_crash_reporting(config.crash_reporting);
     app.set_replay_seconds(config.replay_seconds as i32);
     app.set_replay_mode(config.replay_mode);
@@ -4808,6 +4867,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         call_section_order: previous.call_section_order.clone(),
         ip_direct_calling: app.get_ip_direct_calling(),
         ptt_toggle: app.get_ptt_toggle(),
+        mute_hold: app.get_mute_hold(),
+        deafen_hold: app.get_deafen_hold(),
         ptt_release_ms: app.get_ptt_release_ms(),
         start_with_screen_share: app.get_start_with_screen_share(),
         start_with_camera: app.get_start_with_camera(),
@@ -4998,6 +5059,8 @@ fn sync_transmit_from_ui(app: &MainWindow, state: &AppState) {
     state.transmit.transmit_mode.store(mode, Ordering::Relaxed);
     *state.transmit.va_threshold.lock().unwrap() = app.get_va_threshold();
     state.transmit.ptt_toggle.store(app.get_ptt_toggle(), Ordering::Relaxed);
+    state.transmit.mute_hold.store(app.get_mute_hold(), Ordering::Relaxed);
+    state.transmit.deafen_hold.store(app.get_deafen_hold(), Ordering::Relaxed);
     state.transmit.ptt_release_ms.store(app.get_ptt_release_ms() as u32, Ordering::Relaxed);
     state.duck_db.store(app.get_duck_db().max(0) as u32, Ordering::Relaxed);
     // Spec §1: switching echo cancellation on mid-call applies to that
@@ -5019,6 +5082,9 @@ fn sync_transmit_from_ui(app: &MainWindow, state: &AppState) {
     if let Ok(key) = Keycode::from_str(&app.get_ptt_key_name()) {
         *state.transmit.ptt_key.lock().unwrap() = key;
     }
+    caps_lock::set_bound(
+        *state.transmit.ptt_key.lock().unwrap() == Keycode::CapsLock && mode == MODE_PTT,
+    );
     // An unparseable or empty name means "unbound", which is a normal
     // state for every shortcut except push-to-talk.
     let parse = |name: slint::SharedString| Keycode::from_str(&name).ok();

@@ -134,11 +134,15 @@ pub fn clip_bounds(
 #[derive(Default, Debug)]
 pub struct ReplayHistory {
     clips: VecDeque<Clip>,
+    /// Clips ever kept on this call, including ones since dropped. The
+    /// replay modes watch this move to know a new moment needs offering.
+    cut: u64,
 }
 
 impl ReplayHistory {
     pub fn push(&mut self, clip: Clip) {
         self.clips.push_front(clip);
+        self.cut += 1;
         while self.clips.len() > MAX_CLIPS {
             self.clips.pop_back();
         }
@@ -150,6 +154,10 @@ impl ReplayHistory {
 
     pub fn get(&self, index: usize) -> Option<&Clip> {
         self.clips.get(index)
+    }
+
+    pub fn cut(&self) -> u64 {
+        self.cut
     }
 
     pub fn clear(&mut self) {
@@ -281,5 +289,17 @@ mod tests {
         let clip =
             Clip { at_seconds: 65, damaged_frames: 2, sample_rate: 48_000, samples: vec![] };
         assert!(clip.label().contains("1:05"), "{}", clip.label());
+    }
+
+    #[test]
+    fn the_cut_count_keeps_moving_after_old_clips_drop_off() {
+        // The replay modes watch this to offer a new clip; it must keep
+        // rising once the list is full, or Auto-play would stop at eight.
+        let mut history = ReplayHistory::default();
+        for i in 0..(MAX_CLIPS as u32 + 3) {
+            history.push(Clip { at_seconds: i, damaged_frames: 2, sample_rate: 48_000, samples: vec![] });
+        }
+        assert_eq!(history.cut(), MAX_CLIPS as u64 + 3);
+        assert_eq!(history.clips().count(), MAX_CLIPS);
     }
 }

@@ -54,6 +54,12 @@ pub struct AppConfig {
     /// held (spec section 1 Utility).
     #[serde(default)]
     pub ptt_toggle: bool,
+    /// Mute / deafen only while their key is held, instead of toggling
+    /// (spec §1: "PTT or mute/deafen switched to toggle behavior").
+    #[serde(default)]
+    pub mute_hold: bool,
+    #[serde(default)]
+    pub deafen_hold: bool,
     /// Milliseconds the mic stays open after the push-to-talk key comes up,
     /// so the tail of the last word is not clipped.
     #[serde(default)]
@@ -265,14 +271,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub start_call_silently: bool,
     /// Cancel the echo of the other person out of your microphone
-    /// (spec §1).
-    ///
-    /// Off by default, which the spec does not ask for. An echo canceller
-    /// that misbehaves damages the user's own voice -- worse than the echo
-    /// it was fixing -- and this one has been proven against synthetic
-    /// echo paths, not real rooms. The default waits on evidence rather
-    /// than on the code existing.
-    #[serde(default)]
+    /// (spec §1: "On by default, with a manual off switch for users on
+    /// headphones"). A config saved before this field existed gets the
+    /// spec's default too.
+    #[serde(default = "default_true")]
     pub echo_cancel: bool,
     /// How far to lower the other side while you talk, in dB (spec §1
     /// "Ducking"). Zero is off.
@@ -599,7 +601,7 @@ impl Default for AppConfig {
             chain: ChainConfig::default_preset(),
             input_device: None,
             output_device: None,
-            ptt_key: "Space".to_string(),
+            ptt_key: crate::caps_lock::default_ptt_key().to_string(),
             transmit_mode: 0,
             mute_key: String::new(),
             deafen_key: String::new(),
@@ -637,13 +639,15 @@ impl Default for AppConfig {
             outbox_give_up_hours: 0,
             silent_call_mode: 0,
             start_call_silently: false,
-            echo_cancel: false,
+            echo_cancel: true,
             duck_db: 0,
             presence: 0,
             crash_reporting: false,
             default_ring_rule: 0,
             quiet_hours: crate::notify::QuietHours::default(),
             ptt_toggle: false,
+            mute_hold: false,
+            deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,
             start_with_screen_share: false,
