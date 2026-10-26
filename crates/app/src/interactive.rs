@@ -11,7 +11,7 @@ use inquire::{Confirm, Select, Text};
 use tokio::net::UdpSocket;
 
 use antiphon_audio::{list_input_devices, list_output_devices, ChainConfig};
-use antiphon_net::PeerConnection;
+use antiphon_net::{AppSocket, PeerConnection};
 
 use crate::{run_call, PTT_KEY_CHOICES};
 
@@ -62,7 +62,7 @@ async fn do_listen() -> Result<()> {
     let preset = ask_preset()?;
     let (input_device, output_device) = ask_devices()?;
 
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+    let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
     println!("Listening on {}", socket.local_addr()?);
     let identity = crate::load_identity()?;
     let peer = PeerConnection::listen(socket, &identity).await?;
@@ -87,7 +87,7 @@ async fn do_call() -> Result<()> {
     let preset = ask_preset()?;
     let (input_device, output_device) = ask_devices()?;
 
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+    let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
     println!("Calling {remote} from {}...", socket.local_addr()?);
     let identity = crate::load_identity()?;
     let peer = PeerConnection::connect(socket, remote, &identity).await?;

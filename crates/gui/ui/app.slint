@@ -65,6 +65,14 @@ export struct ReachabilityRow {
     meaning: string,
 }
 
+/// An imported WireGuard config (spec §6). Never carries the key.
+export struct VpnConfigEntry {
+    id: string,
+    name: string,
+    detail: string,
+    active: bool,
+}
+
 /// A file that stays fetchable after the call (spec §5).
 export struct SharedFileEntry {
     name: string,
@@ -1537,6 +1545,20 @@ export component MainWindow inherits Window {
     in-out property <string> pin-code: "";
     in-out property <[SharedFileEntry]> shared-files: [];
     callback sharing-settings-changed();
+    // Spec §6: bring your own VPN.
+    in-out property <bool> sec-vpn: true;
+    in-out property <bool> vpn-enabled: false;
+    in-out property <bool> vpn-route-voice: false;
+    in-out property <bool> vpn-route-files: true;
+    in-out property <bool> vpn-route-messages: true;
+    in-out property <bool> vpn-kill-switch: false;
+    in property <[VpnConfigEntry]> vpn-configs: [];
+    in property <string> vpn-status: "";
+    in property <string> vpn-message: "";
+    callback vpn-settings-changed();
+    callback import-vpn-config();
+    callback select-vpn-config(string);
+    callback delete-vpn-config(string);
     callback check-shared-files();
     callback download-shared-file(string);
     callback forget-shared-file(string);
@@ -4691,6 +4713,93 @@ export component MainWindow inherits Window {
                                         }
                                         Text { text: f.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
                                         if f.status != "" : Text { text: f.status; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+
+                            if section-id == "vpn" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Run your own WireGuard VPN inside this app only -- not a system VPN, so nothing else on this computer changes. Import the .conf file your VPN provider or your own server gives you, then choose what goes through it.";
+                                    text-scale: text-scale;
+                                    title: "VPN"; reduced-motion: reduced-motion; expanded <=> sec-vpn;
+                                }
+                                if sec-vpn : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Use a VPN for this app";
+                                        checked <=> vpn-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default. When on, the traffic you pick below leaves from the VPN server's address instead of yours.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    Text {
+                                        text: vpn-status;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    for c in vpn-configs : VerticalBox {
+                                        padding: 4px; spacing: 2px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Text { text: (c.active ? "● " : "") + c.name; font-weight: c.active ? 700 : 400; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                            if !c.active : Button { text: "Use"; clicked => { select-vpn-config(c.id); } }
+                                            Button { text: "Delete"; clicked => { delete-vpn-config(c.id); } }
+                                        }
+                                        Text { text: c.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Button { text: "Import a WireGuard file..."; clicked => { import-vpn-config(); } }
+                                        HelpIcon {
+                                            text-scale: text-scale;
+                                            text: "A wg-quick .conf file. Its private key is stored encrypted on this device, never in your settings file or a settings export. Script lines (PostUp and the like) are ignored, never run.";
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                    if vpn-message != "" : Text {
+                                        text: vpn-message;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    SettingLabel {
+                                        text: "Send through the VPN";
+                                        help: "Pick per kind of traffic -- for example, files through the VPN while calls stay direct, or the reverse.";
+                                        text-scale: text-scale;
+                                    }
+                                    ToggleSwitch {
+                                        text: "Calls";
+                                        checked <=> vpn-route-voice;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default: a tunnel adds a detour, and voice notices delay first. When on, people can still call you only if your VPN forwards a port to you, or through a relay; you can always call out.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Shared files";
+                                        checked <=> vpn-route-files;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Downloads from holders and uploads to pin nodes. Files sent inside a call travel with the call.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Offline messages";
+                                        checked <=> vpn-route-messages;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Leaving and collecting sealed messages at mailbox nodes.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Kill switch";
+                                        checked <=> vpn-kill-switch;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "If the VPN is down, the traffic picked above stops instead of going out over your real connection. You'll see an error rather than leak your address. Off by default.";
+                                        toggled => { vpn-settings-changed(); }
                                     }
                                 }
                             }

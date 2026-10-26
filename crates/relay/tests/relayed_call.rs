@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use antiphon_crypto::relay_token;
 use antiphon_crypto::IdentityKeyPair;
-use antiphon_net::{relay, PeerConnection, Received};
+use antiphon_net::{relay, AppSocket, PeerConnection, Received};
 use antiphon_relay::{run, Limits, Relay};
 use tokio::net::UdpSocket;
 
@@ -27,7 +27,7 @@ async fn a_call_goes_through_the_relay_end_to_end() {
     assert_eq!(bob_token, alice_token);
 
     // Bob listens, registered at the relay.
-    let bob_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let bob_socket = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
     relay::register(&bob_socket, relay_addr, &[bob_token]).await.unwrap();
     // Let the registration land before Alice dials.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -38,7 +38,7 @@ async fn a_call_goes_through_the_relay_end_to_end() {
     };
 
     // Alice dials the token and calls the relay as if it were Bob.
-    let alice_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let alice_socket = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
     relay::dial(&alice_socket, relay_addr, alice_token, Duration::from_secs(3)).await.unwrap();
     let alice_conn = tokio::time::timeout(
         Duration::from_secs(5),

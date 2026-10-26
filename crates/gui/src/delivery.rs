@@ -35,6 +35,8 @@ use antiphon_net::mailbox::{self, InboxStatus, Label};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use antiphon_net::vpn::TrafficKind;
+use antiphon_net::AppSocket;
 use tokio::net::UdpSocket;
 
 /// How long a single node gets to answer before the next is tried.
@@ -234,15 +236,18 @@ pub async fn send(
     if blob.len() > mailbox::MAX_BLOB {
         return Sent::Failed("too long for a mailbox; it will go when you're both online".into());
     }
-    let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
-        return Sent::Failed("no network".into());
+    // Offline messages go through the VPN when the user routed them
+    // there (spec §6), and are held, not sent direct, under the kill switch.
+    let socket = match crate::vpn::bind(TrafficKind::Messages, 0).await {
+        Ok(s) => s,
+        Err(e) => return Sent::Failed(e.to_string()),
     };
     let mut id = [0u8; 16];
     getrandom::fill(&mut id).expect("OS randomness is unavailable");
     let mut deposited = 0;
     let mut last_error = String::from("no mailbox answered");
     for (node, label) in boxes {
-        let Some(addr) = resolve(&node).await else {
+        let Some(addr) = resolve(TrafficKind::Messages, &node).await else {
             last_error = format!("{node}: could not find that address");
             continue;
         };
@@ -285,7 +290,15 @@ pub async fn collect(
     mut keep: impl FnMut(&Received) -> bool,
 ) -> Vec<(String, Result<NodeStatus, String>)> {
     let mut report = Vec::new();
-    let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else { return report };
+    let socket = match crate::vpn::bind(TrafficKind::Messages, 0).await {
+        Ok(s) => s,
+        Err(e) => {
+            for (_, node, _) in inbox_nodes(routes, strict) {
+                report.push((node, Err(e.to_string())));
+            }
+            return report;
+        }
+    };
     for (kind, node, code) in inbox_nodes(routes, strict) {
         let leave = hosting && kind == RouteKind::OwnDevices;
         let status = collect_one(identity, &socket, &node, &code, leave, &mut keep).await;
@@ -304,13 +317,13 @@ pub struct NodeStatus {
 
 async fn collect_one(
     identity: &IdentityKeyPair,
-    socket: &UdpSocket,
+    socket: &AppSocket,
     node: &str,
     code: &[u8],
     leave_in_place: bool,
     keep: &mut impl FnMut(&Received) -> bool,
 ) -> Result<NodeStatus, String> {
-    let addr = resolve(node).await.ok_or("could not find that address")?;
+    let addr = resolve(TrafficKind::Messages, node).await.ok_or("could not find that address")?;
     let label = mail::inbox_label(identity, node);
     let secret = mail::fetch_secret(identity, node);
     let started = Instant::now();
@@ -366,9 +379,11 @@ pub async fn discover(wait: Duration) -> Vec<SocketAddr> {
     found
 }
 
-pub(crate) async fn resolve(node: &str) -> Option<SocketAddr> {
+/// Resolves a node's `host[:port]` the way `kind` of traffic reaches it --
+/// through the VPN's DNS when that kind is tunneled (spec §6).
+pub(crate) async fn resolve(kind: TrafficKind, node: &str) -> Option<SocketAddr> {
     let with_port = if node.contains(':') { node.to_string() } else { format!("{node}:{DEFAULT_PORT}") };
-    tokio::net::lookup_host(with_port).await.ok()?.next()
+    crate::vpn::resolve(kind, &with_port).await.ok()
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
