@@ -2380,4 +2380,106 @@ mod tests {
         assert_eq!(texts(&ev[0]), ["on my way"]);
         assert_eq!(texts(&ev[1]), ["on my way"]);
     }
+
+    /// Spec §7 over spec §8: Bob joins under a separate identity through a
+    /// real mailbox node on 127.0.0.1. The Welcome reaches the inbox that
+    /// identity registered -- under labels unrelated to his own -- and what
+    /// he posts arrives sealed as that identity, never his main key.
+    #[tokio::test]
+    async fn a_separate_identity_joins_and_talks_through_a_real_mailbox_node() {
+        use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
+        use tokio::net::UdpSocket;
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let node = sock.local_addr().unwrap().to_string();
+        let mb = Arc::new(Mutex::new(Mailbox::new(MailboxLimits { enabled: true, deposits_per_minute: 1000, ..Default::default() })));
+        tokio::spawn(antiphon_relay::run_node(sock, Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default()))), Some(mb), None));
+        let mut routes = crate::delivery::default_routes();
+        routes[2].nodes = vec![node.clone()];
+        let profile = |n: &str| crate::config::ProfileData { display_name: n.into(), status_message: String::new() };
+        let card_of = |id: &IdentityKeyPair, n: &str| {
+            let record = crate::delivery::my_record(id, &routes, false, 1);
+            card_as(id, crate::delivery::encode_record(&record), &profile(n), &Appearance::default())
+        };
+
+        let alice = IdentityKeyPair::generate();
+        let bob = IdentityKeyPair::generate();
+        let community = Key([6; 32]);
+        let bob_here = identity_for(&bob, &community, true);
+        let cards = [card_of(&alice, "Alice"), card_of(&bob, "Bob"), card_of(&bob_here, "Robin")];
+        assert_ne!(
+            crate::delivery::mailboxes_in(&cards[1].record().unwrap()),
+            crate::delivery::mailboxes_in(&cards[2].record().unwrap()),
+            "his two inboxes at the node have unrelated labels"
+        );
+        for id in [&alice, &bob, &bob_here] {
+            crate::delivery::collect(id, &routes, false, false, |_| true).await;
+        }
+        let mut a_space = Space::create(&alice, community, Kind::Group, "Friday", cards[0].clone(), false).unwrap();
+        let mut b_space: Option<Space> = None;
+
+        // (sender, Out): sealed with `sender`, to whoever `out.to` is.
+        let mut outs: Vec<(&IdentityKeyPair, Out)> = a_space.invite(&alice, bob.public().identity_key, "Bob").unwrap().into_iter().map(|o| (&alice, o)).collect();
+        let mut alice_heard = Vec::new();
+        let mut alice_froms = Vec::new();
+        let mut r = [Reassembly::default(), Reassembly::default(), Reassembly::default()];
+        for round in 0..20 {
+            if round == 6 {
+                let (o, _) = b_space.as_mut().expect("bob joined").post(0, "hi, it's Robin", None).unwrap();
+                outs.extend(o.into_iter().map(|o| (&bob_here, o)));
+            }
+            for (from, out) in std::mem::take(&mut outs) {
+                let card = cards.iter().find(|c| c.key.0 == out.to).expect("a card for everyone");
+                for f in fragments(&out.wire) {
+                    let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f) };
+                    let sent = crate::delivery::send(from, &out.to, &card.prekey().unwrap(), &card.record().unwrap(), &body, false).await;
+                    assert_eq!(sent, crate::delivery::Sent::Deposited(1));
+                }
+            }
+            for (i, id) in [&alice, &bob, &bob_here].into_iter().enumerate() {
+                let mut wires = Vec::new();
+                let ri = &mut r[i];
+                crate::delivery::collect(id, &routes, false, false, |m| {
+                    if let Some(w) = m.body.group.as_ref().and_then(|f| ri.feed(m.from, f)) {
+                        wires.push((m.from, w));
+                    }
+                    true
+                })
+                .await;
+                for (from, wire) in wires {
+                    match i {
+                        0 => {
+                            alice_froms.push(from);
+                            let h = a_space.handle(&alice, from, wire);
+                            alice_heard.extend(h.events);
+                            outs.extend(h.outs.into_iter().map(|o| (&alice, o)));
+                        }
+                        1 => {
+                            // His main inbox: the invite, answered as Robin.
+                            let Wire::Invite { manifest, card } = wire else { panic!("only the invite comes here") };
+                            let invite = Invite { from: Key(from), manifest, card, name: String::new(), kind: Kind::Group, at_secs: 0 };
+                            let (space, join) = Space::accept(&bob_here, &invite, cards[2].clone(), true).unwrap();
+                            b_space = Some(space);
+                            outs.push((&bob, join));
+                        }
+                        _ => {
+                            let h = b_space.as_mut().unwrap().handle(&bob_here, from, wire);
+                            outs.extend(h.outs.into_iter().map(|o| (&bob_here, o)));
+                        }
+                    }
+                }
+            }
+            if round > 6 && outs.is_empty() {
+                break;
+            }
+        }
+        let robin = bob_here.public().identity_key;
+        assert!(b_space.as_ref().unwrap().joining.is_none(), "the Welcome reached his separate inbox");
+        assert!(a_space.readers().contains(&robin) && !a_space.readers().contains(&bob.public().identity_key));
+        assert!(alice_heard.iter().any(|e| matches!(e, Event::Message { sender, text, .. } if *sender == robin && text == "hi, it's Robin")));
+        // Only the Join came sealed with his main key, and only to Alice
+        // who invited him; everything else arrived as Robin.
+        let main_count = alice_froms.iter().filter(|k| **k == bob.public().identity_key).count();
+        assert!(main_count >= 1);
+        assert!(alice_froms.iter().all(|k| *k == robin || *k == bob.public().identity_key));
+    }
 }
