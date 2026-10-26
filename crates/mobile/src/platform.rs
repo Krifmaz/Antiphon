@@ -61,6 +61,17 @@ pub trait Platform: Send + Sync + 'static {
     /// Registers for push wake-ups. The address to give contacts arrives
     /// as [`PlatformEvent::PushRegistered`].
     fn register_push(&self) {}
+
+    // ---- Added for iOS. Each has a default that does nothing, so a
+    // ---- platform that has no use for it need not implement it.
+
+    /// The call in [`BackgroundWork::call`] is now connected: answered on
+    /// this phone, or picked up at the other end. `BackgroundWork` only
+    /// says that a call exists, which is not enough for CallKit: it shows
+    /// "Calling..." until told an outgoing call connected, and keeps an
+    /// incoming call ringing on its own screen when it was answered in the
+    /// app instead.
+    fn call_connected(&self) {}
 }
 
 /// The network the phone is on.
@@ -217,5 +228,11 @@ pub fn notify(title: &str, body: &str) {
 pub fn register_push() {
     if let Some(p) = get() {
         p.register_push();
+    }
+}
+
+pub fn call_connected() {
+    if let Some(p) = get() {
+        p.call_connected();
     }
 }
