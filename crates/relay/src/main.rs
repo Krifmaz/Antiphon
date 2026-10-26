@@ -1,4 +1,5 @@
-//! `antiphon-relay`: a self-hostable relay (spec §3). See the library docs
+//! `antiphon-relay`: a self-hostable relay, and optionally a mailbox, a file
+//! host and a group-call SFU (spec §3). See the library docs
 //! for exactly what it holds and for how long.
 
 use std::net::SocketAddr;
@@ -7,7 +8,8 @@ use std::time::Duration;
 
 use antiphon_relay::files::{FileHost, FileStore, HostPolicy, Retention};
 use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
-use antiphon_relay::{run_node, Limits, Relay, COMMITMENT};
+use antiphon_relay::sfu::{Sfu, SfuLimits};
+use antiphon_relay::{run_node_with_sfu, Limits, Relay, COMMITMENT};
 use clap::Parser;
 use tokio::net::UdpSocket;
 
@@ -81,6 +83,20 @@ struct Args {
     /// Remove a hosted file by id, or "all", and exit.
     #[arg(long)]
     files_purge: Option<String>,
+    /// Also forward group calls (an SFU): each member sends its sealed
+    /// audio here once and it goes out to the rest of the call. Off by
+    /// default.
+    #[arg(long)]
+    sfu: bool,
+    /// Most people in one group call.
+    #[arg(long, default_value_t = SfuLimits::default().max_members_per_room)]
+    sfu_max_members: usize,
+    /// Most group calls forwarded at once.
+    #[arg(long, default_value_t = SfuLimits::default().max_rooms)]
+    sfu_max_rooms: usize,
+    /// Most group calls any one address may be in at once.
+    #[arg(long, default_value_t = SfuLimits::default().max_rooms_per_addr)]
+    sfu_max_rooms_per_addr: usize,
 }
 
 #[tokio::main]
@@ -134,6 +150,13 @@ async fn main() -> anyhow::Result<()> {
             ..MailboxLimits::default()
         })))
     });
+    let sfu = args.sfu.then(|| {
+        Arc::new(Mutex::new(Sfu::new(SfuLimits {
+            max_rooms: args.sfu_max_rooms,
+            max_members_per_room: args.sfu_max_members,
+            max_rooms_per_addr: args.sfu_max_rooms_per_addr,
+        })))
+    });
     let files = if args.files {
         let retention = match (args.files_expire_days, args.files_expire_unopened_days) {
             (Some(d), _) => Retention::AfterDays(d),
@@ -164,6 +187,10 @@ async fn main() -> anyhow::Result<()> {
         let open = if m.lock().unwrap().is_open() { "anyone" } else { "members with the code" };
         println!("\nMailbox on: holding sealed mail for {open}.");
     }
+    if let Some(s) = &sfu {
+        let most = s.lock().unwrap().limits().max_members_per_room;
+        println!("\nGroup calls on: forwarding sealed audio for calls of up to {most}.");
+    }
 
     // Retention runs on a clock, not on traffic: a quiet node still lets
     // go of what it promised to.
@@ -188,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
         let relay = relay.clone();
         let mailbox = mailbox.clone();
         let files = files.clone();
+        let sfu = sfu.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(secs.max(1)));
             loop {
@@ -202,6 +230,10 @@ async fn main() -> anyhow::Result<()> {
                         m.inboxes, m.held, m.held_bytes, m.bytes_in, m.bytes_out, m.refused
                     );
                 }
+                if let Some(s) = &sfu {
+                    let s = s.lock().unwrap().stats();
+                    println!("sfu rooms={} members={} packets_forwarded={}", s.rooms, s.members, s.forwarded);
+                }
                 if let Some(f) = &files {
                     let u = f.lock().unwrap().usage();
                     println!(
@@ -214,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::select! {
-        result = run_node(socket, relay, mailbox, files.clone()) => result?,
+        result = run_node_with_sfu(socket, relay, mailbox, files.clone(), sfu) => result?,
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())

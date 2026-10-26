@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+chacha20poly1305 = "0.11.0"
+getrandom = "0.4.3"
+hkdf = "0.13.0"
 sha2 = "0.11.0"
 # Only for SO_RCVBUF; already in the tree underneath tokio.
 socket2 = "0.6.5"
