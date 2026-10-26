@@ -704,7 +704,8 @@ fn default_sections_expanded() -> bool {
 }
 
 fn default_accent_hex() -> String {
-    "#2d7d5a".to_string()
+    // Encore's cream, so the two apps share a palette.
+    "#f0ead6".to_string()
 }
 
 fn default_text_scale() -> f32 {
@@ -1032,7 +1033,7 @@ mod tests {
         assert_eq!(cfg.mute_key, "");
         assert_eq!(cfg.output_gain_db, 0.0);
         assert!(cfg.sections_expanded_default, "sections should default to expanded, not silently collapse everything on upgrade");
-        assert_eq!(cfg.accent_hex, "#2d7d5a");
+        assert_eq!(cfg.accent_hex, "#f0ead6");
         assert_eq!(cfg.font_family, "");
         assert_eq!(cfg.custom_font_path, "");
         assert_eq!(cfg.theme_bg_hex, "#202020");

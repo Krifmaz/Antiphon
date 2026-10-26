@@ -7,7 +7,7 @@ import { Button, LineEdit, ComboBox, VerticalBox, HorizontalBox, GroupBox, Scrol
 // below); `accent` is the one deliberately user-choosable color (Appearance
 // tab's swatch picker), everything else stays theme-derived.
 global Theme {
-    in-out property <color> accent: #2d7d5a;
+    in-out property <color> accent: #f0ead6;
     out property <color> muted-text: Palette.foreground.with-alpha(0.55);
     out property <color> divider: Palette.foreground.with-alpha(0.15);
     out property <color> panel-hover: Palette.foreground.with-alpha(0.08);
@@ -593,7 +593,7 @@ component ProfileAvatar {
         }
         if !root.has-image : Text {
             text: root.initial;
-            color: white;
+            color: Surface.on-accent;
             font-weight: 700;
             font-size: root.size * 0.4;
             horizontal-alignment: center;
@@ -803,7 +803,7 @@ component TabButton {
 
         Text {
             text: root.label;
-            color: active ? white : Palette.foreground;
+            color: active ? Surface.on-accent : Palette.foreground;
             font-weight: active ? 700 : 400;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -861,144 +861,6 @@ component SideNavButton {
             color: active ? Theme.accent-text : Palette.foreground;
             font-weight: active ? 700 : 400;
             vertical-alignment: center;
-        }
-    }
-}
-
-// A draggable, resizable panel for the Call tab's freeform "Edit layout"
-// mode -- the app-wide widget-based layout customization, applied first to
-// the tab where placing things by hand actually makes sense (a fixed list
-// of settings rows doesn't benefit from freeform x/y the way a HUD-style
-// call screen does).
-//
-// The title bar and resize handle track their OWN drag directly (standard
-// Slint idiom: `self.mouse-x - self.pressed-x` inside a `moved` handler on
-// Purely visual/layout -- no `TouchArea`s of its own. An earlier version
-// had the title bar and resize handle each track their own drag directly
-// (`self.mouse-x - self.pressed-x`), on the theory that since Slint
-// pointer capture stays with whichever element received the press, that
-// element tracking its own gesture would sidestep needing a stable
-// external coordinate frame. In practice that still moved slower than the
-// pointer and stuttered -- panel-x/y/width/height changing *is* that
-// element's own geometry changing mid-gesture, and empirically that's not
-// as drift-free as the math suggested it should be. The actual fix: hit
-// detection and all continuous drag/resize math now live on ONE
-// stationary, canvas-sized `TouchArea` (see the Call tab's `canvas`/`hit`
-// below) that manually checks each panel's *current* rect rather than
-// relying on any single panel's own local coordinates -- a frame that
-// truly never moves has no drift to reason about in the first place.
-component FreeformPanel {
-    in property <string> title;
-    in property <length> panel-x;
-    in property <length> panel-y;
-    in property <length> panel-width: 200px;
-    in property <length> panel-height: 120px;
-    in property <bool> editing: false;
-    // True for the brief moment Rust is correcting a drag's drop point to
-    // the nearest open (non-overlapping) grid slot -- animates just that
-    // correction. Live dragging itself stays instant/unanimated (bound to
-    // `false` the rest of the time), since animating *every* position
-    // update would make dragging visibly lag behind the pointer.
-    in property <bool> animating: false;
-    // The profile widget can be moved/resized like any other panel but,
-    // unlike the rest, can never be hidden or removed -- it's the app's
-    // one guaranteed way back to itself (Settings, mute/deafen). `false`
-    // just skips rendering the x button; hit-testing for it already lives
-    // in the canvas, not here, so there's nothing else to gate.
-    in property <bool> removable: true;
-    // A Slint `VerticalBox` splits leftover space *equally* among children
-    // when none of them claim it with `vertical-stretch`, which is why
-    // every panel's buttons and text fields were growing to absurd heights
-    // in a panel taller than its content. The trailing spacer below claims
-    // that slack instead, so children keep their natural size. Panels whose
-    // content wants to fill the height itself (Chat pins its input row to
-    // the bottom) set `content-fills` and supply their own spacer.
-    in property <bool> content-fills: false;
-    callback remove-clicked();
-
-    x: panel-x;
-    y: panel-y;
-    width: panel-width;
-    height: panel-height;
-    animate x, y { duration: root.animating ? 200ms : 0ms; easing: ease-out; }
-
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        background: Palette.background;
-        border-radius: 8px;
-        border-width: root.editing ? 2px : 1px;
-        border-color: root.editing ? Theme.accent : Theme.divider;
-        clip: true;
-
-        VerticalBox {
-            padding: 10px;
-            spacing: 6px;
-            HorizontalBox {
-                padding: 0px;
-                Text { text: root.title; font-weight: 700; font-size: 10px; color: Theme.muted-text; vertical-alignment: center; }
-                Rectangle { horizontal-stretch: 1; }
-                if root.editing && root.removable : remove-touch := TouchArea {
-                    width: 14px;
-                    height: 14px;
-                    clicked => { root.remove-clicked(); }
-                    Text {
-                        text: "x";
-                        color: remove-touch.has-hover ? Theme.accent-text : Theme.muted-text;
-                        font-weight: 700;
-                        font-size: 11px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            // Content that doesn't fit the panel's current size scrolls
-            // vertically instead of getting silently clipped -- resizing a
-            // panel down shouldn't make its bottom controls simply vanish.
-            // Horizontal scrolling is deliberately off: the inner content's
-            // width is pinned to the panel's own (minus the scrollbar's
-            // width), which is what actually makes `wrap: word-wrap` on
-            // text inside do anything -- a `ScrollView` left to size its
-            // content at its natural width never gives wrapping a
-            // narrower-than-natural width to wrap against, so text just
-            // stayed on one line and the view scrolled sideways instead.
-            content-scroll := ScrollView {
-                vertical-stretch: 1;
-                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
-                VerticalBox {
-                    width: content-scroll.width - 14px;
-                    padding: 0px;
-                    spacing: 6px;
-                    @children
-                    if !root.content-fills : Rectangle { vertical-stretch: 1; }
-                }
-            }
-        }
-
-        if root.editing : Rectangle {
-            x: 0px;
-            y: 0px;
-            width: 100%;
-            height: 26px;
-            background: Theme.panel-hover;
-            opacity: 0.5;
-        }
-
-        if root.editing : Rectangle {
-            x: parent.width - 16px;
-            y: parent.height - 16px;
-            width: 16px;
-            height: 16px;
-            border-radius: 4px;
-            background: Theme.accent-wash;
-            Text {
-                text: "//";
-                color: Theme.muted-text;
-                font-size: 9px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
         }
     }
 }
@@ -1116,6 +978,480 @@ component SectionHeader {
     }
 }
 
+// The app's name and mark, in one place: a rename is a change here (and
+// the window title in main.rs), not a hunt through the layout.
+global Brand {
+    out property <string> name: "Antiphon";
+    out property <image> logo: @image-url("tray-icon.png");
+}
+
+// Surface colours for the default layout (rail, sidebar, cards), taken
+// from Encore's "encore" theme (web-rs/static/css/app.css) so the two apps
+// look like siblings; light values are Encore's light theme. `Theme.accent`
+// stays the user's own pick from Appearance -- these are the neutrals
+// around it, and `on-accent` keeps text readable on a light accent like
+// Encore's cream.
+global Surface {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark
+        || (Palette.color-scheme == ColorScheme.unknown && Palette.background.to-hsv().value < 0.5);
+    out property <color> ground: dark ? #161617 : #f6f6fb;
+    out property <color> base: dark ? #1c1c1e : #ffffff;
+    out property <color> raised: dark ? #222224 : #f6f6fb;
+    out property <color> card: dark ? #222224 : #ffffff;
+    out property <color> card-2: dark ? #2a2a2d : #f0f0f7;
+    out property <color> line: dark ? #353538 : #e2e2ee;
+    out property <color> text: dark ? #f0ead6 : #16161f;
+    out property <color> muted: dark ? #aaa493 : #5d5d75;
+    out property <color> faint: dark ? #918b77 : #8d8da5;
+    out property <color> hover: text.with-alpha(0.06);
+    out property <color> selected: text.with-alpha(0.10);
+    // Encore's gold second colour: pins, highlights.
+    out property <color> gold: dark ? #d6c49a : #9a7b2e;
+    out property <color> warm: dark ? #f7cd8c : #b7791f;
+    out property <color> danger: dark ? #f4a3a3 : #d64545;
+    out property <color> online: dark ? #8ee3b0 : #1f9d55;
+    // Encore's pastel extras; letter avatars use lilac.
+    out property <color> info: #9fd2fb;
+    out property <color> pink: #f2a7e4;
+    out property <color> lilac: #c7aef5;
+    out property <color> on-accent: Theme.accent.to-hsv().value > 0.75 && Theme.accent.to-hsv().saturation < 0.45 ? #16161f : #ffffff;
+}
+
+// A monochrome SVG icon, tinted to whatever colour the caller needs.
+component Icon inherits Image {
+    in property <length> size: 18px;
+    width: size;
+    height: size;
+    image-fit: contain;
+    colorize: Surface.muted;
+}
+
+// A square, borderless icon button with a hover wash and a tooltip, used
+// in the user bar, the chat header and the composer.
+component IconButton {
+    in property <image> icon;
+    in property <string> tip;
+    in property <bool> enabled: true;
+    // Draws the icon in the danger colour: muted mic, hang up.
+    in property <bool> danger: false;
+    in property <bool> active: false;
+    in property <length> size: 32px;
+    callback clicked();
+
+    width: size;
+    height: size;
+    accessible-role: button;
+    accessible-label: tip;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+
+    Rectangle {
+        border-radius: 6px;
+        background: root.active ? Surface.selected : (touch.has-hover && root.enabled) ? Surface.hover : transparent;
+        Icon {
+            source: root.icon;
+            size: root.size * 0.56;
+            colorize: root.danger ? Surface.danger : (touch.has-hover || root.active) && root.enabled ? Surface.text : Surface.muted;
+            opacity: root.enabled ? 1.0 : 0.35;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+            changed has-hover => {
+                if (self.has-hover && root.tip != "") {
+                    TooltipState.text = root.tip;
+                    TooltipState.anchor-x = root.absolute-position.x - 12px;
+                    TooltipState.anchor-y = root.absolute-position.y + root.height + 4px;
+                    TooltipState.scale = 1.0;
+                    TooltipState.visible = true;
+                } else if (TooltipState.text == root.tip) {
+                    TooltipState.visible = false;
+                }
+            }
+        }
+    }
+}
+
+// One entry in the far-left rail: Home, a server, or an action. Rounds
+// from a circle to a squircle on hover and grows a pill on its left edge
+// when selected -- the shape people already read as "where am I".
+component RailItem {
+    in property <string> label;
+    in property <string> initial;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    // Draws `icon` untinted (the app logo) instead of as a glyph.
+    in property <bool> full-color: false;
+    in property <bool> active: false;
+    in property <bool> shown: true;
+    // Action entries (add, connect) tint with the accent on hover instead
+    // of filling with it.
+    in property <bool> action: false;
+    in property <bool> reduced-motion: false;
+    callback clicked();
+
+    width: 72px;
+    height: shown ? 56px : 0px;
+    visible: shown;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { root.clicked(); }
+
+    pill := Rectangle {
+        x: 0px;
+        y: (parent.height - self.height) / 2;
+        width: 4px;
+        height: root.active ? 40px : touch.has-hover ? 20px : 0px;
+        border-radius: 2px;
+        background: Surface.text;
+        animate height { duration: root.reduced-motion ? 0ms : 120ms; easing: ease-out; }
+    }
+
+    tile := Rectangle {
+        x: 12px;
+        y: 4px;
+        width: 48px;
+        height: 48px;
+        clip: true;
+        border-radius: root.active || touch.has-hover ? 16px : 24px;
+        background: root.full-color ? (root.active || touch.has-hover ? Theme.accent.with-alpha(0.25) : Surface.raised)
+            : root.action ? (touch.has-hover ? Theme.accent : Surface.raised)
+            : (root.active || touch.has-hover ? Theme.accent : Surface.raised);
+        animate border-radius, background { duration: root.reduced-motion ? 0ms : 120ms; easing: ease-out; }
+
+        if root.has-icon && root.full-color : Image {
+            width: 30px;
+            height: 30px;
+            source: root.icon;
+            image-fit: contain;
+        }
+        if root.has-icon && !root.full-color : Icon {
+            source: root.icon;
+            size: 22px;
+            colorize: root.action
+                ? (touch.has-hover ? Surface.on-accent : Theme.accent)
+                : (root.active || touch.has-hover ? Surface.on-accent : Surface.text);
+        }
+        if !root.has-icon : Text {
+            text: root.initial;
+            font-size: 17px;
+            font-weight: 700;
+            color: root.active || touch.has-hover ? Surface.on-accent : Surface.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        x: tile.x;
+        y: tile.y;
+        width: tile.width;
+        height: tile.height;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        changed has-hover => {
+            if (self.has-hover) {
+                TooltipState.text = root.label;
+                TooltipState.anchor-x = root.absolute-position.x + root.width - 20px;
+                TooltipState.anchor-y = root.absolute-position.y + 16px;
+                TooltipState.scale = 1.0;
+                TooltipState.visible = true;
+            } else if (TooltipState.text == root.label) {
+                TooltipState.visible = false;
+            }
+        }
+    }
+}
+
+// A round letter avatar for people who have no picture here (contacts,
+// the peer). The colour is the accent so the app stays one palette.
+component LetterAvatar {
+    in property <string> initial;
+    in property <length> size: 32px;
+    in property <bool> ring: false;
+    in property <bool> online: false;
+    width: size;
+    height: size;
+
+    Rectangle {
+        border-radius: root.size / 2;
+        background: Surface.lilac;
+        border-width: root.ring ? 2px : 0px;
+        border-color: Surface.online;
+        Text {
+            text: root.initial;
+            color: #16161f;
+            font-weight: 700;
+            font-size: root.size * 0.42;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    if root.online : Rectangle {
+        x: root.size - self.width + 2px;
+        y: root.size - self.height + 2px;
+        width: root.size * 0.38;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: Surface.online;
+        border-width: 3px;
+        border-color: Surface.base;
+    }
+}
+
+// A row in the sidebar: a contact, Home, or Connect.
+component SidebarRow {
+    in property <string> label;
+    in property <string> subtitle;
+    in property <string> initial;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <bool> active: false;
+    in property <bool> warn: false;
+    in property <bool> online: false;
+    in property <bool> shown: true;
+    in property <float> text-scale: 1.0;
+    callback clicked();
+
+    height: shown ? (subtitle != "" ? 44px : 38px) : 0px;
+    visible: shown;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { root.clicked(); }
+
+    Rectangle {
+        border-radius: 6px;
+        background: root.active ? Surface.selected : touch.has-hover ? Surface.hover : transparent;
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 10px;
+            alignment: start;
+            if root.has-icon : Rectangle {
+                width: 32px;
+                Icon { source: root.icon; size: 20px; colorize: root.active ? Surface.text : Surface.muted; }
+            }
+            if !root.has-icon : VerticalLayout {
+                alignment: center;
+                LetterAvatar { initial: root.initial; size: 32px; online: root.online; }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 0px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.label;
+                    font-size: 14px * root.text-scale;
+                    font-weight: root.active ? 600 : 500;
+                    color: root.warn ? Surface.danger : root.active || touch.has-hover ? Surface.text : Surface.muted;
+                    overflow: elide;
+                }
+                if root.subtitle != "" : Text {
+                    text: root.subtitle;
+                    font-size: 11px * root.text-scale;
+                    color: Surface.muted;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}
+
+// Small uppercase heading over a group of sidebar rows ("DIRECT MESSAGES").
+component GroupLabel {
+    in property <string> text;
+    in property <bool> can-add: false;
+    in property <string> add-tip;
+    callback add();
+    height: 32px;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 4px;
+        Text {
+            text: root.text;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.6px;
+            color: Surface.muted;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.can-add : IconButton { icon: @image-url("icons/plus.svg"); tip: root.add-tip; size: 24px; clicked => { root.add(); } }
+    }
+}
+
+// A settings-style card: heading, one line on what it is for, then its
+// controls. The same shape as Encore's settings sections.
+component Card inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <float> text-scale: 1.0;
+    background: Surface.card;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Surface.line;
+    vertical-stretch: 0;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
+        if root.title != "" : Text {
+            text: root.title;
+            font-size: 14px * root.text-scale;
+            font-weight: 700;
+            color: Surface.text;
+            overflow: elide;
+        }
+        if root.description != "" : Text {
+            text: root.description;
+            font-size: 12px * root.text-scale;
+            color: Surface.muted;
+            wrap: word-wrap;
+        }
+        @children
+    }
+}
+
+// Underlined text tabs for the right panel and dialogs.
+component LineTab {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    height: 40px;
+    min-width: label-text.preferred-width + 20px;
+    horizontal-stretch: 0;
+    accessible-role: tab;
+    accessible-label: label;
+    accessible-item-selectable: true;
+    accessible-item-selected: active;
+    accessible-action-default => { root.clicked(); }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    label-text := Text {
+        text: root.label;
+        font-size: 13px;
+        font-weight: 600;
+        color: root.active || touch.has-hover ? Surface.text : Surface.muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        y: parent.height - 2px;
+        height: 2px;
+        border-radius: 1px;
+        background: root.active ? Theme.accent : transparent;
+    }
+}
+
+// A filled call-to-action button in the accent colour (or danger).
+component PrimaryButton {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    callback clicked();
+    height: 34px;
+    min-width: content.preferred-width + 28px;
+    horizontal-stretch: 0;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    Rectangle {
+        border-radius: 6px;
+        background: !root.enabled ? Surface.line
+            : root.danger ? (touch.has-hover ? Surface.danger.darker(0.15) : Surface.danger)
+            : (touch.has-hover ? Theme.accent.darker(0.15) : Theme.accent);
+        touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+        content := HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+            if root.has-icon : VerticalLayout { alignment: center; Icon { source: root.icon; size: 16px; colorize: Surface.on-accent; } }
+            Text {
+                text: root.text;
+                color: !root.enabled ? Surface.muted : root.danger ? #16161f : Surface.on-accent;
+                font-weight: 600;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// A large tile on the Home screen's empty state.
+component StartTile {
+    in property <string> title;
+    in property <string> body;
+    in property <image> icon;
+    callback clicked();
+    min-height: 120px;
+    accessible-role: button;
+    accessible-label: title;
+    accessible-action-default => { root.clicked(); }
+    Rectangle {
+        border-radius: 12px;
+        background: touch.has-hover ? Surface.card-2 : Surface.card;
+        border-width: 1px;
+        border-color: touch.has-hover ? Theme.accent : Surface.line;
+        touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+        VerticalLayout {
+            padding: 16px;
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 36px;
+                height: 36px;
+                border-radius: 10px;
+                background: Theme.accent.with-alpha(0.18);
+                Icon { source: root.icon; size: 20px; colorize: Theme.accent; }
+            }
+            Text { text: root.title; font-size: 14px; font-weight: 700; color: Surface.text; wrap: word-wrap; }
+            Text { text: root.body; font-size: 12px; color: Surface.muted; wrap: word-wrap; }
+        }
+    }
+}
+
+// A dimmed full-window backdrop plus a centred card: the Connect and Add
+// contact dialogs. Clicking the backdrop closes it.
+component Modal {
+    in property <string> title;
+    in property <length> card-width: 600px;
+    callback close();
+    Rectangle {
+        background: #000000a0;
+        TouchArea { clicked => { root.close(); } }
+    }
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: max(24px, (parent.height - self.height) / 2);
+        width: min(root.card-width, parent.width - 48px);
+        height: min(root.height - 48px, 680px);
+        background: Surface.raised;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Surface.line;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000080;
+        clip: true;
+        // Swallows clicks so they do not fall through to the backdrop.
+        TouchArea { }
+        VerticalLayout {
+            padding: 0px;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 12px;
+                padding-top: 14px;
+                height: 52px;
+                Text { text: root.title; font-size: 18px; font-weight: 700; color: Surface.text; vertical-alignment: center; horizontal-stretch: 1; }
+                IconButton { icon: @image-url("icons/x.svg"); tip: "Close"; clicked => { root.close(); } }
+            }
+            @children
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     // Bound rather than fixed so two instances running different profiles
     // are tellable apart in the taskbar, which is the whole point of
@@ -1123,10 +1459,10 @@ export component MainWindow inherits Window {
     in-out property <string> window-title: "Antiphon";
     title: window-title;
     icon: @image-url("tray-icon.png");
-    min-width: 560px;
-    min-height: 480px;
-    preferred-width: 640px;
-    preferred-height: 560px;
+    min-width: 760px;
+    min-height: 520px;
+    preferred-width: 1280px;
+    preferred-height: 800px;
     // Left transparent so the composited background layer below (which is
     // what actually paints the window) can fade toward see-through -- the
     // winit backend already creates the surface with alpha support, so an
@@ -1151,7 +1487,7 @@ export component MainWindow inherits Window {
     // font apart from the built-in System/Monospace/Serif choices.
     in-out property <string> font-import-message: "";
     callback import-font();
-    in-out property <color> accent-choice: #2d7d5a;
+    in-out property <color> accent-choice: #f0ead6;
     changed accent-choice => { Theme.accent = accent-choice; }
 
     // The ColorPicker (saturation/value square + hue bar) and the hex text
@@ -1163,7 +1499,7 @@ export component MainWindow inherits Window {
     in-out property <float> accent-sat: 0.64;
     in-out property <float> accent-val: 0.49;
     in-out property <color> accent-hue-preview: #2dff8a;
-    in-out property <string> accent-hex-display: "#2d7d5a";
+    in-out property <string> accent-hex-display: "#f0ead6";
     callback accent-color-picker-changed();
     callback accent-hex-changed(string);
 
@@ -1436,6 +1772,16 @@ export component MainWindow inherits Window {
     in-out property <bool> monitor-enabled: false;
     in-out property <int> monitor-latency-ms: 120;
     in-out property <int> current-tab: 0;
+    // The default layout's own view state; nothing here is saved.
+    in-out property <int> selected-contact: -1;
+    in-out property <bool> right-panel-open: true;
+    in-out property <int> right-tab: 0;
+    in-out property <bool> connect-dialog-open: false;
+    in-out property <int> connect-dialog-tab: 0;
+    in-out property <bool> add-contact-open: false;
+    // First letter of a name, uppercased, for letter avatars. Rust does it
+    // because .slint has no way to take part of a string.
+    pure callback initial-of(string) -> string;
     in-out property <int> settings-category: 0;
 
     // Settings search (spec §0). Rust owns the filtering and writes the
@@ -1855,7 +2201,7 @@ export component MainWindow inherits Window {
         y: 0px;
         width: 100%;
         height: 100%;
-        background: theme-mode == 3 ? theme-bg-color : Palette.background;
+        background: theme-mode == 3 ? theme-bg-color : Surface.raised;
         opacity: theme-opacity;
 
         if theme-bg-image-set : Image {
@@ -1874,30 +2220,10 @@ export component MainWindow inherits Window {
         }
     }
 
-    VerticalBox {
+    VerticalLayout {
         width: 100%;
         height: 100%;
-        HorizontalBox {
-            height: 32px;
-            padding: 0px;
-            Image { source: @image-url("tray-icon.png"); width: 24px; height: 24px; }
-            Text { text: "Antiphon"; font-size: 17px * text-scale; font-weight: 700; vertical-alignment: center; }
-            Rectangle { horizontal-stretch: 1; }
-            Text { text: status-text; vertical-alignment: center; color: connected ? Theme.accent-text : Theme.muted-text; }
-        }
-
-        HorizontalBox {
-            height: 36px;
-            padding: 0px;
-            spacing: 6px;
-            // Only a way back, not a tab switcher -- Settings is reached
-            // from the profile widget's gear button (spec: "remove the
-            // Settings button from the top left since there's one in the
-            // profile widget"), so there's nothing to show here on the
-            // Call tab itself.
-            if current-tab == 1 : TabButton { label: "Return"; active: false; reduced-motion: reduced-motion; clicked => { current-tab = 0; } }
-            Rectangle { horizontal-stretch: 1; }
-        }
+        spacing: 0px;
 
         // Server mode replaces the whole widget UI with a console -- the
         // profile widget/settings/canvas are all deliberately unreachable
@@ -1906,7 +2232,7 @@ export component MainWindow inherits Window {
         if server-mode : Rectangle {
             vertical-stretch: 1;
             background: #0a0f0a;
-            border-radius: 8px;
+            border-radius: 0px;
 
             VerticalBox {
                 padding: 12px;
@@ -1954,1110 +2280,1065 @@ export component MainWindow inherits Window {
             }
         }
 
-        if current-tab == 0 && !server-mode : VerticalBox {
-            padding: 0px;
-            spacing: 6px;
+        // The default layout: a rail of places on the far left (Home,
+        // servers, add, connect), a sidebar of people with your own user
+        // bar at its foot, the conversation in the middle, and details
+        // about whoever it is with on the right. Diagnostics and the
+        // invite QR live in the Connect dialog rather than on screen all
+        // the time.
+        if current-tab == 0 && !server-mode : HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
 
-            // Edit layout and Widgets used to live in a toolbar here;
-            // both moved into the profile widget's hamburger menu (see the
-            // "Profile" `FreeformPanel` below) so they're reachable from
-            // one consistent place instead of a second, separate control
-            // surface floating above the canvas.
-            if call-editing-layout : Text {
-                text: "Editing layout: drag a panel's title bar to move it, or its bottom-right corner (//) to resize it. Click a panel's x to remove it.";
-                wrap: word-wrap;
-                color: Theme.muted-text;
-                font-size: 11px * text-scale;
+            // ---- Rail ----
+            Rectangle {
+                width: 72px;
+                background: Surface.ground;
+                VerticalLayout {
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: 0px;
+                    RailItem {
+                        label: "Home";
+                        has-icon: true;
+                        full-color: true;
+                        icon: Brand.logo;
+                        active: selected-contact < 0 && !connected;
+                        reduced-motion: reduced-motion;
+                        clicked => { selected-contact = -1; }
+                    }
+                    Rectangle {
+                        height: 10px;
+                        Rectangle { x: 24px; width: 24px; height: 2px; border-radius: 1px; background: Surface.line; }
+                    }
+                    for c[i] in contacts : RailItem {
+                        shown: c.is-server;
+                        label: c.name;
+                        initial: initial-of(c.name);
+                        active: selected-contact == i;
+                        reduced-motion: reduced-motion;
+                        clicked => { selected-contact = i; }
+                    }
+                    RailItem {
+                        label: "Add a contact or server";
+                        has-icon: true;
+                        action: true;
+                        icon: @image-url("icons/plus.svg");
+                        reduced-motion: reduced-motion;
+                        clicked => { add-contact-open = true; }
+                    }
+                    RailItem {
+                        label: "Connect & invite";
+                        has-icon: true;
+                        action: true;
+                        icon: @image-url("icons/qr.svg");
+                        reduced-motion: reduced-motion;
+                        clicked => { connect-dialog-tab = 0; connect-dialog-open = true; }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
             }
 
-            canvas := Rectangle {
-                vertical-stretch: 1;
-                clip: true;
-                changed width => { call-canvas-width = self.width; }
-                changed height => { call-canvas-height = self.height; }
+            // ---- Sidebar: people, voice status, user bar ----
+            Rectangle {
+                width: 236px;
+                background: Surface.base;
+                VerticalLayout {
+                    spacing: 0px;
 
-                // Hit-testing and all continuous drag/resize math for every
-                // panel happens on this ONE stationary TouchArea rather
-                // than on each panel's own (moving) geometry -- see
-                // `FreeformPanel`'s doc comment for why.
-                function hits-title(px: length, py: length, rx: length, ry: length, rw: length) -> bool {
-                    return px >= rx && px <= rx + rw && py >= ry && py <= ry + 26px;
-                }
-                function hits-resize(px: length, py: length, rx: length, ry: length, rw: length, rh: length) -> bool {
-                    return px >= rx + rw - 16px && px <= rx + rw && py >= ry + rh - 16px && py <= ry + rh;
-                }
-
-                if call-editing-layout : hit := TouchArea {
-                    x: 0px;
-                    y: 0px;
-                    width: 100%;
-                    height: 100%;
-
-                    property <string> target: "";
-                    property <string> mode: "";
-                    property <length> press-x: 0px;
-                    property <length> press-y: 0px;
-
-                    pointer-event(event) => {
-                        if event.kind == PointerEventKind.down {
-                            self.press-x = self.pressed-x;
-                            self.press-y = self.pressed-y;
-                            if hits-resize(self.pressed-x, self.pressed-y, call-profile-x, call-profile-y, call-profile-width, call-profile-height) {
-                                self.target = "profile"; self.mode = "resize"; call-panel-resize-started("profile");
-                            } else if call-panel-visible-contacts && hits-resize(self.pressed-x, self.pressed-y, call-contacts-x, call-contacts-y, call-contacts-width, call-contacts-height) {
-                                self.target = "contacts"; self.mode = "resize"; call-panel-resize-started("contacts");
-                            } else if call-panel-visible-chat && hits-resize(self.pressed-x, self.pressed-y, call-chat-x, call-chat-y, call-chat-width, call-chat-height) {
-                                self.target = "chat"; self.mode = "resize"; call-panel-resize-started("chat");
-                            } else if call-panel-visible-filetransfer && hits-resize(self.pressed-x, self.pressed-y, call-filetransfer-x, call-filetransfer-y, call-filetransfer-width, call-filetransfer-height) {
-                                self.target = "filetransfer"; self.mode = "resize"; call-panel-resize-started("filetransfer");
-                            } else if call-panel-visible-invite && hits-resize(self.pressed-x, self.pressed-y, call-invite-x, call-invite-y, call-invite-width, call-invite-height) {
-                                self.target = "invite"; self.mode = "resize"; call-panel-resize-started("invite");
-                            } else if call-panel-visible-connect && hits-resize(self.pressed-x, self.pressed-y, call-connect-x, call-connect-y, call-connect-width, call-connect-height) {
-                                self.target = "connect"; self.mode = "resize"; call-panel-resize-started("connect");
-                            } else if hits-title(self.pressed-x, self.pressed-y, call-profile-x, call-profile-y, call-profile-width) {
-                                self.target = "profile"; self.mode = "drag"; call-panel-drag-started("profile");
-                            } else if call-panel-visible-contacts && hits-title(self.pressed-x, self.pressed-y, call-contacts-x, call-contacts-y, call-contacts-width) {
-                                self.target = "contacts"; self.mode = "drag"; call-panel-drag-started("contacts");
-                            } else if call-panel-visible-chat && hits-title(self.pressed-x, self.pressed-y, call-chat-x, call-chat-y, call-chat-width) {
-                                self.target = "chat"; self.mode = "drag"; call-panel-drag-started("chat");
-                            } else if call-panel-visible-filetransfer && hits-title(self.pressed-x, self.pressed-y, call-filetransfer-x, call-filetransfer-y, call-filetransfer-width) {
-                                self.target = "filetransfer"; self.mode = "drag"; call-panel-drag-started("filetransfer");
-                            } else if call-panel-visible-invite && hits-title(self.pressed-x, self.pressed-y, call-invite-x, call-invite-y, call-invite-width) {
-                                self.target = "invite"; self.mode = "drag"; call-panel-drag-started("invite");
-                            } else if call-panel-visible-connect && hits-title(self.pressed-x, self.pressed-y, call-connect-x, call-connect-y, call-connect-width) {
-                                self.target = "connect"; self.mode = "drag"; call-panel-drag-started("connect");
-                            } else {
-                                self.target = "";
-                                self.mode = "";
+                    Rectangle {
+                        height: 48px;
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Surface.ground; }
+                        find := Rectangle {
+                            x: 10px;
+                            y: 9px;
+                            width: parent.width - 20px;
+                            height: 29px;
+                            border-radius: 6px;
+                            background: Surface.ground;
+                            Text {
+                                text: "Find or add a contact";
+                                color: Surface.muted;
+                                font-size: 13px * text-scale;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                             }
-                        } else if event.kind == PointerEventKind.up {
-                            if self.mode == "drag" {
-                                call-panel-drag-finished(self.target);
-                            } else if self.mode == "resize" {
-                                call-panel-resize-finished(self.target);
-                            }
-                            self.target = "";
-                            self.mode = "";
+                            TouchArea { mouse-cursor: pointer; clicked => { add-contact-open = true; } }
                         }
                     }
 
-                    moved => {
-                        if self.mode == "drag" {
-                            call-panel-drag-moved(self.target, self.mouse-x - self.press-x, self.mouse-y - self.press-y);
-                        } else if self.mode == "resize" {
-                            call-panel-resize-moved(self.target, self.mouse-x - self.press-x, self.mouse-y - self.press-y);
+                    people-scroll := ScrollView {
+                        vertical-stretch: 1;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                        VerticalLayout {
+                            width: people-scroll.visible-width;
+                            padding: 8px;
+                            spacing: 2px;
+                            alignment: start;
+
+                            SidebarRow {
+                                label: "Home";
+                                has-icon: true;
+                                icon: @image-url("icons/home.svg");
+                                active: selected-contact < 0;
+                                text-scale: text-scale;
+                                clicked => { selected-contact = -1; }
+                            }
+                            SidebarRow {
+                                label: "Connect & invite";
+                                has-icon: true;
+                                icon: @image-url("icons/qr.svg");
+                                text-scale: text-scale;
+                                clicked => { connect-dialog-tab = 0; connect-dialog-open = true; }
+                            }
+
+                            if friend-request-from != "" : Rectangle {
+                                background: Theme.accent.with-alpha(0.15);
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Theme.accent.with-alpha(0.5);
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 8px;
+                                    Text { text: friend-request-from + " wants to be added"; wrap: word-wrap; font-size: 12px * text-scale; font-weight: 600; color: Surface.text; }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        PrimaryButton { text: "Accept"; clicked => { accept-friend-request(); } }
+                                        Button { text: "Decline"; clicked => { reject-friend-request(); } }
+                                    }
+                                }
+                            }
+
+                            GroupLabel {
+                                text: "DIRECT MESSAGES";
+                                can-add: true;
+                                add-tip: "Add a contact";
+                                add => { add-contact-open = true; }
+                            }
+                            for c[i] in contacts : SidebarRow {
+                                shown: !c.is-server;
+                                label: c.name + (c.verified ? "  ✓" : "");
+                                subtitle: c.key-changed ? "Key changed -- check before talking" : (connected && c.name == peer-display-name ? "On a call" : c.address);
+                                initial: initial-of(c.name);
+                                warn: c.key-changed;
+                                online: connected && c.name == peer-display-name;
+                                active: selected-contact == i;
+                                text-scale: text-scale;
+                                clicked => { selected-contact = i; }
+                            }
+                            if contacts.length == 0 : Text {
+                                text: "Nobody here yet. Paste someone's invite with +, or share yours from Connect & invite.";
+                                wrap: word-wrap;
+                                color: Surface.muted;
+                                font-size: 12px * text-scale;
+                            }
+
+                            if blocked-names.length > 0 : GroupLabel { text: "BLOCKED"; }
+                            for name[bi] in blocked-names : HorizontalLayout {
+                                padding-left: 10px;
+                                spacing: 6px;
+                                height: 32px;
+                                Text { text: name; vertical-alignment: center; color: Surface.muted; font-size: 13px * text-scale; overflow: elide; horizontal-stretch: 1; }
+                                Button { text: "Unblock"; clicked => { unblock-at(bi); } }
+                            }
+                            Rectangle { vertical-stretch: 1; }
                         }
                     }
-                }
 
-                if onboard-title != "" : Rectangle {
-                    x: 12px;
-                    y: 12px;
-                    width: min(420px, parent.width - 24px);
-                    height: onboard-layout.preferred-height;
-                    background: Palette.background;
-                    border-color: Theme.accent;
-                    border-width: 1px;
-                    border-radius: 8px;
-                    drop-shadow-blur: 12px;
-                    drop-shadow-color: #00000050;
-
-                    onboard-layout := VerticalLayout {
-                        padding: 12px;
-                        spacing: 6px;
-                        Text {
-                            text: onboard-title;
-                            font-weight: 700;
-                            font-size: 13px * text-scale;
-                            color: Theme.accent-text;
+                    // Voice connected: Discord's strip above the user bar.
+                    if connected : Rectangle {
+                        background: Surface.base;
+                        Rectangle { height: 1px; y: 0px; background: Surface.line; }
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 4px;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text { text: "Voice connected"; color: Surface.online; font-weight: 700; font-size: 13px * text-scale; }
+                                    Text {
+                                        text: group-people > 2 ? "\{group-people} people · \{call-mode}" : (peer-display-name == "" ? call-mode : peer-display-name + " · " + call-mode);
+                                        color: Surface.muted;
+                                        font-size: 11px * text-scale;
+                                        overflow: elide;
+                                    }
+                                }
+                                IconButton { icon: @image-url("icons/phone-off.svg"); tip: "Hang up"; danger: true; clicked => { hang-up(); } }
+                            }
+                            if !knocked : Button { text: "Knock (silent)"; clicked => { send-silent-marker(); knocked = true; } }
+                            if knocked : Button { text: "Ring them after all"; clicked => { escalate-call(); knocked = false; } }
                         }
-                        Text {
-                            text: onboard-body;
-                            wrap: word-wrap;
-                            font-size: 11px * text-scale;
+                    }
+
+                    // The user bar: who you are, mic, headphones, settings.
+                    user-bar := Rectangle {
+                        height: 56px;
+                        background: Surface.ground.mix(Surface.base, 0.5);
+                        user-menu := ContextMenuArea {
+                            Menu {
+                                MenuItem { title: "Settings"; activated => { current-tab = 1; } }
+                                MenuItem { title: "Edit profile"; activated => { current-tab = 1; settings-category = 4; } }
+                                MenuSeparator { }
+                                // Saves config and relaunches into (or out
+                                // of) the server console -- see
+                                // `on_server_mode_changed` in main.rs.
+                                MenuItem { title: "Server mode (console)"; checkable: true; checked <=> server-mode; activated => { server-mode-changed(); } }
+                            }
                         }
                         HorizontalLayout {
-                            alignment: end;
-                            Button { text: "Got it"; clicked => { dismiss-onboarding(); } }
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 2px;
+                            me := Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: me-touch.has-hover ? Surface.hover : transparent;
+                                me-touch := TouchArea { mouse-cursor: pointer; clicked => { profile-popup-open = !profile-popup-open; } }
+                                HorizontalLayout {
+                                    padding: 4px;
+                                    spacing: 8px;
+                                    if profile-widget-show-avatar : VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 34px;
+                                            height: 34px;
+                                            ProfileAvatar {
+                                                size: 34px;
+                                                has-image: profile-avatar-image-set;
+                                                img: profile-avatar-image;
+                                                initial: display-initial;
+                                                fit: avatar-image-fit;
+                                                rotation: avatar-image-rotation;
+                                                crop-left: avatar-image-crop-left;
+                                                crop-top: avatar-image-crop-top;
+                                                crop-right: avatar-image-crop-right;
+                                                crop-bottom: avatar-image-crop-bottom;
+                                            }
+                                            Rectangle {
+                                                x: 22px;
+                                                y: 22px;
+                                                width: 14px;
+                                                height: 14px;
+                                                border-radius: 7px;
+                                                background: Surface.online;
+                                                border-width: 3px;
+                                                border-color: Surface.ground.mix(Surface.base, 0.5);
+                                            }
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        if profile-widget-show-name : Text { text: display-name == "" ? "You" : display-name; font-weight: 700; font-size: 13px * text-scale; color: Surface.text; overflow: elide; }
+                                        if profile-widget-show-status : Text { text: status-message == "" ? "Online" : status-message; color: Surface.muted; font-size: 11px * text-scale; overflow: elide; }
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                IconButton {
+                                    icon: muted ? @image-url("icons/mic-off.svg") : @image-url("icons/mic.svg");
+                                    tip: muted ? "Unmute" : "Mute";
+                                    danger: muted;
+                                    enabled: connected;
+                                    clicked => { toggle-mute(); }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                IconButton {
+                                    icon: deafened ? @image-url("icons/headphones-off.svg") : @image-url("icons/headphones.svg");
+                                    tip: deafened ? "Undeafen" : "Deafen";
+                                    danger: deafened;
+                                    enabled: connected;
+                                    clicked => { toggle-deafen(); }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                IconButton { icon: @image-url("icons/gear.svg"); tip: "Settings (right-click for more)"; clicked => { current-tab = 1; } }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- Main column: header, conversation, composer ----
+            main-col := VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 0px;
+
+                property <bool> has-contact: selected-contact >= 0 && selected-contact < contacts.length;
+                property <ContactEntry> contact: contacts[selected-contact];
+                property <string> heading: connected
+                    ? (peer-display-name == "" ? "On a call" : peer-display-name)
+                    : has-contact ? contact.name : "Home";
+
+                Rectangle {
+                    height: 48px;
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Surface.line; }
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: connected || main-col.has-contact ? @image-url("icons/users.svg") : @image-url("icons/home.svg");
+                                size: 20px;
+                            }
+                        }
+                        Text { text: main-col.heading; font-size: 15px * text-scale; font-weight: 700; color: Surface.text; vertical-alignment: center; overflow: elide; }
+                        if connected && peer-status-message != "" : Rectangle { width: 1px; height: 20px; y: 14px; background: Surface.line; }
+                        if connected && peer-status-message != "" : Text { text: peer-status-message; color: Surface.muted; font-size: 13px * text-scale; vertical-alignment: center; overflow: elide; }
+                        Rectangle { horizontal-stretch: 1; }
+                        // Connection state as a quiet pill rather than a
+                        // line of diagnostics in the corner.
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                height: 24px;
+                                width: status-pill.preferred-width + 26px;
+                                border-radius: 12px;
+                                background: connected ? Surface.online.with-alpha(0.15) : Surface.hover;
+                                Rectangle { x: 10px; width: 8px; height: 8px; border-radius: 4px; background: connected ? Surface.online : Surface.muted; }
+                                status-pill := Text {
+                                    x: 22px;
+                                    text: status-text;
+                                    font-size: 12px * text-scale;
+                                    color: connected ? Surface.online : Surface.muted;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            IconButton {
+                                icon: connected ? @image-url("icons/phone-off.svg") : @image-url("icons/phone.svg");
+                                tip: connected ? "Hang up" : main-col.has-contact ? "Call " + main-col.contact.name : "Pick someone to call";
+                                danger: connected;
+                                enabled: connected || main-col.has-contact;
+                                clicked => {
+                                    if (connected) { hang-up(); } else { call-contact(selected-contact); }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            IconButton { icon: @image-url("icons/wifi.svg"); tip: "Connection & network"; clicked => { connect-dialog-tab = 1; connect-dialog-open = true; } }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            IconButton { icon: @image-url("icons/panel-right.svg"); tip: right-panel-open ? "Hide details" : "Show details"; active: right-panel-open; clicked => { right-panel-open = !right-panel-open; } }
                         }
                     }
                 }
 
-                if call-panel-visible-connect : FreeformPanel {
-                    title: "Connect";
-                    panel-x: call-connect-x;
-                    panel-y: call-connect-y;
-                    panel-width: call-connect-width;
-                    panel-height: call-connect-height;
-                    editing: call-editing-layout;
-                    animating: call-panel-snap-animating;
-                    remove-clicked => { call-panel-visible-connect = false; settings-changed(); }
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 0px;
 
-                    HorizontalBox {
-                        padding: 0px;
-                        Text { text: "Listen port:"; vertical-alignment: center; }
-                        LineEdit { text <=> local-port; enabled: !connected; }
-                        Button { text: "Listen"; enabled: !connected; clicked => { start-listen(); } }
-                    }
-                    // Raw address calling is off by default (Settings >
-                    // Call > Advanced): a direct connection shows both
-                    // sides each other's IP.
-                    // Spec §9: a silent call knocks rather than rings. Its own
-                    // button rather than a modifier on the main one -- a
-                    // hidden Shift behaviour is undiscoverable, and this is
-                    // a courtesy people should be able to find.
-                    if connected && !knocked : Button {
-                        text: "Knock (silent)";
-                        clicked => { send-silent-marker(); knocked = true; }
-                    }
-                    // Spec §9: starting a call as a knock rather than
-                    // turning one into a knock afterwards. Shown while
-                    // disconnected, because that is when the choice can
-                    // still be made.
-                    if !connected : ToggleSwitch {
-                        text: "Knock instead of ringing";
-                        checked <=> start-call-silently;
-                        reduced-motion: reduced-motion;
-                        text-scale: text-scale;
-                        help: silent-call-mode == 0
-                            ? "Starts the call without asking for their attention -- they see you are there and answer when they want. Their own notification rules still decide; this can only ask for less, never more."
-                            : "Starts the call without asking for their attention -- they see you are there and answer when they want. Shift+click on Call flips this for one call without changing the switch.";
-                        toggled => { settings-changed(); }
-                    }
-                    // Spec §9: escalating a knock without hanging up and
-                    // calling back. It withdraws your own silencing and
-                    // nothing more -- their rules still decide, and a
-                    // contact set never to ring still will not.
-                    if connected && knocked : Button {
-                        text: "Ring them after all";
-                        clicked => { escalate-call(); knocked = false; }
-                    }
-                    if ip-direct-calling : HorizontalBox {
-                        padding: 0px;
-                        Text { text: "Call:"; vertical-alignment: center; }
-                        LineEdit { text <=> remote-address; enabled: !connected; }
-                        // Spec §9: Shift+click as an *alternative* to the
-                        // checkbox, never the only way to reach it. The
-                        // TouchArea sits on top only in the modes that
-                        // want it, so an ordinary click still goes to the
-                        // Button and keeps its keyboard behaviour.
-                        Rectangle {
-                            call-button := Button {
-                                text: "Call";
-                                enabled: !connected;
-                                clicked => { start-call(); }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 0px;
+
+                        if onboard-title != "" : Rectangle {
+                            VerticalLayout {
+                                padding: 16px;
+                                padding-bottom: 0px;
+                                Rectangle {
+                                    background: Theme.accent.with-alpha(0.12);
+                                    border-radius: 10px;
+                                    border-width: 1px;
+                                    border-color: Theme.accent.with-alpha(0.5);
+                                    HorizontalLayout {
+                                        padding: 14px;
+                                        spacing: 14px;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 4px;
+                                            Text { text: onboard-title; font-weight: 700; font-size: 14px * text-scale; color: Surface.text; }
+                                            Text { text: onboard-body; wrap: word-wrap; font-size: 12px * text-scale; color: Surface.muted; }
+                                        }
+                                        VerticalLayout { alignment: center; PrimaryButton { text: "Got it"; clicked => { dismiss-onboarding(); } } }
+                                    }
+                                }
                             }
-                            if silent-call-mode != 0 && !connected : TouchArea {
-                                mouse-cursor: pointer;
-                                pointer-event(event) => {
-                                    if (event.kind == PointerEventKind.up) {
-                                        // Shift flips the switch for this
-                                        // one call and puts it back after,
-                                        // so a modifier never silently
-                                        // changes a standing preference.
-                                        if (event.modifiers.shift) {
-                                            start-call-silently = !start-call-silently;
-                                            start-call();
-                                            start-call-silently = !start-call-silently;
-                                        } else {
-                                            start-call();
+                        }
+
+                        if connected && replay-ask : HorizontalLayout {
+                            padding: 16px;
+                            padding-bottom: 0px;
+                            spacing: 8px;
+                            Text { text: "Their audio dropped out."; color: Surface.warm; font-size: 13px * text-scale; vertical-alignment: center; horizontal-stretch: 1; }
+                            Button { text: "Replay it"; clicked => { replay-ask = false; play-replay-clip(0); } }
+                            Button { text: "Dismiss"; clicked => { replay-ask = false; replay-notice = ""; } }
+                        }
+                        if delivery-notice != "" : HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            Text {
+                                text: delivery-notice;
+                                wrap: word-wrap;
+                                color: Surface.muted;
+                                font-size: 12px * text-scale;
+                            }
+                        }
+
+                        // Home, nobody picked and nothing said: say what
+                        // the app is for and give the three first steps.
+                        if !connected && !main-col.has-contact && chat-messages.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            padding: 32px;
+                            spacing: 18px;
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+                                Image { source: Brand.logo; width: 56px; height: 56px; }
+                            }
+                            Text { text: "Welcome to " + Brand.name; font-size: 24px * text-scale; font-weight: 800; color: Surface.text; horizontal-alignment: center; }
+                            Text {
+                                text: "No account and nothing to sign up for. Calls and messages go straight between you and the people you add, end-to-end encrypted.";
+                                wrap: word-wrap;
+                                color: Surface.muted;
+                                font-size: 13px * text-scale;
+                                horizontal-alignment: center;
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 12px;
+                                StartTile {
+                                    width: 190px;
+                                    title: "Share your invite";
+                                    body: "A link and QR code that let someone add you.";
+                                    icon: @image-url("icons/qr.svg");
+                                    clicked => { connect-dialog-tab = 0; connect-dialog-open = true; }
+                                }
+                                StartTile {
+                                    width: 190px;
+                                    title: "Add someone";
+                                    body: "Paste the invite a friend sent you.";
+                                    icon: @image-url("icons/plus.svg");
+                                    clicked => { add-contact-open = true; }
+                                }
+                                StartTile {
+                                    width: 190px;
+                                    title: "Check your connection";
+                                    body: "See whether people can reach you, and fix it.";
+                                    icon: @image-url("icons/wifi.svg");
+                                    clicked => { connect-dialog-tab = 1; connect-dialog-open = true; }
+                                }
+                            }
+                        }
+
+                        // A contact picked, not on a call, nothing loaded:
+                        // the start of the conversation.
+                        if !connected && main-col.has-contact && chat-messages.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            padding: 24px;
+                            spacing: 10px;
+                            alignment: end;
+                            HorizontalLayout {
+                                alignment: start;
+                                LetterAvatar { initial: initial-of(main-col.contact.name); size: 72px; }
+                            }
+                            Text { text: main-col.contact.name; font-size: 24px * text-scale; font-weight: 800; color: Surface.text; }
+                            Text {
+                                text: "This is the start of your conversation with \{main-col.contact.name}. Call them to talk and chat live, or leave a message below and it reaches them when they are next online.";
+                                wrap: word-wrap;
+                                color: Surface.muted;
+                                font-size: 13px * text-scale;
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                PrimaryButton {
+                                    text: "Call";
+                                    has-icon: true;
+                                    icon: @image-url("icons/phone.svg");
+                                    clicked => { call-contact(selected-contact); }
+                                }
+                            }
+                        }
+
+                        if connected || chat-messages.length > 0 : chat-scroll := ScrollView {
+                            vertical-stretch: 1;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            // Keeps the newest message in view as the
+                            // conversation grows.
+                            changed viewport-height => { self.viewport-y = min(0px, self.visible-height - self.viewport-height); }
+                            VerticalLayout {
+                                width: chat-scroll.visible-width;
+                                padding-top: 16px;
+                                padding-bottom: 8px;
+                                spacing: 0px;
+                                alignment: end;
+                                if chat-messages.length == 0 : HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    Text {
+                                        text: "Say something -- messages ride the same encrypted connection as the call.";
+                                        wrap: word-wrap;
+                                        color: Surface.muted;
+                                        font-size: 13px * text-scale;
+                                    }
+                                }
+                                for msg in chat-messages : msg-row := Rectangle {
+                                    background: msg-hover.has-hover ? Surface.hover.with-alpha(0.04) : transparent;
+                                    msg-hover := TouchArea { }
+                                    HorizontalLayout {
+                                        padding-left: 16px;
+                                        padding-right: 16px;
+                                        padding-top: 6px;
+                                        padding-bottom: 6px;
+                                        spacing: 12px;
+                                        VerticalLayout {
+                                            alignment: start;
+                                            if msg.from-me : ProfileAvatar {
+                                                size: 36px;
+                                                has-image: profile-avatar-image-set;
+                                                img: profile-avatar-image;
+                                                initial: display-initial;
+                                                fit: avatar-image-fit;
+                                                rotation: avatar-image-rotation;
+                                                crop-left: avatar-image-crop-left;
+                                                crop-top: avatar-image-crop-top;
+                                                crop-right: avatar-image-crop-right;
+                                                crop-bottom: avatar-image-crop-bottom;
+                                            }
+                                            if !msg.from-me : LetterAvatar { size: 36px; initial: initial-of(peer-display-name == "" ? "Peer" : peer-display-name); }
+                                        }
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: msg.from-me ? (display-name == "" ? "You" : display-name) : (peer-display-name == "" ? "Peer" : peer-display-name);
+                                                    color: msg.from-me ? Theme.accent-text : Surface.text;
+                                                    font-size: 14px * text-scale;
+                                                    font-weight: 700;
+                                                }
+                                                if msg.pinned : Text { text: "pinned"; color: Surface.gold; font-size: 11px * text-scale; vertical-alignment: center; }
+                                                // Spec §8: only while still in the outbox.
+                                                if msg.delivery != "" && msg.delivery != "Delivered" : Text {
+                                                    text: msg.delivery;
+                                                    color: Surface.muted;
+                                                    font-size: 11px * text-scale;
+                                                    font-italic: true;
+                                                    vertical-alignment: center;
+                                                }
+                                                Rectangle { horizontal-stretch: 1; }
+                                                // Pinning is local, so it is offered on
+                                                // anyone's message; edit and delete only
+                                                // on your own.
+                                                if msg-hover.has-hover && !msg.deleted : Text {
+                                                    text: msg.pinned ? "Unpin" : "Pin";
+                                                    color: pin-touch.has-hover ? Surface.text : Surface.muted;
+                                                    font-size: 11px * text-scale;
+                                                    vertical-alignment: center;
+                                                    pin-touch := TouchArea { mouse-cursor: pointer; clicked => { pin-chat-message(msg.id, !msg.pinned); } }
+                                                }
+                                                if msg-hover.has-hover && msg.from-me && !msg.deleted : Text {
+                                                    text: "Edit";
+                                                    color: edit-touch.has-hover ? Surface.text : Surface.muted;
+                                                    font-size: 11px * text-scale;
+                                                    vertical-alignment: center;
+                                                    edit-touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { chat-editing-id = msg.id; chat-input = msg.text; }
+                                                    }
+                                                }
+                                                if msg-hover.has-hover && msg.from-me && !msg.deleted : Text {
+                                                    text: "Delete";
+                                                    color: del-touch.has-hover ? Surface.danger : Surface.muted;
+                                                    font-size: 11px * text-scale;
+                                                    vertical-alignment: center;
+                                                    del-touch := TouchArea { mouse-cursor: pointer; clicked => { delete-chat-message(msg.id); } }
+                                                }
+                                            }
+                                            Text {
+                                                // Already formatted by `ChatEntry::display_text`.
+                                                text: msg.text;
+                                                wrap: word-wrap;
+                                                font-size: 14px * text-scale;
+                                                font-italic: msg.deleted;
+                                                color: msg.deleted ? Surface.muted : Surface.text;
+                                            }
+                                            // Where a link goes, worked out without fetching it.
+                                            if msg.links != "" : Text { text: msg.links; color: Surface.muted; font-size: 11px * text-scale; wrap: word-wrap; }
+                                            if msg.reactions != "" : HorizontalLayout {
+                                                alignment: start;
+                                                Rectangle {
+                                                    border-radius: 8px;
+                                                    background: Surface.card;
+                                                    border-width: 1px;
+                                                    border-color: Surface.line;
+                                                    width: reactions-text.preferred-width + 14px;
+                                                    height: 24px;
+                                                    reactions-text := Text { text: msg.reactions; font-size: 12px * text-scale; color: Surface.text; }
+                                                }
+                                            }
+                                            if msg-hover.has-hover && !msg.deleted : HorizontalLayout {
+                                                spacing: 4px;
+                                                alignment: start;
+                                                for choice in reaction-choices : Text {
+                                                    text: choice;
+                                                    font-size: 13px * text-scale;
+                                                    opacity: react-touch.has-hover ? 1.0 : 0.5;
+                                                    react-touch := TouchArea { mouse-cursor: pointer; clicked => { react-to-message(msg.id, choice); } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if voice-message-status != "" : HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            Text {
+                                text: voice-message-status;
+                                color: voice-recording ? Surface.danger : Surface.muted;
+                                font-size: 12px * text-scale;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if outbox-summary != "" : HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            Text {
+                                text: outbox-summary;
+                                color: Surface.muted;
+                                font-size: 12px * text-scale;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // The composer: live chat on a call, a left
+                        // message when a contact is picked but offline.
+                        composer := VerticalLayout {
+                            padding: 16px;
+                            padding-top: 8px;
+                            property <bool> leaving: !connected && main-col.has-contact;
+                            property <bool> usable: connected || (leaving && main-col.contact.key != "");
+                            Rectangle {
+                                height: 46px;
+                                border-radius: 10px;
+                                background: Surface.raised.mix(Surface.ground, 0.5);
+                                border-width: 1px;
+                                border-color: composer-input.has-focus ? Theme.accent.with-alpha(0.6) : Surface.line;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 4px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        IconButton { icon: @image-url("icons/paperclip.svg"); tip: "Send a file"; enabled: connected; clicked => { send-file(); } }
+                                    }
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        composer-input := TextInput {
+                                            x: 6px;
+                                            width: parent.width - 12px;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            font-size: 14px * text-scale;
+                                            color: Surface.text;
+                                            single-line: true;
+                                            enabled: composer.usable;
+                                            text: connected ? chat-input : leave-message-text;
+                                            edited => {
+                                                if (connected) { chat-input = self.text; } else { leave-message-text = self.text; }
+                                            }
+                                            accepted => {
+                                                if (connected) {
+                                                    if (chat-editing-id >= 0) {
+                                                        edit-chat-message(chat-editing-id, self.text);
+                                                        chat-editing-id = -1;
+                                                    } else {
+                                                        send-chat-message(self.text);
+                                                    }
+                                                } else if (main-col.has-contact && leave-message-text != "") {
+                                                    leave-message(selected-contact);
+                                                }
+                                            }
+                                        }
+                                        if composer-input.text == "" : Text {
+                                            x: 6px;
+                                            text: chat-editing-id >= 0 ? "Editing your message..."
+                                                : connected ? "Message " + (peer-display-name == "" ? "your call" : "@" + peer-display-name)
+                                                : main-col.has-contact ? (main-col.contact.key != "" ? "Leave a message for @" + main-col.contact.name : "\{main-col.contact.name} has no key pinned yet -- call them first")
+                                                : "Pick someone on the left to message them";
+                                            width: parent.width - 12px;
+                                            overflow: elide;
+                                            color: Surface.muted;
+                                            font-size: 14px * text-scale;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if chat-editing-id >= 0 : VerticalLayout {
+                                        alignment: center;
+                                        IconButton { icon: @image-url("icons/x.svg"); tip: "Cancel edit"; clicked => { chat-editing-id = -1; chat-input = ""; } }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        IconButton {
+                                            icon: @image-url("icons/record.svg");
+                                            tip: voice-recording ? "Stop and send voice message" : "Record a voice message";
+                                            danger: voice-recording;
+                                            enabled: connected;
+                                            clicked => {
+                                                if (voice-recording) { stop-voice-message(); } else { start-voice-message(); }
+                                            }
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        IconButton {
+                                            icon: @image-url("icons/send.svg");
+                                            tip: connected ? "Send" : "Leave message";
+                                            enabled: connected ? chat-input != "" : (main-col.has-contact && leave-message-text != "" && main-col.contact.key != "");
+                                            clicked => {
+                                                if (connected) { send-chat-message(chat-input); } else { leave-message(selected-contact); }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    if !ip-direct-calling && !connected : Text {
-                        text: "Calling a raw IP is turned off. Call a saved contact instead, or turn it on in Settings > Call > Advanced.";
-                        wrap: word-wrap;
-                        color: Theme.muted-text;
-                        font-size: 10px * text-scale;
-                    }
-                    Button { text: "Hang up"; enabled: connected; clicked => { hang-up(); } }
 
-                    Rectangle { height: 1px; background: Theme.divider; }
-                    Text { text: "Across the internet (NAT)"; font-weight: 700; font-size: 11px * text-scale; }
-                    Text {
-                        text: "Listen and Call above work on a local network. To reach someone in another house without port forwarding, use this instead.";
-                        wrap: word-wrap;
-                        color: Theme.muted-text;
-                        font-size: 10px * text-scale;
-                    }
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        LineEdit {
-                            text: public-address;
-                            read-only: true;
-                            placeholder-text: "your public address appears here";
-                        }
-                        Button { text: "Find"; enabled: !nat-busy && !connected; clicked => { discover-public-address(); } }
-                    }
-                    Text {
-                        text: "1. Press Find, then send that address to the other person. 2. Put their address in Call: above. 3. Both press Punch within a few seconds of each other.";
-                        wrap: word-wrap;
-                        color: Theme.muted-text;
-                        font-size: 10px * text-scale;
-                    }
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Button {
-                            text: port-mapped ? "Close forwarded port" : "Open my port on the router";
-                            enabled: !nat-busy;
-                            clicked => { open-port-automatically(); }
-                        }
-                        HelpIcon {
-                            text-scale: text-scale;
-                            text: "Asks your router to forward your port inward (NAT-PMP), so people can call *you* rather than only the other way round. Renewed automatically while the app is open, and closed again when you press this a second time or quit -- it deliberately expires on its own rather than being left open. Plenty of routers either do not support this or have it switched off, in which case nothing changes and you can still call out.";
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-                    Button { text: nat-busy ? "Punching..." : "Punch"; enabled: !nat-busy && !connected; clicked => { start-punch(); } }
-                    if nat-status != "" : Text { text: nat-status; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
-
-                    // Spec §10's capability table. Three columns rather
-                    // than prose: the questions are independent, and a
-                    // paragraph makes people hunt for the one they care
-                    // about.
-                    for row in reachability-rows : VerticalBox {
-                        padding: 0px;
-                        spacing: 1px;
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: 6px;
-                            Text {
-                                text: row.question;
-                                font-size: 10px * text-scale;
-                                font-weight: 700;
-                                width: 110px;
-                            }
-                            Text {
-                                text: row.answer;
-                                font-size: 10px * text-scale;
-                                color: row.answer == "Works" ? Theme.accent-text : Theme.muted-text;
-                            }
-                        }
-                        Text {
-                            text: row.meaning;
-                            color: Theme.muted-text;
-                            font-size: 9px * text-scale;
-                            wrap: word-wrap;
-                        }
-                    }
-
-                    if connected && verification-code != "" : VerticalBox {
-                        padding: 0px;
-                        spacing: 2px;
-                        Text { text: "Verification code"; font-weight: 700; font-size: 11px * text-scale; }
-                        Text {
-                            text: verification-code;
-                            font-family: "Consolas";
-                            font-size: 12px * text-scale;
-                            wrap: word-wrap;
-                        }
-                        Text {
-                            text: "Read this aloud and check it matches on their screen. If it does, nobody is sitting in the middle of this call. If it doesn't, stop talking.";
-                            wrap: word-wrap;
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                        }
-
-                        // Trust state for this peer's key (spec §4). The
-                        // code above proves the call isn't intercepted
-                        // *right now*; this says whether the key is the
-                        // one we pinned last time.
-                        if peer-fingerprint != "" : Text {
-                            text: "Their key: \{peer-fingerprint}";
-                            color: Theme.muted-text;
-                            font-family: "Consolas";
-                            font-size: 10px * text-scale;
-                            wrap: word-wrap;
-                        }
-                        if peer-trust-message != "" : Text {
-                            text: peer-trust-message;
-                            color: peer-key-changed ? #e05252 : Theme.muted-text;
-                            font-weight: peer-key-changed ? 700 : 400;
-                            font-size: 10px * text-scale;
-                            wrap: word-wrap;
-                        }
-                        if !peer-verified : Button {
-                            text: peer-key-changed ? "Codes match -- trust the new key" : "Codes match -- mark verified";
-                            clicked => { mark-peer-verified(); }
-                        }
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: 6px;
-                            Button { text: "Block"; clicked => { block-peer(); } }
-                            HelpIcon { text-scale: text-scale; text: block-explanation; }
-                            Button { text: "Report"; clicked => { report-peer(""); } }
-                            HelpIcon { text-scale: text-scale; text: report-explanation; }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        if moderation-message != "" : Text {
-                            text: moderation-message;
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                            wrap: word-wrap;
-                        }
-                    }
-                    if connected : VerticalBox {
-                        padding: 0px;
-                        spacing: 2px;
-                        ToggleSwitch {
-                            text: "Mute them";
-                            checked <=> peer-muted;
-                            reduced-motion: reduced-motion;
-                            text-scale: text-scale;
-                            help: "Silences this person on your end only. They are not told, and it does not affect anyone else.";
-                            toggled => { peer-audio-changed(); }
-                        }
-                        SettingLabel {
-                            text: "Their volume: \{round(peer-volume-db)} dB";
-                            help: "A per-person trim on top of the master volume, remembered against this contact -- so a quiet microphone stays fixed for every future call.";
-                            text-scale: text-scale;
-                        }
-                        AccentSlider {
-                            minimum: -24;
-                            maximum: 12;
-                            value <=> peer-volume-db;
-                            changed(v) => { peer-audio-changed(); }
-                        }
-                        SettingLabel {
-                            text: "Their tone";
-                            help: "Fixes how their microphone sounds, on your end only -- they hear nothing different. Remembered against this contact, so a boomy or harsh microphone stays fixed for every future call. All three at 0 means no processing at all.";
-                            text-scale: text-scale;
-                        }
-                        Text {
-                            text: "Bass \{round(peer-bass-db)} dB";
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                        }
-                        AccentSlider {
-                            minimum: -12;
-                            maximum: 12;
-                            value <=> peer-bass-db;
-                            changed(v) => { peer-audio-changed(); }
-                        }
-                        Text {
-                            text: "Voice \{round(peer-voice-db)} dB";
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                        }
-                        AccentSlider {
-                            minimum: -12;
-                            maximum: 12;
-                            value <=> peer-voice-db;
-                            changed(v) => { peer-audio-changed(); }
-                        }
-                        Text {
-                            text: "Treble \{round(peer-treble-db)} dB";
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                        }
-                        AccentSlider {
-                            minimum: -12;
-                            maximum: 12;
-                            value <=> peer-treble-db;
-                            changed(v) => { peer-audio-changed(); }
-                        }
-                    }
-                    // Spec §3: the mode in the call UI, with one line
-                    // saying what it means. One mode exists today; naming
-                    // it anyway is what makes the line worth reading when
-                    // a second one arrives.
-                    if connected : VerticalBox {
-                        padding: 0px;
-                        spacing: 1px;
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: 6px;
-                            Text {
-                                text: "Connection: " + call-mode;
-                                font-size: 11px * text-scale;
-                                font-weight: 700;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        Text {
-                            text: call-mode-explanation;
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                            wrap: word-wrap;
-                        }
-                    }
-                    // Spec §3 group calls / §9: who else is here.
-                    if connected && group-people > 2 : Text {
-                        text: "Voice active · \{group-people} people -- also with \{group-names}";
-                        font-size: 11px * text-scale;
-                        wrap: word-wrap;
-                    }
-                    // Spec §2 "Ask me (popup button)".
-                    if connected && replay-ask : HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Text {
-                            text: "Their audio dropped out.";
-                            font-size: 11px * text-scale;
-                            vertical-alignment: center;
-                        }
-                        Button {
-                            text: "Replay it";
-                            clicked => { replay-ask = false; play-replay-clip(0); }
-                        }
-                        Button {
-                            text: "Dismiss";
-                            clicked => { replay-ask = false; replay-notice = ""; }
-                        }
-                    }
-                    if connected && peer-display-name != "" : Text {
-                        text: peer-status-message != "" ? "With: \{peer-display-name} -- \{peer-status-message}" : "With: \{peer-display-name}";
-                        color: Theme.muted-text;
-                        font-size: 12px * text-scale;
-                    }
-                }
-
-                if call-panel-visible-filetransfer : FreeformPanel {
-                    title: "File Transfer";
-                    panel-x: call-filetransfer-x;
-                    panel-y: call-filetransfer-y;
-                    panel-width: call-filetransfer-width;
-                    panel-height: call-filetransfer-height;
-                    editing: call-editing-layout;
-                    animating: call-panel-snap-animating;
-                    remove-clicked => { call-panel-visible-filetransfer = false; settings-changed(); }
-
-                    if ft-send-error != "" : Text {
-                        text: ft-send-error;
-                        color: #e0a052;
-                        font-size: 10px * text-scale;
-                        wrap: word-wrap;
-                    }
-                    if ft-offer-pending : VerticalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Text { text: "Incoming file"; font-weight: 700; font-size: 11px * text-scale; }
-                        Text { text: ft-offer-name; wrap: word-wrap; font-size: 11px * text-scale; }
-                        Text { text: ft-offer-size; color: Theme.muted-text; font-size: 10px * text-scale; }
-                        // Made by the sender, checked before decoding.
-                        if ft-offer-thumbnail.width > 0 : Image {
-                            source: ft-offer-thumbnail;
-                            width: 64px;
-                            height: 64px;
-                            image-fit: contain;
-                        }
-                        if ft-availability != "" : Text {
-                            text: ft-availability;
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                            wrap: word-wrap;
-                        }
-                        HorizontalBox {
-                            padding: 0px;
-                            Button { text: "Accept"; clicked => { accept-file-offer(); } }
-                            Button { text: "Reject"; clicked => { reject-file-offer(); } }
-                        }
-                    }
-
-                    if !ft-offer-pending && ft-incoming-active : VerticalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Text { text: "Receiving: \{ft-incoming-name}"; wrap: word-wrap; font-size: 11px * text-scale; }
-                        Rectangle {
-                            height: 10px;
-                            background: Theme.track-background;
-                            border-radius: 5px;
-                            clip: true;
-                            Rectangle { x: 0px; y: 0px; height: 100%; width: parent.width * ft-incoming-progress; background: Theme.accent; }
-                        }
-                        Text { text: "\{round(ft-incoming-progress * 100)}%"; color: Theme.muted-text; font-size: 10px * text-scale; }
-                        if ft-incoming-error != "" : Text { text: ft-incoming-error; color: Theme.muted-text; wrap: word-wrap; font-size: 10px * text-scale; }
-                        Button { text: "Cancel"; clicked => { cancel-file-transfer(); } }
-                    }
-
-                    if !ft-offer-pending && !ft-incoming-active && ft-outgoing-active : VerticalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Text { text: "Sending: \{ft-outgoing-name}"; wrap: word-wrap; font-size: 11px * text-scale; }
-                        Rectangle {
-                            height: 10px;
-                            background: Theme.track-background;
-                            border-radius: 5px;
-                            clip: true;
-                            Rectangle { x: 0px; y: 0px; height: 100%; width: parent.width * ft-outgoing-progress; background: Theme.accent; }
-                        }
-                        Text {
-                            text: ft-outgoing-paused
-                                ? "\{round(ft-outgoing-progress * 100)}% -- paused"
-                                : "\{round(ft-outgoing-progress * 100)}%";
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                        }
-                        if ft-outgoing-error != "" : Text { text: ft-outgoing-error; color: Theme.muted-text; wrap: word-wrap; font-size: 10px * text-scale; }
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: 6px;
-                            Button {
-                                text: ft-outgoing-paused ? "Resume" : "Pause";
-                                clicked => { set-transfer-paused(!ft-outgoing-paused); }
-                            }
-                            Button { text: "Cancel"; clicked => { cancel-file-transfer(); } }
-                        }
-                    }
-
-                    if !ft-offer-pending && !ft-incoming-active && !ft-outgoing-active : VerticalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Text {
-                            text: "Send a file to your peer over the same encrypted connection as the call.";
-                            wrap: word-wrap;
-                            color: Theme.muted-text;
-                            font-size: 11px * text-scale;
-                        }
-                        Button { text: "Send file..."; enabled: connected; clicked => { send-file(); } }
-                        if !connected : Text { text: "Connect to a peer first."; color: Theme.muted-text; font-size: 10px * text-scale; }
-                        if ft-status-message != "" : Text { text: ft-status-message; color: Theme.muted-text; wrap: word-wrap; font-size: 10px * text-scale; }
-                    }
-                }
-
-                if call-panel-visible-chat : FreeformPanel {
-                    title: "Chat";
-                    panel-x: call-chat-x;
-                    panel-y: call-chat-y;
-                    panel-width: call-chat-width;
-                    panel-height: call-chat-height;
-                    editing: call-editing-layout;
-                    animating: call-panel-snap-animating;
-                    content-fills: true;
-                    remove-clicked => { call-panel-visible-chat = false; settings-changed(); }
-
-                    if voice-message-status != "" : Text {
-                        text: voice-message-status;
-                        color: voice-recording ? #e05252 : Theme.muted-text;
-                        font-size: 10px * text-scale;
-                        wrap: word-wrap;
-                    }
-                    if connected : HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        vertical-stretch: 0;
-                        Text {
-                            text: "Disappear after";
-                            color: Theme.muted-text;
-                            font-size: 10px * text-scale;
-                            vertical-alignment: center;
-                        }
-                        ComboBox {
-                            model: ["Never", "1 hour", "1 day", "1 week"];
-                            current-index: chat-expire-secs == 3600 ? 1
-                                : chat-expire-secs == 86400 ? 2
-                                : chat-expire-secs == 604800 ? 3
-                                : 0;
-                            selected(v) => {
-                                chat-expire-changed(
-                                    self.current-index == 1 ? 3600
-                                    : self.current-index == 2 ? 86400
-                                    : self.current-index == 3 ? 604800
-                                    : 0
-                                );
-                            }
-                        }
-                        HelpIcon {
-                            text-scale: text-scale;
-                            text: "Deletes messages with this person from your device once they reach this age. Applies to messages sent from now on, and only on your side -- you cannot make their copy disappear.";
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-                    if chat-messages.length == 0 : Text {
-                        text: connected ? "Say something -- messages ride the same encrypted connection as the call." : "Chat opens up once you're on a call.";
-                        wrap: word-wrap;
-                        color: Theme.muted-text;
-                        font-size: 11px * text-scale;
-                    }
-                    for msg in chat-messages : VerticalBox {
-                        padding: 0px;
-                        spacing: 1px;
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: 4px;
-                            Text {
-                                text: (msg.pinned ? "* " : "") + (msg.from-me ? "You" : (peer-display-name == "" ? "Peer" : peer-display-name));
-                                color: msg.from-me ? Theme.accent-text : Theme.muted-text;
-                                font-size: 9px * text-scale;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                            // Spec §8. Shown only while a message is still
-                            // in the outbox: labelling every delivered line
-                            // "Delivered" is noise, and noise is what stops
-                            // people noticing the one that says otherwise.
-                            if msg.delivery != "" && msg.delivery != "Delivered" : Text {
-                                text: msg.delivery;
-                                color: Theme.muted-text;
-                                font-size: 9px * text-scale;
-                                font-italic: true;
-                                vertical-alignment: center;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            // Pinning is local, so it is offered on anyone's
-                            // message. Edit and delete are only offered on
-                            // your own -- rewriting someone else's words
-                            // would not be an edit.
-                            if !msg.deleted : Text {
-                                text: msg.pinned ? "unpin" : "pin";
-                                color: pin-touch.has-hover ? Theme.accent-text : Theme.muted-text;
-                                font-size: 9px * text-scale;
-                                vertical-alignment: center;
-                                pin-touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { pin-chat-message(msg.id, !msg.pinned); }
-                                }
-                            }
-                            if msg.from-me && !msg.deleted : Text {
-                                text: "edit";
-                                color: edit-touch.has-hover ? Theme.accent-text : Theme.muted-text;
-                                font-size: 9px * text-scale;
-                                vertical-alignment: center;
-                                edit-touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        chat-editing-id = msg.id;
-                                        chat-input = msg.text;
-                                    }
-                                }
-                            }
-                            if msg.from-me && !msg.deleted : Text {
-                                text: "delete";
-                                color: del-touch.has-hover ? #e05252 : Theme.muted-text;
-                                font-size: 9px * text-scale;
-                                vertical-alignment: center;
-                                del-touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { delete-chat-message(msg.id); }
-                                }
-                            }
-                        }
-                        Text {
-                            // Already formatted by `ChatEntry::display_text`
-                            // -- deciding it again here would be a second
-                            // place for the wording to drift.
-                            text: msg.text;
-                            wrap: word-wrap;
-                            font-size: 12px * text-scale;
-                            font-italic: msg.deleted;
-                            color: msg.deleted ? Theme.muted-text : Palette.foreground;
-                        }
-                        // Says where a link goes without fetching anything
-                        // from it. A preview that loaded the page would
-                        // hand the sender your IP address before you had
-                        // decided whether to trust them.
-                        if msg.links != "" : Text {
-                            text: msg.links;
-                            color: Theme.muted-text;
-                            font-size: 9px * text-scale;
-                            wrap: word-wrap;
-                        }
-                        if msg.reactions != "" : Text {
-                            text: msg.reactions;
-                            font-size: 11px * text-scale;
-                        }
-                        if !msg.deleted : HorizontalBox {
-                            padding: 0px;
-                            spacing: 2px;
-                            for choice in reaction-choices : Text {
-                                text: choice;
-                                font-size: 11px * text-scale;
-                                opacity: react-touch.has-hover ? 1.0 : 0.35;
-                                react-touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { react-to-message(msg.id, choice); }
-                                }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                    }
-                    // Spacer + a non-stretching input row keeps the prompt
-                    // pinned to the panel's bottom edge instead of letting
-                    // the text field swell to fill the panel.
-                    Rectangle { vertical-stretch: 1; }
-                    if outbox-summary != "" : Text {
-                        text: outbox-summary;
-                        color: Theme.muted-text;
-                        font-size: 10px * text-scale;
-                        wrap: word-wrap;
-                    }
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        vertical-stretch: 0;
-                        LineEdit {
-                            text <=> chat-input;
-                            enabled: connected;
-                            placeholder-text: chat-editing-id >= 0 ? "Editing..." : "Message...";
-                            accepted(v) => {
-                                if (chat-editing-id >= 0) {
-                                    edit-chat-message(chat-editing-id, v);
-                                    chat-editing-id = -1;
-                                } else {
-                                    send-chat-message(v);
-                                }
-                            }
-                        }
-                        if chat-editing-id >= 0 : Button {
-                            text: "Cancel";
-                            clicked => { chat-editing-id = -1; chat-input = ""; }
-                        }
-                        Button {
-                            text: voice-recording ? "Stop & send" : "Record";
-                            enabled: connected;
-                            clicked => {
-                                if (voice-recording) {
-                                    stop-voice-message();
-                                } else {
-                                    start-voice-message();
-                                }
-                            }
-                        }
-                        Button { text: "Send"; enabled: connected && chat-input != ""; clicked => { send-chat-message(chat-input); } }
-                    }
-                }
-
-                if call-panel-visible-invite : FreeformPanel {
-                    title: "My Invite";
-                    panel-x: call-invite-x;
-                    panel-y: call-invite-y;
-                    panel-width: call-invite-width;
-                    panel-height: call-invite-height;
-                    editing: call-editing-layout;
-                    animating: call-panel-snap-animating;
-                    remove-clicked => { call-panel-visible-invite = false; settings-changed(); }
-
-                    if my-invite-qr.width > 0 : Image {
-                        source: my-invite-qr;
-                        // `contain` already keeps the square square inside
-                        // whatever the panel was resized to. Sizing the
-                        // width from the height instead would make width
-                        // depend on a height that depends on width.
-                        vertical-stretch: 1;
-                        image-fit: contain;
-                    }
-                    Text {
-                        text: my-invite-has-address
-                            ? "Scan or send the link. It carries your ID and your current address."
-                            : "This invite names you but has no address yet -- press Find in the Connect panel, then Refresh.";
-                        color: Theme.muted-text;
-                        font-size: 10px * text-scale;
-                        wrap: word-wrap;
-                    }
-                    // Read-only rather than a Copy button: Slint has no
-                    // clipboard API, so a button would have nothing to do.
-                    // A field you can select from actually works.
-                    LineEdit {
-                        text: my-invite-link;
-                        read-only: true;
-                        font-size: 9px * text-scale;
-                    }
-                    Button { text: "Refresh"; clicked => { refresh-invite(); } }
-                }
-
-                if call-panel-visible-contacts : FreeformPanel {
-                    title: "Contacts & Servers";
-                    panel-x: call-contacts-x;
-                    panel-y: call-contacts-y;
-                    panel-width: call-contacts-width;
-                    panel-height: call-contacts-height;
-                    editing: call-editing-layout;
-                    animating: call-panel-snap-animating;
-                    remove-clicked => { call-panel-visible-contacts = false; settings-changed(); }
-
-                    if friend-request-from != "" : Rectangle {
-                        background: Theme.accent-wash;
-                        border-radius: 6px;
-                        VerticalBox {
-                            padding: 8px;
-                            spacing: 6px;
-                            Text { text: friend-request-from + " wants to be added"; wrap: word-wrap; font-size: 11px * text-scale; font-weight: 700; }
-                            HorizontalBox {
-                                padding: 0px;
-                                spacing: 6px;
-                                Button { text: "Accept"; clicked => { accept-friend-request(); } }
-                                Button { text: "Decline"; clicked => { reject-friend-request(); } }
-                            }
-                        }
-                    }
-
-                    if delivery-notice != "" : Text {
-                        text: delivery-notice;
-                        wrap: word-wrap;
-                        font-size: 11px * text-scale;
-                    }
-                    LineEdit {
-                        text <=> leave-message-text;
-                        placeholder-text: "Write a message, then press Leave message on a contact";
-                    }
-                    if contacts.length == 0 : Text {
-                        text: "No saved contacts yet. Add one below, or press \"Add current peer\" while on a call.";
-                        wrap: word-wrap;
-                        color: Theme.muted-text;
-                        font-size: 11px * text-scale;
-                    }
-                    for c[i] in contacts : HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        VerticalBox {
-                            padding: 0px;
+                    // ---- Right panel: who you are with, files ----
+                    if right-panel-open : Rectangle {
+                        width: 300px;
+                        background: Surface.base;
+                        Rectangle { x: 0px; width: 1px; background: Surface.line; }
+                        VerticalLayout {
                             spacing: 0px;
-                            horizontal-stretch: 1;
-                            Text {
-                                text: (c.is-server ? "[server] " : "") + c.name
-                                    + (c.verified ? "  [verified]" : "")
-                                    + (c.key-changed ? "  [KEY CHANGED]" : "");
-                                font-size: 12px * text-scale;
-                                font-weight: 600;
-                                color: c.key-changed ? #e05252 : Palette.foreground;
-                                overflow: elide;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                spacing: 4px;
+                                height: 40px;
+                                LineTab { label: connected ? "Call" : "Profile"; active: right-tab == 0; clicked => { right-tab = 0; } }
+                                LineTab { label: "Files"; active: right-tab == 1; clicked => { right-tab = 1; } }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                            Text { text: c.address; color: Theme.muted-text; font-size: 10px * text-scale; overflow: elide; }
-                            Text {
-                                text: c.fingerprint == "" ? "no key pinned yet" : c.fingerprint;
-                                color: Theme.muted-text;
-                                font-family: "Consolas";
-                                font-size: 9px * text-scale;
-                                overflow: elide;
-                            }
-                        }
-                        ComboBox {
-                            model: ["Rings", "Silent", "Never"];
-                            current-index: c.ring-rule;
-                            selected(v) => { set-contact-ring-rule(i, self.current-index); }
-                        }
-                        // Spec §3: the connection mode, chosen automatically
-                        // and overridable per conversation.
-                        ComboBox {
-                            model: ["Auto", "Direct", "Relay"];
-                            current-index: c.connection-mode;
-                            selected(v) => { set-contact-connection-mode(i, self.current-index); }
-                        }
-                        // Spec §8 per-contact override for messages.
-                        ComboBox {
-                            model: ["Mail: their routes", "Mail: direct only"];
-                            current-index: c.message-route;
-                            selected(v) => { set-contact-message-route(i, self.current-index); }
-                        }
-                        Button {
-                            text: "Leave message";
-                            enabled: leave-message-text != "" && c.key != "";
-                            clicked => { leave-message(i); }
-                        }
-                        Button {
-                            text: "Introduce";
-                            enabled: connected && c.fingerprint != "";
-                            clicked => { introduce-contact(i); }
-                        }
-                        Button {
-                            text: connected ? "Add" : "Call";
-                            enabled: !connected || group-people < 5;
-                            clicked => { call-contact(i); }
-                        }
-                        Button { text: "Forget"; clicked => { forget-history(i); } }
-                        Button { text: "X"; clicked => { remove-contact(i); } }
-                    }
+                            Rectangle { height: 1px; background: Surface.line; }
 
-                    Rectangle { height: 1px; background: Theme.divider; }
-                    Button {
-                        text: "Add current peer";
-                        enabled: connected;
-                        clicked => {
-                            new-contact-name = peer-display-name == "" ? "Peer" : peer-display-name;
-                            new-contact-address = remote-address;
-                            add-contact();
-                        }
-                    }
-                    Button { text: "Ask peer to add me"; enabled: connected; clicked => { send-friend-request(); } }
+                            details-scroll := ScrollView {
+                                vertical-stretch: 1;
+                                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                                VerticalLayout {
+                                    width: details-scroll.visible-width;
+                                    padding: 12px;
+                                    padding-right: 16px;
+                                    spacing: 12px;
+                                    alignment: start;
 
-                    Rectangle { height: 1px; background: Theme.divider; }
-                    SettingLabel { text: "Search history"; help: "Searches the messages stored on this device for the person you are on a call with. Nothing leaves your machine, and nothing is searched for people you have not saved as contacts."; text-scale: text-scale; }
-                    LineEdit {
-                        text <=> history-query;
-                        placeholder-text: "Find in this conversation";
-                        enabled: connected;
-                        edited(v) => { search-history(v); }
-                    }
-                    if history-result != "" : Text {
-                        text: history-result;
-                        wrap: word-wrap;
-                        color: Theme.muted-text;
-                        font-size: 10px * text-scale;
-                    }
-
-                    if blocked-names.length > 0 : Rectangle { height: 1px; background: Theme.divider; }
-                    if blocked-names.length > 0 : Text {
-                        text: "Blocked";
-                        font-size: 11px * text-scale;
-                        font-weight: 600;
-                    }
-                    for name[bi] in blocked-names : HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Text { text: name; vertical-alignment: center; font-size: 11px * text-scale; overflow: elide; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button { text: "Unblock"; clicked => { unblock-at(bi); } }
-                    }
-
-                    Rectangle { height: 1px; background: Theme.divider; }
-                    Text { text: "Add from an invite"; font-size: 11px * text-scale; font-weight: 600; }
-                    LineEdit {
-                        text <=> new-contact-invite;
-                        placeholder-text: "Paste antiphon://... invite";
-                        accepted(v) => { add-from-invite(); }
-                    }
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Button { text: "Add from invite"; enabled: new-contact-invite != ""; clicked => { add-from-invite(); } }
-                        HelpIcon {
-                            text-scale: text-scale;
-                            text: "Paste a link someone sent you. Their permanent ID is pinned straight away, so you will be warned if it ever changes -- but you still need to compare the verification code on your first call to be sure the link really came from them.";
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-                    LineEdit { text <=> new-contact-name; placeholder-text: "Name"; }
-                    LineEdit { text <=> new-contact-address; placeholder-text: "host:port"; }
-                    ToggleSwitch { text: "This is a server"; checked <=> new-contact-is-server; }
-                    Button { text: "Add"; enabled: new-contact-name != "" && new-contact-address != ""; clicked => { add-contact(); } }
-                    if introduction-message != "" : Text {
-                        text: introduction-message;
-                        color: Theme.muted-text;
-                        font-size: 10px * text-scale;
-                        wrap: word-wrap;
-                    }
-                    if contacts-message != "" : Text { text: contacts-message; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
-                }
-
-                // The profile widget: always present, never removable (see
-                // `FreeformPanel.removable`) -- it's the app's one
-                // guaranteed way back to itself. Avatar/name/status open
-                // the profile popup; Mute/Deafen live here directly now
-                // (not as separate buttons outside any widget); the
-                // hamburger opens Settings/Edit layout/Widgets.
-                //
-                // The avatar/name/status row deliberately has NO `TouchArea`
-                // while `call-editing-layout` is on: with one, it would sit
-                // on top of (and steal clicks from) the canvas-level `hit`
-                // layer's title-bar drag detection, since a nested
-                // `TouchArea` always wins hit-testing over a sibling
-                // declared earlier/further out -- so this panel would be
-                // draggable everywhere except by its own header, unlike
-                // every other panel. Two near-identical copies of the same
-                // row (one wrapped in a click handler, one not) is simpler
-                // and more obviously correct than trying to make one
-                // TouchArea conditionally transparent to hits.
-                FreeformPanel {
-                    title: "Profile";
-                    panel-x: call-profile-x;
-                    panel-y: call-profile-y;
-                    panel-width: call-profile-width;
-                    panel-height: call-profile-height;
-                    editing: call-editing-layout;
-                    animating: call-panel-snap-animating;
-                    removable: false;
-
-                    if !call-editing-layout : profile-trigger := TouchArea {
-                        clicked => { profile-popup-open = !profile-popup-open; }
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: 8px;
-                            if profile-widget-show-avatar : ProfileAvatar {
-                                size: 36px;
-                                has-image: profile-avatar-image-set;
-                                img: profile-avatar-image;
-                                initial: display-initial;
-                                fit: avatar-image-fit;
-                                rotation: avatar-image-rotation;
-                                crop-left: avatar-image-crop-left;
-                                crop-top: avatar-image-crop-top;
-                                crop-right: avatar-image-crop-right;
-                                crop-bottom: avatar-image-crop-bottom;
-                            }
-                            VerticalBox {
-                                padding: 0px;
-                                spacing: 0px;
-                                horizontal-stretch: 1;
-                                alignment: center;
-                                if profile-widget-show-name : Text { text: display-name == "" ? "You" : display-name; font-weight: 700; font-size: 13px * text-scale; overflow: elide; }
-                                if profile-widget-show-status : Text { text: status-message == "" ? "Online" : status-message; color: Theme.muted-text; font-size: 11px * text-scale; overflow: elide; }
-                            }
-                        }
-                    }
-                    if call-editing-layout : HorizontalBox {
-                        padding: 0px;
-                        spacing: 8px;
-                        if profile-widget-show-avatar : ProfileAvatar {
-                                size: 36px;
-                                has-image: profile-avatar-image-set;
-                                img: profile-avatar-image;
-                                initial: display-initial;
-                                fit: avatar-image-fit;
-                                rotation: avatar-image-rotation;
-                                crop-left: avatar-image-crop-left;
-                                crop-top: avatar-image-crop-top;
-                                crop-right: avatar-image-crop-right;
-                                crop-bottom: avatar-image-crop-bottom;
-                            }
-                        VerticalBox {
-                            padding: 0px;
-                            spacing: 0px;
-                            horizontal-stretch: 1;
-                            alignment: center;
-                            if profile-widget-show-name : Text { text: display-name == "" ? "You" : display-name; font-weight: 700; font-size: 13px * text-scale; overflow: elide; }
-                            if profile-widget-show-status : Text { text: status-message == "" ? "Online" : status-message; color: Theme.muted-text; font-size: 11px * text-scale; overflow: elide; }
-                        }
-                    }
-
-                    HorizontalBox {
-                        padding: 0px;
-                        spacing: 6px;
-                        Button { text: muted ? "Unmute" : "Mute"; enabled: connected; clicked => { toggle-mute(); } }
-                        Button { text: deafened ? "Undeafen" : "Deafen"; enabled: connected; clicked => { toggle-deafen(); } }
-                        Rectangle { horizontal-stretch: 1; }
-                        hamburger := Rectangle {
-                            width: 28px;
-                            height: 28px;
-                            border-radius: 4px;
-                            background: hamburger-touch.has-hover ? Theme.panel-hover : transparent;
-
-                            VerticalBox {
-                                padding-top: 8px;
-                                padding-bottom: 8px;
-                                padding-left: 7px;
-                                padding-right: 7px;
-                                spacing: 3px;
-                                Rectangle { height: 2px; background: Theme.muted-text; }
-                                Rectangle { height: 2px; background: Theme.muted-text; }
-                                Rectangle { height: 2px; background: Theme.muted-text; }
-                            }
-
-                            hamburger-touch := TouchArea {
-                                clicked => { hamburger-menu.show({ x: 0px, y: hamburger.height }); }
-                            }
-
-                            hamburger-menu := ContextMenuArea {
-                                Menu {
-                                    MenuItem { title: "Settings"; activated => { current-tab = 1; } }
-                                    // Toggling this saves config and relaunches the
-                                    // whole app into (or out of) the server console
-                                    // view -- see `on_server_mode_changed` in main.rs.
-                                    MenuItem { title: "Server mode (console)"; checkable: true; checked <=> server-mode; activated => { server-mode-changed(); } }
-                                    MenuSeparator { }
-                                    MenuItem { title: "Edit layout"; checkable: true; checked <=> call-editing-layout; }
-                                    Menu {
-                                        title: "Widgets";
-                                        MenuItem { title: "Connect"; checkable: true; checked <=> call-panel-visible-connect; activated => { settings-changed(); } }
-                                        MenuItem { title: "File transfer"; checkable: true; checked <=> call-panel-visible-filetransfer; activated => { settings-changed(); } }
-                                        MenuItem { title: "Chat"; checkable: true; checked <=> call-panel-visible-chat; activated => { settings-changed(); } }
-                                        MenuItem { title: "Contacts & servers"; checkable: true; checked <=> call-panel-visible-contacts; activated => { settings-changed(); } }
-                                        MenuItem { title: "My invite (QR)"; checkable: true; checked <=> call-panel-visible-invite; activated => { settings-changed(); } }
+                                    // Header card: the peer, the picked
+                                    // contact, or you.
+                                    if right-tab == 0 : Rectangle {
+                                        border-radius: 10px;
+                                        background: Surface.card;
+                                        border-width: 1px;
+                                        border-color: Surface.line;
+                                        clip: true;
+                                        VerticalLayout {
+                                            Rectangle { height: 56px; background: @linear-gradient(135deg, Theme.accent 0%, Surface.gold 100%); }
+                                            VerticalLayout {
+                                                padding: 14px;
+                                                padding-top: 0px;
+                                                spacing: 4px;
+                                                Rectangle {
+                                                    height: 40px;
+                                                    Rectangle {
+                                                        x: -4px;
+                                                        y: -36px;
+                                                        width: 80px;
+                                                        height: 80px;
+                                                        border-radius: 40px;
+                                                        background: Surface.card;
+                                                        if connected || main-col.has-contact : LetterAvatar {
+                                                            size: 68px;
+                                                            ring: connected;
+                                                            initial: initial-of(connected ? (peer-display-name == "" ? "Peer" : peer-display-name) : main-col.contact.name);
+                                                        }
+                                                        if !connected && !main-col.has-contact : ProfileAvatar {
+                                                            size: 68px;
+                                                            has-image: profile-avatar-image-set;
+                                                            img: profile-avatar-image;
+                                                            initial: display-initial;
+                                                            fit: avatar-image-fit;
+                                                            rotation: avatar-image-rotation;
+                                                            crop-left: avatar-image-crop-left;
+                                                            crop-top: avatar-image-crop-top;
+                                                            crop-right: avatar-image-crop-right;
+                                                            crop-bottom: avatar-image-crop-bottom;
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: connected ? main-col.heading : main-col.has-contact ? main-col.contact.name : (display-name == "" ? "You" : display-name);
+                                                    font-size: 18px * text-scale;
+                                                    font-weight: 800;
+                                                    color: Surface.text;
+                                                    wrap: word-wrap;
+                                                }
+                                                Text {
+                                                    text: connected ? (peer-status-message != "" ? peer-status-message : "On a call with you")
+                                                        : main-col.has-contact ? (main-col.contact.is-server ? "Server · " : "") + main-col.contact.address
+                                                        : (status-message == "" ? "Online" : status-message);
+                                                    color: Surface.muted;
+                                                    font-size: 12px * text-scale;
+                                                    wrap: word-wrap;
+                                                }
+                                                if !connected && !main-col.has-contact : HorizontalLayout {
+                                                    padding-top: 8px;
+                                                    alignment: start;
+                                                    Button { text: "Edit profile"; clicked => { current-tab = 1; settings-category = 4; } }
+                                                }
+                                            }
+                                        }
                                     }
+
+                                    // ---- On a call ----
+                                    if right-tab == 0 && connected : Card {
+                                        title: "Connection: " + call-mode;
+                                        description: call-mode-explanation;
+                                        text-scale: text-scale;
+                                        if group-people > 2 : Text {
+                                            text: "Voice active · \{group-people} people -- also with \{group-names}";
+                                            font-size: 12px * text-scale;
+                                            color: Surface.text;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    if right-tab == 0 && connected && verification-code != "" : Card {
+                                        title: "Verification code";
+                                        description: "Read this aloud and check it matches on their screen. If it does, nobody is sitting in the middle of this call. If it doesn't, stop talking.";
+                                        text-scale: text-scale;
+                                        Rectangle {
+                                            background: Surface.ground;
+                                            border-radius: 6px;
+                                            HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            Text {
+                                                text: verification-code;
+                                                font-family: "Consolas";
+                                                font-size: 14px * text-scale;
+                                                color: Surface.text;
+                                                wrap: word-wrap;
+                                                vertical-alignment: center;
+                                            }
+                                            }
+                                        }
+                                        if peer-fingerprint != "" : Text { text: "Their key: \{peer-fingerprint}"; color: Surface.muted; font-family: "Consolas"; font-size: 11px * text-scale; wrap: word-wrap; }
+                                        if peer-trust-message != "" : Text {
+                                            text: peer-trust-message;
+                                            color: peer-key-changed ? Surface.danger : Surface.muted;
+                                            font-weight: peer-key-changed ? 700 : 400;
+                                            font-size: 12px * text-scale;
+                                            wrap: word-wrap;
+                                        }
+                                        if !peer-verified : PrimaryButton {
+                                            text: peer-key-changed ? "Codes match -- trust the new key" : "Codes match -- mark verified";
+                                            clicked => { mark-peer-verified(); }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            Button { text: "Block"; clicked => { block-peer(); } }
+                                            HelpIcon { text-scale: text-scale; text: block-explanation; y: (parent.height - self.height) / 2; }
+                                            Button { text: "Report"; clicked => { report-peer(""); } }
+                                            HelpIcon { text-scale: text-scale; text: report-explanation; y: (parent.height - self.height) / 2; }
+                                        }
+                                        if moderation-message != "" : Text { text: moderation-message; color: Surface.muted; font-size: 12px * text-scale; wrap: word-wrap; }
+                                    }
+                                    if right-tab == 0 && connected : Card {
+                                        title: "How they sound to you";
+                                        description: "Only on your end, and remembered for this contact.";
+                                        text-scale: text-scale;
+                                        ToggleSwitch {
+                                            text: "Mute them";
+                                            checked <=> peer-muted;
+                                            reduced-motion: reduced-motion;
+                                            text-scale: text-scale;
+                                            help: "Silences this person on your end only. They are not told, and it does not affect anyone else.";
+                                            toggled => { peer-audio-changed(); }
+                                        }
+                                        SettingLabel {
+                                            text: "Volume: \{round(peer-volume-db)} dB";
+                                            help: "A per-person trim on top of the master volume, remembered against this contact -- so a quiet microphone stays fixed for every future call.";
+                                            text-scale: text-scale;
+                                        }
+                                        AccentSlider { minimum: -24; maximum: 12; value <=> peer-volume-db; changed(v) => { peer-audio-changed(); } }
+                                        SettingLabel {
+                                            text: "Bass \{round(peer-bass-db)} · Voice \{round(peer-voice-db)} · Treble \{round(peer-treble-db)} dB";
+                                            help: "Fixes how their microphone sounds, on your end only -- they hear nothing different. All three at 0 means no processing at all.";
+                                            text-scale: text-scale;
+                                        }
+                                        AccentSlider { minimum: -12; maximum: 12; value <=> peer-bass-db; changed(v) => { peer-audio-changed(); } }
+                                        AccentSlider { minimum: -12; maximum: 12; value <=> peer-voice-db; changed(v) => { peer-audio-changed(); } }
+                                        AccentSlider { minimum: -12; maximum: 12; value <=> peer-treble-db; changed(v) => { peer-audio-changed(); } }
+                                    }
+                                    if right-tab == 0 && connected : Card {
+                                        title: "Messages";
+                                        text-scale: text-scale;
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text { text: "Disappear after"; color: Surface.muted; font-size: 12px * text-scale; vertical-alignment: center; }
+                                            ComboBox {
+                                                model: ["Never", "1 hour", "1 day", "1 week"];
+                                                current-index: chat-expire-secs == 3600 ? 1 : chat-expire-secs == 86400 ? 2 : chat-expire-secs == 604800 ? 3 : 0;
+                                                selected(v) => {
+                                                    chat-expire-changed(self.current-index == 1 ? 3600 : self.current-index == 2 ? 86400 : self.current-index == 3 ? 604800 : 0);
+                                                }
+                                            }
+                                            HelpIcon {
+                                                text-scale: text-scale;
+                                                y: (parent.height - self.height) / 2;
+                                                text: "Deletes messages with this person from your device once they reach this age. Applies to messages sent from now on, and only on your side -- you cannot make their copy disappear.";
+                                            }
+                                        }
+                                        SettingLabel { text: "Search history"; help: "Searches the messages stored on this device for the person you are on a call with. Nothing leaves your machine."; text-scale: text-scale; }
+                                        LineEdit { text <=> history-query; placeholder-text: "Find in this conversation"; edited(v) => { search-history(v); } }
+                                        if history-result != "" : Text { text: history-result; wrap: word-wrap; color: Surface.muted; font-size: 12px * text-scale; }
+                                        Button {
+                                            text: "Add to contacts";
+                                            clicked => {
+                                                new-contact-name = peer-display-name == "" ? "Peer" : peer-display-name;
+                                                new-contact-address = remote-address;
+                                                add-contact();
+                                            }
+                                        }
+                                        Button { text: "Ask them to add me"; clicked => { send-friend-request(); } }
+                                    }
+
+                                    // ---- A contact, not on a call ----
+                                    if right-tab == 0 && !connected && main-col.has-contact : Card {
+                                        title: main-col.contact.verified ? "Verified" : main-col.contact.key-changed ? "Key changed" : "Identity";
+                                        description: main-col.contact.fingerprint == "" ? "No key pinned yet. It is pinned on your first call; compare the verification code then." : "The key pinned for them. You are warned if it ever changes.";
+                                        text-scale: text-scale;
+                                        if main-col.contact.fingerprint != "" : Text { text: main-col.contact.fingerprint; font-family: "Consolas"; font-size: 12px * text-scale; color: Surface.text; wrap: word-wrap; }
+                                    }
+                                    if right-tab == 0 && !connected && main-col.has-contact : Card {
+                                        title: "When they call";
+                                        text-scale: text-scale;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 32px;
+                                            Text { text: "Ringing"; color: Surface.muted; font-size: 12px * text-scale; vertical-alignment: center; width: 78px; }
+                                            ComboBox { model: ["Rings", "Silent", "Never"]; current-index: main-col.contact.ring-rule; selected(v) => { set-contact-ring-rule(selected-contact, self.current-index); } }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 32px;
+                                            Text { text: "Connection"; color: Surface.muted; font-size: 12px * text-scale; vertical-alignment: center; width: 78px; }
+                                            ComboBox { model: ["Auto", "Direct", "Relay"]; current-index: main-col.contact.connection-mode; selected(v) => { set-contact-connection-mode(selected-contact, self.current-index); } }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            height: 32px;
+                                            Text { text: "Messages"; color: Surface.muted; font-size: 12px * text-scale; vertical-alignment: center; width: 78px; }
+                                            ComboBox { model: ["Their routes", "Direct only"]; current-index: main-col.contact.message-route; selected(v) => { set-contact-message-route(selected-contact, self.current-index); } }
+                                        }
+                                    }
+                                    if right-tab == 0 && !connected && main-col.has-contact : Card {
+                                        title: "Manage";
+                                        text-scale: text-scale;
+                                        Button { text: "Forget message history"; clicked => { forget-history(selected-contact); } }
+                                        Button { text: "Remove contact"; clicked => { remove-contact(selected-contact); selected-contact = -1; } }
+                                    }
+                                    if right-tab == 0 && connected && contacts.length > 0 : Card {
+                                        title: "Bring someone in";
+                                        description: "Add a saved contact to this call (up to 5 people), or introduce them so they can reach each other.";
+                                        text-scale: text-scale;
+                                        for c[i] in contacts : HorizontalLayout {
+                                            spacing: 6px;
+                                            Text { text: c.name; color: Surface.text; font-size: 13px * text-scale; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                                            Button { text: "Add"; enabled: group-people < 5; clicked => { call-contact(i); } }
+                                            Button { text: "Introduce"; enabled: c.fingerprint != ""; clicked => { introduce-contact(i); } }
+                                        }
+                                        if introduction-message != "" : Text { text: introduction-message; color: Surface.muted; font-size: 12px * text-scale; wrap: word-wrap; }
+                                    }
+
+                                    // ---- Files ----
+                                    if right-tab == 1 && ft-send-error != "" : Text { text: ft-send-error; color: Surface.warm; font-size: 12px * text-scale; wrap: word-wrap; }
+                                    if right-tab == 1 && ft-offer-pending : Card {
+                                        title: "Incoming file";
+                                        description: ft-offer-name + " · " + ft-offer-size;
+                                        text-scale: text-scale;
+                                        if ft-offer-thumbnail.width > 0 : Image { source: ft-offer-thumbnail; height: 96px; image-fit: contain; }
+                                        if ft-availability != "" : Text { text: ft-availability; color: Surface.muted; font-size: 12px * text-scale; wrap: word-wrap; }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            PrimaryButton { text: "Accept"; clicked => { accept-file-offer(); } }
+                                            Button { text: "Reject"; clicked => { reject-file-offer(); } }
+                                        }
+                                    }
+                                    if right-tab == 1 && !ft-offer-pending && ft-incoming-active : Card {
+                                        title: "Receiving";
+                                        description: ft-incoming-name;
+                                        text-scale: text-scale;
+                                        Rectangle {
+                                            height: 8px;
+                                            background: Surface.ground;
+                                            border-radius: 4px;
+                                            clip: true;
+                                            Rectangle { x: 0px; height: 100%; width: parent.width * ft-incoming-progress; background: Theme.accent; }
+                                        }
+                                        Text { text: "\{round(ft-incoming-progress * 100)}%"; color: Surface.muted; font-size: 12px * text-scale; }
+                                        if ft-incoming-error != "" : Text { text: ft-incoming-error; color: Surface.muted; wrap: word-wrap; font-size: 12px * text-scale; }
+                                        Button { text: "Cancel"; clicked => { cancel-file-transfer(); } }
+                                    }
+                                    if right-tab == 1 && !ft-offer-pending && !ft-incoming-active && ft-outgoing-active : Card {
+                                        title: "Sending";
+                                        description: ft-outgoing-name;
+                                        text-scale: text-scale;
+                                        Rectangle {
+                                            height: 8px;
+                                            background: Surface.ground;
+                                            border-radius: 4px;
+                                            clip: true;
+                                            Rectangle { x: 0px; height: 100%; width: parent.width * ft-outgoing-progress; background: Theme.accent; }
+                                        }
+                                        Text {
+                                            text: ft-outgoing-paused ? "\{round(ft-outgoing-progress * 100)}% -- paused" : "\{round(ft-outgoing-progress * 100)}%";
+                                            color: Surface.muted;
+                                            font-size: 12px * text-scale;
+                                        }
+                                        if ft-outgoing-error != "" : Text { text: ft-outgoing-error; color: Surface.muted; wrap: word-wrap; font-size: 12px * text-scale; }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            Button { text: ft-outgoing-paused ? "Resume" : "Pause"; clicked => { set-transfer-paused(!ft-outgoing-paused); } }
+                                            Button { text: "Cancel"; clicked => { cancel-file-transfer(); } }
+                                        }
+                                    }
+                                    if right-tab == 1 && !ft-offer-pending && !ft-incoming-active && !ft-outgoing-active : Card {
+                                        title: "Send a file";
+                                        description: "Goes to whoever you are on a call with, over the same encrypted connection as the call.";
+                                        text-scale: text-scale;
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            PrimaryButton {
+                                                text: "Choose file...";
+                                                has-icon: true;
+                                                icon: @image-url("icons/paperclip.svg");
+                                                enabled: connected;
+                                                clicked => { send-file(); }
+                                            }
+                                        }
+                                        if !connected : Text { text: "Start a call first."; color: Surface.muted; font-size: 12px * text-scale; }
+                                        if ft-status-message != "" : Text { text: ft-status-message; color: Surface.muted; wrap: word-wrap; font-size: 12px * text-scale; }
+                                    }
+                                    Rectangle { vertical-stretch: 1; }
                                 }
                             }
                         }
@@ -3066,8 +3347,30 @@ export component MainWindow inherits Window {
             }
         }
 
+        // Settings: a slim header with a way back, then the settings view.
+        if current-tab == 1 && !server-mode : Rectangle {
+            height: 52px;
+            background: Surface.base;
+            Rectangle { y: parent.height - 1px; height: 1px; background: Surface.line; }
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    IconButton { icon: @image-url("icons/x.svg"); tip: "Back (Esc)"; clicked => { current-tab = 0; } }
+                }
+                Text { text: "Settings"; font-size: 20px * text-scale; font-weight: 800; color: Surface.text; vertical-alignment: center; horizontal-stretch: 1; }
+                VerticalLayout {
+                    alignment: center;
+                    Button { text: "Done"; clicked => { current-tab = 0; } }
+                }
+            }
+        }
+
         if current-tab == 1 && !server-mode : HorizontalBox {
-            padding: 0px;
+            padding: 16px;
+            vertical-stretch: 1;
             spacing: 4px;
 
             VerticalBox {
@@ -5401,6 +5704,258 @@ export component MainWindow inherits Window {
     // fixed window corner rather than tracking the profile widget's own
     // (draggable) position -- simpler, and still predictable/discoverable
     // even after the widget's been moved.
+    // Connect & invite: your invite (QR and link) and the network tools
+    // that used to sit on screen all the time.
+    if connect-dialog-open && current-tab == 0 && !server-mode : Modal {
+        title: "Connect & invite";
+        card-width: 640px;
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        close => { connect-dialog-open = false; }
+
+        HorizontalLayout {
+            padding-left: 16px;
+            spacing: 4px;
+            height: 40px;
+            LineTab { label: "Your invite"; active: connect-dialog-tab == 0; clicked => { connect-dialog-tab = 0; } }
+            LineTab { label: "Network"; active: connect-dialog-tab == 1; clicked => { connect-dialog-tab = 1; } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Rectangle { height: 1px; background: Surface.line; }
+
+        connect-scroll := ScrollView {
+            vertical-stretch: 1;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            VerticalLayout {
+                width: connect-scroll.visible-width;
+                padding: 20px;
+                spacing: 14px;
+                alignment: start;
+
+                if connect-dialog-tab == 0 : HorizontalLayout {
+                    spacing: 20px;
+                    if my-invite-qr.width > 0 : Rectangle {
+                        width: 200px;
+                        height: 200px;
+                        background: white;
+                        border-radius: 12px;
+                        Image { x: 10px; y: 10px; width: 180px; height: 180px; source: my-invite-qr; image-fit: contain; }
+                    }
+                    VerticalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        Text { text: "Let someone add you"; font-size: 16px * text-scale; font-weight: 700; color: Surface.text; }
+                        Text {
+                            text: my-invite-has-address
+                                ? "Have them scan the code, or send them the link. It carries your ID and your current address."
+                                : "This invite names you but has no address yet. Open Network, press Find, then come back and press Refresh.";
+                            color: Surface.muted;
+                            font-size: 13px * text-scale;
+                            wrap: word-wrap;
+                        }
+                        // Read-only rather than a Copy button: Slint has no
+                        // clipboard API, so a field you can select from is
+                        // what actually works.
+                        LineEdit { text: my-invite-link; read-only: true; font-size: 11px * text-scale; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Button { text: "Refresh"; clicked => { refresh-invite(); } }
+                            if !my-invite-has-address : PrimaryButton { text: "Find my address"; clicked => { connect-dialog-tab = 1; } }
+                        }
+                    }
+                }
+
+                if connect-dialog-tab == 1 : Card {
+                    title: "Can people reach you?";
+                    description: "What your network allows, checked from this machine.";
+                    text-scale: text-scale;
+                    for row in reachability-rows : HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: row.question; font-size: 13px * text-scale; font-weight: 600; color: Surface.text; }
+                            Text { text: row.meaning; color: Surface.muted; font-size: 11px * text-scale; wrap: word-wrap; }
+                        }
+                        VerticalLayout {
+                            alignment: start;
+                            Rectangle {
+                                height: 22px;
+                                width: answer-text.preferred-width + 18px;
+                                border-radius: 11px;
+                                background: row.answer == "Works" ? Surface.online.with-alpha(0.15) : Surface.card-2;
+                                answer-text := Text {
+                                    text: row.answer;
+                                    font-size: 11px * text-scale;
+                                    font-weight: 600;
+                                    color: row.answer == "Works" ? Surface.online : Surface.muted;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if connect-dialog-tab == 1 : Card {
+                    title: "Across the internet";
+                    description: "To reach someone in another house without port forwarding: press Find and send them your address, put theirs in Call below, then both press Punch within a few seconds of each other.";
+                    text-scale: text-scale;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        LineEdit { text: public-address; read-only: true; placeholder-text: "Your public address appears here"; }
+                        Button { text: "Find"; enabled: !nat-busy && !connected; clicked => { discover-public-address(); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        PrimaryButton { text: nat-busy ? "Punching..." : "Punch"; enabled: !nat-busy && !connected; clicked => { start-punch(); } }
+                        Button {
+                            text: port-mapped ? "Close forwarded port" : "Open my port on the router";
+                            enabled: !nat-busy;
+                            clicked => { open-port-automatically(); }
+                        }
+                        HelpIcon {
+                            text-scale: text-scale;
+                            y: (parent.height - self.height) / 2;
+                            text: "Asks your router to forward your port inward (NAT-PMP), so people can call *you* rather than only the other way round. Renewed automatically while the app is open, and closed again when you press this a second time or quit. Plenty of routers do not support this, in which case nothing changes and you can still call out.";
+                        }
+                    }
+                    if nat-status != "" : Text { text: nat-status; color: Surface.muted; font-size: 12px * text-scale; wrap: word-wrap; }
+                }
+
+                if connect-dialog-tab == 1 : Card {
+                    title: "Calling by address";
+                    description: "Listen and Call work on a local network, or across the internet once Punch has opened the way.";
+                    text-scale: text-scale;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: "Listen port"; color: Surface.muted; font-size: 12px * text-scale; vertical-alignment: center; width: 80px; }
+                        LineEdit { text <=> local-port; enabled: !connected; }
+                        Button { text: "Listen"; enabled: !connected; clicked => { start-listen(); } }
+                    }
+                    // Raw address calling is off by default (Settings >
+                    // Call > Advanced): a direct connection shows both
+                    // sides each other's IP.
+                    if ip-direct-calling : HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: "Call"; color: Surface.muted; font-size: 12px * text-scale; vertical-alignment: center; width: 80px; }
+                        LineEdit { text <=> remote-address; enabled: !connected; placeholder-text: "host:port"; }
+                        // Spec §9: Shift+click is an alternative to the
+                        // knock switch, never the only way to reach it.
+                        Rectangle {
+                            Button { text: "Call"; enabled: !connected; clicked => { start-call(); } }
+                            if silent-call-mode != 0 && !connected : TouchArea {
+                                mouse-cursor: pointer;
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.up) {
+                                        if (event.modifiers.shift) {
+                                            start-call-silently = !start-call-silently;
+                                            start-call();
+                                            start-call-silently = !start-call-silently;
+                                        } else {
+                                            start-call();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !ip-direct-calling && !connected : Text {
+                        text: "Calling a raw IP is turned off. Call a saved contact instead, or turn it on in Settings > Call > Advanced.";
+                        wrap: word-wrap;
+                        color: Surface.muted;
+                        font-size: 12px * text-scale;
+                    }
+                    if !connected : ToggleSwitch {
+                        text: "Knock instead of ringing";
+                        checked <=> start-call-silently;
+                        reduced-motion: reduced-motion;
+                        text-scale: text-scale;
+                        help: silent-call-mode == 0
+                            ? "Starts the call without asking for their attention -- they see you are there and answer when they want. Their own notification rules still decide; this can only ask for less, never more."
+                            : "Starts the call without asking for their attention -- they see you are there and answer when they want. Shift+click on Call flips this for one call without changing the switch.";
+                        toggled => { settings-changed(); }
+                    }
+                    if connected : HorizontalLayout {
+                        alignment: start;
+                        PrimaryButton { text: "Hang up"; danger: true; clicked => { hang-up(); } }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+
+    // Add a contact or server: from an invite, by address, or from the
+    // call you are on.
+    if add-contact-open && current-tab == 0 && !server-mode : Modal {
+        title: "Add a contact";
+        card-width: 520px;
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        close => { add-contact-open = false; }
+
+        add-scroll := ScrollView {
+            vertical-stretch: 1;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            VerticalLayout {
+                width: add-scroll.visible-width;
+                padding: 20px;
+                padding-top: 4px;
+                spacing: 14px;
+                alignment: start;
+
+                Card {
+                    title: "Paste an invite";
+                    description: "Paste the antiphon:// link someone sent you. Their ID is pinned straight away, so you are warned if it ever changes -- still compare the verification code on your first call.";
+                    text-scale: text-scale;
+                    LineEdit { text <=> new-contact-invite; placeholder-text: "antiphon://..."; accepted(v) => { add-from-invite(); } }
+                    HorizontalLayout {
+                        alignment: start;
+                        PrimaryButton { text: "Add from invite"; enabled: new-contact-invite != ""; clicked => { add-from-invite(); } }
+                    }
+                }
+
+                Card {
+                    title: "Add by address";
+                    description: "For someone on your network, or a server you run.";
+                    text-scale: text-scale;
+                    LineEdit { text <=> new-contact-name; placeholder-text: "Name"; }
+                    LineEdit { text <=> new-contact-address; placeholder-text: "host:port"; }
+                    ToggleSwitch { text: "This is a server"; checked <=> new-contact-is-server; reduced-motion: reduced-motion; text-scale: text-scale; }
+                    HorizontalLayout {
+                        alignment: start;
+                        Button { text: "Add"; enabled: new-contact-name != "" && new-contact-address != ""; clicked => { add-contact(); } }
+                    }
+                }
+
+                if connected : Card {
+                    title: "From this call";
+                    text-scale: text-scale;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        Button {
+                            text: "Add current peer";
+                            clicked => {
+                                new-contact-name = peer-display-name == "" ? "Peer" : peer-display-name;
+                                new-contact-address = remote-address;
+                                add-contact();
+                            }
+                        }
+                        Button { text: "Ask them to add me"; clicked => { send-friend-request(); } }
+                    }
+                }
+
+                if contacts-message != "" : Text { text: contacts-message; color: Surface.muted; font-size: 12px * text-scale; wrap: word-wrap; }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+
     if profile-popup-open : TouchArea {
         x: 0px;
         y: 0px;
@@ -5420,10 +5975,10 @@ export component MainWindow inherits Window {
         // than the window) in the first place. `y` is also floored at
         // 12px so a popup at its height cap can't get pushed off the top
         // of a short window.
-        y: max(12px, parent.height - self.height - 12px);
+        y: max(12px, parent.height - self.height - 64px);
         width: 260px;
         height: min(320px, parent.height - 24px);
-        background: Palette.background;
+        background: Surface.card;
         border-radius: 10px;
         border-width: 1px;
         border-color: Theme.divider;
