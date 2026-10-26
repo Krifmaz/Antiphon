@@ -7,7 +7,7 @@
 //! soft: a phone that refuses one still gets a working app, just without
 //! that convenience, which is why the defaults do nothing.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 pub trait Platform: Send + Sync + 'static {
     /// Whether the user has granted microphone access. Both platforms ask
@@ -27,9 +27,118 @@ pub trait Platform: Send + Sync + 'static {
     fn system_insets(&self) -> (f32, f32) {
         (0.0, 0.0)
     }
+
+    /// What the phone is connected through now, for "only on Wi-Fi" and
+    /// cellular limits.
+    fn network(&self) -> Network {
+        Network::Unknown
+    }
+    /// Whether the system's battery saver is on.
+    fn battery_saver(&self) -> bool {
+        false
+    }
+    /// Tells the platform what must keep running while the app is not in
+    /// front: a call (Android foreground service, iOS CallKit and the
+    /// background audio session) and file transfers. Called on every
+    /// change, including back to nothing.
+    fn set_background_work(&self, _work: &BackgroundWork) {}
+    /// Opens the system file picker. The answer arrives later as
+    /// [`PlatformEvent::FilePicked`] or [`PlatformEvent::FilePickCancelled`].
+    fn pick_file(&self) {}
+    /// Reads a file the user picked, by the handle in [`PickedFile`]. The
+    /// handle survives a restart (a persisted content URI on Android, a
+    /// security-scoped bookmark on iOS), which a raw path does not.
+    fn read_file(&self, _handle: &str) -> std::io::Result<Vec<u8>> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    /// Where received files go so the user can find them, as a path the
+    /// app can write; `None` keeps them in private storage.
+    fn downloads_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Shows a notification: a message, a missed call, a finished file.
+    fn notify(&self, _title: &str, _body: &str) {}
+    /// Registers for push wake-ups. The address to give contacts arrives
+    /// as [`PlatformEvent::PushRegistered`].
+    fn register_push(&self) {}
+}
+
+/// The network the phone is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Network {
+    #[default]
+    Unknown,
+    None,
+    Wifi,
+    /// Mobile data, or any network the system marks as metered.
+    Metered,
+}
+
+/// What has to keep running while the app is in the background.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackgroundWork {
+    /// The person a call is with, or `None` when no call is running.
+    pub call: Option<String>,
+    /// Listening for incoming calls.
+    pub listening: bool,
+    /// File transfers in progress.
+    pub transfers: usize,
+}
+
+/// A file the user picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickedFile {
+    /// Opaque to the shared code; pass it back to [`Platform::read_file`].
+    pub handle: String,
+    pub name: String,
+    pub size: Option<u64>,
+}
+
+/// Call controls pressed outside the app: a notification button, the
+/// lock screen, CallKit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallAction {
+    Answer,
+    Decline,
+    HangUp,
+    Mute(bool),
+}
+
+/// Something the platform reports back to the shared code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlatformEvent {
+    FilePicked(PickedFile),
+    FilePickCancelled,
+    CallAction(CallAction),
+    /// The push address contacts should send wake-ups to.
+    PushRegistered(String),
+    /// A push arrived. The bytes are the sealed payload, still encrypted.
+    Push(Vec<u8>),
+    NetworkChanged(Network),
 }
 
 static PLATFORM: OnceLock<Box<dyn Platform>> = OnceLock::new();
+static EVENTS: Mutex<Vec<PlatformEvent>> = Mutex::new(Vec::new());
+static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Queues an event for the shared code and wakes the event loop. Safe
+/// from any thread, including a JNI callback or an Objective-C delegate.
+pub fn post(event: PlatformEvent) {
+    EVENTS.lock().unwrap().push(event);
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
+}
+
+/// Everything posted since the last call.
+pub(crate) fn take_events() -> Vec<PlatformEvent> {
+    std::mem::take(&mut *EVENTS.lock().unwrap())
+}
+
+/// How [`post`] wakes the event loop; set once by the runner.
+pub(crate) fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKE.set(Box::new(wake));
+}
 
 /// Hands the shared code its platform. Called once, before anything else
 /// in this crate runs; a second call is ignored.
@@ -69,4 +178,44 @@ pub fn read_clipboard() -> Option<String> {
 
 pub fn system_insets() -> (f32, f32) {
     get().map_or((0.0, 0.0), |p| p.system_insets())
+}
+
+pub fn network() -> Network {
+    get().map_or(Network::Unknown, |p| p.network())
+}
+
+pub fn battery_saver() -> bool {
+    get().is_some_and(|p| p.battery_saver())
+}
+
+pub fn set_background_work(work: &BackgroundWork) {
+    if let Some(p) = get() {
+        p.set_background_work(work);
+    }
+}
+
+pub fn pick_file() {
+    if let Some(p) = get() {
+        p.pick_file();
+    }
+}
+
+pub fn read_file(handle: &str) -> std::io::Result<Vec<u8>> {
+    get().map_or(Err(std::io::ErrorKind::Unsupported.into()), |p| p.read_file(handle))
+}
+
+pub fn downloads_dir() -> Option<std::path::PathBuf> {
+    get().and_then(|p| p.downloads_dir())
+}
+
+pub fn notify(title: &str, body: &str) {
+    if let Some(p) = get() {
+        p.notify(title, body);
+    }
+}
+
+pub fn register_push() {
+    if let Some(p) = get() {
+        p.register_push();
+    }
 }

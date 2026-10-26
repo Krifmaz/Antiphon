@@ -100,6 +100,10 @@ impl Runner {
             return;
         }
         let dir = self.data_dir.clone();
+        let platform_proxy = self.proxy.clone();
+        platform::set_waker(move || {
+            let _ = platform_proxy.lock().unwrap().send_event(Wake);
+        });
         let proxy = self.proxy.clone();
         let wake = Arc::new(move || {
             let _ = proxy.lock().unwrap().send_event(Wake);
@@ -325,6 +329,11 @@ impl ApplicationHandler<Wake> for Runner {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: Wake) {
+        if let Some(app) = self.app.as_mut() {
+            for event in platform::take_events() {
+                app.platform_event(event);
+            }
+        }
         if let Some(graphics) = &self.graphics {
             graphics.window.request_redraw();
         }

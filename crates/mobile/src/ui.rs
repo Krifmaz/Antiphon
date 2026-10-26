@@ -149,6 +149,12 @@ impl App {
         self.local_ip = call::local_ip();
     }
 
+    /// Something the phone reported from outside the interface: a picked
+    /// file, a notification button, a push.
+    pub fn platform_event(&mut self, event: platform::PlatformEvent) {
+        log::info!("platform event: {event:?}");
+    }
+
     /// Every finger is off the screen. Push-to-talk must never stay keyed
     /// because the release landed somewhere the button did not see.
     pub fn touch_ended(&mut self) {
