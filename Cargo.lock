@@ -379,6 +379,7 @@ version = "0.1.0"
 dependencies = [
  "bip39",
  "chacha20poly1305",
+ "curve25519-dalek",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
@@ -398,6 +399,8 @@ version = "0.1.0"
 dependencies = [
  "antiphon-crypto",
  "antiphon-protocol",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
  "sha2",
  "socket2",
  "thiserror 2.0.20",

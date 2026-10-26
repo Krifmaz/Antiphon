@@ -26,6 +26,8 @@ pub enum NetError {
     FileRefused(crate::blob::Refusal),
     #[error("nobody holding that file answered")]
     FileHolderTimeout,
+    #[error("none of the DHT bootstrap nodes answered")]
+    DhtUnreachable,
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }

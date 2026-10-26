@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+# Node keys for the DHT (`dht.rs`); both already in the tree via crypto.
+ed25519-dalek = "3.0.0"
+getrandom = "0.4.3"
 sha2 = "0.11.0"
 # Only for SO_RCVBUF; already in the tree underneath tokio.
 socket2 = "0.6.5"
