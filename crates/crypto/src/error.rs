@@ -14,6 +14,12 @@ pub enum CryptoError {
     StaleDeviceList { offered: u64, known: u64 },
     #[error("recovery phrase is not a valid 24-word phrase")]
     InvalidRecoveryPhrase,
+    #[error("that is not a valid recovery share")]
+    InvalidShare,
+    #[error("not enough different shares to rebuild the identity")]
+    NotEnoughShares,
+    #[error("these shares are from different splits, or some are missing")]
+    SharesDoNotMatch,
     #[error("this backup key was sealed for a different device")]
     BackupNotSealedForThisDevice,
     #[error("invite link is malformed")]

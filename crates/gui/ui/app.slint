@@ -1524,6 +1524,10 @@ export component MainWindow inherits Window {
     in-out property <string> recovery-phrase: "";
     in-out property <bool> recovery-phrase-shown: false;
     callback toggle-recovery-phrase();
+    in-out property <int> recovery-split-choice: 0;
+    in-out property <string> recovery-shares: "";
+    in-out property <bool> recovery-shares-shown: false;
+    callback toggle-recovery-shares();
 
     in-out property <string> display-name: "You";
     // Rust-computed (first character of display-name, uppercased) for the
@@ -3775,13 +3779,22 @@ export component MainWindow inherits Window {
                                     }
                                     SettingLabel {
                                         text: "Replay keeps the last \{replay-seconds} seconds";
-                                        help: "How much of what you have heard is kept, so you can save a moment you missed. It is held in plain memory -- rolling, discarded when the call ends, and never written to disk unless you press Save -- but it is NOT encrypted while it is there, so anything that can read this program's memory can read it. That is also why it is capped at a minute.";
+                                        help: "How much of what you have heard is kept, so you can save a moment you missed. It is encrypted in memory under a key made for this call, rolls over as it fills, and is gone the moment the call ends -- never written to disk unless you press Save. This app does not record you. While the call runs, something that can read this program's memory could still read it, which is one reason it is capped at a minute.";
                                         text-scale: text-scale;
                                     }
                                     AccentSlider {
                                         minimum: 10; maximum: 60;
                                         value: replay-seconds;
                                         changed(v) => { replay-seconds = round(v); replay-settings-changed(); }
+                                    }
+                                    // Spec §2 asks for this to be stated loudly, not
+                                    // tucked into help: otherwise "the app records
+                                    // you" becomes the story.
+                                    Text {
+                                        text: "Not a recording: encrypted in memory, rolling, and gone when the call ends.";
+                                        color: Theme.muted-text;
+                                        font-size: 11px * text-scale;
+                                        wrap: word-wrap;
                                     }
                                     SettingLabel {
                                         text: "When their audio drops out";
@@ -4747,8 +4760,38 @@ export component MainWindow inherits Window {
                                         color: #e0a052;
                                         font-size: 10px * text-scale;
                                     }
+                                    SettingLabel {
+                                        text: "Split among friends";
+                                        help: "Splits your recovery phrase into shares for people or devices you trust. Any two of three (or three of five) rebuild your identity; fewer reveal nothing about it, so no one person holding a share can become you.";
+                                        text-scale: text-scale;
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        spacing: 8px;
+                                        ComboBox {
+                                            model: ["2 of 3", "3 of 5", "2 of 2"];
+                                            current-index <=> recovery-split-choice;
+                                            enabled: !recovery-shares-shown;
+                                        }
+                                        Button {
+                                            text: recovery-shares-shown ? "Hide shares" : "Make shares";
+                                            clicked => { toggle-recovery-shares(); }
+                                        }
+                                    }
+                                    if recovery-shares-shown : Text {
+                                        text: recovery-shares;
+                                        font-family: "Consolas";
+                                        font-size: 12px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    if recovery-shares-shown : Text {
+                                        text: "Give each share to a different person or device. New shares are made every time, and shares from different times don't mix.";
+                                        wrap: word-wrap;
+                                        color: #e0a052;
+                                        font-size: 10px * text-scale;
+                                    }
                                     Text {
-                                        text: "Restoring: antiphon-cli identity restore \"<your 24 words>\"";
+                                        text: "Restoring: antiphon-cli identity restore \"<your 24 words>\"  or  antiphon-cli identity restore-shares \"<share>\" \"<share>\"";
                                         color: Theme.muted-text;
                                         font-family: "Consolas";
                                         font-size: 10px * text-scale;

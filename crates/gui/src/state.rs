@@ -235,7 +235,7 @@ pub struct ActiveCall {
     /// Rolling buffer of the most recent *received* audio
     /// (spec §2 "Replay") -- captured pre-deafen/pre-volume, so it holds
     /// what the peer actually sent, not what happened to be audible.
-    replay: Arc<Mutex<std::collections::VecDeque<f32>>>,
+    replay: Arc<Mutex<crate::sealed_ring::SealedRing>>,
     /// Clips cut around damaged moments (spec §2 replay history).
     replay_clips: Arc<Mutex<crate::replay_history::ReplayHistory>>,
     /// File transfer (spec §5) progress/offer state for this call -- see
@@ -690,7 +690,9 @@ impl ActiveCall {
     /// One kept clip's audio, for playing it back.
     pub fn replay_clip(&self, index: usize) -> Option<(u32, Vec<f32>)> {
         let history = self.replay_clips.lock().unwrap();
-        history.get(index).map(|c| (c.sample_rate, c.samples.clone()))
+        let clip = history.get(index)?;
+        let samples = self.replay.lock().unwrap().open(&clip.audio)?;
+        Some((clip.sample_rate, samples))
     }
 
     /// How many clips this call has cut so far (spec §2 replay modes).
@@ -703,7 +705,7 @@ impl ActiveCall {
     }
 
     pub fn take_replay_snapshot(&self) -> (u32, Vec<f32>) {
-        let samples: Vec<f32> = self.replay.lock().unwrap().iter().copied().collect();
+        let samples = self.replay.lock().unwrap().snapshot();
         (self.sample_rate.load(Ordering::Relaxed), samples)
     }
 
@@ -1354,7 +1356,9 @@ pub fn start_pipeline(
         Arc::new(Mutex::new(None));
     let pending_friend_request: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let friend_accepted: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let replay: Arc<Mutex<std::collections::VecDeque<f32>>> = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    // Sealed in RAM under a key made for this call (spec §2 "Ephemeral by
+    // design"); dropping the call drops the key.
+    let replay: Arc<Mutex<crate::sealed_ring::SealedRing>> = Arc::new(Mutex::new(Default::default()));
     let replay_clips: Arc<Mutex<crate::replay_history::ReplayHistory>> =
         Arc::new(Mutex::new(crate::replay_history::ReplayHistory::default()));
     // Recently sent audio, so a peer's resend request can be answered.
@@ -1827,11 +1831,8 @@ pub fn start_pipeline(
                     // deafen gate and volume scaling below, so "save the
                     // last 30 seconds" means what the peer sent.
                     let mut ring = drain_replay.lock().unwrap();
-                    ring.extend(samples.iter().copied());
                     let cap = replay_cap(drain_replay_seconds.load(Ordering::Relaxed));
-                    while ring.len() > cap {
-                        ring.pop_front();
-                    }
+                    ring.push(&samples, cap);
 
                     // Spec §2 replay history. Cut here, while the ring is
                     // already locked and still holds the moment -- a
@@ -1842,8 +1843,8 @@ pub fn start_pipeline(
                             sample_rate,
                             damaged_frames,
                         );
-                        let clip_samples: Vec<f32> =
-                            ring.iter().copied().skip(bounds.start).take(bounds.len()).collect();
+                        let clip_samples = ring.copy_range(bounds.start, bounds.len());
+                        let clip_audio = ring.seal(&clip_samples);
                         // The damage happened a settle window ago, not now.
                         let settled_ago = (crate::replay_history::SETTLE_FRAMES as u64
                             + damaged_frames as u64)
@@ -1857,7 +1858,7 @@ pub fn start_pipeline(
                                 at_seconds: at_seconds as u32,
                                 damaged_frames,
                                 sample_rate,
-                                samples: clip_samples,
+                                audio: clip_audio,
                             },
                         );
                     }

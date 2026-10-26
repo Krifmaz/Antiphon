@@ -22,6 +22,7 @@ mod presence;
 mod reachability;
 mod reactions;
 mod replay_history;
+mod sealed_ring;
 mod qr;
 mod search;
 mod soundboard;
@@ -1514,6 +1515,30 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 config::save(&config);
                 apply_onboarding(&app, &config);
             }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        // Spec §3 "optional Shamir split". Made fresh on each show, like
+        // the phrase, so the shares exist in the window only while
+        // someone is looking at them.
+        main_window.on_toggle_recovery_shares(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            if app.get_recovery_shares_shown() {
+                app.set_recovery_shares("".into());
+                app.set_recovery_shares_shown(false);
+                return;
+            }
+            let (need, of) = match app.get_recovery_split_choice() {
+                1 => (3, 5),
+                2 => (2, 2),
+                _ => (2, 3),
+            };
+            let Ok(shares) = antiphon_crypto::shamir::split(&state.identity.master_seed(), need, of) else { return };
+            let text = shares.iter().map(|s| s.to_text()).collect::<Vec<_>>().join("\n\n");
+            app.set_recovery_shares(text.into());
+            app.set_recovery_shares_shown(true);
         });
     }
     {

@@ -82,11 +82,11 @@ pub fn held() -> bool {
 /// Called on the release edge of Caps Lock-as-push-to-talk. Puts the lock
 /// back off where the key press was not swallowed.
 pub fn after_release() {
-    if hooked() {
-        return; // never flipped
-    }
+    // A hooked press was swallowed, so the lock never flipped.
     #[cfg(all(unix, not(target_os = "macos")))]
-    x11_unlock::clear_caps_lock();
+    if !hooked() {
+        x11_unlock::clear_caps_lock();
+    }
 }
 
 #[cfg(windows)]

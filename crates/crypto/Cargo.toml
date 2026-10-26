@@ -15,10 +15,14 @@ thiserror = "2.0.20"
 x25519-dalek = { version = "3.0.0", features = ["getrandom", "static_secrets"] }
 zeroize = "1.9.0"
 
+[target.'cfg(not(windows))'.dependencies]
+# Keychain on macOS, the Secret Service (GNOME Keyring, KWallet) on Linux,
+# for spec §6's "private keys in the OS keystore". Pure Rust D-Bus, so no
+# libdbus to install. See `keystore.rs`.
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
+
 [target.'cfg(windows)'.dependencies]
-# DPAPI, for spec §6's "private keys in the OS keystore". Windows-only by
-# construction: Keychain and libsecret are separate work, and this crate
-# says so rather than pretending otherwise -- see `keystore.rs`.
+# DPAPI, for spec §6's "private keys in the OS keystore".
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
 [dev-dependencies]
