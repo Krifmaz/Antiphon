@@ -66,6 +66,45 @@ secrets, or with a throwaway key when they are not set -- that APK
 installs, but the next one will not install over it. Logs go to logcat
 under the tag `antiphon`.
 
+## iOS
+
+The iOS app is [`crates/ios`](crates/ios): the same shared Rust and iced
+app as Android, started from a plain `main` (winit calls
+`UIApplicationMain` itself), with the Apple frameworks reached through
+the `objc2` bindings. No Swift, no Objective-C and no Xcode project. Like
+the Android crate it compiles to nothing on a desktop.
+
+Building it needs a Mac with Xcode (for the iOS SDK the linker needs) and
+the Rust targets:
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+crates/ios/build-app.sh sim       # target/aarch64-apple-ios-sim/release/Antiphon.app
+xcrun simctl install booted target/aarch64-apple-ios-sim/release/Antiphon.app
+xcrun simctl launch --console booted org.antiphon.app
+crates/ios/build-app.sh device    # target/aarch64-apple-ios/release/Antiphon.app
+```
+
+The script runs `cargo build`, then lays out the bundle by hand: the
+binary, [`Info.plist`](crates/ios/Info.plist) (bundle id
+`org.antiphon.app`, iOS 15 or later) and the icons. On Linux,
+`cargo check`/`clippy --target aarch64-apple-ios -p antiphon-ios` work
+without the SDK; only linking does not.
+
+**Signing.** The simulator build is signed ad hoc and runs as it is. A
+phone only installs an app signed with an Apple developer account's
+certificate and a provisioning profile for `org.antiphon.app` (with Push
+Notifications enabled, for PushKit), so without those the device build
+is left unsigned. To sign, set either `IOS_CERTIFICATE_P12` (base64 of
+the .p12), `IOS_CERTIFICATE_PASSWORD` and `IOS_PROVISIONING_PROFILE`
+(base64 of the .mobileprovision), or, on a Mac that already has the
+certificate, `IOS_SIGN_IDENTITY` and `IOS_PROVISIONING_PROFILE_PATH`.
+The script then also writes `Antiphon.ipa`. CI reads the first three from
+repository secrets of the same names.
+
+Logs go to the unified log through `NSLog`: Console.app, or
+`xcrun simctl spawn booted log stream --process antiphon-ios`.
+
 ## Verifying a release binary
 
 The goal is that you can build the published source yourself and get a
@@ -131,7 +170,10 @@ pipeline building every target from the same commit":
 - **Every push and pull request:** build, test and clippy on Linux,
   Windows and macOS, with the toolchain pinned per platform — which is
   the right place to pin it, since a build matrix already knows its
-  target triple.
+  target triple. The iOS app is clippy-checked and built for the
+  simulator (and for devices, signed if the secrets above are set) on a
+  Mac runner, and uploaded as the `app-ios` artifact. That job is
+  optional and no release waits on it.
 - **Every `v*` tag:** the release build above, run **twice from clean on
   each platform**. The job compares the two binaries byte for byte and
   refuses to publish anything that differs, then uploads the binaries with

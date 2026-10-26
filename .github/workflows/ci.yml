@@ -8,6 +8,9 @@
 #               ever starting), and that should not hold a release back.
 #   android  -- clippy the Android crate and build the APK (Rust + iced)
 #               for every push and pull request. Required for a release.
+#   ios      -- clippy the iOS crate and build the simulator app (and a
+#               device build, signed when the IOS_* secrets exist) on
+#               macOS. Optional, like test-macos; nothing waits on it.
 #   release  -- on a tag, build the release binaries the reproducible way
 #               (BUILDING.md), twice on each platform, and refuse to publish
 #               unless both builds hash identically. That turns "reproducible
@@ -141,6 +144,55 @@ jobs:
     name: test (macos-latest)
     runs-on: macos-latest
     steps: *test-steps
+
+  ios:
+    name: ios (simulator app)
+    # Linking for iOS needs Apple's SDK, so this is a macOS job, and so
+    # optional for the same reason as test-macos: a Mac runner that never
+    # turns up must not turn the pipeline red. Nothing needs it, publish
+    # included -- there is no iOS release to attach yet, only a simulator
+    # build to try.
+    runs-on: macos-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+      - name: Clippy (iOS)
+        run: |
+          cargo clippy -p antiphon-ios --target aarch64-apple-ios --locked -- -D warnings
+          cargo clippy -p antiphon-ios --target aarch64-apple-ios-sim --locked -- -D warnings
+      - name: Build the simulator app
+        run: crates/ios/build-app.sh sim
+      - name: Build for devices
+        # Signed when the IOS_* secrets are set (see BUILDING.md), so the
+        # .ipa installs on the phones in the profile; unsigned otherwise,
+        # which at least proves the device build links.
+        env:
+          IOS_CERTIFICATE_P12: ${{ secrets.IOS_CERTIFICATE_P12 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: crates/ios/build-app.sh device
+      - name: Package
+        run: |
+          mkdir -p out
+          ditto -c -k --keepParent target/aarch64-apple-ios-sim/release/Antiphon.app out/Antiphon-simulator.app.zip
+          if [ -f target/aarch64-apple-ios/release/Antiphon.ipa ]; then
+            cp target/aarch64-apple-ios/release/Antiphon.ipa out/
+          fi
+          cd out && shasum -a 256 * | tee SHA256SUMS-ios.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          # Not "antiphon-*": publish packages every artifact named that.
+          name: app-ios
+          path: out/*
 
   release:
     name: release (${{ matrix.os }})
