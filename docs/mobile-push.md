@@ -20,7 +20,7 @@ listens on the relay, or fetches its mail.
 |---|---|---|
 | Android | **UnifiedPush**: any distributor app the user installs (ntfy, NextPush, or an FCM-backed one) | Receiving side built |
 | Android | FCM directly | Not built: needs a Firebase project and Google's closed SDK in the APK |
-| iOS | APNs, PushKit for calls | Not built; the payload below is meant for it unchanged |
+| iOS | APNs: PushKit (VoIP) for calls, alert pushes for the rest | Receiving side in `crates/ios`; the same payload, wrapped as under "Transport" |
 
 UnifiedPush keeps the choice of who carries the wake-ups with the user, and a
 distributor that relays through FCM still gives Google-reliability delivery
@@ -82,6 +82,23 @@ token to listen on, or the mailbox label to fetch.
 checks `Wake::is_fresh(now, max_age)` (a minute is right for calls; longer
 for mail) and remembers the 16-byte ids it has accepted for that long.
 
+## Transport
+
+The same 368 sealed bytes go over every service; only the wrapping differs.
+Both phone apps expect exactly this:
+
+- **UnifiedPush (Android):** the raw sealed bytes are the HTTP POST body to
+  the endpoint URL, `Content-Type: application/octet-stream`, nothing else.
+  The distributor hands them to the app unchanged
+  (`PlatformEvent::Push(bytes)`).
+- **APNs (iOS):** the sealed bytes, base64-encoded, under the payload key
+  `"p"`. A `Call` wake-up goes as a **VoIP push** (PushKit), which iOS
+  insists is reported to CallKit at once. Every other kind (`Message`,
+  `File`) goes as a **plain alert push**, never a VoIP push, since a VoIP
+  push that does not ring is a reason for iOS to stop delivering them. The
+  alert's visible text is generic and fixed; nothing in it may depend on
+  the sender or the content.
+
 ## How a sender would send it
 
 Out of scope for now: nothing on the desktop, relay or mailbox side sends
@@ -91,9 +108,8 @@ wake-ups yet. When it is built:
    inside data they already authenticate, its signed route record or device
    list, so a contact never seals to a key someone else supplied.
 2. To call, the caller seals a `Call` wake-up whose hint is the pairwise
-   relay token, POSTs the 368 bytes to the endpoint (UnifiedPush: raw body,
-   `Content-Type: application/octet-stream`; APNs: base64 in a custom key
-   of a payload with no alert text), and then dials the relay as usual.
+   relay token, sends it as described under "Transport" below, and then
+   dials the relay as usual.
 3. A **mailbox node** holding mail for an offline phone can do the same
    with a `Message` wake-up, so the phone fetches its mail now instead of on
    its next poll. The node needs only the endpoint and the push key, not the

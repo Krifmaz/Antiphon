@@ -45,26 +45,53 @@ bytes no matter what else they do.
 
 ## Android
 
-The Android app is [`crates/android`](crates/android): Rust and iced, no
-Java. It is part of the workspace but compiles to nothing on a desktop, so
-`cargo build` above is unaffected. To build the APK you need the Android
-SDK (a platform matching `target_sdk_version` in its `Cargo.toml`, and
-build-tools), an NDK, and `cargo-apk`:
+The Android app is [`crates/android`](crates/android): Rust and iced, plus
+four small Java classes in [`crates/android/java`](crates/android/java) for
+what only Java can receive on Android -- an activity result, a foreground
+service for calls in the background, and the UnifiedPush receiver. It is
+part of the workspace but compiles to nothing on a desktop, so `cargo build`
+above is unaffected.
+
+The APK is built by [`crates/android/build-apk.sh`](crates/android/build-apk.sh),
+which runs the SDK's own tools in order: `cargo build` per ABI with the
+NDK's clang as linker, `aapt2` for the resources and the hand-written
+[`AndroidManifest.xml`](crates/android/AndroidManifest.xml), `javac` and
+`d8` for the Java, then `zip`, `zipalign` and `apksigner`. (It replaced
+cargo-apk, which cannot package a service or a receiver.) You need the
+Android SDK with `platforms;android-35` and a build-tools, an NDK, and a
+JDK (17 is what CI uses):
 
 ```bash
 rustup target add aarch64-linux-android x86_64-linux-android
-cargo install cargo-apk --version 0.10.0 --locked
 export ANDROID_HOME=~/Android/Sdk ANDROID_NDK_ROOT=~/Android/Sdk/ndk/<version>
-cargo apk build -p antiphon-android            # debug, signed with the SDK's debug key
-cargo apk run   -p antiphon-android            # installs and starts it on a connected phone
+crates/android/build-apk.sh                    # release; target/apk/antiphon.apk
+crates/android/build-apk.sh --debug            # quicker to build, slow to run
+APK_TARGETS=aarch64-linux-android crates/android/build-apk.sh   # one ABI only
+adb install -r target/apk/antiphon.apk
 ```
 
-A `--release` build must be signed: set `CARGO_APK_RELEASE_KEYSTORE` and
-`CARGO_APK_RELEASE_KEYSTORE_PASSWORD`. CI does this from the
+Without a keystore the script signs with the SDK's debug key
+(`~/.android/debug.keystore`, made if missing). To sign with a real key set
+`APK_KEYSTORE` and `APK_KEYSTORE_PASSWORD` (and `APK_KEY_ALIAS` if the
+keystore holds more than one key). CI does this from the
 `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD` repository
-secrets, or with a throwaway key when they are not set -- that APK
-installs, but the next one will not install over it. Logs go to logcat
+secrets, or with a throwaway key when they are not set -- that APK installs,
+but the next one will not install over it. The versionCode follows
+cargo-apk's formula from the crate version, so these APKs install over the
+ones cargo-apk built. File times inside the APK are set from
+`SOURCE_DATE_EPOCH` (default: the last commit's time). Logs go to logcat
 under the tag `antiphon`.
+
+Push wake-ups use [UnifiedPush](https://unifiedpush.org): install a
+distributor such as ntfy on the phone and the app registers with it. There
+is no FCM build; see [`docs/mobile-push.md`](docs/mobile-push.md).
+
+Audio needs nothing Android-specific: cpal's Android backend is AAudio,
+through the `ndk` crate, so there is no C++ runtime (`libc++_shared.so`) to
+ship. The script checks, and adds it if a dependency ever starts needing
+it. cpal does not set AAudio's voice-communication input preset, so the
+platform's own echo canceller is not guaranteed to engage; the app's own
+echo canceller in `antiphon-audio` is what a call relies on.
 
 ## Verifying a release binary
 
