@@ -40,18 +40,18 @@ The short version of [`FEATURES.md`](FEATURES.md):
   control, shared files that outlive the call (per-file keys, seeding,
   pinning, multi-peer download), chat persisted encrypted at rest with
   an outbox and offline delivery through mailbox nodes on your own
-  route list, QR / link
-  invites, verification codes, key-change warnings, the UI editor and
+  route list, contacts found again through a DHT when their address
+  changes, an in-app WireGuard tunnel with per-mode routing and a kill
+  switch, QR / link invites, verification codes, key-change warnings, the UI editor and
   theming, presence, notification rules, data export, reproducible
   build configuration with a CI pipeline for all three desktop targets.
 - **Reduced:** Caps Lock as push-to-talk works on Windows and X11 but
   not yet on macOS or Wayland; no project-run mailbox node ships as a
   default.
-- **Not built:** anything that needs infrastructure the app does not
-  have yet -- the DHT, large group calls through an SFU (small mesh
-  group calls are keyed with MLS and SFrame already), VPN integration,
-  mobile clients, push
-  notifications. Each is a project on its own and is listed as such.
+- **Not built yet:** communities and group chats, large group calls
+  through an SFU (small mesh group calls are keyed with MLS and SFrame
+  already), mobile clients, push notifications, packaging. Each is
+  listed as such in FEATURES.md.
 
 ## Installing
 

@@ -1,7 +1,7 @@
 # Feature Checklist — VoIP App Feature Spec v0.3
 
 Every feature from [`docs/voip-app-feature-spec.pdf`](docs/voip-app-feature-spec.pdf), section by section, audited against
-the code in this repo, last updated 2026-10-17. `cargo test --workspace` and `cargo clippy --workspace --all-targets`
+the code in this repo, last updated 2026-10-26. `cargo test --workspace` and `cargo clippy --workspace --all-targets`
 are clean on Linux and Windows.
 
 **Legend**
@@ -12,14 +12,16 @@ are clean on Linux and Windows.
 | `[~]` | **Partial** — a real but reduced version exists; the gap is stated on the line |
 | `[ ]` | **Not started** — no code for it |
 
-**Score: 163 done · 29 partial · 40 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
+**Score: 177 done · 29 partial · 26 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
 
-**§0 Core Principles: 5 of 6 done.** The sixth needs infrastructure, not code in this repo.
+**§0 Core Principles: 6 of 6 done.**
 
-The shape of it: **§1 Audio Suite and the 1:1 encrypted-call path are largely real.**
-Everything that needs infrastructure the app doesn't have yet — relays, DHT, MLS
-groups, mailbox nodes, mobile — is not started. The foundation the spec calls for
-exists; the fallback infrastructure it calls "fallback, not foundation" does not.
+The shape of it: **§1 Audio Suite and the 1:1 encrypted-call path are largely real,
+and so is the infrastructure around them**: a self-hostable relay that also runs
+mailbox, file-hosting and DHT nodes, mesh group calls keyed with MLS and SFrame,
+seeded and pinned files, a userspace WireGuard tunnel with a kill switch. What is
+left is mostly communities and group chats (§9), mobile, packaging, and the parts
+of those features that need communities to exist.
 
 ---
 
