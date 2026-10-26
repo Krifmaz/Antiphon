@@ -1589,13 +1589,19 @@ pub fn start_pipeline(
                     }
                 }
                 sequence = sequence.wrapping_add(1);
-                if let Err(e) = send_peer.send_audio(&bytes).await {
-                    eprintln!("[net] send error: {e}");
-                }
-                // Spec §3 group mesh: the same sealed-per-person frame to
-                // everyone else in the call, one upload each.
-                for leg in send_group.leg_peers() {
-                    let _ = leg.send_audio(&bytes).await;
+                if let Some(sfu) = send_group.sfu_call() {
+                    // Spec §3 past the mesh: one upload, and the SFU
+                    // forwards it to everyone.
+                    sfu.send_audio(&bytes).await;
+                } else {
+                    if let Err(e) = send_peer.send_audio(&bytes).await {
+                        eprintln!("[net] send error: {e}");
+                    }
+                    // Spec §3 group mesh: the same sealed-per-person frame
+                    // to everyone else in the call, one upload each.
+                    for leg in send_group.leg_peers() {
+                        let _ = leg.send_audio(&bytes).await;
+                    }
                 }
             } else {
                 // Cleared while not transmitting, so the first frame after

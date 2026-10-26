@@ -66,9 +66,10 @@ pub type RoomToken = [u8; ROOM_LEN];
 pub type MemberTag = [u8; MEMBER_LEN];
 pub type Cookie = [u8; COOKIE_LEN];
 
-/// Largest media payload carried. An Opus frame at its highest bitrate
-/// plus sealing overhead fits; anything larger is not audio.
-pub const MAX_MEDIA_PAYLOAD: usize = 1300;
+/// Largest media payload carried. Calls send 20 ms of 48 kHz audio as
+/// 32-bit samples plus an FEC backup (`crate::fec`), about 4.2 KB once
+/// sealed, so this leaves headroom for that and nothing much larger.
+pub const MAX_MEDIA_PAYLOAD: usize = 6000;
 
 /// Most members a ROSTER can list, which keeps one inside the 4 KB every
 /// receive buffer in this project is sized for. An SFU's per-room limit
@@ -329,7 +330,7 @@ impl SfuClient {
         let mut cookie = None;
         let mut joined = false;
         let mut roster: Option<Vec<MemberTag>> = None;
-        let mut buf = vec![0u8; 4096];
+        let mut buf = vec![0u8; 8192];
         'outer: while tokio::time::Instant::now() < deadline {
             socket.send_to(&Message::Join { room, member, cookie }.encode(), sfu).await?;
             let wait_until = (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline);
@@ -422,7 +423,7 @@ async fn run_member(
     events: mpsc::Sender<SfuEvent>,
 ) {
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + JOIN_INTERVAL, JOIN_INTERVAL);
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; 8192];
     loop {
         tokio::select! {
             _ = tick.tick() => {
@@ -523,7 +524,7 @@ mod tests {
     #[test]
     fn a_full_roster_and_a_full_media_frame_fit_one_datagram() {
         assert!(Message::Roster(vec![[0; 16]; MAX_ROSTER]).encode().len() <= 4096);
-        assert!(encode_media(&[0; 16], &[0; MAX_MEDIA_PAYLOAD]).len() <= 1400);
+        assert!(encode_media(&[0; 16], &[0; MAX_MEDIA_PAYLOAD]).len() <= 8192, "the client receive buffer");
     }
 
     #[test]

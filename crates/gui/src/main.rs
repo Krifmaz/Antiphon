@@ -23,6 +23,7 @@ mod reachability;
 mod fallback_relay;
 mod network_ui;
 mod anonymity;
+mod sfu_call;
 mod reactions;
 mod replay_history;
 mod sealed_ring;
@@ -676,8 +677,12 @@ fn add_to_group_call(app: &MainWindow, state: &Arc<AppState>, contact: config::C
     let ctx = {
         let call = state.call.lock().unwrap();
         let Some(active) = call.as_ref() else { return };
-        if active.group.is_full() {
-            app.set_contacts_message(format!("A group call holds up to {} people.", group::MAX_PEOPLE).into());
+        // Past the mesh the call moves to our relay's SFU, so only a
+        // full SFU call, or a full mesh with no relay, turns anyone away.
+        let has_relay = !network_ui::effective_relay(app).is_empty();
+        if active.group.is_full() && (active.group.sfu_call().is_some() || !has_relay) {
+            let most = if active.group.sfu_call().is_some() { sfu_call::MAX_PEOPLE } else { group::MAX_PEOPLE };
+            app.set_contacts_message(format!("A group call holds up to {most} people.").into());
             return;
         }
         group_context(app, state, active)

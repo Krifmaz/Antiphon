@@ -183,6 +183,11 @@ pub enum ControlMessage {
     /// Leaving the group call. The 1:1 path has no hang-up message; a
     /// group needs one, or everyone else keeps mixing a silent leg.
     GroupLeave,
+    /// The call has moved past the mesh to an SFU (spec §3 "Beyond that --
+    /// SFU relay"): join the room at `sfu` named by `secret` and `day`.
+    /// Sent only over the call's own end-to-end sessions, so the SFU never
+    /// learns the secret. See `crate::sfu_call`.
+    GroupSfu { sfu: String, secret: String, day: u64 },
 }
 
 impl ControlMessage {
