@@ -90,18 +90,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: android
-      - name: Android SDK pieces and cargo-apk
+      - uses: actions/setup-java@v4
+        # javac and d8 for the app's few Java classes. Pinned, like Rust,
+        # so the dex is built by the same compiler every time.
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Android SDK pieces
         # The runner image carries the SDK and an NDK; this only makes sure
-        # the platform cargo-apk compiles against (target_sdk_version in
-        # crates/android/Cargo.toml) and a build-tools are present.
+        # the platform the APK compiles against (TARGET_SDK in
+        # crates/android/build-apk.sh) and a pinned build-tools are present.
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" > /dev/null
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-          cargo install cargo-apk --version 0.10.0 --locked
+          echo "BUILD_TOOLS_VERSION=35.0.0" >> "$GITHUB_ENV"
       - name: Clippy (Android)
-        run: cargo clippy -p antiphon-android --target aarch64-linux-android --locked -- -D warnings
+        run: cargo clippy -p antiphon-android -p antiphon-mobile --target aarch64-linux-android --locked -- -D warnings
       - name: Signing key
         # A release APK must be signed. With the ANDROID_KEYSTORE_BASE64 and
         # ANDROID_KEYSTORE_PASSWORD secrets set, every build is signed with
@@ -123,17 +129,18 @@ jobs:
               -alias antiphon -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Antiphon"
           fi
           echo "::add-mask::$PASS"
-          echo "CARGO_APK_RELEASE_KEYSTORE=$KS" >> "$GITHUB_ENV"
-          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+          echo "APK_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "APK_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
       - name: Build APK
-        # Same path remapping as the desktop release builds, so the
-        # builder's directories do not end up inside the shipped library.
+        # crates/android/build-apk.sh rather than cargo-apk, which cannot
+        # package the app's service and push receiver. Same path remapping
+        # as the desktop release builds, so the builder's directories do not
+        # end up inside the shipped library.
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
           export CARGO_ENCODED_RUSTFLAGS="$(printf -- '--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo' "$PWD" "${CARGO_HOME:-$HOME/.cargo}")"
-          cargo apk build -p antiphon-android --release
           mkdir -p out
-          cp target/release/apk/antiphon.apk out/antiphon-android.apk
+          crates/android/build-apk.sh --out out/antiphon-android.apk
           cd out && sha256sum antiphon-android.apk | tee SHA256SUMS-android.txt
       - uses: actions/upload-artifact@v4
         with:

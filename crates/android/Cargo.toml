@@ -5,8 +5,9 @@ edition.workspace = true
 version.workspace = true
 
 [lib]
-# cargo-apk loads this as the NativeActivity's library. No Java or Kotlin:
-# the activity is the platform's own android.app.NativeActivity.
+# AntiphonActivity (java/) loads this as its NativeActivity library. The
+# APK is put together by build-apk.sh, from this, the Java around it,
+# res/ and AndroidManifest.xml.
 crate-type = ["cdylib"]
 path = "src/lib.rs"
 
@@ -22,41 +23,3 @@ ndk-context = "0.1.1"
 # antiphon-mobile's.
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "android-native-activity"] }
 antiphon-mobile = { version = "0.1.0", path = "../mobile" }
-
-[package.metadata.android]
-package = "org.antiphon.app"
-apk_name = "antiphon"
-build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
-resources = "res"
-
-[package.metadata.android.sdk]
-min_sdk_version = 26
-target_sdk_version = 35
-
-[package.metadata.android.application]
-label = "Antiphon"
-icon = "@mipmap/ic_launcher"
-theme = "@android:style/Theme.DeviceDefault.NoActionBar"
-
-[package.metadata.android.application.activity]
-# Rotation and keyboard changes would otherwise restart the activity, which
-# for a NativeActivity means tearing down the Rust side mid-call.
-config_changes = "orientation|screenSize|screenLayout|keyboardHidden|keyboard"
-orientation = "portrait"
-exported = true
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.INTERNET"
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.RECORD_AUDIO"
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.MODIFY_AUDIO_SETTINGS"
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.WAKE_LOCK"
-
-[[package.metadata.android.uses_feature]]
-name = "android.hardware.microphone"
-required = true

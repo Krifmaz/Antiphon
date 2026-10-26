@@ -1,10 +1,22 @@
-//! The handful of Android framework calls a NativeActivity cannot make
-//! from the NDK alone, made through JNI on the activity `android-activity`
-//! hands over. Each one fails soft: a phone that refuses one of these
-//! still gets a working app, just without that convenience.
+//! The Android framework calls a NativeActivity cannot make from the NDK
+//! alone, made through JNI on the activity `android-activity` hands over.
+//! Each one fails soft: a phone that refuses one of these still gets a
+//! working app, just without that convenience.
+//!
+//! Most are plain JNI calls on framework objects. The ones that need a
+//! Java class of the app's own -- the foreground service, the push
+//! receiver, anything that has to run on the UI thread -- call into
+//! `java/org/antiphon/app`, and the answers come back through
+//! [`crate::native`].
 
-use antiphon_mobile::platform::Platform;
-use jni::objects::{JObject, JValue};
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::fd::FromRawFd;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use antiphon_mobile::platform::{BackgroundWork, Network, Platform};
+use jni::objects::{JClass, JObject, JValue};
 use jni::{JNIEnv, JavaVM};
 
 /// Android's half of [`Platform`].
@@ -33,6 +45,47 @@ impl Platform for Android {
 
     fn system_insets(&self) -> (f32, f32) {
         system_insets()
+    }
+
+    fn network(&self) -> Network {
+        network()
+    }
+
+    fn battery_saver(&self) -> bool {
+        battery_saver()
+    }
+
+    fn set_background_work(&self, work: &BackgroundWork) {
+        set_background_work(work);
+    }
+
+    fn pick_file(&self) {
+        call_activity("opening the file picker", "pickFile");
+    }
+
+    fn read_file(&self, handle: &str) -> io::Result<Vec<u8>> {
+        read_file(handle)
+    }
+
+    fn downloads_dir(&self) -> Option<PathBuf> {
+        static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+        DIR.get_or_init(downloads_dir).clone()
+    }
+
+    fn notify(&self, title: &str, body: &str) {
+        notify(title, body);
+    }
+
+    fn register_push(&self) {
+        register_push();
+    }
+
+    fn ring(&self, from: Option<&str>) {
+        ring(from);
+    }
+
+    fn request_battery_exemption(&self) {
+        call_activity("asking for a battery exemption", "requestBatteryExemption");
     }
 }
 
@@ -66,7 +119,10 @@ fn with_activity<T>(what: &str, f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::er
     // SAFETY: a global reference, owned by ndk-context; JObject does not
     // delete it on drop.
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-    match f(&mut env, &activity) {
+    // A frame, so the local references made inside are freed on return:
+    // android_main's thread never returns to Java, which would otherwise
+    // be the only thing that frees them.
+    match env.with_local_frame(16, |env| f(env, &activity)) {
         Ok(value) => Some(value),
         Err(e) => {
             // A Java exception left pending would abort the next JNI call.
@@ -218,4 +274,254 @@ fn system_insets() -> (f32, f32) {
         }
     })
     .unwrap_or((0.0, 0.0))
+}
+
+/// One of the app's own classes. A thread that native code attached
+/// finds classes through the system class loader, which knows the
+/// framework but not the APK, so this asks the activity's loader instead.
+fn app_class<'a>(env: &mut JNIEnv<'a>, activity: &JObject, name: &str) -> jni::errors::Result<JClass<'a>> {
+    let loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?.l()?;
+    let name = env.new_string(name)?;
+    let class = env
+        .call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(&name)])?
+        .l()?;
+    Ok(JClass::from(class))
+}
+
+/// Calls a no-argument method of `AntiphonActivity`, which posts whatever
+/// it does to the UI thread itself.
+fn call_activity(what: &str, method: &str) {
+    with_activity(what, |env, activity| {
+        env.call_method(activity, method, "()V", &[])?;
+        Ok(())
+    });
+}
+
+fn sdk_int(env: &mut JNIEnv) -> jni::errors::Result<i32> {
+    env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?.i()
+}
+
+fn system_service<'a>(env: &mut JNIEnv<'a>, activity: &JObject, name: &str) -> jni::errors::Result<JObject<'a>> {
+    let name = env.new_string(name)?;
+    env.call_method(activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&name)])?
+        .l()
+}
+
+/// `NetworkCapabilities.NET_CAPABILITY_NOT_METERED` and
+/// `NET_CAPABILITY_TEMPORARILY_NOT_METERED`.
+const NOT_METERED: i32 = 11;
+const TEMPORARILY_NOT_METERED: i32 = 25;
+
+/// What the default network is now. "Wi-Fi" means what the user means by
+/// it, data that costs nothing: a phone's hotspot, which Android marks as
+/// metered, counts as mobile data, and an unmetered Ethernet adapter
+/// counts as Wi-Fi.
+pub(crate) fn network() -> Network {
+    with_activity("reading the network type", |env, activity| {
+        let manager = system_service(env, activity, "connectivity")?;
+        let active = env.call_method(&manager, "getActiveNetwork", "()Landroid/net/Network;", &[])?.l()?;
+        if active.is_null() {
+            return Ok(Network::None);
+        }
+        let caps = env
+            .call_method(
+                &manager,
+                "getNetworkCapabilities",
+                "(Landroid/net/Network;)Landroid/net/NetworkCapabilities;",
+                &[JValue::Object(&active)],
+            )?
+            .l()?;
+        if caps.is_null() {
+            return Ok(Network::None);
+        }
+        let has = |env: &mut JNIEnv, cap: i32| -> jni::errors::Result<bool> {
+            env.call_method(&caps, "hasCapability", "(I)Z", &[JValue::Int(cap)])?.z()
+        };
+        // Some 5G plans are unmetered for a while (Android 11 and later);
+        // the user is not charged for that data either.
+        let unmetered = has(env, NOT_METERED)? || (sdk_int(env)? >= 30 && has(env, TEMPORARILY_NOT_METERED)?);
+        Ok(if unmetered { Network::Wifi } else { Network::Metered })
+    })
+    .unwrap_or(Network::Unknown)
+}
+
+/// Whether the system's battery saver is on.
+fn battery_saver() -> bool {
+    with_activity("reading battery saver", |env, activity| {
+        let power = system_service(env, activity, "power")?;
+        env.call_method(&power, "isPowerSaveMode", "()Z", &[])?.z()
+    })
+    .unwrap_or(false)
+}
+
+/// Starts, updates or stops `CallService`, the foreground service that
+/// keeps a call, listening or transfers running with the app out of sight.
+fn set_background_work(work: &BackgroundWork) {
+    with_activity("updating background work", |env, activity| {
+        let class = app_class(env, activity, "org.antiphon.app.CallService")?;
+        let call = match &work.call {
+            Some(name) => JObject::from(env.new_string(name)?),
+            None => JObject::null(),
+        };
+        let transfers = i32::try_from(work.transfers).unwrap_or(i32::MAX);
+        env.call_static_method(
+            &class,
+            "update",
+            "(Landroid/content/Context;Ljava/lang/String;ZI)V",
+            &[
+                JValue::Object(activity),
+                JValue::Object(&call),
+                JValue::Bool(u8::from(work.listening)),
+                JValue::Int(transfers),
+            ],
+        )?;
+        Ok(())
+    });
+}
+
+/// Shows or withdraws the incoming-call alert.
+fn ring(from: Option<&str>) {
+    with_activity("ringing", |env, activity| {
+        let class = app_class(env, activity, "org.antiphon.app.CallService")?;
+        let from = match from {
+            Some(name) => JObject::from(env.new_string(name)?),
+            None => JObject::null(),
+        };
+        env.call_static_method(
+            &class,
+            "ring",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            &[JValue::Object(activity), JValue::Object(&from)],
+        )?;
+        Ok(())
+    });
+}
+
+fn notify(title: &str, body: &str) {
+    with_activity("showing a notification", |env, activity| {
+        let class = app_class(env, activity, "org.antiphon.app.CallService")?;
+        let title = env.new_string(title)?;
+        let body = env.new_string(body)?;
+        env.call_static_method(
+            &class,
+            "notify",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(activity), JValue::Object(&title), JValue::Object(&body)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Asks the UnifiedPush distributor for an endpoint, which arrives later
+/// as `PlatformEvent::PushRegistered`. With no distributor installed there
+/// is nothing to ask, and the app works as before: reachable while open.
+fn register_push() {
+    let registered = with_activity("registering for push", |env, activity| {
+        let class = app_class(env, activity, "org.antiphon.app.PushReceiver")?;
+        env.call_static_method(&class, "register", "(Landroid/content/Context;)Z", &[JValue::Object(activity)])?
+            .z()
+    });
+    if registered == Some(false) {
+        log::info!("no UnifiedPush distributor installed (ntfy, for one); push wake-ups are off");
+    }
+}
+
+/// Reads a picked document by its content URI. The content resolver opens
+/// a file descriptor and the bytes are read from that, rather than copied
+/// across JNI one Java array at a time. A plain path is read directly.
+fn read_file(handle: &str) -> io::Result<Vec<u8>> {
+    if handle.starts_with('/') {
+        return std::fs::read(handle);
+    }
+    let fd = with_activity("opening a picked file", |env, activity| {
+        let resolver = env
+            .call_method(activity, "getContentResolver", "()Landroid/content/ContentResolver;", &[])?
+            .l()?;
+        let text = env.new_string(handle)?;
+        let uri = env
+            .call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&text)])?
+            .l()?;
+        let mode = env.new_string("r")?;
+        let descriptor = env
+            .call_method(
+                &resolver,
+                "openFileDescriptor",
+                "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+                &[JValue::Object(&uri), JValue::Object(&mode)],
+            )?
+            .l()?;
+        if descriptor.is_null() {
+            return Ok(-1);
+        }
+        env.call_method(&descriptor, "detachFd", "()I", &[])?.i()
+    });
+    match fd {
+        Some(fd) if fd >= 0 => {
+            // SAFETY: detachFd hands over sole ownership of an open
+            // descriptor; nothing on the Java side will close it, and File
+            // closes it when dropped.
+            let mut file = unsafe { File::from_raw_fd(fd) };
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }
+        // Usually the file was deleted, or its grant revoked, since it was
+        // picked; with_activity has logged the exception.
+        _ => Err(io::Error::new(io::ErrorKind::NotFound, "the picked file can no longer be opened")),
+    }
+}
+
+/// Where received files go. On Android 11 and later an app may write into
+/// the shared Downloads folder with no permission at all, and what it
+/// writes shows up in the Files app, so that is the place, in a folder of
+/// its own. Before that, or if the shared folder refuses for any other
+/// reason, the app's own folder on shared storage, which the Files app can
+/// also reach (Android/data/org.antiphon.app/files/Download).
+fn downloads_dir() -> Option<PathBuf> {
+    let (sdk, public, private) = with_activity("finding the downloads folder", |env, activity| {
+        let sdk = sdk_int(env)?;
+        let kind = env.new_string("Download")?;
+        let public = env
+            .call_static_method(
+                "android/os/Environment",
+                "getExternalStoragePublicDirectory",
+                "(Ljava/lang/String;)Ljava/io/File;",
+                &[JValue::Object(&kind)],
+            )?
+            .l()?;
+        let public = file_path(env, &public)?;
+        let private = env
+            .call_method(activity, "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;", &[JValue::Object(&kind)])?
+            .l()?;
+        let private = file_path(env, &private)?;
+        Ok((sdk, public, private))
+    })?;
+    if sdk >= 30 {
+        if let Some(dir) = public.map(|p| p.join("Antiphon")).filter(|d| writable(d)) {
+            return Some(dir);
+        }
+    }
+    private.filter(|d| writable(d))
+}
+
+fn file_path(env: &mut JNIEnv, file: &JObject) -> jni::errors::Result<Option<PathBuf>> {
+    if file.is_null() {
+        return Ok(None);
+    }
+    let path = env.call_method(file, "getAbsolutePath", "()Ljava/lang/String;", &[])?.l()?;
+    let path: String = env.get_string(&path.into())?.into();
+    Ok(Some(PathBuf::from(path)))
+}
+
+/// Whether files can really be made in `dir`, made if missing. Tried
+/// rather than assumed: storage can be unmounted, and vendors differ on
+/// what the shared folders allow.
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(".antiphon-write-test");
+    let ok = std::fs::create_dir_all(dir).is_ok() && std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if !ok {
+        log::info!("{} is not writable", dir.display());
+    }
+    ok
 }

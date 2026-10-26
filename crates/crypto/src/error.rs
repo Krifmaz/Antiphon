@@ -24,6 +24,8 @@ pub enum CryptoError {
     BackupNotSealedForThisDevice,
     #[error("invite link is malformed")]
     MalformedInvite,
+    #[error("a push wake-up's hint can be at most {max} bytes")]
+    PushHintTooLong { max: usize },
     #[error("decryption failed: wrong key, corrupted data, or forged ciphertext")]
     DecryptionFailed,
     #[error("counter {counter} was already consumed or is older than the retained window")]

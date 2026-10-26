@@ -367,7 +367,11 @@ impl App {
             }
             PlatformEvent::FilePickCancelled => {}
             PlatformEvent::NetworkChanged(network) => self.network = network,
-            PlatformEvent::CallAction(CallAction::HangUp | CallAction::Decline) => self.engine.stop(),
+            PlatformEvent::CallAction(CallAction::Answer) => platform::ring(None),
+            PlatformEvent::CallAction(CallAction::HangUp | CallAction::Decline) => {
+                platform::ring(None);
+                self.engine.stop();
+            }
             PlatformEvent::CallAction(CallAction::Mute(muted)) => {
                 // Muting from outside the app means "stop transmitting",
                 // whichever way the mic was keyed; unmuting puts back what
@@ -550,6 +554,15 @@ impl App {
             transfers: self.files.transfer_count(live.as_deref()),
         };
         if work != self.background_work {
+            // Someone called in while the app was out of sight. Listening
+            // answers by itself, so the call is already up; the alert is
+            // what tells the person holding the phone, and Decline hangs up.
+            let call_arrived = self.background_work.listening && self.background_work.call.is_none();
+            match &work.call {
+                Some(name) if call_arrived && !self.foreground => platform::ring(Some(name)),
+                None if self.background_work.call.is_some() => platform::ring(None),
+                _ => {}
+            }
             platform::set_background_work(&work);
             self.background_work = work;
             changed = true;
@@ -961,6 +974,12 @@ impl App {
                 self.save();
             }
             Message::KeepListening(on) => {
+                // Without the exemption, Doze cuts the network a few
+                // minutes after the screen goes off, and the setting would
+                // quietly stop working.
+                if on {
+                    platform::request_battery_exemption();
+                }
                 self.settings.keep_listening_in_background = on;
                 self.save();
             }

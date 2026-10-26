@@ -62,8 +62,9 @@ pub trait Platform: Send + Sync + 'static {
     /// as [`PlatformEvent::PushRegistered`].
     fn register_push(&self) {}
 
-    // ---- Added for iOS. Each has a default that does nothing, so a
-    // ---- platform that has no use for it need not implement it.
+    // Added after the contract above was first agreed. Each has a default
+    // that does nothing, so a platform that has no use for it need not
+    // implement it.
 
     /// The call in [`BackgroundWork::call`] is now connected: answered on
     /// this phone, or picked up at the other end. `BackgroundWork` only
@@ -72,6 +73,15 @@ pub trait Platform: Send + Sync + 'static {
     /// incoming call ringing on its own screen when it was answered in the
     /// app instead.
     fn call_connected(&self) {}
+    /// Shows an incoming-call alert that can light the screen and open the
+    /// app over the lock screen, with Answer and Decline (reported as
+    /// [`PlatformEvent::CallAction`]); `None` withdraws it. For when the
+    /// app is not in front: a platform may show nothing while it is.
+    fn ring(&self, _from: Option<&str>) {}
+    /// Asks the user, through the system's own prompt, to exempt the app
+    /// from battery optimisation so the network stays up while it listens
+    /// for calls in the background. Does nothing if it is already exempt.
+    fn request_battery_exemption(&self) {}
 }
 
 /// The network the phone is on.
@@ -147,8 +157,16 @@ pub(crate) fn take_events() -> Vec<PlatformEvent> {
 }
 
 /// How [`post`] wakes the event loop; set once by the runner.
+/// Events posted before this -- a push that started the process, a
+/// network change during start-up -- would otherwise wait for some
+/// unrelated wake-up, so they get one now.
 pub(crate) fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
+    if !EVENTS.lock().unwrap().is_empty() {
+        if let Some(wake) = WAKE.get() {
+            wake();
+        }
+    }
 }
 
 /// Hands the shared code its platform. Called once, before anything else
@@ -234,5 +252,17 @@ pub fn register_push() {
 pub fn call_connected() {
     if let Some(p) = get() {
         p.call_connected();
+    }
+}
+
+pub fn ring(from: Option<&str>) {
+    if let Some(p) = get() {
+        p.ring(from);
+    }
+}
+
+pub fn request_battery_exemption() {
+    if let Some(p) = get() {
+        p.request_battery_exemption();
     }
 }
