@@ -25,7 +25,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use crate::socket::Datagram;
 
 use crate::error::NetError;
 
@@ -121,7 +121,7 @@ impl Message {
 /// [`crate::PeerConnection::listen`], which would swallow any reply, so
 /// none is awaited: re-sending every [`REGISTER_INTERVAL`] is what makes it
 /// reliable.
-pub async fn register(socket: &UdpSocket, relay: SocketAddr, tokens: &[RelayToken]) -> Result<(), NetError> {
+pub async fn register(socket: &impl Datagram, relay: SocketAddr, tokens: &[RelayToken]) -> Result<(), NetError> {
     for batch in tokens.chunks(MAX_TOKENS_PER_REGISTER) {
         socket.send_to(&Message::Register(batch.to_vec()).encode(), relay).await?;
     }
@@ -131,7 +131,7 @@ pub async fn register(socket: &UdpSocket, relay: SocketAddr, tokens: &[RelayToke
 /// Asks `relay` to pair `socket` with whoever registered `token`, and waits
 /// for the answer. On `Ok`, aim a [`crate::PeerConnection::connect`] at
 /// `relay` on the same socket.
-pub async fn dial(socket: &UdpSocket, relay: SocketAddr, token: RelayToken, timeout: Duration) -> Result<(), NetError> {
+pub async fn dial(socket: &impl Datagram, relay: SocketAddr, token: RelayToken, timeout: Duration) -> Result<(), NetError> {
     let request = Message::Dial(token).encode();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut buf = [0u8; 64];
@@ -155,7 +155,7 @@ pub async fn dial(socket: &UdpSocket, relay: SocketAddr, token: RelayToken, time
 }
 
 /// Tells `relay` to forget this socket. Best effort.
-pub async fn leave(socket: &UdpSocket, relay: SocketAddr) {
+pub async fn leave(socket: &impl Datagram, relay: SocketAddr) {
     let _ = socket.send_to(&Message::Leave.encode(), relay).await;
 }
 

@@ -6,10 +6,24 @@ version.workspace = true
 [dependencies]
 bip39 = { version = "2.2.2", features = ["zeroize"] }
 chacha20poly1305 = "0.11.0"
-ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+# Same version ed25519-dalek is built on; used directly for the
+# per-day key blinding in `dht_record.rs`.
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["alloc", "digest", "zeroize"] }
+# `hazmat` for signing under a blinded key (`dht_record.rs`).
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "hazmat"] }
 getrandom = "0.4.3"
+# SFrame (RFC 9605) media keys, cipher suite AES_128_GCM_SHA256_128.
+# See `sframe.rs`.
+aes-gcm = "=0.11.1"
 hkdf = "0.13.0"
 hmac = "0.13.0"
+# MLS (RFC 9420) for groups, spec §3. See `group.rs`. The basic-credential
+# crate is not used: credentials are signed by our own identity key
+# through `openmls_traits::signatures::Signer`, so an MLS member *is* the
+# same Ed25519 identity a 1:1 contact pins.
+openmls = "=0.9.2"
+openmls_rust_crypto = "=0.6.0"
+openmls_traits = "=0.6.0"
 sha2 = "0.11.0"
 thiserror = "2.0.20"
 x25519-dalek = { version = "3.0.0", features = ["getrandom", "static_secrets"] }

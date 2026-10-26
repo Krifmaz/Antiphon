@@ -29,12 +29,15 @@
 //!   forward secrecy, plus DH steps every few seconds of traffic so a
 //!   stolen chain key stops working (post-compromise security).
 //!
+//! - **Groups are MLS** ([`group`]): RFC 9420 through `openmls`, with
+//!   every member's credential being their identity key, so a group member
+//!   is the same verified person as a 1:1 contact.
+//! - **Media a relay forwards is SFrame** ([`sframe`]): RFC 9605, keyed
+//!   per epoch and per sender from the MLS exporter, so a forwarder never
+//!   holds a key and someone who left can't hear what follows.
 //! - **Push wake-ups name nobody** ([`push`]): sealed to the woken
 //!   device's own push key, constant size, so a push service relays a
 //!   knock without learning who knocked or why.
-//!
-//! Not yet implemented, each a larger piece of work building on
-//! [`Session`]: MLS for groups, and SFrame for relayed media.
 //!
 //! # Frozen labels
 //!
@@ -52,7 +55,9 @@
 pub mod backup;
 mod contact;
 mod device;
+pub mod dht_record;
 mod error;
+pub mod group;
 mod handshake;
 mod identity;
 mod invite;
@@ -67,6 +72,7 @@ pub mod relay_token;
 pub mod shamir;
 mod route;
 mod session;
+pub mod sframe;
 pub mod store;
 mod verification;
 

@@ -22,8 +22,14 @@ pub enum CryptoError {
     SharesDoNotMatch,
     #[error("this backup key was sealed for a different device")]
     BackupNotSealedForThisDevice,
+    #[error("DHT record is malformed, too large, or not filed under its own key")]
+    MalformedDhtRecord,
+    #[error("DHT record signature does not verify")]
+    DhtSignatureInvalid,
     #[error("invite link is malformed")]
     MalformedInvite,
+    #[error("SFrame header is malformed or truncated")]
+    MalformedFrame,
     #[error("a push wake-up's hint can be at most {max} bytes")]
     PushHintTooLong { max: usize },
     #[error("decryption failed: wrong key, corrupted data, or forged ciphertext")]
