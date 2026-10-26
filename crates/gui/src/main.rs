@@ -33,6 +33,7 @@ mod control;
 mod delivery;
 mod swarm;
 mod sharing;
+mod discovery;
 mod file_transfer;
 mod state;
 mod wav;
@@ -187,6 +188,7 @@ fn main() -> anyhow::Result<()> {
     }
     delivery::set_hosting(&app_state.runtime, loaded.hold_mail_for_devices, loaded.hold_mail_port);
     sharing::set_seeding(&app_state.runtime, loaded.seeding, loaded.seed_port);
+    discovery::start(&app_state.runtime, app_state.identity.clone());
 
     let main_window = MainWindow::new()?;
     main_window.set_my_share_id(share_id(&app_state.identity.public().identity_key).into());
@@ -264,6 +266,7 @@ fn main() -> anyhow::Result<()> {
     let mut peer_routes_saved = String::new();
     let mut delivery_round_seen = 0u64;
     let mut sharing_seen = u64::MAX;
+    let mut discovery_seen = 0u64;
     _meter_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let Some(app) = meter_window.upgrade() else { return };
         // Spec §8: what the courier did since the last tick.
@@ -280,6 +283,20 @@ fn main() -> anyhow::Result<()> {
         if sharing_now != sharing_seen {
             sharing_seen = sharing_now;
             apply_shared_files_to_ui(&app, &config::load());
+        }
+        // Spec §4: what the DHT side knows about reaching us, so a new
+        // forwarded port, relay or STUN answer is republished at once.
+        discovery::set_local(discovery::Local {
+            listen_port: app.get_local_port().parse().unwrap_or(0),
+            mapped_port: meter_state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()),
+            stun_public: Some(app.get_public_address().to_string()).filter(|a| !a.is_empty()),
+            relay: app.get_relay_server().trim().to_string(),
+        });
+        let discovery_now = discovery::revision();
+        if discovery_now != discovery_seen {
+            discovery_seen = discovery_now;
+            app.set_dht_status(discovery::status().into());
+            apply_contacts_to_ui(&app, &config::load().contacts);
         }
 
         // Keyboard shortcuts, raised as flags by the poller thread (which
@@ -729,6 +746,71 @@ fn group_context(app: &MainWindow, state: &Arc<AppState>, active: &state::Active
         relay: (!relay.is_empty()).then_some(relay),
         is_blocked: Arc::new(is_peer_blocked),
     }
+}
+
+/// Spec §4: a direct call to `contact` that looks them up in the DHT when
+/// their saved address doesn't answer, then falls back to their relay
+/// (only in automatic mode -- a contact set to Direct stays direct).
+async fn call_with_lookup(
+    contact: &config::Contact,
+    saved: String,
+    local_port: u16,
+    identity: Arc<antiphon_crypto::IdentityKeyPair>,
+    state: &Arc<AppState>,
+    window_weak: &slint::Weak<MainWindow>,
+    now: u64,
+) -> anyhow::Result<antiphon_net::PeerConnection> {
+    let attempt = |address: String| {
+        let identity = identity.clone();
+        async move {
+            let remote = state::resolve(&address).await?;
+            match tokio::time::timeout(discovery::DIRECT_TRY, state::establish_call(remote, local_port, identity)).await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!("{address} didn't answer"),
+            }
+        }
+    };
+    let say = |text: String| {
+        let weak = window_weak.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_status_text(text.into());
+            }
+        })
+        .ok();
+    };
+    let mut last = match attempt(saved.clone()).await {
+        Ok(peer) => return Ok(peer),
+        Err(e) => e,
+    };
+    say(format!("{} didn't answer at their saved address. Looking them up...", contact.name));
+    if let Some(fresh) = discovery::find_contact_now(&contact.identity_key, &saved).await {
+        say(format!("Found {} at a new address. Calling...", contact.name));
+        let weak = window_weak.clone();
+        let shown = fresh.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_remote_address(shown.into());
+            }
+        })
+        .ok();
+        match attempt(fresh).await {
+            Ok(peer) => return Ok(peer),
+            Err(e) => last = e,
+        }
+    }
+    // The DHT may have brought a relay along; re-read the contact.
+    let refreshed = config::load().contacts.into_iter().find(|c| c.identity_key == contact.identity_key);
+    let contact = refreshed.as_ref().unwrap_or(contact);
+    if connection_mode::Override::from_i32(contact.connection_mode) == connection_mode::Override::Auto {
+        if let Some(connection_mode::Plan::Relay { relay, token }) = connection_mode::relay_only(contact, &identity, now) {
+            say(format!("Trying {} through their relay...", contact.name));
+            let addr = state::resolve(&relay).await?;
+            *state.relay_addr.lock().unwrap() = Some(addr);
+            return state::establish_relayed_call(addr, token, local_port, identity).await;
+        }
+    }
+    Err(last)
 }
 
 /// Records the relay a saved contact listens at. Strangers are not saved.
@@ -2637,6 +2719,27 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             // everyone else, unless this conversation says otherwise.
             match connection_mode::plan(contact, &state.identity, now_secs()) {
                 Err(reason) => app.set_contacts_message(reason.into()),
+                Ok(connection_mode::Plan::Direct { address }) if config::load().dht_enabled && !contact.identity_key.is_empty() => {
+                    // Spec §4: with the DHT on, a saved address that
+                    // doesn't answer is looked up before giving up, and
+                    // then -- unless this contact is set to Direct -- their
+                    // relay is tried.
+                    *state.relay_addr.lock().unwrap() = None;
+                    app.set_remote_address(address.clone().into());
+                    let local_port: u16 = app.get_local_port().parse().unwrap_or(0);
+                    let config = read_chain_config(&app);
+                    let (input, output) = selected_devices(&app);
+                    let hello = local_hello(&app);
+                    set_status(&app, &tray_weak, &format!("Calling {}...", contact.name));
+                    let (window_weak2, tray_weak2, state2) = (window_weak.clone(), tray_weak.clone(), state.clone());
+                    let identity = state.identity.clone();
+                    let contact = contact.clone();
+                    let now = now_secs();
+                    state.runtime.spawn(async move {
+                        let result = call_with_lookup(&contact, address, local_port, identity, &state2, &window_weak2, now).await;
+                        finish_connect(window_weak2, tray_weak2, state2, result, config, input, output, hello);
+                    });
+                }
                 Ok(connection_mode::Plan::Direct { address }) => {
                     // A direct contact call goes down the exact same path
                     // as a typed one rather than duplicating it.
@@ -2801,6 +2904,69 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         });
     }
     main_window.on_forget_shared_file(move |file_id| sharing::forget(&file_id));
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_dht_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            config::save(&current_config(&app));
+            if !app.get_dht_enabled() {
+                app.set_dht_status("".into());
+            }
+            discovery::kick();
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_browse_directories(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            config::save(&config);
+            if config.directories.is_empty() {
+                app.set_directory_status("Add a directory's address first.".into());
+                return;
+            }
+            app.set_directory_status("Asking...".into());
+            let weak = window_weak.clone();
+            state.runtime.spawn(async move {
+                let mut pins = config.directory_pins.clone();
+                let (listed, problems) = discovery::browse(&config.directories, &mut pins).await;
+                let mut saved = config::load();
+                saved.directory_pins = pins;
+                config::save(&saved);
+                slint::invoke_from_event_loop(move || {
+                    let Some(app) = weak.upgrade() else { return };
+                    let rows: Vec<DirectoryEntry> = listed
+                        .into_iter()
+                        .map(|l| DirectoryEntry {
+                            name: l.entry.name.into(),
+                            description: l.entry.description.into(),
+                            invite: l.entry.invite.into(),
+                            directory: l.directory.into(),
+                        })
+                        .collect();
+                    let summary = if rows.is_empty() { "No communities found.".to_string() } else { format!("{} communities.", rows.len()) };
+                    let mut lines = vec![summary];
+                    lines.extend(problems);
+                    app.set_directory_status(lines.join("\n").into());
+                    app.set_directory_entries(ModelRc::new(VecModel::from(rows)));
+                })
+                .ok();
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_join_directory_entry(move |name, invite| {
+            let Some(app) = window_weak.upgrade() else { return };
+            // The same path as pasting the link by hand: it is saved
+            // unverified, like any invite.
+            app.set_new_contact_name(name);
+            app.set_new_contact_invite(invite);
+            app.invoke_add_from_invite();
+            app.set_directory_status(app.get_contacts_message());
+        });
+    }
     {
         let window_weak = main_window.as_weak();
         let state = app_state.clone();
@@ -4649,6 +4815,9 @@ fn apply_routes_to_ui(app: &MainWindow, config: &config::AppConfig) {
     app.set_seed_port(config.seed_port as i32);
     app.set_pin_nodes(config.pin_nodes.join(", ").into());
     app.set_pin_code(config.pin_code.clone().into());
+    app.set_dht_enabled(config.dht_enabled);
+    app.set_dht_bootstrap(config.dht_bootstrap.join(", ").into());
+    app.set_directories(config.directories.join(", ").into());
 }
 
 /// Spec §5: the shared-files list, with what's known about each.
@@ -4767,9 +4936,15 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 route_record: previous.map(|p| p.route_record.clone()).unwrap_or_default(),
                 route_sequence: previous.and_then(|p| p.route_sequence),
                 message_route: c.message_route,
+                dht_sequence: previous.and_then(|p| p.dht_sequence),
             }
         })
         .collect()
+}
+
+/// A comma- or whitespace-separated list the user typed, as entries.
+fn split_list(text: &str) -> Vec<String> {
+    text.split(|c: char| c == ',' || c.is_whitespace()).map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect()
 }
 
 fn string_vec_to_model(items: Vec<String>) -> ModelRc<SharedString> {
@@ -5114,6 +5289,7 @@ fn apply_section_defaults(app: &MainWindow, expanded: bool) {
     app.set_sec_notifications(expanded);
     app.set_sec_transferlimits(expanded);
     app.set_sec_sharedfiles(expanded);
+    app.set_sec_discovery(expanded);
 }
 
 /// Computes the profile bar's avatar-circle letter from the current
@@ -5551,6 +5727,10 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
             .filter(|n| !n.is_empty())
             .collect(),
         pin_code: app.get_pin_code().trim().to_string(),
+        dht_enabled: app.get_dht_enabled(),
+        dht_bootstrap: split_list(&app.get_dht_bootstrap()),
+        directories: split_list(&app.get_directories()),
+        directory_pins: previous.directory_pins.clone(),
         ptt_toggle: app.get_ptt_toggle(),
         mute_hold: app.get_mute_hold(),
         deafen_hold: app.get_deafen_hold(),

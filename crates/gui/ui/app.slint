@@ -75,6 +75,14 @@ export struct SharedFileEntry {
     mine: bool,
 }
 
+/// A community listed in a directory (spec §4).
+export struct DirectoryEntry {
+    name: string,
+    description: string,
+    invite: string,
+    directory: string,
+}
+
 /// One delivery route (spec §8), for the route list.
 export struct RouteEntry {
     title: string,
@@ -1466,6 +1474,7 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-notifications: true;
     in-out property <bool> sec-transferlimits: true;
     in-out property <bool> sec-sharedfiles: true;
+    in-out property <bool> sec-discovery: true;
     in-out property <bool> sec-outbox: true;
     in-out property <bool> sec-calladvanced: true;
     in-out property <bool> ip-direct-calling: false;
@@ -1540,6 +1549,16 @@ export component MainWindow inherits Window {
     callback check-shared-files();
     callback download-shared-file(string);
     callback forget-shared-file(string);
+    // Spec §4 discovery: the DHT and community directories.
+    in-out property <bool> dht-enabled: false;
+    in-out property <string> dht-bootstrap: "";
+    in-out property <string> dht-status: "";
+    in-out property <string> directories: "";
+    in-out property <string> directory-status: "";
+    in-out property <[DirectoryEntry]> directory-entries: [];
+    callback dht-settings-changed();
+    callback browse-directories();
+    callback join-directory-entry(string, string);
     callback set-contact-message-route(int, int);
     callback leave-message(int);
     /// Shown when audio was recovered, if the mode asks for it.
@@ -4691,6 +4710,64 @@ export component MainWindow inherits Window {
                                         }
                                         Text { text: f.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
                                         if f.status != "" : Text { text: f.status; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+
+                            if section-id == "discovery" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "How contacts find you after your address changes, and how you find public communities. Both are off until you turn them on and name the nodes to use.";
+                                    text-scale: text-scale;
+                                    title: "Finding contacts"; reduced-motion: reduced-motion; expanded <=> sec-discovery;
+                                }
+                                if sec-discovery : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Let contacts find me if my address changes (DHT)";
+                                        checked <=> dht-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Publishes where you can be reached to a distributed table, encrypted so only people who already have your identity key -- your contacts, or anyone you gave your invite link -- can read it. The nodes storing it can't tell whose it is or read the address. When a contact's saved address stops answering, the app looks them up the same way before trying their relay. Off by default.";
+                                        toggled => { dht-settings-changed(); }
+                                    }
+                                    SettingLabel { text: "Bootstrap nodes"; help: "DHT nodes to join through: anyone running antiphon-relay --dht, such as your own or your community's. None are built in. Comma-separated, press Enter."; text-scale: text-scale; }
+                                    LineEdit {
+                                        text <=> dht-bootstrap;
+                                        placeholder-text: "node.example.org:3479, ...";
+                                        accepted(t) => { dht-settings-changed(); }
+                                    }
+                                    if dht-enabled && dht-status != "" : Text {
+                                        text: dht-status;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    SettingLabel { text: "Community directories"; help: "Directories list public communities that asked to be listed, never people. Nothing is searched unless you add a directory here and press Browse."; text-scale: text-scale; }
+                                    LineEdit {
+                                        text <=> directories;
+                                        placeholder-text: "directory.example.org:3479, ...";
+                                        accepted(t) => { dht-settings-changed(); }
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Button { text: "Browse"; clicked => { browse-directories(); } }
+                                    }
+                                    if directory-status != "" : Text {
+                                        text: directory-status;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    for d in directory-entries : VerticalBox {
+                                        padding: 4px; spacing: 2px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Text { text: d.name; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                            Button { text: "Add"; clicked => { join-directory-entry(d.name, d.invite); } }
+                                        }
+                                        Text { text: d.description; font-size: 10px * text-scale; wrap: word-wrap; }
+                                        Text { text: "Listed by " + d.directory; color: Theme.muted-text; font-size: 10px * text-scale; }
                                     }
                                 }
                             }

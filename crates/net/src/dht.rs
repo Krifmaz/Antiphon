@@ -1279,6 +1279,27 @@ pub async fn publish(
     Ok(stored)
 }
 
+/// Asks `node` how it sees us. A DHT node answers a ping with the
+/// address the request came from, which is our public address -- the IP,
+/// at least; the port is this socket's mapping, not the call socket's.
+pub async fn observe(socket: &UdpSocket, node: SocketAddr, timeout: Duration) -> Option<SocketAddr> {
+    let txid = new_txid();
+    socket.send_to(&Message::encode_request(txid, None, &Request::Ping), node).await.ok()?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut buf = vec![0u8; 2048];
+    while let Ok(Ok((n, from))) = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
+        if from != node {
+            continue;
+        }
+        if let Some(Message::Reply { txid: t, body: Reply::Pong { observed }, .. }) = Message::decode(&buf[..n]) {
+            if t == txid {
+                return Some(observed);
+            }
+        }
+    }
+    None
+}
+
 /// Reads a node's whole community directory. Returns the node's public
 /// key with it: every page is signed by that key, so a caller that pins
 /// it on first use (as the app does) notices if a different machine

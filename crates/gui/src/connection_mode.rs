@@ -78,6 +78,12 @@ pub fn plan(contact: &Contact, identity: &IdentityKeyPair, unix_secs: u64) -> Re
     }
 }
 
+/// The relay route alone, for falling back to after a direct attempt
+/// failed.
+pub fn relay_only(contact: &Contact, identity: &IdentityKeyPair, unix_secs: u64) -> Option<Plan> {
+    relay_plan(contact, identity, unix_secs)
+}
+
 fn relay_plan(contact: &Contact, identity: &IdentityKeyPair, unix_secs: u64) -> Option<Plan> {
     let relay = contact.relay.trim();
     if relay.is_empty() {
