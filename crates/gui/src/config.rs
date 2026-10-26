@@ -126,6 +126,23 @@ pub struct AppConfig {
     /// than sending it from your real address. Off by default.
     #[serde(default)]
     pub vpn_kill_switch: bool,
+    /// Publish where you are to the DHT and look contacts up there when
+    /// their address changes (spec §4). Off by default.
+    #[serde(default)]
+    pub dht_enabled: bool,
+    /// DHT nodes to join through, `host[:port]`. Empty by default: the
+    /// app ships with none, so nothing is asked of anyone you didn't
+    /// choose.
+    #[serde(default)]
+    pub dht_bootstrap: Vec<String>,
+    /// Community directories to browse (spec §4 "Opt-in directories"),
+    /// `host[:port]`. Empty by default.
+    #[serde(default)]
+    pub directories: Vec<String>,
+    /// Each directory's key, `address=hex`, pinned the first time it
+    /// answered.
+    #[serde(default)]
+    pub directory_pins: Vec<String>,
     #[serde(default)]
     pub deafen_hold: bool,
     /// Milliseconds the mic stays open after the push-to-talk key comes up,
@@ -534,6 +551,10 @@ pub struct Contact {
     /// -- messages to them wait until you're both online.
     #[serde(default)]
     pub message_route: i32,
+    /// The highest DHT record sequence accepted for them (spec §4), so a
+    /// replayed older record can't move them back.
+    #[serde(default)]
+    pub dht_sequence: Option<u64>,
 }
 
 /// A freeform panel's position and size in logical pixels, relative to its
@@ -622,7 +643,7 @@ pub const AUDIO_SECTION_IDS: &[&str] =
 pub const APPEARANCE_SECTION_IDS: &[&str] = &["accent", "theme", "textmotion", "importexport"];
 pub const PROFILE_SECTION_IDS: &[&str] = &["profile", "about"];
 pub const CALL_SECTION_IDS: &[&str] =
-    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "callparticipants", "outbox", "calladvanced", "vpn"];
+    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "discovery", "callparticipants", "outbox", "calladvanced", "vpn"];
 
 fn default_audio_order() -> Vec<String> {
     AUDIO_SECTION_IDS.iter().map(|s| s.to_string()).collect()
@@ -762,6 +783,10 @@ impl Default for AppConfig {
             vpn_route_files: true,
             vpn_route_messages: true,
             vpn_kill_switch: false,
+            dht_enabled: false,
+            dht_bootstrap: Vec::new(),
+            directories: Vec::new(),
+            directory_pins: Vec::new(),
             deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,

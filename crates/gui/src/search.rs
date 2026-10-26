@@ -97,6 +97,7 @@ pub const INDEX: &[Entry] = &[
     Entry { category: Category::Call, id: "soundboard", title: "Soundboard", keywords: "sound clips wav effects meme play audio", always_visible: false },
     Entry { category: Category::Call, id: "transferlimits", title: "File transfer speed", keywords: "bandwidth upload cap throttle limit slow data", always_visible: false },
     Entry { category: Category::Call, id: "calladvanced", title: "Knock instead of ringing", keywords: "silent knock quiet shift click ring notify attention", always_visible: false },
+    Entry { category: Category::Call, id: "discovery", title: "Finding contacts", keywords: "dht discovery bootstrap lookup address changed moved ip directory community directories find people", always_visible: false },
     Entry { category: Category::Call, id: "sharedfiles", title: "Shared files", keywords: "seed seeding pin pinning share download files swarm torrent holders available offline", always_visible: false },
     Entry { category: Category::Call, id: "vpn", title: "VPN", keywords: "vpn wireguard tunnel privacy ip address hide kill switch route mullvad proton conf", always_visible: false },
     Entry { category: Category::Call, id: "outbox", title: "Undelivered messages", keywords: "outbox queue offline retry give up pending unsent delivery waiting", always_visible: false },

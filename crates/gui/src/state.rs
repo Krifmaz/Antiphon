@@ -968,6 +968,10 @@ pub struct PortMapHandle {
     pub gateway: std::net::Ipv4Addr,
     pub internal_port: u16,
     pub external_port: u16,
+    /// The port the router forwards *now*: a renewal may come back with
+    /// a different one (spec §6), and this follows it so the DHT record
+    /// is republished with the new address.
+    current_external: Arc<std::sync::atomic::AtomicU16>,
     renewal: tokio::task::JoinHandle<()>,
 }
 
@@ -980,6 +984,11 @@ impl PortMapHandle {
     fn stop(self) -> (std::net::Ipv4Addr, u16) {
         self.renewal.abort();
         (self.gateway, self.internal_port)
+    }
+
+    /// The forwarded port as of the latest renewal.
+    pub fn current_external_port(&self) -> u16 {
+        self.current_external.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Stops renewing and asks the router to drop the mapping, without
@@ -1024,12 +1033,17 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
         .ok_or_else(|| anyhow::anyhow!("this machine has no IPv4 address on a local network"))?;
     let (gateway, mapping) = antiphon_net::port_map::open_port(local, local_port).await?;
 
+    let current_external = Arc::new(std::sync::atomic::AtomicU16::new(mapping.external_port));
+    let follow = current_external.clone();
     let renewal = tokio::spawn(async move {
         let mut interval = mapping.renew_after();
         loop {
             tokio::time::sleep(interval).await;
             match antiphon_net::port_map::request_mapping(gateway, local_port).await {
-                Ok(renewed) => interval = renewed.renew_after(),
+                Ok(renewed) => {
+                    interval = renewed.renew_after();
+                    follow.store(renewed.external_port, std::sync::atomic::Ordering::Relaxed);
+                }
                 // Kept trying rather than given up on: a router that was
                 // rebooting a moment ago will answer the next one, and
                 // stopping here would silently end the user's
@@ -1044,6 +1058,7 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
         gateway,
         internal_port: mapping.internal_port,
         external_port: mapping.external_port,
+        current_external,
         renewal,
     })
 }

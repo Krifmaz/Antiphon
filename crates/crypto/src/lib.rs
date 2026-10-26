@@ -52,6 +52,7 @@
 pub mod backup;
 mod contact;
 mod device;
+pub mod dht_record;
 mod error;
 pub mod group;
 mod handshake;

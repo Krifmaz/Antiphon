@@ -247,12 +247,31 @@ pub async fn run_node(
     mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
 ) -> std::io::Result<()> {
+    run_node_with_dht(socket, relay, mailbox, files, None).await
+}
+
+/// [`run_node`], also serving as a DHT node (spec §4) when `dht` is given.
+/// Off unless the operator asks: a node that isn't one stays silent to
+/// DHT traffic rather than refusing it, so it can't be mapped as one.
+/// The caller drives [`antiphon_net::dht::DhtNode::tick`] on a timer.
+pub async fn run_node_with_dht(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
+    dht: Option<Arc<std::sync::Mutex<antiphon_net::dht::DhtNode>>>,
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65_536];
     let mut last_sweep = Instant::now();
     loop {
         let (n, from) = socket.recv_from(&mut buf).await?;
         let now = Instant::now();
-        let out = if antiphon_net::blob::Message::is_blob_datagram(&buf[..n]) {
+        let out = if antiphon_net::dht::Message::is_dht_datagram(&buf[..n]) {
+            match &dht {
+                Some(d) => d.lock().unwrap().handle(from, &buf[..n], now),
+                None => vec![],
+            }
+        } else if antiphon_net::blob::Message::is_blob_datagram(&buf[..n]) {
             match &files {
                 Some(f) => {
                     let secs = std::time::SystemTime::now()
@@ -298,7 +317,9 @@ This relay forwards encrypted packets it cannot read. It never holds a key.
 It sees rotating blinded tokens, never who you are. It keeps addresses only
 while a call or registration is live, and writes no connection logs.
 If it holds mail, the mail is sealed end to end: it sees an inbox label it
-cannot link to anyone, and never a sender, a recipient or a word.";
+cannot link to anyone, and never a sender, a recipient or a word.
+If it is a DHT node, it stores records filed under keys that change daily,
+sealed so it can read neither whose they are nor the address inside.";
 
 #[cfg(test)]
 mod tests {

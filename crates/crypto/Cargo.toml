@@ -6,7 +6,11 @@ version.workspace = true
 [dependencies]
 bip39 = { version = "2.2.2", features = ["zeroize"] }
 chacha20poly1305 = "0.11.0"
-ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+# Same version ed25519-dalek is built on; used directly for the
+# per-day key blinding in `dht_record.rs`.
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["alloc", "digest", "zeroize"] }
+# `hazmat` for signing under a blinded key (`dht_record.rs`).
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "hazmat"] }
 getrandom = "0.4.3"
 # SFrame (RFC 9605) media keys, cipher suite AES_128_GCM_SHA256_128.
 # See `sframe.rs`.

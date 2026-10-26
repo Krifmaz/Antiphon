@@ -28,6 +28,8 @@ pub enum NetError {
     FileHolderTimeout,
     #[error("the VPN is down and the kill switch is on, so this was not sent over your real connection")]
     KillSwitch,
+    #[error("none of the DHT bootstrap nodes answered")]
+    DhtUnreachable,
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }
