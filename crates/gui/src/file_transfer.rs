@@ -450,7 +450,12 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
         | ControlMessage::AudioMissing { .. }
         | ControlMessage::FriendRequest { .. }
         | ControlMessage::FriendAccept { .. }
-        | ControlMessage::FriendReject => {}
+        | ControlMessage::FriendReject
+        | ControlMessage::GroupConnect { .. }
+        | ControlMessage::GroupPunch { .. }
+        | ControlMessage::GroupPunchAddr { .. }
+        | ControlMessage::GroupPunchPeer { .. }
+        | ControlMessage::GroupLeave => {}
         ControlMessage::FileOffer {
             transfer_id,
             file_name,

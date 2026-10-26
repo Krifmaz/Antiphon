@@ -33,7 +33,8 @@ Every crate's `lib.rs` doc comment states its scope against the spec.
 
 The short version of [`FEATURES.md`](FEATURES.md):
 
-- **Real:** the 1:1 encrypted call path end to end, the whole §1 audio
+- **Real:** the encrypted call path end to end, 1:1 or a mesh of up to
+  five, direct or through a self-hosted relay, the whole §1 audio
   suite, lost-audio recovery (FEC, retransmit, adaptive jitter buffer,
   replay history, catch-up), file transfer with resume and send-rate
   control, chat persisted encrypted at rest with an outbox, QR / link
@@ -46,7 +47,7 @@ The short version of [`FEATURES.md`](FEATURES.md):
   sealing on Windows only; Caps Lock as push-to-talk works on Windows
   and X11 but not yet on macOS or Wayland.
 - **Not built:** anything that needs infrastructure the app does not
-  have yet -- the DHT, group calls / MLS / SFU, mailbox nodes and the
+  have yet -- the DHT, large group calls / MLS / SFU, mailbox nodes and the
   tiered delivery routes, VPN integration, mobile clients, push
   notifications. Each is a project on its own and is listed as such.
 

@@ -147,6 +147,21 @@ pub enum ControlMessage {
     /// with the contact rather than only one side.
     FriendAccept { display_name: String },
     FriendReject,
+    /// Group calls (spec §3 "up to ~5 people, direct mesh"): the person
+    /// who added someone asks two members to connect to each other through
+    /// a relay. `dial` says which side dials and which registers and
+    /// listens; `peer_key` is who must answer, checked against the
+    /// handshake so a stranger who learned the token can't slip in.
+    GroupConnect { pair: u64, peer_key: String, relay: String, token: String, dial: bool },
+    /// The same without a relay: find your public address on a fresh
+    /// socket and report it, so the two members can punch through to each
+    /// other directly.
+    GroupPunch { pair: u64, peer_key: String },
+    GroupPunchAddr { pair: u64, addr: String },
+    GroupPunchPeer { pair: u64, peer_key: String, addr: String },
+    /// Leaving the group call. The 1:1 path has no hang-up message; a
+    /// group needs one, or everyone else keeps mixing a silent leg.
+    GroupLeave,
 }
 
 impl ControlMessage {

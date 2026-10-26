@@ -174,6 +174,8 @@ pub struct ActiveCall {
     /// after the user edits their profile mid-call) via `AppState::runtime`
     /// -- see `main::sync_transmit_from_ui`'s sibling for profile pushes.
     pub peer: Arc<PeerConnection>,
+    /// Everyone beyond `peer` in a group call (spec §3).
+    pub group: Arc<crate::group::Group>,
     /// Live Monitoring (spec §1 Utility): hear your own processed mic in
     /// your headphones. Toggling this doesn't open/close a stream -- the
     /// monitor playback stream runs for the whole call, this just decides
@@ -1473,6 +1475,9 @@ pub fn start_pipeline(
     let sample_rate = capture.sample_rate;
     let chain = Arc::new(Mutex::new(AudioChain::from_config(sample_rate, &config)));
 
+    // Spec §3 group calls: everyone beyond the primary connection.
+    let group = Arc::new(crate::group::Group::default());
+    let send_group = group.clone();
     let send_peer = peer.clone();
     let send_muted = muted.clone();
     let send_ptt = ptt_active.clone();
@@ -1565,6 +1570,11 @@ pub fn start_pipeline(
                 if let Err(e) = send_peer.send_audio(&bytes).await {
                     eprintln!("[net] send error: {e}");
                 }
+                // Spec §3 group mesh: the same sealed-per-person frame to
+                // everyone else in the call, one upload each.
+                for leg in send_group.leg_peers() {
+                    let _ = leg.send_audio(&bytes).await;
+                }
             } else {
                 // Cleared while not transmitting, so the first frame after
                 // a pause doesn't offer a backup copy of audio from before
@@ -1587,6 +1597,7 @@ pub fn start_pipeline(
     let recv_peer = peer.clone();
     let recv_jitter = jitter.clone();
     let recv_profile = peer_profile.clone();
+    let recv_group = group.clone();
     let recv_ft_state = file_transfer_state.clone();
     let recv_ft_peer = peer.clone();
     let recv_chat_log = chat_log.clone();
@@ -1619,6 +1630,12 @@ pub fn start_pipeline(
                     }
                 }
                 Received::Control(bytes) => match ControlMessage::decode(&bytes) {
+                    Some(m) if crate::group::is_group_message(&m) => {
+                        recv_group.inbox.lock().unwrap().push((crate::group::Link::Primary, m));
+                    }
+                    // The primary connection leaving ends this call, as a
+                    // 1:1 hang-up always has; nothing more to do here.
+                    Some(ControlMessage::GroupLeave) => {}
                     Some(ControlMessage::Hello(hello)) => {
                         // Spec §9: the caller said up front that this is a
                         // knock. Handled here, on the same flag the
@@ -1769,10 +1786,16 @@ pub fn start_pipeline(
     let drain_peer_eq = peer_eq.clone();
     let drain_ptt = ptt_active.clone();
     let drain_peer_muted = peer_muted.clone();
+    let drain_group = group.clone();
+    // Spec §3 group calls and §1 ducking: everyone's audio meets here.
+    // The primary connection is source 0; each leg is its id + 1.
+    let mut mixer = crate::mixer::Mixer::default();
+    let mut mixed_legs: Vec<u64> = Vec::new();
     let drain_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         loop {
             tick.tick().await;
+            mixer.set_duck_db(drain_duck_db.load(Ordering::Relaxed) as f32);
             // Cheap no-op most ticks (a single mutex check, internally
             // throttled to once every couple of seconds) -- riding the
             // existing 10ms tick instead of a dedicated timer.
@@ -1899,27 +1922,63 @@ pub fn start_pipeline(
                     let speed = catch_up_speed(backlog);
                     catch_up_out.clear();
                     catch_up.process(&samples, speed, &mut catch_up_out);
-                    drain_sink.lock().unwrap().push(&catch_up_out);
+                    mixer.push(0, &catch_up_out);
+                }
+            }
 
-                    // The echo canceller's reference is what actually
-                    // reaches the speaker -- after the gain, the ducking
-                    // and the EQ -- because that is what the room hears
-                    // and therefore what comes back. Feeding it the raw
-                    // received audio instead would have it hunting for an
-                    // echo of a signal nobody played.
-                    {
-                        let mut far = drain_aec_far.lock().unwrap();
-                        far.extend(catch_up_out.iter().copied());
-                        while far.len() > AEC_REFERENCE_SAMPLES {
-                            far.pop_front();
-                        }
+            // Spec §3 group calls: everyone else, at the master level and
+            // under the same deafen switch, mixed with the primary.
+            let legs = drain_group.leg_audio();
+            mixed_legs.retain(|id| {
+                let present = legs.iter().any(|(leg, _)| leg == id);
+                if !present {
+                    mixer.remove(id + 1);
+                }
+                present
+            });
+            let master = 10f32.powf(*output_gain_db.lock().unwrap() / 20.0);
+            for (id, leg_jitter) in legs {
+                if !mixed_legs.contains(&id) {
+                    mixed_legs.push(id);
+                }
+                let mut leg_jitter = leg_jitter.lock().unwrap();
+                // Legs repair with FEC only; the requests are dropped so
+                // they don't pile up.
+                leg_jitter.take_retransmit_requests();
+                while let PopResult::Frame(mut samples)
+                | PopResult::Recovered(mut samples)
+                | PopResult::Concealed(mut samples) = leg_jitter.pop_ready()
+                {
+                    if drain_deafened.load(Ordering::Relaxed) {
+                        continue;
                     }
+                    for s in &mut samples {
+                        *s *= master;
+                    }
+                    mixer.push(id + 1, &samples);
+                }
+            }
+
+            let out = mixer.pull();
+            if !out.is_empty() {
+                drain_sink.lock().unwrap().push(&out);
+                // The echo canceller's reference is what actually
+                // reaches the speaker -- after the gain, the ducking, the
+                // EQ and the mix -- because that is what the room hears
+                // and therefore what comes back. Feeding it the raw
+                // received audio instead would have it hunting for an
+                // echo of a signal nobody played.
+                let mut far = drain_aec_far.lock().unwrap();
+                far.extend(out.iter().copied());
+                while far.len() > AEC_REFERENCE_SAMPLES {
+                    far.pop_front();
                 }
             }
         }
     });
 
     Ok(ActiveCall {
+        group,
         echo_canceller,
         chain,
         sample_rate: AtomicU32::new(sample_rate),

@@ -1491,6 +1491,10 @@ export component MainWindow inherits Window {
     in-out property <string> replay-notice: "";
     // Spec §2 "Ask me": a clip is waiting behind a Replay button.
     in-out property <bool> replay-ask: false;
+    // Spec §3 group calls: everyone in the call, you included, and the
+    // names of everyone beyond the person you're connected to.
+    in-out property <int> group-people: 2;
+    in-out property <string> group-names: "";
     callback replay-settings-changed();
 
     in-out property <int> my-presence: 0;
@@ -2281,6 +2285,12 @@ export component MainWindow inherits Window {
                             wrap: word-wrap;
                         }
                     }
+                    // Spec §3 group calls / §9: who else is here.
+                    if connected && group-people > 2 : Text {
+                        text: "Voice active · \{group-people} people -- also with \{group-names}";
+                        font-size: 11px * text-scale;
+                        wrap: word-wrap;
+                    }
                     // Spec §2 "Ask me (popup button)".
                     if connected && replay-ask : HorizontalBox {
                         padding: 0px;
@@ -2723,7 +2733,11 @@ export component MainWindow inherits Window {
                             enabled: connected && c.fingerprint != "";
                             clicked => { introduce-contact(i); }
                         }
-                        Button { text: "Call"; enabled: !connected; clicked => { call-contact(i); } }
+                        Button {
+                            text: connected ? "Add" : "Call";
+                            enabled: !connected || group-people < 5;
+                            clicked => { call-contact(i); }
+                        }
                         Button { text: "Forget"; clicked => { forget-history(i); } }
                         Button { text: "X"; clicked => { remove-contact(i); } }
                     }

@@ -1,6 +1,8 @@
 mod animated_image;
 mod caps_lock;
 mod connection_mode;
+mod mixer;
+mod group;
 mod config;
 mod content_store;
 mod crash_report;
@@ -420,6 +422,32 @@ fn main() -> anyhow::Result<()> {
                 app.set_introduction_message(message.into());
             }
 
+            // Spec §3 group calls: act on introductions, notice who
+            // left, and keep the participant line current.
+            let inbox: Vec<_> = std::mem::take(&mut *active.group.inbox.lock().unwrap());
+            if !inbox.is_empty() {
+                let ctx = group_context(&app, &meter_app_state, active);
+                for (link, message) in inbox {
+                    let ctx = ctx.clone();
+                    meter_app_state.runtime.spawn(async move { ctx.handle(link, message).await });
+                }
+            }
+            for (_, name) in active.group.remove_departed() {
+                *active.group.notice.lock().unwrap() = format!("{name} left the call.");
+            }
+            {
+                let notice = std::mem::take(&mut *active.group.notice.lock().unwrap());
+                if !notice.is_empty() {
+                    app.set_contacts_message(notice.into());
+                }
+                let names = active.group.names();
+                let people = active.group.people() as i32;
+                if app.get_group_people() != people || app.get_group_names().as_str() != names.join(", ") {
+                    app.set_group_people(people);
+                    app.set_group_names(names.join(", ").into());
+                }
+            }
+
             let pending = active.pending_friend_request.lock().unwrap().clone();
             app.set_friend_request_from(pending.unwrap_or_default().into());
             // The peer accepted a request we sent -- save them now that
@@ -595,6 +623,71 @@ fn local_hello(app: &MainWindow) -> Hello {
     }
 }
 
+/// Brings `contact` into the current call (spec §3 group calls), reaching
+/// them the same way a call to them on its own would.
+fn add_to_group_call(app: &MainWindow, state: &Arc<AppState>, contact: config::Contact) {
+    let ctx = {
+        let call = state.call.lock().unwrap();
+        let Some(active) = call.as_ref() else { return };
+        if active.group.is_full() {
+            app.set_contacts_message(format!("A group call holds up to {} people.", group::MAX_PEOPLE).into());
+            return;
+        }
+        group_context(app, state, active)
+    };
+    let plan = match connection_mode::plan(&contact, &state.identity, now_secs()) {
+        Ok(plan) => plan,
+        Err(reason) => {
+            app.set_contacts_message(reason.into());
+            return;
+        }
+    };
+    app.set_contacts_message(format!("Adding {}...", contact.name).into());
+    let identity = state.identity.clone();
+    let window_weak = app.as_weak();
+    let name = contact.name.clone();
+    state.runtime.spawn(async move {
+        let connected = match plan {
+            connection_mode::Plan::Direct { address } => match address.parse() {
+                Ok(addr) => state::establish_call(addr, 0, identity).await.map(|p| (p, false)),
+                Err(_) => Err(anyhow::anyhow!("{address} isn't an address")),
+            },
+            connection_mode::Plan::Relay { relay, token } => async {
+                let addr = state::resolve(&relay).await?;
+                state::establish_relayed_call(addr, token, 0, identity).await
+            }
+            .await
+            .map(|p| (p, true)),
+        };
+        let message = match connected {
+            Ok((peer, relayed)) => match ctx.add_person(peer, relayed).await {
+                Ok(m) => m,
+                Err(e) => e,
+            },
+            Err(e) => format!("Couldn't add {name}: {e}"),
+        };
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = window_weak.upgrade() {
+                app.set_contacts_message(message.into());
+            }
+        })
+        .ok();
+    });
+}
+
+/// What acting on group-call messages needs (spec §3).
+fn group_context(app: &MainWindow, state: &Arc<AppState>, active: &state::ActiveCall) -> group::Context {
+    let relay = app.get_relay_server().trim().to_string();
+    group::Context {
+        group: active.group.clone(),
+        primary: active.peer.clone(),
+        identity: state.identity.clone(),
+        hello: local_hello(app),
+        relay: (!relay.is_empty()).then_some(relay),
+        is_blocked: Arc::new(is_peer_blocked),
+    }
+}
+
 /// Records the relay a saved contact listens at. Strangers are not saved.
 fn save_peer_relay(identity_key: &[u8; 32], relay: &str) {
     let mut config = config::load();
@@ -707,6 +800,10 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 config.calls_completed = config.calls_completed.saturating_add(1);
                 config::save(&config);
                 apply_onboarding(&app, &config);
+            }
+            if let Some(active) = state.call.lock().unwrap().as_ref() {
+                let _guard = state.runtime.enter();
+                active.group.announce_leaving(&active.peer);
             }
             *state.call.lock().unwrap() = None; // Drop tears the call down.
             file_transfer::set_call_active(false);
@@ -2438,6 +2535,11 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let Some(app) = window_weak.upgrade() else { return };
             let contacts = config::load().contacts;
             let Some(contact) = usize::try_from(index).ok().and_then(|i| contacts.get(i)) else { return };
+            // Spec §3: during a call, the same button adds them to it.
+            if app.get_connected() {
+                add_to_group_call(&app, &state, contact.clone());
+                return;
+            }
             // Spec §3: direct for known contacts, through a relay for
             // everyone else, unless this conversation says otherwise.
             match connection_mode::plan(contact, &state.identity, now_secs()) {

@@ -313,6 +313,7 @@ dependencies = [
  "antiphon-crypto",
  "antiphon-net",
  "antiphon-protocol",
+ "antiphon-relay",
  "anyhow",
  "device_query",
  "dirs",

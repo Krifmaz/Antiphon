@@ -1,0 +1,587 @@
+//! Group calls (spec §3 "Group calls": "Up to ~5 people -- direct mesh, no
+//! infrastructure").
+//!
+//! A call starts as 1:1 and stays that shape underneath: the person you
+//! called or who called you is the *primary* connection, and everything
+//! a 1:1 call does -- chat, files, verification -- rides on it unchanged.
+//! Each further person is a **leg**: a connection of its own, carrying
+//! audio and a profile, mixed into what you hear by `crate::mixer`.
+//!
+//! **Mesh**, not a star: when someone adds a person, every existing member
+//! connects to the newcomer directly, so nobody's audio passes through
+//! anyone else's machine. The person who did the adding only introduces
+//! them, in one of two ways:
+//!
+//! - **Through a relay**, when they have one: both members get the same
+//!   one-off token; one registers it and listens, the other dials it.
+//!   Neither learns the other's IP address, which is the right default
+//!   for two people who may be strangers to each other (spec §3
+//!   "everyone else -> relay").
+//! - **Punching**, when there is no relay: each member finds its public
+//!   address on a fresh socket, the introducer swaps the two, and both
+//!   punch through at once.
+//!
+//! Either way the newcomer has to *prove* to be the identity named in the
+//! introduction -- checked against the handshake -- so a token that leaked
+//! cannot be used to join a call.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use antiphon_crypto::IdentityKeyPair;
+use antiphon_net::{JitterBuffer, PeerConnection, Received};
+use tokio::net::UdpSocket;
+use tokio::task::JoinHandle;
+
+use crate::connection_mode::{decode_hex32, encode_hex32};
+use crate::control::{ControlMessage, Hello};
+
+/// Including you. Past this a mesh costs every member one upload per
+/// person, and the spec hands that size to an SFU.
+pub const MAX_PEOPLE: usize = 5;
+
+const JITTER_MAX_WAIT: Duration = Duration::from_millis(60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Where a group message came from, so a reply goes back the same way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Link {
+    Primary,
+    Leg(u64),
+}
+
+/// One more person in the call.
+pub struct Leg {
+    pub id: u64,
+    pub peer: Arc<PeerConnection>,
+    pub jitter: Arc<Mutex<JitterBuffer>>,
+    pub profile: Arc<Mutex<Option<Hello>>>,
+    pub relayed: bool,
+    left: Arc<AtomicBool>,
+    recv_task: JoinHandle<()>,
+}
+
+impl Drop for Leg {
+    fn drop(&mut self) {
+        self.recv_task.abort();
+    }
+}
+
+impl Leg {
+    pub fn name(&self) -> String {
+        match self.profile.lock().unwrap().as_ref() {
+            Some(h) if !h.display_name.is_empty() => h.display_name.clone(),
+            _ => antiphon_crypto::fingerprint(&self.peer.peer_identity().identity_key),
+        }
+    }
+}
+
+/// A pair the introducer is matching up without a relay.
+struct PunchPair {
+    a: (Link, [u8; 32], Option<String>),
+    b: (Link, [u8; 32], Option<String>),
+}
+
+/// Everything about the call beyond the primary connection.
+#[derive(Default)]
+pub struct Group {
+    legs: Mutex<Vec<Leg>>,
+    next_id: AtomicU64,
+    /// Group messages waiting for the UI thread to act on.
+    pub inbox: Mutex<Vec<(Link, ControlMessage)>>,
+    /// Fresh sockets that reported a public address, awaiting the other
+    /// member's, by pair.
+    punch_sockets: Mutex<HashMap<u64, Arc<UdpSocket>>>,
+    /// Pairs this machine introduced without a relay.
+    punch_pairs: Mutex<HashMap<u64, PunchPair>>,
+    /// The latest thing worth telling the user, cleared once shown.
+    pub notice: Mutex<String>,
+}
+
+impl Group {
+    pub fn people(&self) -> usize {
+        self.legs.lock().unwrap().len() + 2
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.people() >= MAX_PEOPLE
+    }
+
+    /// Everyone's names, for the call screen.
+    /// Spec §3: how each is connected is shown too, since a relayed leg
+    /// hides IP addresses and a direct one does not.
+    pub fn names(&self) -> Vec<String> {
+        self.legs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| if l.relayed { format!("{} (relayed)", l.name()) } else { l.name() })
+            .collect()
+    }
+
+    pub fn leg_peers(&self) -> Vec<Arc<PeerConnection>> {
+        self.legs.lock().unwrap().iter().map(|l| l.peer.clone()).collect()
+    }
+
+    pub fn leg_keys(&self) -> Vec<[u8; 32]> {
+        self.legs.lock().unwrap().iter().map(|l| l.peer.peer_identity().identity_key).collect()
+    }
+
+    /// Each leg's id and jitter buffer, for the playback loop.
+    pub fn leg_audio(&self) -> Vec<(u64, Arc<Mutex<JitterBuffer>>)> {
+        self.legs.lock().unwrap().iter().map(|l| (l.id, l.jitter.clone())).collect()
+    }
+
+    fn peer_for(&self, link: Link, primary: &Arc<PeerConnection>) -> Option<Arc<PeerConnection>> {
+        match link {
+            Link::Primary => Some(primary.clone()),
+            Link::Leg(id) => self.legs.lock().unwrap().iter().find(|l| l.id == id).map(|l| l.peer.clone()),
+        }
+    }
+
+    fn key_for(&self, link: Link, primary: &Arc<PeerConnection>) -> Option<[u8; 32]> {
+        self.peer_for(link, primary).map(|p| p.peer_identity().identity_key)
+    }
+
+    /// Drops legs whose person said they were leaving. Returns their ids,
+    /// so the mixer can forget them too.
+    pub fn remove_departed(&self) -> Vec<(u64, String)> {
+        let mut legs = self.legs.lock().unwrap();
+        let gone: Vec<(u64, String)> =
+            legs.iter().filter(|l| l.left.load(Ordering::Relaxed)).map(|l| (l.id, l.name())).collect();
+        legs.retain(|l| !l.left.load(Ordering::Relaxed));
+        gone
+    }
+
+    /// Adds a connected person as a leg and starts receiving from them.
+    pub fn add_leg(self: &Arc<Self>, peer: PeerConnection, relayed: bool, hello: Hello) -> Option<u64> {
+        let key = peer.peer_identity().identity_key;
+        if self.leg_keys().contains(&key) || self.is_full() {
+            return None;
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let peer = Arc::new(peer);
+        let jitter = Arc::new(Mutex::new(JitterBuffer::new(JITTER_MAX_WAIT)));
+        let profile = Arc::new(Mutex::new(None));
+        let left = Arc::new(AtomicBool::new(false));
+
+        let recv_task = {
+            let (jitter, profile, left, group) = (jitter.clone(), profile.clone(), left.clone(), self.clone());
+            let recv_peer = peer.clone();
+            tokio::spawn(async move {
+                let _ = recv_peer
+                    .recv_loop(move |message| match message {
+                        Received::Audio { plaintext, .. } => {
+                            if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
+                                jitter.lock().unwrap().push_with_backup(
+                                    decoded.sequence as u64,
+                                    decoded.primary,
+                                    decoded.backup,
+                                );
+                            }
+                        }
+                        Received::Control(bytes) => match ControlMessage::decode(&bytes) {
+                            Some(ControlMessage::Hello(h)) => *profile.lock().unwrap() = Some(h),
+                            Some(ControlMessage::GroupLeave) => left.store(true, Ordering::Relaxed),
+                            Some(m) if is_group_message(&m) => group.inbox.lock().unwrap().push((Link::Leg(id), m)),
+                            _ => {}
+                        },
+                        // Files and chat stay on the primary connection.
+                        Received::File(_) => {}
+                    })
+                    .await;
+            })
+        };
+
+        {
+            let peer = peer.clone();
+            tokio::spawn(async move {
+                let _ = peer.send_control(&ControlMessage::Hello(hello).encode()).await;
+            });
+        }
+        self.legs.lock().unwrap().push(Leg { id, peer, jitter, profile, relayed, left, recv_task });
+        Some(id)
+    }
+
+    /// Tells everyone we're going. Best effort, and spawned so it outlives
+    /// the call being torn down.
+    pub fn announce_leaving(&self, primary: &Arc<PeerConnection>) {
+        let mut peers = self.leg_peers();
+        if peers.is_empty() {
+            return;
+        }
+        peers.push(primary.clone());
+        tokio::spawn(async move {
+            for p in peers {
+                let _ = p.send_control(&ControlMessage::GroupLeave.encode()).await;
+            }
+        });
+    }
+}
+
+pub fn is_group_message(m: &ControlMessage) -> bool {
+    matches!(
+        m,
+        ControlMessage::GroupConnect { .. }
+            | ControlMessage::GroupPunch { .. }
+            | ControlMessage::GroupPunchAddr { .. }
+            | ControlMessage::GroupPunchPeer { .. }
+    )
+}
+
+/// Whether an identity key is blocked.
+pub type BlockCheck = Arc<dyn Fn(&[u8; 32]) -> bool + Send + Sync>;
+
+/// What acting on group messages needs from the rest of the app.
+#[derive(Clone)]
+pub struct Context {
+    pub group: Arc<Group>,
+    pub primary: Arc<PeerConnection>,
+    pub identity: Arc<IdentityKeyPair>,
+    pub hello: Hello,
+    /// Our relay, `host:port`, if there is one.
+    pub relay: Option<String>,
+    /// Spec §9: blocked people are refused here as everywhere else.
+    pub is_blocked: BlockCheck,
+}
+
+impl Context {
+    fn admit(&self, peer: PeerConnection, expected: &[u8; 32], relayed: bool) -> Result<(), String> {
+        let key = peer.peer_identity().identity_key;
+        if &key != expected {
+            return Err("someone other than who was introduced answered, so they were not let in".into());
+        }
+        if (self.is_blocked)(&key) {
+            return Err("a person you blocked was added to the call; you are not connected to them".into());
+        }
+        self.group.add_leg(peer, relayed, self.hello.clone()).map(|_| ()).ok_or_else(|| "the call is full".into())
+    }
+
+    fn say(&self, text: impl Into<String>) {
+        *self.group.notice.lock().unwrap() = text.into();
+    }
+
+    async fn send(&self, link: Link, message: ControlMessage) {
+        if let Some(peer) = self.group.peer_for(link, &self.primary) {
+            let _ = peer.send_control(&message.encode()).await;
+        }
+    }
+
+    /// Adds `peer`, already connected, then introduces them to everyone
+    /// else in the call so the mesh closes.
+    pub async fn add_person(&self, peer: PeerConnection, relayed: bool) -> Result<String, String> {
+        let new_key = peer.peer_identity().identity_key;
+        if new_key == self.primary.peer_identity().identity_key || self.group.leg_keys().contains(&new_key) {
+            return Err("They're already in the call.".into());
+        }
+        let others: Vec<(Link, [u8; 32])> = std::iter::once((Link::Primary, self.primary.peer_identity().identity_key))
+            .chain(self.group.legs.lock().unwrap().iter().map(|l| (Link::Leg(l.id), l.peer.peer_identity().identity_key)))
+            .collect();
+        let Some(new_id) = self.group.add_leg(peer, relayed, self.hello.clone()) else {
+            return Err(format!("A group call holds up to {MAX_PEOPLE} people."));
+        };
+        let new_link = Link::Leg(new_id);
+
+        for (link, key) in others {
+            let pair = random_u64();
+            match &self.relay {
+                Some(relay) => {
+                    let token = encode_hex32(&random_32());
+                    // The newcomer listens and the existing member dials:
+                    // the member is already in a call, so it is the one
+                    // whose socket is free to dial out from.
+                    self.send(new_link, ControlMessage::GroupConnect {
+                        pair,
+                        peer_key: encode_hex32(&key),
+                        relay: relay.clone(),
+                        token: token.clone(),
+                        dial: false,
+                    })
+                    .await;
+                    self.send(link, ControlMessage::GroupConnect {
+                        pair,
+                        peer_key: encode_hex32(&new_key),
+                        relay: relay.clone(),
+                        token,
+                        dial: true,
+                    })
+                    .await;
+                }
+                None => {
+                    self.group.punch_pairs.lock().unwrap().insert(
+                        pair,
+                        PunchPair { a: (new_link, new_key, None), b: (link, key, None) },
+                    );
+                    self.send(new_link, ControlMessage::GroupPunch { pair, peer_key: encode_hex32(&key) }).await;
+                    self.send(link, ControlMessage::GroupPunch { pair, peer_key: encode_hex32(&new_key) }).await;
+                }
+            }
+        }
+        Ok(format!("Added. {} people in the call.", self.group.people()))
+    }
+
+    /// Acts on one group message from `link`.
+    pub async fn handle(&self, link: Link, message: ControlMessage) {
+        match message {
+            ControlMessage::GroupConnect { pair: _, peer_key, relay, token, dial } => {
+                let (Some(expected), Some(token)) = (decode_hex32(&peer_key), decode_hex32(&token)) else { return };
+                if self.group.is_full() {
+                    return;
+                }
+                let result = async {
+                    let relay_addr = crate::state::resolve(&relay).await.map_err(|e| e.to_string())?;
+                    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await.map_err(|e| e.to_string())?);
+                    let peer = if dial {
+                        dial_with_retry(&socket, relay_addr, token).await?;
+                        tokio::time::timeout(CONNECT_TIMEOUT, PeerConnection::connect(socket, relay_addr, &self.identity))
+                            .await
+                            .map_err(|_| "they never answered".to_string())?
+                            .map_err(|e| e.to_string())?
+                    } else {
+                        let weak = Arc::downgrade(&socket);
+                        tokio::spawn(async move {
+                            // Registered until connected (the socket is
+                            // then owned by the leg) or given up on.
+                            for _ in 0..(CONNECT_TIMEOUT.as_secs() / 2) {
+                                let Some(s) = weak.upgrade() else { break };
+                                let _ = antiphon_net::relay::register(&s, relay_addr, &[token]).await;
+                                drop(s);
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                        });
+                        tokio::time::timeout(CONNECT_TIMEOUT, PeerConnection::listen(socket, &self.identity))
+                            .await
+                            .map_err(|_| "they never arrived".to_string())?
+                            .map_err(|e| e.to_string())?
+                    };
+                    self.admit(peer, &expected, true)
+                }
+                .await;
+                if let Err(e) = result {
+                    self.say(format!("Couldn't connect to someone in the group: {e}"));
+                }
+            }
+            ControlMessage::GroupPunch { pair, peer_key: _ } => {
+                if self.group.is_full() {
+                    return;
+                }
+                match crate::state::discover_public_address(0).await {
+                    Ok((addr, socket)) => {
+                        self.group.punch_sockets.lock().unwrap().insert(pair, socket);
+                        self.send(link, ControlMessage::GroupPunchAddr { pair, addr: addr.to_string() }).await;
+                    }
+                    Err(e) => self.say(format!("Couldn't find this machine's public address for the group: {e}")),
+                }
+            }
+            ControlMessage::GroupPunchAddr { pair, addr } => {
+                // Only the introducer, matching a pair it set up, and only
+                // from one of the two members it asked.
+                let Some(from_key) = self.group.key_for(link, &self.primary) else { return };
+                let ready = {
+                    let mut pairs = self.group.punch_pairs.lock().unwrap();
+                    let Some(p) = pairs.get_mut(&pair) else { return };
+                    if p.a.1 == from_key {
+                        p.a.2 = Some(addr);
+                    } else if p.b.1 == from_key {
+                        p.b.2 = Some(addr);
+                    } else {
+                        return;
+                    }
+                    match (&p.a.2, &p.b.2) {
+                        (Some(_), Some(_)) => pairs.remove(&pair),
+                        _ => None,
+                    }
+                };
+                if let Some(PunchPair { a, b }) = ready {
+                    let (a_addr, b_addr) = (a.2.unwrap_or_default(), b.2.unwrap_or_default());
+                    self.send(a.0, ControlMessage::GroupPunchPeer { pair, peer_key: encode_hex32(&b.1), addr: b_addr }).await;
+                    self.send(b.0, ControlMessage::GroupPunchPeer { pair, peer_key: encode_hex32(&a.1), addr: a_addr }).await;
+                }
+            }
+            ControlMessage::GroupPunchPeer { pair, peer_key, addr } => {
+                let Some(expected) = decode_hex32(&peer_key) else { return };
+                let Some(socket) = self.group.punch_sockets.lock().unwrap().remove(&pair) else { return };
+                let Ok(addr) = addr.parse::<SocketAddr>() else { return };
+                match PeerConnection::punch(socket, addr, CONNECT_TIMEOUT, &self.identity).await {
+                    Ok(peer) => {
+                        if let Err(e) = self.admit(peer, &expected, false) {
+                            self.say(format!("Couldn't add someone to the group: {e}"));
+                        }
+                    }
+                    Err(e) => self.say(format!(
+                        "Couldn't reach someone in the group directly ({e}). A relay in Settings > Call fixes this."
+                    )),
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn dial_with_retry(socket: &UdpSocket, relay: SocketAddr, token: [u8; 32]) -> Result<(), String> {
+    // The listener may register a moment after we're told to dial.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match antiphon_net::relay::dial(socket, relay, token, Duration::from_secs(3)).await {
+            Ok(()) => return Ok(()),
+            Err(_) if tokio::time::Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(500)).await,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+fn random_32() -> [u8; 32] {
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).expect("OS randomness is unavailable");
+    b
+}
+
+fn random_u64() -> u64 {
+    u64::from_le_bytes(random_32()[..8].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hello(name: &str) -> Hello {
+        Hello {
+            display_name: name.into(),
+            status_message: String::new(),
+            presence: None,
+            wants_silent: false,
+            relay: String::new(),
+        }
+    }
+
+    async fn connected_pair() -> (PeerConnection, PeerConnection) {
+        let a_id = IdentityKeyPair::generate();
+        let b_id = IdentityKeyPair::generate();
+        let a_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let b_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let b_addr = b_sock.local_addr().unwrap();
+        let listen = tokio::spawn(async move { PeerConnection::listen(b_sock, &b_id).await.unwrap() });
+        let a = PeerConnection::connect(a_sock, b_addr, &a_id).await.unwrap();
+        (a, listen.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_group_holds_at_most_five_people() {
+        let group = Arc::new(Group::default());
+        let mut keep = Vec::new();
+        for i in 0..MAX_PEOPLE {
+            let (a, b) = connected_pair().await;
+            let added = group.add_leg(a, false, hello("me"));
+            if i < MAX_PEOPLE - 2 {
+                assert!(added.is_some(), "leg {i}");
+            } else {
+                assert!(added.is_none(), "leg {i} should not fit");
+            }
+            keep.push(b);
+        }
+        assert_eq!(group.people(), MAX_PEOPLE);
+    }
+
+    #[tokio::test]
+    async fn the_same_person_is_not_added_twice() {
+        let group = Arc::new(Group::default());
+        let (a, _b) = connected_pair().await;
+        let key = a.peer_identity();
+        assert!(group.add_leg(a, false, hello("me")).is_some());
+        assert_eq!(group.leg_keys(), vec![key.identity_key]);
+    }
+
+    #[tokio::test]
+    async fn a_leg_carries_audio_and_a_leave_removes_it() {
+        let group = Arc::new(Group::default());
+        let (mine, theirs) = connected_pair().await;
+        let id = group.add_leg(mine, false, hello("me")).unwrap();
+        let theirs = Arc::new(theirs);
+        let frame = antiphon_net::fec::encode(0, &[0.25; 960], None);
+        theirs.send_audio(&frame).await.unwrap();
+        theirs.send_control(&ControlMessage::Hello(hello("Carol")).encode()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(group.names(), vec!["Carol".to_string()]);
+        let (leg_id, jitter) = group.leg_audio().remove(0);
+        assert_eq!(leg_id, id);
+        assert!(jitter.lock().unwrap().backlog_frames() > 0 || !matches!(jitter.lock().unwrap().pop_ready(), antiphon_net::PopResult::Empty));
+
+        theirs.send_control(&ControlMessage::GroupLeave.encode()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(group.remove_departed(), vec![(id, "Carol".to_string())]);
+        assert_eq!(group.people(), 2);
+    }
+
+    /// Feeds group messages arriving on a primary connection into that
+    /// member's inbox, as `state::start_pipeline` does in the app.
+    fn pump_primary(peer: Arc<PeerConnection>, group: Arc<Group>) {
+        tokio::spawn(peer.recv_loop(move |m| {
+            if let Received::Control(bytes) = m {
+                if let Some(m) = ControlMessage::decode(&bytes).filter(is_group_message) {
+                    group.inbox.lock().unwrap().push((Link::Primary, m));
+                }
+            }
+        }));
+    }
+
+    async fn pair_between(a: &Arc<IdentityKeyPair>, b: &Arc<IdentityKeyPair>) -> (PeerConnection, PeerConnection) {
+        let a_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let b_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let b_addr = b_sock.local_addr().unwrap();
+        let b2 = b.clone();
+        let listen = tokio::spawn(async move { PeerConnection::listen(b_sock, &b2).await.unwrap() });
+        let a_conn = PeerConnection::connect(a_sock, b_addr, a).await.unwrap();
+        (a_conn, listen.await.unwrap())
+    }
+
+    fn context(group: Arc<Group>, primary: Arc<PeerConnection>, identity: Arc<IdentityKeyPair>, relay: Option<String>, name: &str) -> Context {
+        Context { group, primary, identity, hello: hello(name), relay, is_blocked: Arc::new(|_| false) }
+    }
+
+    #[tokio::test]
+    async fn adding_a_third_person_closes_the_mesh_through_a_relay() {
+        let relay_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let relay_addr = relay_socket.local_addr().unwrap();
+        tokio::spawn(antiphon_relay::run(
+            relay_socket,
+            Arc::new(Mutex::new(antiphon_relay::Relay::new(antiphon_relay::Limits::default()))),
+        ));
+
+        let (alice, bob, carol) = (
+            Arc::new(IdentityKeyPair::generate()),
+            Arc::new(IdentityKeyPair::generate()),
+            Arc::new(IdentityKeyPair::generate()),
+        );
+        // Alice is on a call with Bob, then calls Carol to add her.
+        let (a_b, b_a) = pair_between(&alice, &bob).await;
+        let (a_c, c_a) = pair_between(&alice, &carol).await;
+        let (g_a, g_b, g_c) = (Arc::new(Group::default()), Arc::new(Group::default()), Arc::new(Group::default()));
+        let (b_a, c_a) = (Arc::new(b_a), Arc::new(c_a));
+        pump_primary(b_a.clone(), g_b.clone());
+        pump_primary(c_a.clone(), g_c.clone());
+
+        let ctx_a = context(g_a.clone(), Arc::new(a_b), alice.clone(), Some(relay_addr.to_string()), "Alice");
+        let ctx_b = context(g_b.clone(), b_a, bob.clone(), None, "Bob");
+        let ctx_c = context(g_c.clone(), c_a, carol.clone(), None, "Carol");
+
+        ctx_a.add_person(a_c, false).await.unwrap();
+        assert_eq!(g_a.people(), 3);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while (g_b.people() < 3 || g_c.people() < 3) && tokio::time::Instant::now() < deadline {
+            for (ctx, g) in [(&ctx_b, &g_b), (&ctx_c, &g_c)] {
+                for (link, m) in std::mem::take(&mut *g.inbox.lock().unwrap()) {
+                    let ctx = ctx.clone();
+                    tokio::spawn(async move { ctx.handle(link, m).await });
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(g_b.leg_keys(), vec![carol.public().identity_key], "Bob should reach Carol directly");
+        assert_eq!(g_c.leg_keys(), vec![bob.public().identity_key], "Carol should reach Bob directly");
+        assert!(g_b.names()[0].contains("relayed"), "{:?}", g_b.names());
+    }
+}
