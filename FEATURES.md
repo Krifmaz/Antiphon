@@ -126,10 +126,10 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 
 - [x] **Known contacts → Direct P2P** ([`PeerConnection`](crates/net/src/peer.rs))
 - [x] NAT traversal — STUN discovery plus UDP hole punching ([`stun.rs`](crates/net/src/stun.rs), [`PeerConnection::punch`](crates/net/src/peer.rs))
-- [ ] **Relay (default for everyone else)** — no relay exists; every call is direct
+- [x] **Relay (default for everyone else)** — [`antiphon-relay`](crates/relay) pairs two sockets on a blinded token and forwards sealed frames byte for byte, so an unmodified `PeerConnection` aimed at the relay *is* the relayed call ([`net/src/relay.rs`](crates/net/src/relay.rs), real-socket test in [`relayed_call.rs`](crates/relay/tests/relayed_call.rs)). Self-hostable as a binary or Docker image; set in Settings > Call. A listener registers there, and invite links carry the relay plus a secret so a stranger can ring through it
 - [ ] **Anonymity mode** — multi-hop relay routing *(spec §11 defers to v1.5+)*
-- [ ] Mode chosen automatically by contact status, manually overridable per conversation
-- [x] **Active mode visible in the call UI with a one-line explanation** — "Connection: Direct", plus the line the spec asks for: connected straight to them with nothing in between, *which also means you can each see the other's IP address*. Both halves, because saying only the first would be selling it rather than explaining it. Modelled as an enum with one variant rather than a hardcoded string: the point of showing the mode is that it will one day differ
+- [x] **Mode chosen automatically by contact status, overridable per conversation** ([`connection_mode.rs`](crates/gui/src/connection_mode.rs)) — known contacts (a completed call or a verified key) go direct, everyone else through their relay; each contact row has Auto / Direct / Relay. With no relay to use, an automatic relay call is **refused with the reason** rather than quietly placed direct, since that would expose both IP addresses without saying so
+- [x] **Active mode visible in the call UI with a one-line explanation** — "Connection: Direct" (you can each see the other's IP address) or "Connection: Relayed" (neither of you can, and the relay can't read or hear anything), decided from where the connection actually arrived rather than from what was asked for
 
 ### Group calls
 
@@ -155,12 +155,12 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 
 ### What a relay operator can see — and the commitment
 
-- [ ] Blinded session tokens, no persistent user identifiers at the relay
-- [ ] No connection logs retained
-- [ ] The relay never holds a key to anything
-- [ ] All of the above stated publicly and plainly, not buried in a privacy policy
+- [x] **Blinded session tokens, no persistent user identifiers at the relay** ([`relay_token.rs`](crates/crypto/src/relay_token.rs)) — pairwise tokens come from the static DH of both prekeys, so an operator cannot compute them even knowing both identities; invite tokens come from a secret only in the link. Both rotate daily, so the relay never sees a stable pseudonym
+- [x] **No connection logs retained** — the relay has no logging at all; registrations expire after 60 s without a refresh and pairings 120 s after the last packet. `--stats-every` prints aggregate counts only
+- [x] **The relay never holds a key to anything** — it forwards the same AEAD-sealed frames a direct call carries; the handshake runs end to end through it
+- [x] **Stated publicly and plainly** — the operator commitment is printed at start-up, in `antiphon-relay --help`, and in the relay crate docs
 
-*(All four unstarted because there is no relay.)*
+
 
 ---
 

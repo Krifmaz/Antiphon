@@ -77,6 +77,12 @@ export struct ContactEntry {
     key-changed: bool,
     /// 0 always ring, 1 silent only, 2 never. See `notify::RingRule`.
     ring-rule: int,
+    /// The full pinned identity key, hex, or "".
+    key: string,
+    /// Spec §3 per-conversation override: 0 auto, 1 direct, 2 relay.
+    connection-mode: int,
+    /// They have shared a relay, so a relayed call is possible.
+    via-relay: bool,
 }
 
 // A from-scratch slider, standing in for std-widgets' `Slider`. That one's
@@ -1236,7 +1242,8 @@ export component MainWindow inherits Window {
     /// Spec §4: hand a contact's key to the person on this call.
     callback introduce-contact(int);
     in-out property <string> introduction-message: "";
-    callback call-contact(string);
+    callback call-contact(int);
+    callback set-contact-connection-mode(int, int);
     callback send-friend-request();
     callback accept-friend-request();
     callback reject-friend-request();
@@ -1434,6 +1441,9 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-outbox: true;
     in-out property <bool> sec-calladvanced: true;
     in-out property <bool> ip-direct-calling: false;
+    // Spec §3: the relay this machine listens at, "" for none.
+    in-out property <string> relay-server: "";
+    callback new-invite-secret();
     /// Ring rules (spec §9 "Receiver settings always win", §13 schedules).
     /// Getting-started prompt (spec §13). Empty title means nothing to
     /// show, so the banner disappears entirely rather than sitting blank.
@@ -2701,12 +2711,19 @@ export component MainWindow inherits Window {
                             current-index: c.ring-rule;
                             selected(v) => { set-contact-ring-rule(i, self.current-index); }
                         }
+                        // Spec §3: the connection mode, chosen automatically
+                        // and overridable per conversation.
+                        ComboBox {
+                            model: ["Auto", "Direct", "Relay"];
+                            current-index: c.connection-mode;
+                            selected(v) => { set-contact-connection-mode(i, self.current-index); }
+                        }
                         Button {
                             text: "Introduce";
                             enabled: connected && c.fingerprint != "";
                             clicked => { introduce-contact(i); }
                         }
-                        Button { text: "Call"; enabled: !connected; clicked => { call-contact(c.address); } }
+                        Button { text: "Call"; enabled: !connected; clicked => { call-contact(i); } }
                         Button { text: "Forget"; clicked => { forget-history(i); } }
                         Button { text: "X"; clicked => { remove-contact(i); } }
                     }
@@ -4570,6 +4587,26 @@ export component MainWindow inherits Window {
                                         toggled => { silent-call-mode = self.checked ? 1 : 0; settings-changed(); }
                                     }
                                     ToggleSwitch { text: "IP direct calling"; checked <=> ip-direct-calling; text-scale: text-scale; help: "Lets you call a raw address like 192.168.1.10:6000, and lets one be called. A direct connection is the fastest and most private option with people you already know, but both sides can see each other's IP address -- the same as any direct connection on the internet. Off by default: with it off, the Connect panel only offers your saved contacts."; toggled => { settings-changed(); } }
+                                    SettingLabel {
+                                        text: "Relay server";
+                                        help: "A relay passes your calls along for people who can't reach you directly, and for anyone not yet a known contact, so neither of you learns the other's IP address. It forwards encrypted data it cannot read and never holds a key. Run your own with antiphon-relay, or use one your community runs. Leave empty for none.";
+                                        text-scale: text-scale;
+                                    }
+                                    LineEdit {
+                                        text <=> relay-server;
+                                        placeholder-text: "relay.example.org:3479";
+                                        edited(t) => { settings-changed(); }
+                                    }
+                                    Button {
+                                        text: "Make a new invite link";
+                                        clicked => { new-invite-secret(); }
+                                    }
+                                    Text {
+                                        text: "Anyone holding an old invite link can no longer ring you through the relay. Saved contacts are not affected.";
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
                                 }
                             }
                         }

@@ -868,11 +868,64 @@ pub struct AppState {
     /// startup and shared by every call, so the user is the same person
     /// across connections rather than a fresh stranger each time.
     pub identity: Arc<IdentityKeyPair>,
+    /// The relay the current or next call goes through, if any -- what
+    /// tells a connection that arrived from this address apart from a
+    /// direct one (spec §3 "active mode visible in the call UI").
+    pub relay_addr: Mutex<Option<SocketAddr>>,
 }
 
-pub async fn establish_listen(port: u16, identity: Arc<IdentityKeyPair>) -> Result<PeerConnection> {
+/// Recomputes the tokens to register at a relay; see [`establish_listen`].
+pub type RelayTokens = Box<dyn Fn() -> Vec<antiphon_net::relay::RelayToken> + Send>;
+
+/// Listens for a call on `port`. With a relay, the same socket is also
+/// registered there under `tokens()` -- re-evaluated on every refresh, so
+/// a new contact or a new day is picked up without restarting -- so people
+/// who can't reach this machine directly still can through the relay
+/// (spec §3).
+pub async fn establish_listen(
+    port: u16,
+    identity: Arc<IdentityKeyPair>,
+    relay: Option<(SocketAddr, RelayTokens)>,
+) -> Result<PeerConnection> {
     let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+    if let Some((relay_addr, tokens)) = relay {
+        // Holds only a weak handle: once the listen (or the call it
+        // became) drops the socket, the refresh stops on its own.
+        let weak = Arc::downgrade(&socket);
+        tokio::spawn(async move {
+            while let Some(socket) = weak.upgrade() {
+                let _ = antiphon_net::relay::register(&socket, relay_addr, &tokens()).await;
+                drop(socket);
+                tokio::time::sleep(antiphon_net::relay::REGISTER_INTERVAL).await;
+            }
+        });
+    }
     Ok(PeerConnection::listen(socket, &identity).await?)
+}
+
+/// Resolves a `host:port` the user typed, for a relay.
+pub async fn resolve(address: &str) -> Result<SocketAddr> {
+    tokio::net::lookup_host(address)
+        .await?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{address} did not resolve to any address"))
+}
+
+/// Calls someone through a relay (spec §3 "Everyone else -> Relay"): asks
+/// the relay to pair this socket with whoever registered `token`, then
+/// handshakes with the relay's address exactly as if it were theirs.
+pub async fn establish_relayed_call(
+    relay: SocketAddr,
+    token: antiphon_net::relay::RelayToken,
+    local_port: u16,
+    identity: Arc<IdentityKeyPair>,
+) -> Result<PeerConnection> {
+    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+    antiphon_net::relay::dial(&socket, relay, token, Duration::from_secs(5)).await?;
+    match tokio::time::timeout(Duration::from_secs(15), PeerConnection::connect(socket, relay, &identity)).await {
+        Ok(result) => Ok(result?),
+        Err(_) => anyhow::bail!("the relay paired the call, but they never answered"),
+    }
 }
 
 pub async fn establish_call(

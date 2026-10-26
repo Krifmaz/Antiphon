@@ -1,5 +1,6 @@
 mod animated_image;
 mod caps_lock;
+mod connection_mode;
 mod config;
 mod content_store;
 mod crash_report;
@@ -164,6 +165,7 @@ fn main() -> anyhow::Result<()> {
         punch_socket: Mutex::new(None),
         port_map: Mutex::new(None),
         identity,
+        relay_addr: Mutex::new(None),
     });
 
     let main_window = MainWindow::new()?;
@@ -236,6 +238,9 @@ fn main() -> anyhow::Result<()> {
     // establishes a baseline instead of offering every clip cut before
     // anyone was looking.
     let mut clips_cut_last: u64 = u64::MAX;
+    // The relay this call's peer said they listen at, once saved, so it is
+    // written once per call rather than on every tick.
+    let mut peer_relay_saved = String::new();
     _meter_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let Some(app) = meter_window.upgrade() else { return };
 
@@ -286,6 +291,12 @@ fn main() -> anyhow::Result<()> {
                     None => presence::PeerPresence::Unknown,
                 };
                 app.set_peer_presence_label(shown.label().into());
+                // Spec §3: remember where a contact can be reached through
+                // a relay, so the next call to them can use it.
+                if !peer.relay.is_empty() && peer.relay != peer_relay_saved {
+                    peer_relay_saved = peer.relay.clone();
+                    save_peer_relay(&active.peer_identity().identity_key, &peer.relay);
+                }
             }
             update_file_transfer_ui(&app, active, &meter_app_state, &meter_window2);
 
@@ -414,7 +425,7 @@ fn main() -> anyhow::Result<()> {
             // The peer accepted a request we sent -- save them now that
             // there's a name to save them under.
             if let Some((name, address)) = active.take_friend_accepted() {
-                save_contact_if_new(&app, &name, &address);
+                save_contact_if_new(&app, &meter_app_state, active, &name, &address);
             }
 
             let rev = active.chat_rev.load(Ordering::Relaxed);
@@ -477,6 +488,7 @@ fn main() -> anyhow::Result<()> {
             // Reset the baseline so the next call does not offer clips
             // carried over from this one.
             clips_cut_last = u64::MAX;
+            peer_relay_saved.clear();
             app.set_replay_notice("".into());
             app.set_replay_ask(false);
         }
@@ -545,8 +557,24 @@ fn do_start_listen(app: &MainWindow, window_weak: &slint::Weak<MainWindow>, tray
     let tray_weak2 = tray_weak.clone();
     let state2 = state.clone();
     let identity = state.identity.clone();
+    let relay = listen_relay(app, state);
     state.runtime.spawn(async move {
-        let result = state::establish_listen(port, identity).await;
+        // Spec §3: also reachable through our relay, when one is set. A
+        // relay that won't resolve costs the relay path, not the listen.
+        let relay = match relay {
+            Some((address, tokens)) => match state::resolve(&address).await {
+                Ok(addr) => {
+                    *state2.relay_addr.lock().unwrap() = Some(addr);
+                    Some((addr, tokens))
+                }
+                Err(_) => None,
+            },
+            None => {
+                *state2.relay_addr.lock().unwrap() = None;
+                None
+            }
+        };
+        let result = state::establish_listen(port, identity, relay).await;
         finish_connect(window_weak2, tray_weak2, state2, result, config, input, output, hello);
     });
 }
@@ -563,7 +591,53 @@ fn local_hello(app: &MainWindow) -> Hello {
         // the caller before connecting; a listener never knocks, since
         // answering is not something you do quietly.
         wants_silent: app.get_start_call_silently(),
+        relay: app.get_relay_server().trim().to_string(),
     }
+}
+
+/// Records the relay a saved contact listens at. Strangers are not saved.
+fn save_peer_relay(identity_key: &[u8; 32], relay: &str) {
+    let mut config = config::load();
+    let key = encode_identity_key(identity_key);
+    if let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == key) {
+        if contact.relay != relay {
+            contact.relay = relay.to_string();
+            config::save(&config);
+        }
+    }
+}
+
+/// The secret behind the relay part of the invite link (spec §3), made on
+/// first use and kept until the user asks for a new link.
+fn relay_invite_secret() -> [u8; 32] {
+    let mut config = config::load();
+    if let Some(secret) = connection_mode::decode_hex32(&config.relay_invite_secret) {
+        return secret;
+    }
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).expect("OS randomness is unavailable");
+    config.relay_invite_secret = connection_mode::encode_hex32(&secret);
+    config::save(&config);
+    secret
+}
+
+/// What to register at our relay while listening, if there is one.
+fn listen_relay(
+    app: &MainWindow,
+    state: &Arc<AppState>,
+) -> Option<(String, state::RelayTokens)> {
+    let relay = app.get_relay_server().trim().to_string();
+    if relay.is_empty() {
+        return None;
+    }
+    let identity = state.identity.clone();
+    let secret = relay_invite_secret();
+    Some((
+        relay,
+        Box::new(move || {
+            connection_mode::listening_tokens(&config::load().contacts, &identity, Some(secret), now_secs())
+        }),
+    ))
 }
 
 fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Arc<AppState>) {
@@ -604,6 +678,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let (input, output) = selected_devices(&app);
             let hello = local_hello(&app);
             set_status(&app, &tray_weak, "Calling...");
+            *state.relay_addr.lock().unwrap() = None;
 
             let window_weak2 = window_weak.clone();
             let tray_weak2 = tray_weak.clone();
@@ -721,14 +796,25 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             // the whole reason contacts are keyed by key.
             if let Some(existing) = contacts.iter_mut().find(|c| c.identity_key == identity_key) {
                 let name = existing.name.clone();
-                if invite.address.is_empty() || existing.address == invite.address {
+                let new_secret =
+                    invite.relay_secret.as_ref().map(connection_mode::encode_hex32).unwrap_or_default();
+                let address_changed = !invite.address.is_empty() && existing.address != invite.address;
+                let relay_changed = !invite.relay.is_empty()
+                    && (existing.relay != invite.relay || existing.relay_secret != new_secret);
+                if !address_changed && !relay_changed {
                     app.set_contacts_message(format!("{name} is already saved").into());
                     return;
                 }
-                existing.address = invite.address.clone();
+                if address_changed {
+                    existing.address = invite.address.clone();
+                }
+                if relay_changed {
+                    existing.relay = invite.relay.clone();
+                    existing.relay_secret = new_secret;
+                }
                 apply_contacts_to_ui(&app, &contacts);
                 save_current_config(&app);
-                app.set_contacts_message(format!("Updated {name}'s address").into());
+                app.set_contacts_message(format!("Updated {name}'s details").into());
                 app.set_new_contact_invite("".into());
                 return;
             }
@@ -754,6 +840,12 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 ring_rule: 0,
                 eq_bands: Vec::new(),
                 note: String::new(),
+                // Spec §3: a stranger is reached through their relay, so
+                // the relay part of the link is what makes them callable
+                // without either side exposing an address.
+                relay: invite.relay.clone(),
+                relay_secret: invite.relay_secret.as_ref().map(connection_mode::encode_hex32).unwrap_or_default(),
+                ..Default::default()
             });
             apply_contacts_to_ui(&app, &contacts);
             save_current_config(&app);
@@ -2340,13 +2432,84 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
     }
     {
         let window_weak = main_window.as_weak();
-        main_window.on_call_contact(move |address| {
+        let tray_weak = tray.as_weak();
+        let state = app_state.clone();
+        main_window.on_call_contact(move |index| {
             let Some(app) = window_weak.upgrade() else { return };
-            // Fills in the address field, then invokes the ordinary dial
-            // callback -- a contact call goes down the exact same path as a
-            // typed one rather than duplicating the connect logic.
-            app.set_remote_address(address);
-            app.invoke_start_call();
+            let contacts = config::load().contacts;
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| contacts.get(i)) else { return };
+            // Spec §3: direct for known contacts, through a relay for
+            // everyone else, unless this conversation says otherwise.
+            match connection_mode::plan(contact, &state.identity, now_secs()) {
+                Err(reason) => app.set_contacts_message(reason.into()),
+                Ok(connection_mode::Plan::Direct { address }) => {
+                    // A direct contact call goes down the exact same path
+                    // as a typed one rather than duplicating it.
+                    *state.relay_addr.lock().unwrap() = None;
+                    app.set_remote_address(address.into());
+                    app.invoke_start_call();
+                }
+                Ok(connection_mode::Plan::Relay { relay, token }) => {
+                    let local_port: u16 = app.get_local_port().parse().unwrap_or(0);
+                    let config = read_chain_config(&app);
+                    let (input, output) = selected_devices(&app);
+                    let hello = local_hello(&app);
+                    set_status(&app, &tray_weak, &format!("Calling {} through a relay...", contact.name));
+                    let (window_weak2, tray_weak2, state2) = (window_weak.clone(), tray_weak.clone(), state.clone());
+                    let identity = state.identity.clone();
+                    state.runtime.spawn(async move {
+                        let result = async {
+                            let addr = state::resolve(&relay).await?;
+                            *state2.relay_addr.lock().unwrap() = Some(addr);
+                            state::establish_relayed_call(addr, token, local_port, identity).await
+                        }
+                        .await;
+                        finish_connect(window_weak2, tray_weak2, state2, result, config, input, output, hello);
+                    });
+                }
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_set_contact_connection_mode(move |index, mode| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| config.contacts.get_mut(i)) else { return };
+            contact.connection_mode = match connection_mode::Override::from_i32(mode) {
+                connection_mode::Override::Auto => 0,
+                connection_mode::Override::Direct => 1,
+                connection_mode::Override::Relay => 2,
+            };
+            let message = match connection_mode::Override::from_i32(mode) {
+                connection_mode::Override::Auto => format!(
+                    "{} is called {} automatically.",
+                    contact.name,
+                    if connection_mode::is_known(contact) { "direct" } else { "through a relay" }
+                ),
+                connection_mode::Override::Direct => format!(
+                    "{} is always called direct -- fastest, but you see each other's IP address.",
+                    contact.name
+                ),
+                connection_mode::Override::Relay => format!(
+                    "{} is always called through a relay -- neither of you sees the other's IP address.",
+                    contact.name
+                ),
+            };
+            config::save(&config);
+            apply_contacts_to_ui(&app, &config.contacts);
+            app.set_contacts_message(message.into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_new_invite_secret(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            config.relay_invite_secret.clear();
+            config::save(&config);
+            refresh_invite(&app, &state);
         });
     }
     {
@@ -2366,13 +2529,15 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         let state = app_state.clone();
         main_window.on_accept_friend_request(move || {
             let Some(app) = window_weak.upgrade() else { return };
-            let accepted = {
-                let call = state.call.lock().unwrap();
-                call.as_ref().and_then(|active| active.accept_friend_request(&state.runtime, app.get_display_name().to_string()))
+            let call = state.call.lock().unwrap();
+            let Some(active) = call.as_ref() else { return };
+            let Some((name, address)) =
+                active.accept_friend_request(&state.runtime, app.get_display_name().to_string())
+            else {
+                return;
             };
-            let Some((name, address)) = accepted else { return };
             app.set_friend_request_from("".into());
-            save_contact_if_new(&app, &name, &address);
+            save_contact_if_new(&app, &state, active, &name, &address);
         });
     }
     {
@@ -3069,7 +3234,11 @@ fn finish_connect(
             // key we saw last time at this address.
             let peer_identity = peer.peer_identity();
             let remote_addr = peer.remote_addr().to_string();
-            let trust = evaluate_peer_trust(&remote_addr, &peer_identity);
+            // Spec §3: a connection that came from our relay's address is
+            // a relayed one, and the address is the relay's, not theirs.
+            let relayed = *state.relay_addr.lock().unwrap() == Some(peer.remote_addr());
+            let mode = if relayed { reachability::Mode::Relayed } else { reachability::Mode::Direct };
+            let trust = evaluate_peer_trust(&remote_addr, &peer_identity, relayed);
             // Spec §1: this person's remembered volume trim and mute, so a
             // quiet microphone stays fixed across calls rather than being
             // re-adjusted every time.
@@ -3130,6 +3299,8 @@ fn finish_connect(
                     slint::invoke_from_event_loop(move || {
                         if let Some(app) = window_weak.upgrade() {
                             app.set_connected(true);
+                            app.set_call_mode(mode.label().into());
+                            app.set_call_mode_explanation(mode.explain().into());
                             // A new call has not knocked yet, whatever the
                             // last one did.
                             app.set_knocked(false);
@@ -3423,16 +3594,28 @@ fn apply_panel_rect(
 /// Adds `(name, address)` to the saved contacts unless that address is
 /// already there -- shared by both sides of the friend-request exchange,
 /// which can otherwise both try to save the same peer.
-fn save_contact_if_new(app: &MainWindow, name: &str, address: &str) {
+/// Saves the person on the current call as a contact, after a friend
+/// request. Keyed by the identity the handshake proved; over a relay the
+/// address is the relay's, so none is stored and the relay is kept instead
+/// (spec §3).
+fn save_contact_if_new(app: &MainWindow, state: &AppState, active: &state::ActiveCall, name: &str, address: &str) {
+    let peer = active.peer_identity();
+    let key = encode_identity_key(&peer.identity_key);
+    let relayed = state.relay_addr.lock().unwrap().is_some_and(|r| r.to_string() == address);
     let mut contacts = contacts_from_ui(app);
-    if contacts.iter().any(|c| c.address == address) {
+    if contacts.iter().any(|c| c.identity_key == key || (!relayed && c.address == address)) {
         app.set_contacts_message(format!("{name} is already saved").into());
         return;
     }
+    let their_relay = active.peer_profile.lock().unwrap().as_ref().map(|h| h.relay.clone()).unwrap_or_default();
     contacts.push(config::Contact {
         name: name.to_string(),
-        address: address.to_string(),
+        address: if relayed { String::new() } else { address.to_string() },
         is_server: false,
+        identity_key: key,
+        first_seen_secs: now_secs(),
+        prekey: connection_mode::encode_hex32(&peer.prekey),
+        relay: their_relay,
         ..Default::default()
     });
     apply_contacts_to_ui(app, &contacts);
@@ -3461,11 +3644,21 @@ struct PeerTrust {
 /// directly rather than the UI model. A contact that isn't saved at all is
 /// not pinned -- there is nothing to warn about and nothing to remember
 /// until the user decides to keep them.
-fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity) -> PeerTrust {
+fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity, relayed: bool) -> PeerTrust {
     let fingerprint = antiphon_crypto::fingerprint(&peer.identity_key);
     let mut config = config::load();
 
-    let Some(index) = config.contacts.iter().position(|c| c.address == remote_addr) else {
+    // By key first: a relayed call arrives from the relay's address, and
+    // a contact who moved arrives from a new one. The address is only a
+    // fallback for a contact saved by address and never called before --
+    // and never for a relayed call, where it is the relay's.
+    let key_hex = encode_identity_key(&peer.identity_key);
+    let index = config.contacts.iter().position(|c| c.identity_key == key_hex).or_else(|| {
+        (!relayed)
+            .then(|| config.contacts.iter().position(|c| c.address == remote_addr))
+            .flatten()
+    });
+    let Some(index) = index else {
         return PeerTrust {
             fingerprint,
             verified: false,
@@ -3473,6 +3666,15 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity
             message: "Not a saved contact. Add them to remember this key.".to_string(),
         };
     };
+
+    // The same key as pinned: keep its prekey on file (spec §3 -- it is
+    // what makes them a known contact). Contacts pinned from an invite
+    // link arrive here on their first call, never through FirstContact.
+    let prekey_hex = connection_mode::encode_hex32(&peer.prekey);
+    if config.contacts[index].identity_key == key_hex && config.contacts[index].prekey != prekey_hex {
+        config.contacts[index].prekey = prekey_hex;
+        config::save(&config);
+    }
 
     let contact = &config.contacts[index];
     let pinned = decode_identity_key(&contact.identity_key).map(|identity_key| {
@@ -3495,6 +3697,9 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity
             let name = contact.name.clone();
             config.contacts[index].identity_key = encode_identity_key(&peer.identity_key);
             config.contacts[index].first_seen_secs = now_secs();
+            // Spec §3: a completed call makes them a known contact, and
+            // their prekey is what a pairwise relay token is derived from.
+            config.contacts[index].prekey = connection_mode::encode_hex32(&peer.prekey);
             config::save(&config);
             PeerTrust {
                 fingerprint,
@@ -3755,6 +3960,7 @@ fn apply_introduction(
             ring_rule: 0,
             eq_bands: Vec::new(),
             note: introduction::provenance_note(introducer),
+            ..Default::default()
         });
         config::save(&config);
     }
@@ -3990,10 +4196,14 @@ fn refresh_invite(app: &MainWindow, state: &std::sync::Arc<state::AppState>) {
         }
     };
 
-    let invite = antiphon_crypto::Invite {
-        identity_key: state.identity.public().identity_key,
-        address: address.clone(),
-    };
+    let mut invite = antiphon_crypto::Invite::new(state.identity.public().identity_key, address.clone());
+    // Spec §3: with a relay, the link also lets its holder ring you
+    // through it without either of you seeing the other's address.
+    let relay = app.get_relay_server().trim().to_string();
+    if !relay.is_empty() {
+        invite.relay = relay;
+        invite.relay_secret = Some(relay_invite_secret());
+    }
     let link = invite.to_link();
 
     app.set_my_invite_has_address(!address.is_empty());
@@ -4042,6 +4252,9 @@ fn apply_contacts_to_ui(app: &MainWindow, contacts: &[config::Contact]) {
             // that produced it.
             key_changed: false,
             ring_rule: c.ring_rule,
+            key: c.identity_key.clone().into(),
+            connection_mode: c.connection_mode,
+            via_relay: !c.relay.is_empty(),
         })
         .collect();
     app.set_contacts(ModelRc::new(VecModel::from(entries)));
@@ -4085,7 +4298,14 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
         .iter()
         .map(|c| {
             let address = c.address.to_string();
-            let previous = saved.contacts.iter().find(|s| s.address == address);
+            let key = c.key.to_string();
+            // By key where there is one: two contacts reached only through
+            // a relay both have an empty address.
+            let previous = if key.is_empty() {
+                saved.contacts.iter().find(|s| s.identity_key.is_empty() && s.address == address)
+            } else {
+                saved.contacts.iter().find(|s| s.identity_key == key)
+            };
             config::Contact {
                 name: c.name.to_string(),
                 address,
@@ -4104,6 +4324,10 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 // config rather than rebuilt from a UI that never had it.
                 eq_bands: previous.map(|p| p.eq_bands.clone()).unwrap_or_default(),
                 note: previous.map(|p| p.note.clone()).unwrap_or_default(),
+                prekey: previous.map(|p| p.prekey.clone()).unwrap_or_default(),
+                relay: previous.map(|p| p.relay.clone()).unwrap_or_default(),
+                relay_secret: previous.map(|p| p.relay_secret.clone()).unwrap_or_default(),
+                connection_mode: c.connection_mode,
             }
         })
         .collect()
@@ -4587,6 +4811,7 @@ fn apply_config_to_ui(app: &MainWindow, config: &config::AppConfig) {
         config::CALL_SECTION_IDS,
     )));
     app.set_ip_direct_calling(config.ip_direct_calling);
+    app.set_relay_server(config.relay_server.clone().into());
     app.set_ptt_toggle(config.ptt_toggle);
     app.set_mute_hold(config.mute_hold);
     app.set_deafen_hold(config.deafen_hold);
@@ -4866,6 +5091,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         // section the search happened to hide.
         call_section_order: previous.call_section_order.clone(),
         ip_direct_calling: app.get_ip_direct_calling(),
+        relay_server: app.get_relay_server().trim().to_string(),
+        relay_invite_secret: previous.relay_invite_secret.clone(),
         ptt_toggle: app.get_ptt_toggle(),
         mute_hold: app.get_mute_hold(),
         deafen_hold: app.get_deafen_hold(),

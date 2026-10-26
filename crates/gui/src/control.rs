@@ -25,6 +25,11 @@ pub struct Hello {
     /// knocking, which is what a missing field should mean.
     #[serde(default)]
     pub wants_silent: bool,
+    /// The relay this person listens at, `host:port`, or empty (spec §3).
+    /// Sent so a contact can reach you through it next time without
+    /// exchanging another link. Defaulted for peers on older builds.
+    #[serde(default)]
+    pub relay: String,
 }
 
 /// Note on trust: none of these messages are authenticated beyond the
@@ -165,6 +170,7 @@ mod tests {
             status_message: "Away".to_string(),
             presence: Some(1),
             wants_silent: true,
+            relay: "relay.example:3479".to_string(),
         });
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();
         match decoded {

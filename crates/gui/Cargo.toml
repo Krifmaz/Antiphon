@@ -7,6 +7,7 @@ version.workspace = true
 anyhow = "1.0.104"
 device_query = "4.0.1"
 dirs = "6.0.0"
+getrandom = "0.4.3"
 image = "0.25.10"
 qrcode = { version = "0.14.1", default-features = false }
 rfd = "0.17.2"

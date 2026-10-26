@@ -235,6 +235,7 @@ mod tests {
             ring_rule: 0,
             eq_bands: Vec::new(),
             note: String::new(),
+            ..Default::default()
         });
         std::fs::write(
             dir.join("config.json"),

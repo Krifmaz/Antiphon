@@ -1,8 +1,14 @@
 //! Invite links (spec §4 "QR code / invite link -- primary method").
 //!
 //! ```text
-//! antiphon://<64-hex identity key>@<host>:<port>
+//! antiphon://<64-hex identity key>@<host>:<port>?relay=<host>:<port>&k=<64-hex>
 //! ```
+//!
+//! The query is optional (spec §3 "Everyone else -> Relay"): `relay` names
+//! the relay the link's owner listens at, and `k` is a secret from which
+//! the daily relay token is derived (`relay_token::from_invite_secret`).
+//! Whoever holds the link can ring its owner through that relay without
+//! either side seeing the other's address.
 //!
 //! The link carries **who** and **where to start**, and those two halves
 //! age very differently:
@@ -21,8 +27,9 @@
 //! whose address has gone stale still names the right person; only the
 //! starting point is lost.
 //!
-//! Nothing here is secret. An invite reveals an identity key and an
-//! address the holder chose to publish -- it does not authenticate anyone
+//! Nothing here is secret except `k`, which only lets someone *ring* you
+//! through your relay -- revoked by generating a new one. An invite reveals
+//! an identity key and an address the holder chose to publish -- it does not authenticate anyone
 //! by itself, and pasting one only pins a key on first contact (see
 //! [`crate::contact`]). Someone who intercepts a link can substitute their
 //! own; that is exactly the gap the verification code closes.
@@ -43,19 +50,34 @@ pub struct Invite {
     pub identity_key: [u8; 32],
     /// `host:port`, or empty when the link carries no bootstrap hint.
     pub address: String,
+    /// The relay its owner listens at, `host:port`, or empty.
+    pub relay: String,
+    /// The secret the relay token is derived from. Only meaningful with
+    /// `relay` set.
+    pub relay_secret: Option<[u8; 32]>,
 }
 
 impl Invite {
+    /// An invite with no relay part.
+    pub fn new(identity_key: [u8; 32], address: impl Into<String>) -> Self {
+        Self { identity_key, address: address.into(), relay: String::new(), relay_secret: None }
+    }
+
     /// Builds an invite link. An empty `address` produces an
     /// identity-only link, which is valid and forward-looking -- it just
     /// can't be dialled until discovery exists.
     pub fn to_link(&self) -> String {
         let hex: String = self.identity_key.iter().map(|b| format!("{b:02x}")).collect();
-        if self.address.is_empty() {
+        let mut link = if self.address.is_empty() {
             format!("{SCHEME}{hex}")
         } else {
             format!("{SCHEME}{hex}@{}", self.address)
+        };
+        if let (false, Some(secret)) = (self.relay.is_empty(), self.relay_secret) {
+            let k: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+            link.push_str(&format!("?relay={}&k={k}", self.relay));
         }
+        link
     }
 
     /// Parses an invite link.
@@ -72,27 +94,51 @@ impl Invite {
             .or_else(|| trimmed.strip_prefix(LEGACY_SCHEME))
             .unwrap_or(trimmed);
 
+        let (body, query) = match body.split_once('?') {
+            Some((body, query)) => (body, query),
+            None => (body, ""),
+        };
+        let mut relay = String::new();
+        let mut relay_secret = None;
+        for pair in query.split('&').filter(|p| !p.is_empty()) {
+            match pair.split_once('=') {
+                Some(("relay", value)) if looks_like_host_port(value) => relay = value.to_string(),
+                Some(("k", value)) => relay_secret = Some(parse_hex32(value)?),
+                // Unknown keys are ignored so a newer link still opens in
+                // an older build; a malformed known key is an error.
+                Some(("relay", _)) => return Err(CryptoError::MalformedInvite),
+                _ => {}
+            }
+        }
+        if relay.is_empty() != relay_secret.is_none() {
+            return Err(CryptoError::MalformedInvite);
+        }
+
         let (hex, address) = match body.split_once('@') {
             Some((hex, address)) => (hex, address.trim()),
             None => (body, ""),
         };
 
-        let hex = hex.trim();
-        if hex.len() != 64 {
-            return Err(CryptoError::MalformedInvite);
-        }
-        let mut identity_key = [0u8; 32];
-        for (i, byte) in identity_key.iter_mut().enumerate() {
-            let pair = hex.get(i * 2..i * 2 + 2).ok_or(CryptoError::MalformedInvite)?;
-            *byte = u8::from_str_radix(pair, 16).map_err(|_| CryptoError::MalformedInvite)?;
-        }
+        let identity_key = parse_hex32(hex.trim())?;
 
         if !address.is_empty() && !looks_like_host_port(address) {
             return Err(CryptoError::MalformedInvite);
         }
 
-        Ok(Self { identity_key, address: address.to_string() })
+        Ok(Self { identity_key, address: address.to_string(), relay, relay_secret })
     }
+}
+
+fn parse_hex32(hex: &str) -> Result<[u8; 32], CryptoError> {
+    if hex.len() != 64 {
+        return Err(CryptoError::MalformedInvite);
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let pair = hex.get(i * 2..i * 2 + 2).ok_or(CryptoError::MalformedInvite)?;
+        *byte = u8::from_str_radix(pair, 16).map_err(|_| CryptoError::MalformedInvite)?;
+    }
+    Ok(out)
 }
 
 /// A deliberately loose check: enough to catch a truncated paste or a
@@ -113,11 +159,31 @@ mod tests {
 
     fn invite_for(address: &str) -> (IdentityKeyPair, Invite) {
         let id = IdentityKeyPair::generate();
-        let invite = Invite {
-            identity_key: id.public().identity_key,
-            address: address.to_string(),
-        };
+        let invite = Invite::new(id.public().identity_key, address);
         (id, invite)
+    }
+
+    #[test]
+    fn a_relay_part_round_trips() {
+        let (_, mut invite) = invite_for("203.0.113.7:6001");
+        invite.relay = "relay.example.org:3479".into();
+        invite.relay_secret = Some([0xab; 32]);
+        let link = invite.to_link();
+        assert!(link.contains("?relay=relay.example.org:3479&k=abab"), "{link}");
+        assert_eq!(Invite::parse(&link).unwrap(), invite);
+    }
+
+    #[test]
+    fn a_relay_without_its_secret_is_rejected() {
+        let (_, invite) = invite_for("203.0.113.7:6001");
+        assert!(Invite::parse(&format!("{}?relay=r.example:1", invite.to_link())).is_err());
+        assert!(Invite::parse(&format!("{}?k={}", invite.to_link(), "ab".repeat(32))).is_err());
+    }
+
+    #[test]
+    fn unknown_query_keys_are_ignored() {
+        let (_, invite) = invite_for("203.0.113.7:6001");
+        assert_eq!(Invite::parse(&format!("{}?future=1", invite.to_link())).unwrap(), invite);
     }
 
     #[test]

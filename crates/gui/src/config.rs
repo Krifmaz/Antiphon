@@ -58,6 +58,15 @@ pub struct AppConfig {
     /// (spec §1: "PTT or mute/deafen switched to toggle behavior").
     #[serde(default)]
     pub mute_hold: bool,
+    /// The relay this machine listens at, `host:port`; empty for none
+    /// (spec §3). Self-hosted or a community's -- the app ships with no
+    /// default, so nothing is relayed through anyone you didn't choose.
+    #[serde(default)]
+    pub relay_server: String,
+    /// The secret behind the relay part of your invite link, hex. Made on
+    /// first use; replacing it revokes every link handed out before.
+    #[serde(default)]
+    pub relay_invite_secret: String,
     #[serde(default)]
     pub deafen_hold: bool,
     /// Milliseconds the mic stays open after the push-to-talk key comes up,
@@ -438,6 +447,23 @@ pub struct Contact {
     /// until a verification code says otherwise.
     #[serde(default)]
     pub note: String,
+    /// Their X25519 prekey, hex, learned from the first completed call.
+    /// What makes them a *known* contact (spec §3) and what the pairwise
+    /// relay token is derived from.
+    #[serde(default)]
+    pub prekey: String,
+    /// The relay they listen at, `host:port`, from their invite link or
+    /// from what they said on a call. Empty when unknown.
+    #[serde(default)]
+    pub relay: String,
+    /// The secret from their invite link, hex, for ringing them through
+    /// their relay before you have ever spoken.
+    #[serde(default)]
+    pub relay_secret: String,
+    /// Per-conversation override (spec §3): 0 automatic, 1 direct, 2 relay.
+    /// See `crate::connection_mode`.
+    #[serde(default)]
+    pub connection_mode: i32,
 }
 
 /// A freeform panel's position and size in logical pixels, relative to its
@@ -647,6 +673,8 @@ impl Default for AppConfig {
             quiet_hours: crate::notify::QuietHours::default(),
             ptt_toggle: false,
             mute_hold: false,
+            relay_server: String::new(),
+            relay_invite_secret: String::new(),
             deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,

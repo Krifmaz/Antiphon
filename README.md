@@ -24,6 +24,7 @@ A Cargo workspace, one crate per concern:
 | [`crates/net`](crates/net) | §2, §3, §5, §6 | UDP peer connection, STUN discovery + hole punching, NAT-PMP port mapping with renewal, adaptive jitter buffer, forward error correction, audio retransmit requests, file chunking with per-chunk hashes |
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
 | [`crates/app`](crates/app) | §1 Utility | `antiphon-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
+| [`crates/relay`](crates/relay) | §3 Relay | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry |
 | [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon`: the Slint desktop app -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
 Every crate's `lib.rs` doc comment states its scope against the spec.
@@ -42,11 +43,10 @@ The short version of [`FEATURES.md`](FEATURES.md):
 - **Reduced:** classical spectral noise suppression rather than an ML
   model; a symmetric ratchet without the DH step (a session is per call,
   so a compromised chain key is worth the rest of one call); keystore
-  sealing on Windows only; Caps Lock cannot be a push-to-talk key
-  (needs an OS-level hook, and is refused with the reason rather than
-  misbehaving).
+  sealing on Windows only; Caps Lock as push-to-talk works on Windows
+  and X11 but not yet on macOS or Wayland.
 - **Not built:** anything that needs infrastructure the app does not
-  have -- relays, the DHT, group calls / MLS / SFU, mailbox nodes and the
+  have yet -- the DHT, group calls / MLS / SFU, mailbox nodes and the
   tiered delivery routes, VPN integration, mobile clients, push
   notifications. Each is a project on its own and is listed as such.
 
@@ -116,6 +116,19 @@ Hold Space to talk; Ctrl+C hangs up. `--no-ptt` keeps the mic open,
 JSON file, `identity restore` recovers an identity from its 24-word
 phrase.
 
+### Relay
+
+```bash
+cargo run -p antiphon-relay -- --listen 0.0.0.0:3479
+# or: docker build -f crates/relay/Dockerfile -t antiphon-relay . && docker run -p 3479:3479/udp antiphon-relay
+```
+
+Put its `host:port` in Settings > Call > Relay server. While listening,
+the app registers there, and anyone without a direct route -- strangers
+by default, any contact you set to Relay -- reaches you through it
+without either side seeing the other's IP address. Invite links then
+carry the relay too.
+
 ## Layout
 
 ```
@@ -125,6 +138,7 @@ crates/
   net/        UDP transport, NAT traversal, recovery, file chunks
   audio/      DSP chain, echo cancellation, device I/O
   app/        antiphon-cli
+  relay/      antiphon-relay, self-hostable
   gui/        antiphon (Slint UI) + build.rs compiling ui/app.slint
 docs/         the feature spec
 notes/        where work stopped, for picking up on another machine

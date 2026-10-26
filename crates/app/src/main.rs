@@ -186,10 +186,7 @@ async fn main() -> Result<()> {
             IdentityAction::Show => {
                 let identity = load_identity()?;
                 println!("Identity: {}", hex(&identity.public().identity_key));
-                println!("Invite:   {}", antiphon_crypto::Invite {
-                    identity_key: identity.public().identity_key,
-                    address: String::new(),
-                }.to_link());
+                println!("Invite:   {}", antiphon_crypto::Invite::new(identity.public().identity_key, "").to_link());
             }
             IdentityAction::ShowPhrase => {
                 let identity = load_identity()?;

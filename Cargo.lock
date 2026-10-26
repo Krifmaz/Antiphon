@@ -316,6 +316,7 @@ dependencies = [
  "anyhow",
  "device_query",
  "dirs",
+ "getrandom 0.4.3",
  "image",
  "qrcode",
  "rfd",
