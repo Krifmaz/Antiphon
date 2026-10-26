@@ -127,16 +127,16 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 - [x] **Known contacts → Direct P2P** ([`PeerConnection`](crates/net/src/peer.rs))
 - [x] NAT traversal — STUN discovery plus UDP hole punching ([`stun.rs`](crates/net/src/stun.rs), [`PeerConnection::punch`](crates/net/src/peer.rs))
 - [x] **Relay (default for everyone else)** — [`antiphon-relay`](crates/relay) pairs two sockets on a blinded token and forwards sealed frames byte for byte, so an unmodified `PeerConnection` aimed at the relay *is* the relayed call ([`net/src/relay.rs`](crates/net/src/relay.rs), real-socket test in [`relayed_call.rs`](crates/relay/tests/relayed_call.rs)). Self-hostable as a binary or Docker image; set in Settings > Call. A listener registers there, and invite links carry the relay plus a secret so a stranger can ring through it
-- [ ] **Anonymity mode** — multi-hop relay routing *(spec §11 defers to v1.5+)*
+- [~] **Anonymity mode** — multi-hop relay routing ([`net/src/onion.rs`](crates/net/src/onion.rs), [`relay/src/onion.rs`](crates/relay/src/onion.rs), [`anonymity.rs`](crates/gui/src/anonymity.rs)). Settings > Call > Advanced takes two or three hop nodes (`antiphon-relay --hops`); relay dials and registrations then run over a circuit built in one round trip, with per-hop keys from an X25519 exchange against each hop's key, so the first hop sees you but not where you go and the target relay sees only the last hop. The call code is unchanged: a circuit is presented as a local socket. Automatic connection choice never goes direct while it is on, and the call shows **Connection: Anonymous**. Tested with a real handshake and audio through two hops plus a target relay. **Not done:** fixed-size cell padding, hop-key pinning (keys are fetched from the node), automatic circuit rebuild after a hop restarts, and group-call legs still connect without circuits
 - [x] **Mode chosen automatically by contact status, overridable per conversation** ([`connection_mode.rs`](crates/gui/src/connection_mode.rs)) — known contacts (a completed call or a verified key) go direct, everyone else through their relay; each contact row has Auto / Direct / Relay. With no relay to use, an automatic relay call is **refused with the reason** rather than quietly placed direct, since that would expose both IP addresses without saying so
 - [x] **Active mode visible in the call UI with a one-line explanation** — "Connection: Direct" (you can each see the other's IP address) or "Connection: Relayed" (neither of you can, and the relay can't read or hear anything), decided from where the connection actually arrived rather than from what was asked for
 
 ### Group calls
 
 - [x] **Up to ~5 people — direct mesh, no infrastructure** ([`group.rs`](crates/gui/src/group.rs), [`mixer.rs`](crates/gui/src/mixer.rs)) — during a call, a contact's Call button becomes Add. The person adding someone connects to them, then introduces them to every existing member, who connect to each other directly: through the adder's relay on a one-off token when there is one (so members who are strangers never see each other's IP), by hole punching when there isn't. Every newcomer must prove to be the identity named in the introduction, so a leaked token can't join a call, and blocked people are refused. A mixer advances by the slowest *talking* person so two voices overlap instead of playing in turn. Covered by a three-person test that closes the mesh through a real relay. **Not done:** if the person you first connected to hangs up, your side of the call ends with them
-- [ ] Beyond that — SFU relay forwarding encrypted frames *(spec §11 defers)*
-- [ ] Community owners can self-host their own SFU
-- [ ] Project-hosted relays as fallback
+- [x] **Beyond that — SFU relay forwarding encrypted frames** ([`relay/src/sfu.rs`](crates/relay/src/sfu.rs), [`net/src/sfu.rs`](crates/net/src/sfu.rs), [`sfu_call.rs`](crates/gui/src/sfu_call.rs)). Adding a sixth person moves the call to your relay's SFU: a fresh group secret goes to every member over the call's own end-to-end sessions, everyone joins a room named by a daily-rotating token derived from it, and each uploads once. Each member seals audio with its own sender key and announces that key signed by its identity and sealed under the group secret, so the SFU sees a room token, random per-call member tags and sealed bytes, never a name or a key. Joins need a stateless cookie so spoofed joins can't aim a room's fan-out at someone; a seat can't be taken from a live member. Up to 50 people by default. Tested with eight members on a real socket and six through the app's own call path. **Stopgap crypto:** sender keys behind a `MediaSealer` trait that SFrame keys from MLS will replace; until then the shared secret gives no post-compromise security
+- [x] **Community owners can self-host their own SFU** — `antiphon-relay --sfu` (with `--sfu-max-members`, `--sfu-max-rooms`, `--sfu-max-rooms-per-addr`) on the same port as the relay, mailbox and files; off by default, and the operator commitment printed at start-up covers it
+- [~] **Project-hosted relays as fallback** ([`fallback_relay.rs`](crates/gui/src/fallback_relay.rs)) — your relay first, then your own fallback list, then the project's; each is probed (a dial for a random token, which a live relay answers "not found") so a dead one is skipped before a call relies on it, and the first that answers is used for listening, invites and group calls. **Not done:** the project runs no nodes yet, so its list is empty rather than pointing at machines nobody keeps up
 
 ### Encryption
 
@@ -190,7 +190,7 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 ### Infrastructure position
 
 - [x] If project infrastructure disappears, existing contacts keep working *(true today by construction — there is none)*
-- [ ] Bootstrap nodes, fallback relays, optional directories
+- [~] Bootstrap nodes, fallback relays, optional directories — fallback relays are done (§3); bootstrap nodes and directories belong to the DHT work
 
 ---
 
@@ -249,7 +249,7 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 - [x] **Automatic port negotiation** ([`port_map.rs`](crates/net/src/port_map.rs)) — a NAT-PMP (RFC 6886) client, with the renewal loop that makes it mean anything: mappings expire by design, so a one-shot request would leave you reachable for an hour and then quietly not, with nothing on screen changing. Renewed at half the lifetime as the RFC prescribes, so a lost renewal still gets a second chance. An hour, not a day, so a hole left by a crash closes on its own. The **external port is read from the reply, never assumed** — routers are allowed to hand back a different number, and reporting the requested one would send people to a port nobody is listening on. Released when you switch it off and again on exit. Every refusal names a next step, because a failure the user cannot act on is noise. NAT-PMP only: UPnP-IGD is SOAP over HTTP with a long history of being exploitable, and the small protocol is the right one to add first
 - [~] Handles port changes on reconnect without user action — the renewal loop keeps trying through a router reboot and picks the mapping back up, backing off so a router that is simply gone is not hammered. **Not done:** noticing that the router handed back a *different* external port on renewal and telling anyone — that needs somewhere to publish a changed address to, which is §4's DHT
 - [x] **The port-forwarding capability table** ([`reachability.rs`](crates/gui/src/reachability.rs)) — three rows in the Connect panel answering the questions people actually have: can I call out (always yes), is my public address known, and can anyone call me. The rule it turns on: **"not checked yet" is never reported as "no"** — one is a router to look at, the other is a button nobody pressed, and collapsing them sends people to debug a network that is fine. A refusal says what still works (call out, forward by hand, both press Punch) rather than overstating the problem
-- [~] **Reachability status** — the capability table above answers "can I be reached", combining the STUN and NAT-PMP results. Still no Direct / Relayed / blocked line, because there is no relay to fall back to; what exists instead is an explicit **Connection: Direct** line in the call UI
+- [x] **Reachability status — always visible, never discovered through failure** ([`reachability.rs`](crates/gui/src/reachability.rs), [`network_ui.rs`](crates/gui/src/network_ui.rs)) — the header always shows **Direct**, **Relayed — VPN doesn't allow incoming connections** or **Relayed — network blocks direct connections**, worked out at start-up from two STUN servers (a different public port per destination means a symmetric NAT, which can't be punched) and whether the default route is a VPN interface (routing table on Linux, `route` on macOS). With direct blocked and no relay answering it says so and points at Settings; hover explains, click re-checks. **Not done:** VPN detection on Windows (treated as no VPN)
 
 ---
 
@@ -354,11 +354,11 @@ exists; the fallback infrastructure it calls "fallback, not foundation" does not
 
 - [ ] Video calls
 - [ ] Screen share with audio
-- [ ] SFU relay for large calls
+- [x] SFU relay for large calls — built ahead of the spec's schedule, see §3
 - [ ] Communities at full scale
 - [ ] Plugin host
 - [ ] Bots / API
-- [ ] Anonymity mode (multi-hop)
+- [~] Anonymity mode (multi-hop) — built ahead of the spec's schedule, see §3
 
 ---
 
