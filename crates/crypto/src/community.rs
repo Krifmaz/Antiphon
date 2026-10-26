@@ -495,7 +495,7 @@ pub fn check_transition(old: &Manifest, old_signed: &SignedManifest, new: &Signe
             Some(before) if before.role != m.role => {
                 // Re-roling: only someone you outrank, and only to a role
                 // below your own.
-                if !old.can(s, perm::MANAGE_ROLES, Some(&m.key.0)) || old.rank(s) >= m.role as u32 + 1 {
+                if !old.can(s, perm::MANAGE_ROLES, Some(&m.key.0)) || old.rank(s) > m.role as u32 {
                     return Err(Denied::NotAllowed("give that role"));
                 }
             }

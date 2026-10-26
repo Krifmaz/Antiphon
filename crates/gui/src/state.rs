@@ -286,6 +286,7 @@ pub fn monitor_added_latency_ms() -> u32 {
 
 impl Drop for ActiveCall {
     fn drop(&mut self) {
+        crate::community::clear_live(&self.peer.peer_identity().identity_key);
         self.send_task.abort();
         self.recv_task.abort();
         self.drain_task.abort();
@@ -1714,6 +1715,16 @@ pub fn start_pipeline(
                                 note,
                             });
                     }
+                    Some(ControlMessage::Community { data }) => {
+                        // Off the receive loop: it may be a commit to
+                        // process and a file to write, and audio is waiting.
+                        let from = recv_primary_key;
+                        tokio::task::spawn_blocking(move || {
+                            if let Some(store) = crate::community::Store::app() {
+                                store.receive_fragment(from, &data);
+                            }
+                        });
+                    }
                     Some(ControlMessage::EscalateCall) => {
                         recv_ring.store(true, Ordering::Relaxed);
                     }
@@ -2025,6 +2036,10 @@ pub fn start_pipeline(
             }
         }
     });
+
+    // Group chat and community messages for this person go over the call
+    // while it lasts (spec §9), rather than through their mailbox.
+    crate::community::set_live(peer.clone());
 
     Ok(ActiveCall {
         group,

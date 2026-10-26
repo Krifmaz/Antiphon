@@ -224,6 +224,7 @@ mod tests {
             deleted: false,
             pinned: false,
             expires_at_secs: None,
+            ..Default::default()
         }
     }
 
