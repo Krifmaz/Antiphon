@@ -108,27 +108,33 @@ public class AntiphonActivity extends NativeActivity {
      */
     void showWhenLocked(boolean on) {
         if (Build.VERSION.SDK_INT < 27) return;
-        runOnUiThread(() -> {
-            setShowWhenLocked(on);
-            setTurnScreenOn(on);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                setShowWhenLocked(on);
+                setTurnScreenOn(on);
+            }
         });
     }
 
     /** Opens the system's document picker. The answer comes to onActivityResult. */
     public void pickFile() {
-        runOnUiThread(() -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("*/*");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-            try {
-                startActivityForResult(intent, PICK_FILE);
-            } catch (RuntimeException e) {
-                // No document provider at all, which some stripped-down
-                // builds manage.
-                Log.w(TAG, "could not open the file picker", e);
-                Native.filePickCancelled();
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("*/*");
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                try {
+                    startActivityForResult(intent, PICK_FILE);
+                } catch (RuntimeException e) {
+                    // No document provider at all, which some stripped-down
+                    // builds manage.
+                    Log.w(TAG, "could not open the file picker", e);
+                    Native.filePickCancelled();
+                }
             }
         });
     }
@@ -171,8 +177,12 @@ public class AntiphonActivity extends NativeActivity {
     public void requestNotificationPermission() {
         if (Build.VERSION.SDK_INT < 33) return;
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
-        runOnUiThread(() -> requestPermissions(
-                new String[] {Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION));
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION);
+            }
+        });
     }
 
     /**
@@ -183,13 +193,16 @@ public class AntiphonActivity extends NativeActivity {
     public void requestBatteryExemption() {
         PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (power == null || power.isIgnoringBatteryOptimizations(getPackageName())) return;
-        runOnUiThread(() -> {
-            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    Uri.parse("package:" + getPackageName()));
-            try {
-                startActivity(intent);
-            } catch (RuntimeException e) {
-                Log.w(TAG, "could not ask for a battery exemption", e);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getPackageName()));
+                try {
+                    startActivity(intent);
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "could not ask for a battery exemption", e);
+                }
             }
         });
     }

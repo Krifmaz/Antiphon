@@ -214,7 +214,9 @@ echo "build-apk: aapt2"
 echo "build-apk: javac, d8"
 # Java 8 language level against android.jar as the boot class path, so
 # only the platform's own classes are visible; d8 then turns the class
-# files into Android's dex format, desugaring lambdas for MIN_SDK.
+# files into Android's dex format. No lambdas in the Java: android.jar has
+# no java.lang.invoke.LambdaMetafactory, so javac cannot compile one against
+# it -- anonymous classes instead.
 # Quoted one per line, so the argument file survives a space in the path.
 find "$HERE/java" "$BUILD/gen" -name '*.java' | LC_ALL=C sort | sed 's/.*/"&"/' > "$BUILD/sources.txt"
 javac -source 8 -target 8 -Xlint:-options -encoding UTF-8 \

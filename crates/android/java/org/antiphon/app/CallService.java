@@ -98,22 +98,25 @@ public class CallService extends Service {
             if (callWith == null) activity.showWhenLocked(false);
             if (!idle) activity.requestNotificationPermission();
         }
-        main.post(() -> {
-            if (running != null) {
-                running.apply();
-                return;
-            }
-            synchronized (lock) {
-                if (isIdle()) return;
-            }
-            createChannels(app);
-            try {
-                app.startForegroundService(new Intent(app, CallService.class).setAction(ACTION_UPDATE));
-            } catch (RuntimeException e) {
-                // Android 12 and later refuse to start one from the
-                // background. Calls and listening start from a tap, so this
-                // is a transfer that began while the app was out of sight.
-                Log.w(TAG, "could not start the background service", e);
+        main.post(new Runnable() {
+            @Override
+            public void run() {
+                if (running != null) {
+                    running.apply();
+                    return;
+                }
+                synchronized (lock) {
+                    if (isIdle()) return;
+                }
+                createChannels(app);
+                try {
+                    app.startForegroundService(new Intent(app, CallService.class).setAction(ACTION_UPDATE));
+                } catch (RuntimeException e) {
+                    // Android 12 and later refuse to start one from the
+                    // background. Calls and listening start from a tap, so this
+                    // is a transfer that began while the app was out of sight.
+                    Log.w(TAG, "could not start the background service", e);
+                }
             }
         });
     }
