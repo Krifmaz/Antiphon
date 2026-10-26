@@ -1579,6 +1579,13 @@ pub fn start_pipeline(
                 _ => send_ptt.load(Ordering::Relaxed),
             };
             if should_send && !send_muted.load(Ordering::Relaxed) {
+                // Spec §7: your own words in the captions, only if asked
+                // for, and only what actually went out.
+                if crate::captions::own_voice() {
+                    if let Some(tap) = crate::captions::tap() {
+                        tap.push(crate::captions::OWN_VOICE, sample_rate, &samples);
+                    }
+                }
                 // Spec §2, layer one: every frame carries a low-quality
                 // copy of the one before it, so a single lost frame is
                 // repaired with no round trip and no added delay.
@@ -1858,6 +1865,7 @@ pub fn start_pipeline(
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         loop {
             tick.tick().await;
+            let caption_tap = crate::captions::tap();
             mixer.set_duck_db(drain_duck_db.load(Ordering::Relaxed) as f32);
             // Cheap no-op most ticks (a single mutex check, internally
             // throttled to once every couple of seconds) -- riding the
@@ -1885,6 +1893,14 @@ pub fn start_pipeline(
                     PopResult::Empty => break,
                 };
                 drained_samples += samples.len() as u64;
+                // Spec §7 live captions: before the deafen gate and the
+                // volume, since someone who can't hear the call is who
+                // captions are for. Never blocks; see `captions`.
+                if let Some(tap) = &caption_tap {
+                    if !drain_peer_muted.load(Ordering::Relaxed) {
+                        tap.push(0, sample_rate, &samples);
+                    }
+                }
                 {
                     // Replay ring: record everything received, before the
                     // deafen gate and volume scaling below, so "save the
@@ -2009,6 +2025,9 @@ pub fn start_pipeline(
                 | PopResult::Recovered(mut samples)
                 | PopResult::Concealed(mut samples) = leg_jitter.pop_ready()
                 {
+                    if let Some(tap) = &caption_tap {
+                        tap.push(id + 1, sample_rate, &samples);
+                    }
                     if drain_deafened.load(Ordering::Relaxed) {
                         continue;
                     }

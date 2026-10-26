@@ -19,6 +19,7 @@ slint = { version = "1.17.1", features = ["unstable-fontique-010"] }
 zeroize = "1.9.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
+antiphon-captions = { version = "0.1.0", path = "../captions" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
 antiphon-protocol = { version = "0.1.0", path = "../protocol" }

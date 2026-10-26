@@ -73,6 +73,12 @@ export struct VpnConfigEntry {
     active: bool,
 }
 
+/// One line of live captions (spec §7).
+export struct CaptionLine {
+    who: string,
+    text: string,
+}
+
 /// A file that stays fetchable after the call (spec §5).
 export struct SharedFileEntry {
     name: string,
@@ -1540,6 +1546,7 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-notifications: true;
     in-out property <bool> sec-transferlimits: true;
     in-out property <bool> sec-sharedfiles: true;
+    in-out property <bool> sec-captions: true;
     in-out property <bool> sec-discovery: true;
     in-out property <bool> sec-outbox: true;
     in-out property <bool> sec-calladvanced: true;
@@ -1604,6 +1611,25 @@ export component MainWindow inherits Window {
     callback route-code-edited(int, string);
     callback delivery-settings-changed();
     callback find-nodes();
+    // Spec §7 on-device live captions. Off by default.
+    in-out property <bool> captions-enabled: false;
+    in-out property <bool> captions-own-voice: false;
+    in property <bool> captions-model-installed: false;
+    in property <bool> captions-download-allowed: false;
+    in property <bool> captions-downloading: false;
+    in property <float> captions-download-fraction: 0;
+    in property <string> captions-size-text;
+    in property <string> captions-model-message;
+    in property <bool> captions-live: false;
+    in property <string> captions-status;
+    in property <[CaptionLine]> caption-lines;
+    in property <bool> captions-have-transcript: false;
+    callback captions-settings-changed();
+    callback captions-download();
+    callback captions-cancel-download();
+    callback captions-import();
+    callback captions-remove-model();
+    callback captions-save-transcript();
     // Spec §5 seeding and pinning.
     in-out property <bool> seeding: false;
     in-out property <int> seed-scope: 0;
@@ -3196,8 +3222,45 @@ export component MainWindow inherits Window {
                                         MenuItem { title: "Contacts & servers"; checkable: true; checked <=> call-panel-visible-contacts; activated => { settings-changed(); } }
                                         MenuItem { title: "My invite (QR)"; checkable: true; checked <=> call-panel-visible-invite; activated => { settings-changed(); } }
                                     }
+                                    MenuItem { title: "Live captions"; checkable: true; checked <=> captions-enabled; activated => { captions-settings-changed(); } }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Spec §7 live captions, subtitle-style along the bottom
+                // and above every panel, so moving panels around can never
+                // hide them. Shown only while captions are actually
+                // running in a call.
+                if captions-live && (caption-lines.length > 0 || captions-status != "") : Rectangle {
+                    width: min(680px, parent.width - 24px);
+                    height: captions-layout.preferred-height;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height - 12px;
+                    background: #000000c8;
+                    border-radius: 8px;
+
+                    captions-layout := VerticalLayout {
+                        padding: 10px;
+                        spacing: 2px;
+                        for line in caption-lines : Text {
+                            text: line.who + ": " + line.text;
+                            color: #ffffff;
+                            wrap: word-wrap;
+                            font-size: 15px * text-scale;
+                            accessible-role: text;
+                            accessible-label: line.who + " said " + line.text;
+                        }
+                        if captions-status != "" : Text {
+                            text: captions-status;
+                            color: #ffffffb0;
+                            wrap: word-wrap;
+                            font-size: 10px * text-scale;
+                        }
+                        if captions-have-transcript : HorizontalLayout {
+                            alignment: end;
+                            Button { text: "Save transcript..."; clicked => { captions-save-transcript(); } }
                         }
                     }
                 }
@@ -5190,6 +5253,83 @@ export component MainWindow inherits Window {
                                         }
                                         Text { text: f.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
                                         if f.status != "" : Text { text: f.status; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+
+                            if section-id == "captions" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Words appear at the bottom of the call screen as people speak. The speech recognition runs on this computer: no audio and no text is sent anywhere, and the words are forgotten when the call ends unless you save them.";
+                                    text-scale: text-scale;
+                                    title: "Live captions"; reduced-motion: reduced-motion; expanded <=> sec-captions;
+                                }
+                                if sec-captions : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Show live captions in calls";
+                                        checked <=> captions-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default. Captions what the other people in the call say -- even while you're deafened, since that may be exactly when you need them. Someone you've muted isn't captioned.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Caption my own voice too";
+                                        checked <=> captions-own-voice;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Adds what you say, as sent, so a saved transcript has both sides.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    if captions-model-installed : HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text { text: "Speech model installed (Whisper tiny, English)."; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; font-size: 11px * text-scale; }
+                                        Button { text: "Remove"; clicked => { captions-remove-model(); } }
+                                    }
+                                    if !captions-model-installed : VerticalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text {
+                                            text: "Captions need a speech model on this computer: Whisper tiny (English), " + captions-size-text + ". It is downloaded once, only if you press Download, and checked against a fingerprint built into the app. After that, captioning works offline.";
+                                            wrap: word-wrap;
+                                            font-size: 11px * text-scale;
+                                        }
+                                        if !captions-download-allowed : Text {
+                                            text: "This build can't download the model (it has no fingerprint to check it against). If you have the files -- config.json, tokenizer.json and model.safetensors from openai/whisper-tiny.en -- choose their folder.";
+                                            color: Theme.muted-text;
+                                            wrap: word-wrap;
+                                            font-size: 10px * text-scale;
+                                        }
+                                        if captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: Theme.muted-text.with-alpha(0.25);
+                                                accessible-role: progress-indicator;
+                                                accessible-value: round(captions-download-fraction * 100) + "%";
+                                                Rectangle {
+                                                    x: 0px;
+                                                    width: parent.width * captions-download-fraction;
+                                                    height: parent.height;
+                                                    border-radius: 4px;
+                                                    background: Theme.accent;
+                                                }
+                                            }
+                                            Text { text: round(captions-download-fraction * 100) + "%"; vertical-alignment: center; font-size: 10px * text-scale; }
+                                            Button { text: "Cancel"; clicked => { captions-cancel-download(); } }
+                                        }
+                                        if !captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            if captions-download-allowed : Button { text: "Download"; clicked => { captions-download(); } }
+                                            Button { text: "Use files I already have..."; clicked => { captions-import(); } }
+                                        }
+                                    }
+                                    if captions-model-message != "" : Text {
+                                        text: captions-model-message;
+                                        wrap: word-wrap;
+                                        font-size: 10px * text-scale;
                                     }
                                 }
                             }

@@ -1,6 +1,7 @@
 mod animated_image;
 mod caps_lock;
 mod connection_mode;
+mod captions;
 mod mixer;
 mod group;
 mod group_keys;
@@ -2917,6 +2918,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         main_window.on_check_shared_files(move || sharing::check_all(&state.runtime));
     }
     wire_communities(main_window, app_state);
+    captions::wire(main_window, app_state);
     {
         let window_weak = main_window.as_weak();
         let state = app_state.clone();
@@ -4907,6 +4909,8 @@ fn apply_routes_to_ui(app: &MainWindow, config: &config::AppConfig) {
     app.set_route_fan_out(config.route_fan_out);
     app.set_hold_mail(config.hold_mail_for_devices);
     app.set_hold_mail_port(config.hold_mail_port as i32);
+    app.set_captions_enabled(config.captions_enabled);
+    app.set_captions_own_voice(config.captions_own_voice);
     app.set_seeding(config.seeding);
     app.set_seed_scope(config.seed_scope);
     app.set_seed_port(config.seed_port as i32);
@@ -5428,6 +5432,7 @@ fn apply_section_defaults(app: &MainWindow, expanded: bool) {
     app.set_sec_notifications(expanded);
     app.set_sec_transferlimits(expanded);
     app.set_sec_sharedfiles(expanded);
+    app.set_sec_captions(expanded);
     app.set_sec_vpn(expanded);
     app.set_sec_discovery(expanded);
 }
@@ -5857,6 +5862,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         strict_mode: app.get_strict_mode(),
         hold_mail_for_devices: app.get_hold_mail(),
         hold_mail_port: u16::try_from(app.get_hold_mail_port()).unwrap_or(3480),
+        captions_enabled: app.get_captions_enabled(),
+        captions_own_voice: app.get_captions_own_voice(),
         seeding: app.get_seeding(),
         seed_scope: app.get_seed_scope().clamp(0, 2),
         seed_port: previous.seed_port,
