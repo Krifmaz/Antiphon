@@ -19,13 +19,20 @@
 //!   aggregate counters, and only when asked to.
 //!
 //! The same node can also hold sealed mail for people who are offline
-//! ([`mailbox`]). That is off unless the operator switches it on.
+//! ([`mailbox`]), host sealed files ([`files`]), and forward group calls
+//! as a selective forwarding unit ([`sfu`]): one copy of each member's
+//! sealed audio in, a copy out to every other member of the room. Each is
+//! off unless the operator switches it on. The SFU holds the same kind of
+//! thing the relay does -- a blinded, daily-rotating room token, a random
+//! per-call member tag and an address per member, for as long as the call
+//! is live -- and forwards payloads it cannot read.
 //!
 //! The core is a plain state machine ([`Relay::handle`]) so it can be
 //! tested without sockets; [`run`] is the thin loop around it.
 
 pub mod files;
 pub mod mailbox;
+pub mod sfu;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -247,12 +254,36 @@ pub async fn run_node(
     mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
 ) -> std::io::Result<()> {
+    run_node_with_sfu(socket, relay, mailbox, files, None).await
+}
+
+/// [`run_node`], plus group-call forwarding if `sfu` is given. SFU
+/// datagrams are told apart by their own magic like the other services;
+/// without an SFU, a JOIN is answered "disabled" so a client can say why.
+pub async fn run_node_with_sfu(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
+    sfu: Option<Arc<std::sync::Mutex<sfu::Sfu>>>,
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65_536];
     let mut last_sweep = Instant::now();
     loop {
         let (n, from) = socket.recv_from(&mut buf).await?;
         let now = Instant::now();
-        let out = if antiphon_net::blob::Message::is_blob_datagram(&buf[..n]) {
+        let out = if antiphon_net::sfu::Message::is_sfu_datagram(&buf[..n]) {
+            match &sfu {
+                Some(s) => s.lock().unwrap().handle(from, &buf[..n], now),
+                None => match antiphon_net::sfu::Message::decode(&buf[..n]) {
+                    Some(antiphon_net::sfu::Message::Join { .. }) => vec![(
+                        from,
+                        antiphon_net::sfu::Message::Refused(antiphon_net::sfu::Refusal::Disabled).encode(),
+                    )],
+                    _ => vec![],
+                },
+            }
+        } else if antiphon_net::blob::Message::is_blob_datagram(&buf[..n]) {
             match &files {
                 Some(f) => {
                     let secs = std::time::SystemTime::now()
@@ -298,7 +329,10 @@ This relay forwards encrypted packets it cannot read. It never holds a key.
 It sees rotating blinded tokens, never who you are. It keeps addresses only
 while a call or registration is live, and writes no connection logs.
 If it holds mail, the mail is sealed end to end: it sees an inbox label it
-cannot link to anyone, and never a sender, a recipient or a word.";
+cannot link to anyone, and never a sender, a recipient or a word.
+If it forwards group calls, it sees a room token that changes daily and a
+random tag per member per call, never a group, a name or a word: the audio
+is sealed by the members and forwarded as it came.";
 
 #[cfg(test)]
 mod tests {
