@@ -1,13 +1,13 @@
 //! The winit application: owns the window, the wgpu surface and the iced
 //! `UserInterface`, and feeds [`App`] its events. Follows iced's own
-//! `integration` example, plus what Android adds -- the window comes and
+//! `integration` example, plus what phones add -- the window comes and
 //! goes as the app is backgrounded, the soft keyboard must be asked for,
 //! and the system bars draw over the edges.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use android_activity::AndroidApp;
 use iced_core::{clipboard, mouse, renderer, window as core_window, Event, Pixels, Size, Theme};
 use iced_graphics::{Shell, Viewport};
 use iced_runtime::user_interface::{self, UserInterface};
@@ -30,6 +30,14 @@ const ANIMATION_FRAME: Duration = Duration::from_millis(50);
 /// How often to re-read the insets while the keyboard is up, since it
 /// slides in over several frames and reports no event when it settles.
 const KEYBOARD_POLL: Duration = Duration::from_millis(200);
+
+/// Android: Vulkan first, OpenGL ES if it fails, since older phones ship
+/// Vulkan drivers that enumerate fine and then cannot create a device.
+#[cfg(target_os = "android")]
+const GRAPHICS_BACKENDS: [wgpu::Backends; 2] = [wgpu::Backends::VULKAN, wgpu::Backends::GL];
+/// iOS has Metal and nothing else worth trying.
+#[cfg(target_os = "ios")]
+const GRAPHICS_BACKENDS: [wgpu::Backends; 1] = [wgpu::Backends::METAL];
 
 struct Clipboard;
 
@@ -55,7 +63,8 @@ struct Graphics {
 }
 
 pub struct Runner {
-    android: AndroidApp,
+    /// The app's private storage: identity, settings.
+    data_dir: PathBuf,
     proxy: Arc<Mutex<EventLoopProxy<Wake>>>,
     app: Option<App>,
     graphics: Option<Graphics>,
@@ -70,9 +79,9 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn new(android: AndroidApp, proxy: EventLoopProxy<Wake>) -> Self {
+    pub fn new(data_dir: PathBuf, proxy: EventLoopProxy<Wake>) -> Self {
         Self {
-            android,
+            data_dir,
             proxy: Arc::new(Mutex::new(proxy)),
             app: None,
             graphics: None,
@@ -90,7 +99,7 @@ impl Runner {
         if self.app.is_some() {
             return;
         }
-        let dir = self.android.internal_data_path().unwrap_or_else(std::env::temp_dir);
+        let dir = self.data_dir.clone();
         let proxy = self.proxy.clone();
         let wake = Arc::new(move || {
             let _ = proxy.lock().unwrap().send_event(Wake);
@@ -108,10 +117,8 @@ impl Runner {
                 .map_err(|e| format!("could not create the window: {e}"))?,
         );
 
-        // Vulkan first, OpenGL ES if it fails: older phones ship Vulkan
-        // drivers that enumerate fine and then cannot create a device.
         let mut last_error = String::from("no graphics backend");
-        for backends in [wgpu::Backends::VULKAN, wgpu::Backends::GL] {
+        for backends in GRAPHICS_BACKENDS {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends, ..Default::default() });
             let surface = match instance.create_surface(window.clone()) {
                 Ok(surface) => surface,

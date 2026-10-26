@@ -3,8 +3,38 @@
 //! hands over. Each one fails soft: a phone that refuses one of these
 //! still gets a working app, just without that convenience.
 
+use antiphon_mobile::platform::Platform;
 use jni::objects::{JObject, JValue};
 use jni::{JNIEnv, JavaVM};
+
+/// Android's half of [`Platform`].
+pub struct Android;
+
+impl Platform for Android {
+    fn has_mic_permission(&self) -> bool {
+        has_mic_permission()
+    }
+
+    fn request_mic_permission(&self) {
+        request_mic_permission();
+    }
+
+    fn set_call_audio(&self, in_call: bool, speaker: bool) {
+        set_call_audio(in_call, speaker);
+    }
+
+    fn copy_to_clipboard(&self, text: &str) {
+        copy_to_clipboard(text);
+    }
+
+    fn read_clipboard(&self) -> Option<String> {
+        read_clipboard()
+    }
+
+    fn system_insets(&self) -> (f32, f32) {
+        system_insets()
+    }
+}
 
 const RECORD_AUDIO: &str = "android.permission.RECORD_AUDIO";
 /// `PackageManager.PERMISSION_GRANTED`.
@@ -52,7 +82,7 @@ fn with_activity<T>(what: &str, f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::er
 
 /// Whether the user has granted microphone access. Android asks at run
 /// time, not at install, so this can change while the app is open.
-pub fn has_mic_permission() -> bool {
+fn has_mic_permission() -> bool {
     with_activity("checking microphone permission", |env, activity| {
         let name = env.new_string(RECORD_AUDIO)?;
         let result = env
@@ -66,7 +96,7 @@ pub fn has_mic_permission() -> bool {
 /// Shows the system's microphone permission prompt. The answer is not
 /// reported back to native code, so callers check [`has_mic_permission`]
 /// again when the activity resumes.
-pub fn request_mic_permission() {
+fn request_mic_permission() {
     with_activity("requesting microphone permission", |env, activity| {
         let name = env.new_string(RECORD_AUDIO)?;
         let array = env.new_object_array(1, "java/lang/String", &name)?;
@@ -85,7 +115,7 @@ fn audio_manager<'a>(env: &mut JNIEnv<'a>, activity: &JObject) -> jni::errors::R
 /// and noise suppressor engage, and audio goes to the earpiece unless the
 /// speaker is on. Without this a call plays like music, out of the
 /// loudspeaker, and the microphone hears it.
-pub fn set_call_audio(in_call: bool, speaker: bool) {
+fn set_call_audio(in_call: bool, speaker: bool) {
     with_activity("setting the audio mode", |env, activity| {
         let manager = audio_manager(env, activity)?;
         let mode = if in_call { MODE_IN_COMMUNICATION } else { MODE_NORMAL };
@@ -114,7 +144,7 @@ fn clipboard_manager<'a>(env: &mut JNIEnv<'a>, activity: &JObject) -> jni::error
 }
 
 /// Copies `text` to the system clipboard.
-pub fn copy_to_clipboard(text: &str) {
+fn copy_to_clipboard(text: &str) {
     with_activity("copying to the clipboard", |env, activity| {
         let manager = clipboard_manager(env, activity)?;
         let label = env.new_string("Antiphon")?;
@@ -134,7 +164,7 @@ pub fn copy_to_clipboard(text: &str) {
 
 /// The clipboard's text, if it holds any. A soft keyboard has no Ctrl+V,
 /// so the paste buttons read it here.
-pub fn read_clipboard() -> Option<String> {
+fn read_clipboard() -> Option<String> {
     with_activity("reading the clipboard", |env, activity| {
         let manager = clipboard_manager(env, activity)?;
         let clip = env.call_method(&manager, "getPrimaryClip", "()Landroid/content/ClipData;", &[])?.l()?;
@@ -161,7 +191,7 @@ pub fn read_clipboard() -> Option<String> {
 /// bar, and the soft keyboard while it is up -- in physical pixels, as
 /// (top, bottom). Android 15 draws every app edge to edge, so without this
 /// the first row of the app sits under the clock.
-pub fn system_insets() -> (f32, f32) {
+fn system_insets() -> (f32, f32) {
     with_activity("reading window insets", |env, activity| {
         let window = env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
         let decor = env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?.l()?;

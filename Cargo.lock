@@ -367,21 +367,10 @@ version = "0.1.0"
 dependencies = [
  "android-activity",
  "android_logger",
- "antiphon-audio",
- "antiphon-crypto",
- "antiphon-net",
- "futures",
- "iced_core",
- "iced_graphics",
- "iced_runtime",
- "iced_wgpu",
- "iced_widget",
+ "antiphon-mobile",
  "jni 0.21.1",
  "log",
  "ndk-context",
- "serde",
- "serde_json",
- "tokio",
  "winit",
 ]
 
@@ -431,6 +420,26 @@ dependencies = [
  "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "antiphon-mobile"
+version = "0.1.0"
+dependencies = [
+ "antiphon-audio",
+ "antiphon-crypto",
+ "antiphon-net",
+ "futures",
+ "iced_core",
+ "iced_graphics",
+ "iced_runtime",
+ "iced_wgpu",
+ "iced_widget",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "winit",
 ]
 
 [[package]]

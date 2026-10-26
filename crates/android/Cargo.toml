@@ -1,6 +1,6 @@
 [package]
 name = "antiphon-android"
-description = "Antiphon for Android: the iced GUI on top of the shared Rust core"
+description = "Antiphon for Android: the shared iced phone app, started from a NativeActivity"
 edition.workspace = true
 version.workspace = true
 
@@ -18,21 +18,10 @@ android_logger = "0.15"
 log = "0.4"
 jni = "0.21"
 ndk-context = "0.1.1"
-iced_wgpu = "0.14.0"
-iced_runtime = "0.14.0"
-iced_core = "0.14.0"
-iced_widget = { version = "0.14.0", features = ["wgpu"] }
-# The phone has fonts, but the fallback chain cosmic-text builds from them
-# varies by vendor; bundling Fira Sans makes every device render the same.
-iced_graphics = { version = "0.14.0", features = ["fira-sans"] }
+# Only for its Android backend; the window and everything drawn in it is
+# antiphon-mobile's.
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "android-native-activity"] }
-futures = { version = "0.3", features = ["executor"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
-antiphon-audio = { version = "0.1.0", path = "../audio" }
-antiphon-crypto = { version = "0.1.0", path = "../crypto" }
-antiphon-net = { version = "0.1.0", path = "../net" }
+antiphon-mobile = { version = "0.1.0", path = "../mobile" }
 
 [package.metadata.android]
 package = "org.antiphon.app"

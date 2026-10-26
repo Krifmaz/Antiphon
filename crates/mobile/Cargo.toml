@@ -1,0 +1,26 @@
+[package]
+name = "antiphon-mobile"
+description = "Antiphon's phone app, shared by Android and iOS: iced on winit and wgpu"
+edition.workspace = true
+version.workspace = true
+
+# Everything is phone-only, so `cargo build --workspace` on a desktop
+# compiles an empty crate rather than a second GUI toolkit.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+log = "0.4"
+iced_wgpu = "0.14.0"
+iced_runtime = "0.14.0"
+iced_core = "0.14.0"
+iced_widget = { version = "0.14.0", features = ["wgpu"] }
+# The phone has fonts, but the fallback chain cosmic-text builds from them
+# varies by vendor; bundling Fira Sans makes every device render the same.
+iced_graphics = { version = "0.14.0", features = ["fira-sans"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+futures = { version = "0.3", features = ["executor"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+antiphon-audio = { version = "0.1.0", path = "../audio" }
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }
+antiphon-net = { version = "0.1.0", path = "../net" }
+
