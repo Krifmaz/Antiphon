@@ -5000,9 +5000,7 @@ fn save_routes(app: &MainWindow, mut config: config::AppConfig) {
     apply_routes_to_ui(app, &config);
     // Members of your groups who aren't your contacts learn the new list
     // from your card (spec §9), as contacts do from your next Hello.
-    if let Some(card) = my_space_card() {
-        std::thread::spawn(move || community::refresh_cards(card));
-    }
+    std::thread::spawn(community::refresh_cards);
     delivery::kick();
 }
 
@@ -5993,7 +5991,15 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
 }
 
 fn save_current_config(app: &MainWindow) {
-    config::save(&current_config(app));
+    let before = config::load().profile;
+    let now = current_config(app);
+    let renamed = before.display_name != now.profile.display_name || before.status_message != now.profile.status_message;
+    config::save(&now);
+    // Spaces where you kept your profile's name or status show the new
+    // one (spec §7); refresh_cards skips any where nothing changed.
+    if renamed {
+        std::thread::spawn(community::refresh_cards);
+    }
 }
 
 /// Saves settings, spawns a fresh instance of this same executable, and
@@ -6178,13 +6184,6 @@ fn read_chain_config(app: &MainWindow) -> ChainConfig {
 
 // ---- Spec §9: group chats and communities -----------------------------------
 
-/// How you appear to members: your prekey, route list and display name.
-fn my_space_card() -> Option<community::Card> {
-    let identity = delivery::identity()?;
-    let config = config::load();
-    Some(community::Card::mine(&identity, delivery::my_record_hex(), &config.profile.display_name))
-}
-
 fn selected_space(app: &MainWindow) -> Option<antiphon_crypto::community::Key> {
     connection_mode::decode_hex32(&app.get_selected_space()).map(antiphon_crypto::community::Key)
 }
@@ -6231,7 +6230,6 @@ fn space_update(app: &MainWindow, change: impl FnOnce(&mut antiphon_crypto::comm
 fn apply_spaces_to_ui(app: &MainWindow) {
     use antiphon_crypto::community::{perm, Kind};
     let Some(store) = community::Store::app() else { return };
-    let me = store.identity.public().identity_key;
     let config = config::load();
     let mut spaces: Vec<community::Space> = store.ids().iter().filter_map(|id| store.load(id)).collect();
     spaces.sort_by_key(|s| s.manifest().name.to_lowercase());
@@ -6282,6 +6280,7 @@ fn apply_spaces_to_ui(app: &MainWindow) {
     };
     let m = space.manifest();
     let community = m.kind == Kind::Community;
+    let me = space.me();
     let joined = space.joining.is_none() && !space.removed;
     app.set_space_title(m.name.clone().into());
     let subtitle = if space.joining.is_some() {
@@ -6299,6 +6298,8 @@ fn apply_spaces_to_ui(app: &MainWindow) {
     };
     app.set_space_subtitle(subtitle.into());
     app.set_space_is_community(community);
+    app.set_space_separate(space.persona);
+    app.set_space_look_defaults(config.profile.display_name.clone().into());
     app.set_space_removed(space.removed);
     let channel_index = (app.get_space_channel_index().max(0) as usize).min(m.channels.len() - 1);
     app.set_space_channel_names(ModelRc::new(VecModel::from(
@@ -6343,9 +6344,14 @@ fn apply_spaces_to_ui(app: &MainWindow) {
         .map(|x| {
             let k = x.key.0;
             let owner = m.is_owner(&k);
+            let card = space.card(&k);
+            let avatar = card.and_then(|c| c.avatar.as_deref()).and_then(avatar_image);
             SpaceMember {
                 key: delivery::hex(&k).into(),
                 name: space.name_of(&k).into(),
+                status: card.map(|c| c.status.clone()).unwrap_or_default().into(),
+                has_avatar: avatar.is_some(),
+                avatar: avatar.unwrap_or_default(),
                 role: if owner { "Owner".into() } else { m.roles.get(x.role as usize).map(|r| r.name.clone()).unwrap_or_default().into() },
                 role_index: x.role as i32,
                 me: k == me,
@@ -6391,7 +6397,92 @@ fn apply_spaces_to_ui(app: &MainWindow) {
     app.set_space_dht_node(m.nodes.dht.first().cloned().unwrap_or_default().into());
 }
 
+/// A picture from a card (base64 JPEG), for the member list.
+fn avatar_image(b64: &str) -> Option<slint::Image> {
+    if b64.is_empty() || b64.len() > community::MAX_AVATAR {
+        return None;
+    }
+    let bytes = file_transfer::decode_b64(b64)?;
+    let rgba = image::load_from_memory(&bytes).ok()?.thumbnail(64, 64).to_rgba8();
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), rgba.width(), rgba.height());
+    Some(slint::Image::from_rgba8(buffer))
+}
+
+/// A picked image as a card picture: a 48 px square JPEG, base64, made
+/// smaller until it fits [`community::MAX_AVATAR`].
+fn avatar_from_file(path: &std::path::Path) -> Result<String, String> {
+    let img = image::open(path).map_err(|e| format!("couldn't read that picture: {e}"))?;
+    let square = img.resize_to_fill(48, 48, image::imageops::FilterType::Lanczos3).to_rgb8();
+    for quality in [80u8, 65, 50, 35] {
+        let mut out = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+        encoder.encode_image(&square).map_err(|e| e.to_string())?;
+        let b64 = file_transfer::encode_b64(&out);
+        if b64.len() <= community::MAX_AVATAR {
+            return Ok(b64);
+        }
+    }
+    Err("that picture won't shrink small enough".into())
+}
+
+/// The selected space's "How I appear here" fields, from what's saved.
+/// Only on selecting or saving, so a redraw never wipes what's being typed.
+fn load_look_to_ui(app: &MainWindow) {
+    let (Some(store), Some(id)) = (community::Store::app(), selected_space(app)) else { return };
+    let look = store.appearance(&id);
+    app.set_space_look_name(look.name.into());
+    app.set_space_look_status(look.status.into());
+    app.set_space_look_avatar(avatar_image(&look.avatar).unwrap_or_default());
+    app.set_space_look_avatar_data(look.avatar.into());
+}
+
 fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_save_look(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let look = community::Appearance {
+                name: app.get_space_look_name().trim().to_string(),
+                status: app.get_space_look_status().trim().to_string(),
+                avatar: app.get_space_look_avatar_data().to_string(),
+            };
+            space_action(&app, |store, id| store.set_appearance(id, look));
+            if app.get_space_status().is_empty() {
+                app.set_space_status("Saved. Members see it when they next collect their mail.".into());
+            }
+            load_look_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_clear_look_avatar(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_space_look_avatar_data("".into());
+            app.set_space_look_avatar(slint::Image::default());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_pick_look_avatar(move || {
+            let window_weak = window_weak.clone();
+            // The dialog blocks, so not on the UI thread.
+            std::thread::spawn(move || {
+                let Some(path) = rfd::FileDialog::new().set_title("A picture for this space").add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp"]).pick_file() else { return };
+                let result = avatar_from_file(&path);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(app) = window_weak.upgrade() else { return };
+                    match result {
+                        Ok(b64) => {
+                            app.set_space_look_avatar(avatar_image(&b64).unwrap_or_default());
+                            app.set_space_look_avatar_data(b64.into());
+                            app.set_space_status("Save to send it.".into());
+                        }
+                        Err(e) => app.set_space_status(e.into()),
+                    }
+                });
+            });
+        });
+    }
     {
         let window_weak = main_window.as_weak();
         main_window.on_open_communities(move || {
@@ -6414,6 +6505,7 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
             app.set_space_thread_root("".into());
             app.set_space_channel_index(0);
             app.set_space_status("".into());
+            load_look_to_ui(&app);
             apply_spaces_to_ui(&app);
         });
     }
@@ -6430,9 +6522,9 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
         let window_weak = main_window.as_weak();
         main_window.on_create_space(move |name, is_community| {
             let Some(app) = window_weak.upgrade() else { return };
-            let (Some(store), Some(card)) = (community::Store::app(), my_space_card()) else { return };
+            let Some(store) = community::Store::app() else { return };
             let kind = if is_community { antiphon_crypto::community::Kind::Community } else { antiphon_crypto::community::Kind::Group };
-            match store.create(kind, &name, card) {
+            match store.create(kind, &name, app.get_space_new_separate()) {
                 Ok(id) => {
                     app.set_space_new_name("".into());
                     app.set_selected_space(delivery::hex(&id.0).into());
@@ -6445,10 +6537,10 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
     }
     {
         let window_weak = main_window.as_weak();
-        main_window.on_accept_space_invite(move |index| {
+        main_window.on_accept_space_invite(move |index, separate| {
             let Some(app) = window_weak.upgrade() else { return };
-            let (Some(store), Some(card)) = (community::Store::app(), my_space_card()) else { return };
-            match store.accept_invite(index.max(0) as usize, card) {
+            let Some(store) = community::Store::app() else { return };
+            match store.accept_invite(index.max(0) as usize, separate) {
                 Ok(id) => {
                     app.set_selected_space(delivery::hex(&id.0).into());
                     app.set_space_status("Accepted. You'll be let in when they next collect their mail.".into());
@@ -6685,7 +6777,7 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
                         let mid = u64::from_le_bytes(b) >> 1;
                         let post = community::Post::File { id: mid, channel, name: name.clone(), size, file_id: file_id.clone(), key: key.clone(), holders: holders.clone(), at_secs };
                         let outs = space.share_file(post)?;
-                        Ok(((), outs, vec![community::Event::File { channel, id: mid, sender: store.identity.public().identity_key, name, size, file_id, key, holders, at_secs }]))
+                        Ok(((), outs, vec![community::Event::File { channel, id: mid, sender: space.me(), name, size, file_id, key, holders, at_secs }]))
                     })
                 })();
                 let _ = slint::invoke_from_event_loop(move || {

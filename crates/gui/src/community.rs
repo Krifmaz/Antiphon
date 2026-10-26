@@ -51,6 +51,27 @@
 //!   the winner, and if the loser was theirs they make their change again
 //!   on top.
 //!
+//! # How you appear, and as whom (spec §7 "per-community identity")
+//!
+//! Each space has its own [`Appearance`] -- name, status line, a small
+//! picture -- carried in your [`Card`] there; empty means your profile's.
+//! Separately, you can be in a space under a **separate identity**
+//! ([`antiphon_crypto::persona`]), chosen when you create it or accept the
+//! invite: a key derived for that space that is your MLS credential,
+//! manifest entry, card and mailbox there, so no two spaces (and none of
+//! your contacts) can match you up. To keep that true:
+//!
+//! - An invite is an [`Offer`]: nobody is written into the manifest until
+//!   they answer, and then under the key they answer with. Your Join goes
+//!   to the inviter sealed with your main key -- they alone see both.
+//! - What you send as a separate identity goes by mailbox, sealed as that
+//!   identity, and never over a live call (which is with your main key).
+//! - The courier collects that identity's own inboxes, and takes only
+//!   community traffic there.
+//! - Shared files from that space are fetched as that identity.
+//!
+//! The tradeoffs are spelled out in `antiphon_crypto::persona`.
+//!
 //! Not handled: a member who misses a commit for good (offline longer than
 //! the mailboxes keep mail) is stuck in an old epoch until someone invites
 //! them again; nothing detects that for them.
@@ -112,7 +133,21 @@ pub struct Card {
     pub routes: String,
     /// What they call themselves. Shown as theirs, not as a petname.
     pub name: String,
+    /// Their status line here (spec §7 "per-community identity").
+    #[serde(default)]
+    pub status: String,
+    /// Their picture here, a small JPEG as base64 (see [`MAX_AVATAR`]).
+    /// `None` means "not included" -- cards passed around in bulk (a
+    /// Welcome lists everyone's) leave it out to stay small, and a card
+    /// without one never clears the picture already known. `Some("")` is
+    /// "no picture".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
+
+/// The largest picture a card may carry, as base64. A 48 px thumbnail;
+/// the whole card travels in ~540-byte mailbox fragments.
+pub const MAX_AVATAR: usize = 6 * 1024;
 
 impl Card {
     pub fn mine(identity: &IdentityKeyPair, routes_hex: String, name: &str) -> Self {
@@ -121,7 +156,25 @@ impl Card {
             public: hex(&identity.public().encode()),
             routes: routes_hex,
             name: name.chars().filter(|c| !c.is_control()).take(80).collect(),
+            status: String::new(),
+            avatar: None,
         }
+    }
+
+    /// With a status line and picture for this community.
+    pub fn with_profile(mut self, status: &str, avatar: &str) -> Self {
+        self.status = status.chars().filter(|c| !c.is_control()).take(120).collect();
+        self.avatar = Some(if avatar.len() <= MAX_AVATAR { avatar.to_string() } else { String::new() });
+        self
+    }
+
+    /// Without the picture, for passing many cards at once.
+    pub fn slim(&self) -> Self {
+        Self { avatar: None, ..self.clone() }
+    }
+
+    fn has_avatar(&self) -> bool {
+        self.avatar.as_deref().is_some_and(|a| !a.is_empty())
     }
 
     /// The prekey, if the card is genuinely signed by the identity it
@@ -254,6 +307,21 @@ struct Held {
     wire: Wire,
 }
 
+/// Someone we invited who hasn't answered. They aren't written into the
+/// manifest until they do, because they may answer with a separate
+/// identity (see [`antiphon_crypto::persona`]) -- and a manifest that had
+/// listed their main key first would have told every member who the new
+/// key belongs to.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Offer {
+    key: Key,
+    /// What we call them, for the manifest if they join as themselves.
+    name: String,
+    at_secs: u64,
+}
+
+const MAX_OFFERS: usize = 200;
+
 #[derive(Serialize, Deserialize)]
 struct Saved {
     manifests: Vec<String>,
@@ -267,6 +335,12 @@ struct Saved {
     joining: Option<Key>,
     #[serde(default)]
     removed: bool,
+    /// We are in it under a separate identity, derived from our seed and
+    /// its id ([`antiphon_crypto::persona::community_identity`]).
+    #[serde(default)]
+    persona: bool,
+    #[serde(default)]
+    offers: Vec<Offer>,
 }
 
 pub struct Space {
@@ -281,12 +355,26 @@ pub struct Space {
     pub joining: Option<[u8; 32]>,
     /// Taken out of the group, or left.
     pub removed: bool,
+    /// In it under a separate identity: `me` is that key, not our main one.
+    pub persona: bool,
+    offers: Vec<Offer>,
+}
+
+/// The identity to act as in a space: `main`, or the separate one derived
+/// for it.
+pub fn identity_for(main: &IdentityKeyPair, id: &Key, persona: bool) -> IdentityKeyPair {
+    let seed = if persona { antiphon_crypto::persona::community_identity(main, &id.0).master_seed() } else { main.master_seed() };
+    IdentityKeyPair::from_master_seed(seed)
 }
 
 impl Space {
-    /// A new group chat or community, with us as its owner.
-    pub fn create(identity: &IdentityKeyPair, kind: Kind, name: &str, card: Card) -> Result<Self, String> {
-        let m = Manifest::genesis(identity, kind, name, &card.name);
+    /// A new group chat or community, with us as its owner. `id` is
+    /// chosen first so a separate identity -- derived from it -- can be the
+    /// owner from the very first version: `identity` and `card` are
+    /// already that identity's when `persona` is set.
+    pub fn create(identity: &IdentityKeyPair, id: Key, kind: Kind, name: &str, card: Card, persona: bool) -> Result<Self, String> {
+        let mut m = Manifest::genesis(identity, kind, name, &card.name);
+        m.id = id;
         let signed = SignedManifest::sign(&m, identity);
         let mut mls = GroupMember::new(identity);
         mls.create().map_err(|e| e.to_string())?;
@@ -299,17 +387,35 @@ impl Space {
             previous: None,
             joining: None,
             removed: false,
+            persona,
+            offers: Vec::new(),
         })
     }
 
+    /// The key we are in it as.
+    pub fn me(&self) -> [u8; 32] {
+        self.me
+    }
+
     /// Accepting an invite: the space as far as we know it, and the Join
-    /// for the inviter.
-    pub fn accept(identity: &IdentityKeyPair, invite: &Invite, card: Card) -> Result<(Self, Out), String> {
+    /// for the inviter. `identity` and `card` are whoever we join as: our
+    /// main identity, or -- with `persona` -- the one derived for this
+    /// community. Either way the Join must go to the inviter sealed with
+    /// our *main* key, the one they invited.
+    pub fn accept(identity: &IdentityKeyPair, invite: &Invite, card: Card, persona: bool) -> Result<(Self, Out), String> {
         let signed = SignedManifest::decode(&unb64(&invite.manifest)?).map_err(|e| e.to_string())?;
         let m = cm::accept_first(&signed).map_err(|e| e.to_string())?;
         let me = identity.public().identity_key;
-        if !m.is_member(&me) {
-            return Err("that invite doesn't list you".into());
+        if card.key.0 != me {
+            return Err("that card isn't yours".into());
+        }
+        // Listed already (an invite from an older version), or an offer:
+        // the inviter adds whichever key we answer with.
+        if !m.is_member(&me) && !m.can(&invite.from.0, perm::INVITE, None) {
+            return Err("whoever invited you can't let you in".into());
+        }
+        if m.is_banned(&me) {
+            return Err("you're banned from it".into());
         }
         let mut mls = GroupMember::new(identity);
         let key_package = mls.key_package().map_err(|e| e.to_string())?;
@@ -323,6 +429,8 @@ impl Space {
             previous: None,
             joining: Some(invite.from.0),
             removed: false,
+            persona,
+            offers: Vec::new(),
         };
         space.learn(invite.card.clone());
         let out = Out { to: invite.from.0, wire: Wire::Join { community, key_package: b64(&key_package), card } };
@@ -338,11 +446,15 @@ impl Space {
             previous: self.previous.clone(),
             joining: self.joining.map(Key),
             removed: self.removed,
+            persona: self.persona,
+            offers: self.offers.clone(),
         };
         serde_json::to_vec(&saved).expect("a space always serializes")
     }
 
-    pub fn restore(identity: &IdentityKeyPair, bytes: &[u8]) -> Result<Self, String> {
+    /// `main` is our main identity; a space we are in under a separate one
+    /// derives it again here.
+    pub fn restore(main: &IdentityKeyPair, bytes: &[u8]) -> Result<Self, String> {
         let saved: Saved = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
         let mut chain = Vec::new();
         for s in &saved.manifests {
@@ -355,15 +467,18 @@ impl Space {
         if chain.is_empty() {
             return Err("no manifest".into());
         }
+        let identity = identity_for(main, &chain[0].1.id, saved.persona);
         Ok(Self {
             me: identity.public().identity_key,
             chain,
-            mls: GroupMember::restore(identity, &unb64(&saved.mls)?).map_err(|e| e.to_string())?,
+            mls: GroupMember::restore(&identity, &unb64(&saved.mls)?).map_err(|e| e.to_string())?,
             cards: saved.cards,
             held: saved.held,
             previous: saved.previous,
             joining: saved.joining.map(|k| k.0),
             removed: saved.removed,
+            persona: saved.persona,
+            offers: saved.offers,
         })
     }
 
@@ -401,9 +516,17 @@ impl Space {
         self.manifest().member(key).map(|m| m.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| hex(&key[..4]))
     }
 
-    fn learn(&mut self, card: Card) {
+    fn learn(&mut self, mut card: Card) {
         if !card.valid() {
             return;
+        }
+        if card.avatar.as_ref().is_some_and(|a| a.len() > MAX_AVATAR) {
+            card.avatar = None;
+        }
+        if let Some(old) = self.cards.iter().find(|c| c.key == card.key) {
+            if card.avatar.is_none() {
+                card.avatar = old.avatar.clone();
+            }
         }
         match self.cards.iter_mut().find(|c| c.key == card.key) {
             Some(old) => {
@@ -521,35 +644,77 @@ impl Space {
         let mut outs: Vec<Out> = before
             .into_iter()
             .filter(|k| *k != card.key.0)
-            .map(|to| Out { to, wire: Wire::Commit { community: id, commit: b64(&c.commit), manifest: manifest.clone(), cards: vec![card.clone()] } })
+            .map(|to| Out { to, wire: Wire::Commit { community: id, commit: b64(&c.commit), manifest: manifest.clone(), cards: vec![card.slim()] } })
             .collect();
         if let Some(welcome) = c.welcome {
             outs.push(Out {
                 to: card.key.0,
-                wire: Wire::Welcome { community: id, welcome: b64(&welcome), manifest, cards: self.cards.clone() },
+                wire: Wire::Welcome { community: id, welcome: b64(&welcome), manifest, cards: self.cards.iter().map(Card::slim).collect() },
             });
+            outs.extend(self.avatar_for(&[card.key.0]));
         }
         Ok(outs)
     }
 
     // ---- what a member does ----
 
-    /// Lists someone as a member (if they aren't already) and sends them
-    /// an invite. They are added to the group when they accept.
-    pub fn invite(&mut self, identity: &IdentityKeyPair, who: [u8; 32], name: &str) -> Result<Vec<Out>, String> {
-        let mut outs = Vec::new();
-        if !self.manifest().is_member(&who) {
-            let signed = self.change(identity, |m| {
-                let role = m.default_role();
-                m.members.push(cm::Member { key: Key(who), role, name: name.chars().take(80).collect() });
-            })?;
-            outs.extend(self.send(&Post::Manifest { manifest: b64(&signed.encode()) })?);
-        } else if self.readers().contains(&who) {
+    /// Invites someone. Nothing is written into the manifest yet: they
+    /// are listed when they accept, under whichever key they answer with
+    /// (see [`Offer`]), and added to the group then.
+    pub fn invite(&mut self, _identity: &IdentityKeyPair, who: [u8; 32], name: &str) -> Result<Vec<Out>, String> {
+        if self.removed || self.joining.is_some() {
+            return Err("you're not in it".into());
+        }
+        let m = self.manifest();
+        if self.readers().contains(&who) {
             return Err("they're already in it".into());
         }
-        let card = self.card(&self.me).cloned().ok_or("no card of your own")?;
-        outs.push(Out { to: who, wire: Wire::Invite { manifest: b64(&self.signed().encode()), card } });
-        Ok(outs)
+        if m.is_banned(&who) {
+            return Err("they're banned from it".into());
+        }
+        if !m.can(&self.me, perm::INVITE, None) {
+            return Err("you can't invite people here".into());
+        }
+        if !m.is_member(&who) {
+            self.offers.retain(|o| o.key.0 != who);
+            if self.offers.len() >= MAX_OFFERS {
+                self.offers.remove(0);
+            }
+            self.offers.push(Offer { key: Key(who), name: name.chars().take(80).collect(), at_secs: now_secs() });
+        }
+        // Slim: the invitee learns the picture once they are in.
+        let card = self.card(&self.me).map(Card::slim).ok_or("no card of your own")?;
+        Ok(vec![Out { to: who, wire: Wire::Invite { manifest: b64(&self.signed().encode()), card } }])
+    }
+
+    /// Answering a Join: if `from` was invited and isn't listed yet,
+    /// lists `card.key` -- them, or the separate identity they chose.
+    fn admit(&mut self, identity: &IdentityKeyPair, from: [u8; 32], card: &Card) -> Result<(), String> {
+        if self.manifest().is_member(&card.key.0) {
+            return Ok(());
+        }
+        let Some(offer) = self.offers.iter().find(|o| o.key.0 == from).cloned() else {
+            return Err("a join from someone not invited".into());
+        };
+        // Joining as themselves: the name we know them by, as before.
+        // Under a separate identity: the name they chose for it -- ours
+        // for them would say who it is.
+        let name = if card.key.0 == from { offer.name } else { card.name.clone() };
+        let key = card.key;
+        self.change(identity, |m| {
+            let role = m.default_role();
+            m.members.push(cm::Member { key, role, name: name.chars().take(80).collect() });
+        })?;
+        self.offers.retain(|o| o.key.0 != from);
+        Ok(())
+    }
+
+    /// Our own card, picture included, for `to` only -- for someone who
+    /// just joined, since the cards in a Welcome leave pictures out.
+    fn avatar_for(&mut self, to: &[[u8; 32]]) -> Vec<Out> {
+        let Some(card) = self.card(&self.me).filter(|c| c.has_avatar()).cloned() else { return Vec::new() };
+        let Ok(wire) = self.encrypt(&Post::Card(card)) else { return Vec::new() };
+        to.iter().filter(|k| **k != self.me).map(|k| Out { to: *k, wire: wire.clone() }).collect()
     }
 
     /// Posts to a channel, optionally as a reply in a thread.
@@ -664,16 +829,24 @@ impl Space {
         match wire {
             Wire::Invite { .. } => Ok(()),
             Wire::Join { key_package, card, .. } => {
-                let m = self.manifest();
-                if !m.is_member(&from) || card.key.0 != from || !card.valid() {
+                // `from` is who we invited, proved by the transport; the
+                // card is who they join as -- themselves, or a separate
+                // identity, which only an outstanding offer allows.
+                let listed = self.manifest().is_member(&from) && card.key.0 == from;
+                let offered = self.offers.iter().any(|o| o.key.0 == from);
+                if !(listed || offered) || !card.valid() {
                     return Err("a join from someone not invited".into());
                 }
-                if self.readers().contains(&from) || !self.mls.in_group() {
+                let joiner = card.key.0;
+                if self.readers().contains(&joiner) || !self.mls.in_group() {
                     return Ok(());
                 }
                 let kp = unb64(&key_package)?;
-                if self.mls.key_package_identity(&kp).map_err(|e| e.to_string())? != from {
+                if self.mls.key_package_identity(&kp).map_err(|e| e.to_string())? != joiner {
                     return Err("a join with someone else's key".into());
+                }
+                if !listed {
+                    self.admit(identity, from, &card)?;
                 }
                 self.learn(card.clone());
                 h.outs.extend(self.commit_add(&kp, card)?);
@@ -698,6 +871,9 @@ impl Space {
                 }
                 self.joining = None;
                 h.events.push(Event::Joined);
+                // Our picture, which the inviter's commit left out.
+                let others = self.others_in_group();
+                h.outs.extend(self.avatar_for(&others));
                 Ok(())
             }
             Wire::Commit { commit, manifest, cards, .. } => {
@@ -823,10 +999,15 @@ impl Space {
         match result {
             Ok(Processed::NewEpoch { removed_self, .. }) => {
                 self.previous = before;
+                let mut newcomers = Vec::new();
                 for c in cards {
                     if self.readers().contains(&c.key.0) {
+                        newcomers.push(c.key.0);
                         self.learn(c);
                     }
+                }
+                if !removed_self {
+                    h.outs.extend(self.avatar_for(&newcomers));
                 }
                 if removed_self {
                     self.removed = true;
@@ -1058,6 +1239,25 @@ struct Queued {
     fragment: String,
     #[serde(default)]
     attempts: u32,
+    /// Sent as the separate identity we use in this community, rather
+    /// than as our main one -- and so never over a live call, which would
+    /// say who sent it.
+    #[serde(default)]
+    persona: Option<Key>,
+}
+
+/// How you appear in one group chat or community (spec §7 "per-community
+/// identity"). Empty fields mean "as in my profile".
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Appearance {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    /// A small JPEG, base64, or empty for none. Your profile picture is
+    /// never sent anywhere, so the default here is no picture either.
+    #[serde(default)]
+    pub avatar: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -1076,6 +1276,9 @@ struct Hub {
     /// your default. Kept here, not in the manifest: it is yours alone.
     #[serde(default)]
     ring: HashMap<String, i32>,
+    /// How you appear in each, by id hex. Yours alone, like `ring`.
+    #[serde(default)]
+    appear: HashMap<String, Appearance>,
 }
 
 const MAX_OUTBOX: usize = 20_000;
@@ -1167,14 +1370,57 @@ impl Store {
             .collect()
     }
 
-    fn queue(&self, hub: &mut Hub, outs: Vec<Out>) {
+    /// The identity we act as in `space`.
+    pub fn identity_in(&self, space: &Space) -> IdentityKeyPair {
+        identity_for(&self.identity, &space.id(), space.persona)
+    }
+
+    /// Our card for a space: as `identity` (main or separate), with the
+    /// name, status and picture chosen for it.
+    pub fn card_for(&self, id: &Key, identity: &IdentityKeyPair) -> Card {
+        let config = crate::config::load();
+        let record = crate::delivery::my_record(identity, &config.routes, config.strict_mode, config.route_sequence);
+        card_as(identity, crate::delivery::encode_record(&record), &config.profile, &self.appearance(id))
+    }
+
+    pub fn appearance(&self, id: &Key) -> Appearance {
+        self.hub().appear.get(&hex(&id.0)).cloned().unwrap_or_default()
+    }
+
+    /// Changes how you appear in one space, and tells its members.
+    pub fn set_appearance(&self, id: &Key, look: Appearance) -> Result<(), String> {
+        if look.avatar.len() > MAX_AVATAR {
+            return Err("that picture is too big to send".into());
+        }
+        {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            if look == Appearance::default() {
+                hub.appear.remove(&hex(&id.0));
+            } else {
+                hub.appear.insert(hex(&id.0), look);
+            }
+            self.save_hub(&hub);
+        }
+        self.with_space(id, |space, identity| {
+            let card = self.card_for(&space.id(), identity);
+            if space.removed || space.joining.is_some() {
+                // Not in yet: the card goes with the next thing we send.
+                space.learn(card);
+                return Ok(((), Vec::new(), vec![Event::Changed]));
+            }
+            Ok(((), space.refresh_card(card)?, vec![Event::Changed]))
+        })
+    }
+
+    fn queue(&self, hub: &mut Hub, outs: Vec<Out>, me: [u8; 32], persona: Option<Key>) {
         for out in outs {
-            if out.to == self.identity.public().identity_key {
+            if out.to == self.identity.public().identity_key || out.to == me {
                 continue;
             }
             for fragment in fragments(&out.wire) {
                 if hub.outbox.len() < MAX_OUTBOX {
-                    hub.outbox.push(Queued { to: Key(out.to), id: random_id(), fragment, attempts: 0 });
+                    hub.outbox.push(Queued { to: Key(out.to), id: random_id(), fragment, attempts: 0, persona });
                 }
             }
         }
@@ -1183,7 +1429,7 @@ impl Store {
     /// Records what a space reported: messages into channel history,
     /// edits and deletes checked against who wrote what.
     fn record(&self, space: &Space, events: &[Event], hub: &mut Hub) {
-        let me = self.identity.public().identity_key;
+        let me = space.me();
         let id = space.id();
         for e in events {
             match e {
@@ -1262,11 +1508,12 @@ impl Store {
     pub fn with_space<T>(&self, id: &Key, f: impl FnOnce(&mut Space, &IdentityKeyPair) -> Result<(T, Vec<Out>, Vec<Event>), String>) -> Result<T, String> {
         let _guard = LOCK.lock().unwrap();
         let mut space = self.load(id).ok_or("couldn't open it")?;
-        let (value, outs, events) = f(&mut space, &self.identity)?;
+        let identity = self.identity_in(&space);
+        let (value, outs, events) = f(&mut space, &identity)?;
         self.save(&space).map_err(|e| e.to_string())?;
         let mut hub = self.hub();
         self.record(&space, &events, &mut hub);
-        self.queue(&mut hub, outs);
+        self.queue(&mut hub, outs, space.me(), space.persona.then_some(space.id()));
         self.save_hub(&hub);
         drop(_guard);
         bump();
@@ -1274,12 +1521,20 @@ impl Store {
         Ok(value)
     }
 
-    pub fn create(&self, kind: Kind, name: &str, card: Card) -> Result<Key, String> {
+    /// A new group chat or community. With `persona`, we own it under a
+    /// separate identity derived for it, and our main key appears nowhere
+    /// in it.
+    pub fn create(&self, kind: Kind, name: &str, persona: bool) -> Result<Key, String> {
         let name = name.trim();
         if name.is_empty() {
             return Err("Give it a name first.".into());
         }
-        let space = Space::create(&self.identity, kind, name, card)?;
+        let mut id = [0u8; 32];
+        getrandom::fill(&mut id).expect("OS randomness is unavailable");
+        let id = Key(id);
+        let identity = identity_for(&self.identity, &id, persona);
+        let card = self.card_for(&id, &identity);
+        let space = Space::create(&identity, id, kind, name, card, persona)?;
         let _guard = LOCK.lock().unwrap();
         self.save(&space).map_err(|e| e.to_string())?;
         bump();
@@ -1290,20 +1545,27 @@ impl Store {
         self.hub().invites
     }
 
-    pub fn accept_invite(&self, index: usize, card: Card) -> Result<Key, String> {
+    /// Accepts an invite, as ourselves or -- with `persona` -- under a
+    /// separate identity for that community. The answer goes to the
+    /// inviter sealed with our main key either way: it is them we were
+    /// invited by, and they alone learn which key we chose.
+    pub fn accept_invite(&self, index: usize, persona: bool) -> Result<Key, String> {
         let _guard = LOCK.lock().unwrap();
         let mut hub = self.hub();
         if index >= hub.invites.len() {
             return Err("that invite is gone".into());
         }
         let invite = hub.invites.remove(index);
-        let (space, out) = Space::accept(&self.identity, &invite, card)?;
+        let id = SignedManifest::decode(&unb64(&invite.manifest)?).and_then(|s| s.open()).map_err(|e| e.to_string())?.id;
+        let identity = identity_for(&self.identity, &id, persona);
+        let card = self.card_for(&id, &identity);
+        let (space, out) = Space::accept(&identity, &invite, card, persona)?;
         if self.load(&space.id()).is_some_and(|s| !s.removed) {
             self.save_hub(&hub);
             return Err("you're already in it".into());
         }
         self.save(&space).map_err(|e| e.to_string())?;
-        self.queue(&mut hub, vec![out]);
+        self.queue(&mut hub, vec![out], space.me(), None);
         self.save_hub(&hub);
         drop(_guard);
         bump();
@@ -1376,6 +1638,19 @@ impl Store {
     /// One fragment that arrived from `from`. Returns whether it was
     /// taken (so its mailbox copy may be deleted).
     pub fn receive_fragment(&self, from: [u8; 32], fragment: &str) -> bool {
+        self.take_fragment(from, fragment, true)
+    }
+
+    /// One fragment collected at the inbox of a separate identity. Only
+    /// community traffic is taken there: an invite to it is dropped, since
+    /// whoever sent one could only know that key from inside a community,
+    /// and "invite this key elsewhere" is how two communities would come
+    /// to share it.
+    pub fn receive_persona_fragment(&self, from: [u8; 32], fragment: &str) -> bool {
+        self.take_fragment(from, fragment, false)
+    }
+
+    fn take_fragment(&self, from: [u8; 32], fragment: &str, invites: bool) -> bool {
         let wire = {
             let _guard = LOCK.lock().unwrap();
             let mut hub = self.hub();
@@ -1384,10 +1659,23 @@ impl Store {
             self.save_hub(&hub);
             wire
         };
-        if let Some(wire) = wire {
-            self.receive(from, wire);
+        match wire {
+            Some(Wire::Invite { .. }) if !invites => {}
+            Some(wire) => self.receive(from, wire),
+            None => {}
         }
         true
+    }
+
+    /// The spaces we are in under a separate identity, and that identity:
+    /// the courier collects each one's mail too.
+    pub fn personas(&self) -> Vec<IdentityKeyPair> {
+        self.ids()
+            .iter()
+            .filter_map(|id| self.load(id))
+            .filter(|s| s.persona && !s.removed)
+            .map(|s| self.identity_in(&s))
+            .collect()
     }
 
     /// A whole message from `from`.
@@ -1418,7 +1706,9 @@ impl Store {
         }
         let Some(signed) = unb64(&manifest).ok().and_then(|b| SignedManifest::decode(&b).ok()) else { return };
         let Ok(m) = cm::accept_first(&signed) else { return };
-        if !m.is_member(&self.identity.public().identity_key) {
+        // Listed already (from an older build), or offered by someone
+        // allowed to invite: we are written in when we answer.
+        if !m.is_member(&self.identity.public().identity_key) && !m.can(&from, perm::INVITE, None) {
             return;
         }
         // Already in it: this is the same invite again, or a re-invite
@@ -1467,11 +1757,14 @@ impl Store {
         let mut sent: Vec<u64> = Vec::new();
         let mut failed: Vec<u64> = Vec::new();
         let mut unreachable: Vec<Key> = Vec::new();
+        let mut personas: HashMap<Key, IdentityKeyPair> = HashMap::new();
         for q in &queued {
             if unreachable.contains(&q.to) {
                 continue;
             }
-            if let Some(live) = live(&q.to.0) {
+            // A live call is with our main key: what we send as a separate
+            // identity never goes over one, or the call would say who sent it.
+            if let Some(live) = live(&q.to.0).filter(|_| q.persona.is_none()) {
                 let msg = crate::control::ControlMessage::Community { data: q.fragment.clone() };
                 if live.send_control(&msg.encode()).await.is_ok() {
                     sent.push(q.id);
@@ -1484,7 +1777,11 @@ impl Store {
                 continue;
             };
             let body = crate::delivery::MailBody { id: q.id, text: String::new(), at_secs: now_secs(), group: Some(q.fragment.clone()) };
-            match crate::delivery::send(&self.identity, &q.to.0, &prekey, &record, &body, fan_out).await {
+            let sender: &IdentityKeyPair = match q.persona {
+                Some(id) => personas.entry(id).or_insert_with(|| identity_for(&self.identity, &id, true)),
+                None => &self.identity,
+            };
+            match crate::delivery::send(sender, &q.to.0, &prekey, &record, &body, fan_out).await {
                 crate::delivery::Sent::Deposited(_) => sent.push(q.id),
                 crate::delivery::Sent::NoRoute => unreachable.push(q.to),
                 crate::delivery::Sent::Failed(_) => {
@@ -1510,15 +1807,34 @@ impl Store {
     }
 }
 
-/// Our route list changed: tell each space's members where to reach us.
-pub fn refresh_cards(card: Card) {
+/// Our card for one space: `identity`'s key, prekey and route list, and
+/// the name, status and picture chosen for that space -- or the profile's
+/// name and status where none was. No picture unless one was chosen.
+pub fn card_as(identity: &IdentityKeyPair, routes_hex: String, profile: &crate::config::ProfileData, look: &Appearance) -> Card {
+    let pick = |own: &str, default: &str| if own.trim().is_empty() { default.to_string() } else { own.trim().to_string() };
+    Card::mine(identity, routes_hex, &pick(&look.name, &profile.display_name)).with_profile(&pick(&look.status, &profile.status_message), &look.avatar)
+}
+
+/// Our route list or profile changed: tell each space's members where to
+/// reach us and what we're called there.
+pub fn refresh_cards() {
     let Some(store) = Store::app() else { return };
     for id in store.ids() {
-        let _ = store.with_space(&id, |space, _| {
+        let _ = store.with_space(&id, |space, identity| {
             if space.removed || space.joining.is_some() {
                 return Ok(((), Vec::new(), Vec::new()));
             }
-            Ok(((), space.refresh_card(card.clone())?, Vec::new()))
+            let card = store.card_for(&space.id(), identity);
+            // The record is re-signed with a new timestamp each time, so
+            // compare what it says, not its bytes.
+            let seq = |c: &Card| c.record().map(|r| (r.record.sequence, r.record.routes));
+            let same = space.card(&space.me()).is_some_and(|old| {
+                old.name == card.name && old.status == card.status && old.avatar == card.avatar && seq(old) == seq(&card)
+            });
+            if same {
+                return Ok(((), Vec::new(), Vec::new()));
+            }
+            Ok(((), space.refresh_card(card)?, Vec::new()))
         });
     }
 }
@@ -1544,6 +1860,15 @@ fn live(key: &[u8; 32]) -> Option<Arc<antiphon_net::PeerConnection>> {
     LIVE.lock().unwrap().iter().find(|(k, _)| k == key).map(|(_, p)| p.clone())
 }
 
+/// The separate identity to fetch a shared file as, when its link came
+/// from a community (`with` is `community:<id hex>`) we are in under one.
+pub fn identity_for_link(with: &str) -> Option<Arc<IdentityKeyPair>> {
+    let id = crate::connection_mode::decode_hex32(with.strip_prefix("community:")?).map(Key)?;
+    let store = Store::app()?;
+    let space = store.load(&id).filter(|s| s.persona)?;
+    Some(Arc::new(store.identity_in(&space)))
+}
+
 /// For the seeding holder (spec §5 "this community"): is this identity a
 /// member of that community right now, by our copy of its manifest?
 pub fn is_member(community: &[u8; 32], key: &[u8; 32]) -> bool {
@@ -1559,18 +1884,37 @@ mod tests {
         id: IdentityKeyPair,
         space: Option<Space>,
         name: &'static str,
+        /// Answers invites under a separate identity.
+        separate: bool,
+        /// How they appear in the next space they join or make.
+        look: Appearance,
     }
 
     fn person(name: &'static str) -> Person {
-        Person { id: IdentityKeyPair::generate(), space: None, name }
+        Person { id: IdentityKeyPair::generate(), space: None, name, separate: false, look: Appearance::default() }
     }
 
     impl Person {
         fn key(&self) -> [u8; 32] {
             self.id.public().identity_key
         }
+        /// The key they're in their space as.
+        fn here(&self) -> [u8; 32] {
+            self.space.as_ref().map_or(self.key(), |s| s.me())
+        }
+        /// Who they act as in their space.
+        fn acting(&self) -> IdentityKeyPair {
+            match &self.space {
+                Some(s) => identity_for(&self.id, &s.id(), s.persona),
+                None => IdentityKeyPair::from_master_seed(self.id.master_seed()),
+            }
+        }
         fn card(&self) -> Card {
             Card::mine(&self.id, String::new(), self.name)
+        }
+        fn card_as(&self, identity: &IdentityKeyPair) -> Card {
+            let profile = crate::config::ProfileData { display_name: self.name.into(), status_message: "Online".into() };
+            card_as(identity, String::new(), &profile, &self.look)
         }
         fn space(&mut self) -> &mut Space {
             self.space.as_mut().unwrap()
@@ -1596,8 +1940,10 @@ mod tests {
                     diverted.push((from, out));
                     continue;
                 }
-                let Some(to) = people.iter().position(|p| p.key() == out.to) else { continue };
-                let from_key = people[from].key();
+                let Some(to) = people.iter().position(|p| p.key() == out.to || p.here() == out.to) else { continue };
+                // A Join is sealed with the joiner's main key, whoever
+                // they join as; the rest with the key they're in it as.
+                let from_key = if matches!(out.wire, Wire::Join { .. }) { people[from].key() } else { people[from].here() };
                 // Through the wire format, fragments and all.
                 let mut r = Reassembly::default();
                 let mut wire = None;
@@ -1608,13 +1954,15 @@ mod tests {
                 if let Wire::Invite { manifest, card } = wire {
                     let invite = Invite { from: Key(from_key), manifest, card, name: String::new(), kind: Kind::Group, at_secs: 0 };
                     let p = &mut people[to];
-                    let (space, join) = Space::accept(&p.id, &invite, p.card()).unwrap();
+                    let community = SignedManifest::decode(&unb64(&invite.manifest).unwrap()).unwrap().open().unwrap().id;
+                    let as_whom = identity_for(&p.id, &community, p.separate);
+                    let (space, join) = Space::accept(&as_whom, &invite, p.card_as(&as_whom), p.separate).unwrap();
                     p.space = Some(space);
                     next.push((to, join));
                     continue;
                 }
                 let p = &mut people[to];
-                let id = IdentityKeyPair::from_master_seed(p.id.master_seed());
+                let id = p.acting();
                 let Some(space) = p.space.as_mut() else { continue };
                 let h = space.handle(&id, from_key, wire);
                 events[to].extend(h.events);
@@ -1636,7 +1984,7 @@ mod tests {
     /// Alice makes a group, invites Bob and Carol, everyone joins.
     fn three() -> (Person, Person, Person) {
         let (mut alice, mut bob, mut carol) = (person("Alice"), person("Bob"), person("Carol"));
-        alice.space = Some(Space::create(&alice.id, Kind::Community, "Choir", alice.card()).unwrap());
+        alice.space = Some(Space::create(&alice.id, Key([3; 32]), Kind::Community, "Choir", alice.card(), false).unwrap());
         let id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
         let outs = alice.space().invite(&id, bob.key(), "Bob").unwrap();
         run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
@@ -1748,6 +2096,173 @@ mod tests {
         assert_eq!(texts(&ev[2]), ["hello Dave"]);
     }
 
+    /// The same seed as `p`, holding a space of its own: one person in a
+    /// second community.
+    fn twin(p: &Person) -> Person {
+        Person { id: IdentityKeyPair::from_master_seed(p.id.master_seed()), space: None, name: p.name, separate: p.separate, look: p.look.clone() }
+    }
+
+    fn look(name: &str) -> Appearance {
+        Appearance { name: name.into(), ..Default::default() }
+    }
+
+    /// `owner` makes a community and invites `joiner`, who answers as
+    /// their settings say.
+    fn join(owner: &mut Person, joiner: &mut Person, id: u8, name: &str) {
+        owner.space = Some(Space::create(&owner.id, Key([id; 32]), Kind::Community, name, owner.card(), false).unwrap());
+        let me = owner.acting();
+        let outs = owner.space().invite(&me, joiner.key(), "Bob from work").unwrap();
+        let ev = run(&mut [owner, joiner], outs.into_iter().map(|o| (0, o)).collect());
+        assert!(ev[1].contains(&Event::Joined), "{ev:?}");
+    }
+
+    /// Spec §7 "per-community identity": Bob is in two communities under
+    /// two separate identities, and Dave in the same two as himself with
+    /// two names.
+    #[test]
+    fn two_communities_see_different_names_and_keys_for_the_same_user() {
+        let (mut alice, mut carol) = (person("Alice"), person("Carol"));
+        let mut bob_a = person("Bob");
+        bob_a.separate = true;
+        bob_a.look = look("Robin");
+        let mut bob_b = twin(&bob_a);
+        bob_b.look = look("Knight");
+        join(&mut alice, &mut bob_a, 1, "Choir");
+        join(&mut carol, &mut bob_b, 2, "Chess");
+
+        let in_a = bob_a.here();
+        let in_b = bob_b.here();
+        let main = bob_a.key();
+        assert_ne!(in_a, in_b);
+        assert_ne!(in_a, main);
+        assert_ne!(in_b, main);
+        // Each is exactly the key derived for that community.
+        assert_eq!(in_a, antiphon_crypto::persona::community_identity(&bob_a.id, &[1; 32]).public().identity_key);
+
+        let a = alice.space.as_ref().unwrap();
+        let b = carol.space.as_ref().unwrap();
+        // Listed, in the group, and named as they chose -- not "Bob from
+        // work", which is what the inviter called his main key.
+        assert!(a.manifest().is_member(&in_a) && a.readers().contains(&in_a));
+        assert!(b.manifest().is_member(&in_b) && b.readers().contains(&in_b));
+        assert_eq!(a.name_of(&in_a), "Robin");
+        assert_eq!(b.name_of(&in_b), "Knight");
+        assert_eq!(a.manifest().member(&in_a).unwrap().name, "Robin");
+        // His main key is in neither community's history: not one version
+        // of either manifest, nor any card, ever named it.
+        for s in [a, b] {
+            assert!(s.chain.iter().all(|(signed, m)| !m.is_member(&main) && !m.owners.contains(&Key(main)) && signed.signer != main));
+            assert!(s.cards.iter().all(|c| c.key.0 != main));
+            assert!(s.readers().iter().all(|k| *k != main));
+        }
+
+        // Dave joins both as himself, with a different name in each: the
+        // names differ, the key -- deliberately -- does not.
+        let mut dave_a = person("Dave");
+        dave_a.look = look("Tenor Dave");
+        let mut dave_b = twin(&dave_a);
+        dave_b.look = look("D4");
+        let me = alice.acting();
+        let outs = alice.space().invite(&me, dave_a.key(), "Dave").unwrap();
+        run(&mut [&mut alice, &mut bob_a, &mut dave_a], outs.into_iter().map(|o| (0, o)).collect());
+        let me = carol.acting();
+        let outs = carol.space().invite(&me, dave_b.key(), "Dave").unwrap();
+        run(&mut [&mut carol, &mut bob_b, &mut dave_b], outs.into_iter().map(|o| (0, o)).collect());
+        assert_eq!(dave_a.here(), dave_b.here());
+        // Joined as himself: the manifest keeps the inviter's name for
+        // him, as it always did; members see the one he chose.
+        assert_eq!(alice.space().manifest().member(&dave_a.key()).unwrap().name, "Dave");
+        assert_eq!(alice.space().name_of(&dave_a.key()), "Tenor Dave");
+        assert_eq!(carol.space().card(&dave_b.key()).unwrap().name, "D4");
+        // Bob, already in A, learned Dave's card for A from the commit.
+        assert_eq!(bob_a.space().card(&dave_a.key()).unwrap().name, "Tenor Dave");
+    }
+
+    /// The separate identity comes from the seed, so restoring from the
+    /// recovery phrase (or shares) gets you back into the community.
+    #[test]
+    fn a_separate_identity_survives_recovery_from_the_seed() {
+        let mut alice = person("Alice");
+        let mut bob = person("Bob");
+        bob.separate = true;
+        join(&mut alice, &mut bob, 5, "Choir");
+        let before = bob.here();
+        let saved = bob.space().save();
+
+        // A new device: only the phrase came along.
+        let phrase = antiphon_crypto::mnemonic::phrase_from_seed(&bob.id.master_seed());
+        let restored = IdentityKeyPair::from_master_seed(antiphon_crypto::mnemonic::seed_from_phrase(&phrase).unwrap());
+        let mut bob2 = Person { id: restored, space: Some(Space::restore(&IdentityKeyPair::from_master_seed(bob.id.master_seed()), &saved).unwrap()), name: "Bob", separate: true, look: Appearance::default() };
+        assert_eq!(bob2.here(), before);
+        let (outs, _) = bob2.space().post(0, "back again", None).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob2], outs.into_iter().map(|o| (1, o)).collect());
+        assert!(ev[0].iter().any(|e| matches!(e, Event::Message { sender, text, .. } if *sender == before && text == "back again")));
+    }
+
+    /// What Bob writes in A is his A identity's, and nothing in B -- not
+    /// his key there, not his main key -- can be shown to have written it.
+    #[test]
+    fn a_message_in_one_community_cannot_be_attributed_in_another() {
+        let (mut alice, mut carol) = (person("Alice"), person("Carol"));
+        let mut bob_a = person("Bob");
+        bob_a.separate = true;
+        let mut bob_b = twin(&bob_a);
+        join(&mut alice, &mut bob_a, 1, "Choir");
+        join(&mut carol, &mut bob_b, 2, "Chess");
+        let (in_a, in_b) = (bob_a.here(), bob_b.here());
+
+        let (outs, _) = bob_a.space().post(0, "only for the choir", None).unwrap();
+        let wire = outs[0].wire.clone();
+        let ev = run(&mut [&mut alice, &mut bob_a], outs.into_iter().map(|o| (1, o)).collect());
+        assert!(ev[0].iter().any(|e| matches!(e, Event::Message { sender, .. } if *sender == in_a)));
+
+        // Handed to Carol, it is for a community she isn't in.
+        let carol_id = carol.acting();
+        let h = carol.space().handle(&carol_id, in_b, wire);
+        assert!(texts(&h.events).is_empty());
+
+        // His A card is self-signed by the A key; it can't be passed off
+        // as -- or checked against -- the key B knows, or his main key.
+        let card = alice.space().card(&in_a).unwrap().clone();
+        assert!(card.prekey().is_some());
+        for other in [in_b, bob_a.key()] {
+            let relabelled = Card { key: Key(other), ..card.clone() };
+            assert!(relabelled.prekey().is_none());
+        }
+        // And the A key's signatures don't verify as either.
+        let a_id = bob_a.acting();
+        let sig = a_id.sign(b"hello");
+        assert!(antiphon_crypto::verify_signature(&in_b, b"hello", &sig).is_err());
+        assert!(antiphon_crypto::verify_signature(&bob_a.key(), b"hello", &sig).is_err());
+    }
+
+    /// A picture chosen for a community reaches members who were there
+    /// first and those who come after, though bulk cards leave it out.
+    #[test]
+    fn a_community_picture_reaches_everyone() {
+        let (mut alice, mut bob, mut carol) = (person("Alice"), person("Bob"), person("Carol"));
+        bob.look = Appearance { name: "Robin".into(), status: "humming".into(), avatar: "QUJD".into() };
+        carol.look = Appearance { avatar: "WFla".into(), ..Default::default() };
+        // Carol made it, with her picture; Alice joins first, then Bob.
+        carol.space = Some(Space::create(&carol.id, Key([8; 32]), Kind::Group, "Friday", carol.card_as(&carol.id), false).unwrap());
+        let me = carol.acting();
+        let outs = carol.space().invite(&me, alice.key(), "Alice").unwrap();
+        run(&mut [&mut carol, &mut alice, &mut bob], outs.into_iter().map(|o| (0, o)).collect());
+        let outs = carol.space().invite(&me, bob.key(), "Bob").unwrap();
+        run(&mut [&mut carol, &mut alice, &mut bob], outs.into_iter().map(|o| (0, o)).collect());
+
+        let bob_card = alice.space().card(&bob.key()).unwrap().clone();
+        assert_eq!(bob_card.avatar.as_deref(), Some("QUJD"), "Alice, there first, has Bob's picture");
+        assert_eq!(bob_card.status, "humming");
+        assert_eq!(bob.space().card(&carol.key()).unwrap().avatar.as_deref(), Some("WFla"), "Bob, the newcomer, has Carol's");
+        // Too big a picture is not taken.
+        let huge = Card { avatar: Some("A".repeat(MAX_AVATAR + 1)), ..bob_card };
+        let saved = alice.space().save();
+        let mut s = Space::restore(&alice.id, &saved).unwrap();
+        s.learn(huge);
+        assert_eq!(s.card(&bob.key()).unwrap().avatar.as_deref(), Some("QUJD"));
+    }
+
     #[test]
     fn fragments_fit_a_mailbox_and_reassemble_in_any_order() {
         let alice = IdentityKeyPair::generate();
@@ -1797,7 +2312,7 @@ mod tests {
         for p in [&alice, &bob, &carol] {
             crate::delivery::collect(&p.id, &routes, false, false, |_| true).await;
         }
-        alice.space = Some(Space::create(&alice.id, Kind::Group, "Friday", a_card).unwrap());
+        alice.space = Some(Space::create(&alice.id, Key([4; 32]), Kind::Group, "Friday", a_card, false).unwrap());
         let cards = [b_card.clone(), c_card.clone()];
 
         /// Mails every Out to its recipient's node, then has everyone
@@ -1832,7 +2347,7 @@ mod tests {
                         let p = &mut *people[i];
                         if let Wire::Invite { manifest, card } = wire {
                             let invite = Invite { from: Key(from), manifest, card, name: String::new(), kind: Kind::Group, at_secs: 0 };
-                            let (space, join) = Space::accept(&p.id, &invite, p.card_with_routes(own)).unwrap();
+                            let (space, join) = Space::accept(&p.id, &invite, p.card_with_routes(own), false).unwrap();
                             p.space = Some(space);
                             outs.push((i, join));
                             continue;
@@ -1864,5 +2379,107 @@ mod tests {
         let ev = deliver(&mut [&mut alice, &mut bob, &mut carol], &cards, &routes, outs.into_iter().map(|o| (2, o)).collect(), &own).await;
         assert_eq!(texts(&ev[0]), ["on my way"]);
         assert_eq!(texts(&ev[1]), ["on my way"]);
+    }
+
+    /// Spec §7 over spec §8: Bob joins under a separate identity through a
+    /// real mailbox node on 127.0.0.1. The Welcome reaches the inbox that
+    /// identity registered -- under labels unrelated to his own -- and what
+    /// he posts arrives sealed as that identity, never his main key.
+    #[tokio::test]
+    async fn a_separate_identity_joins_and_talks_through_a_real_mailbox_node() {
+        use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
+        use tokio::net::UdpSocket;
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let node = sock.local_addr().unwrap().to_string();
+        let mb = Arc::new(Mutex::new(Mailbox::new(MailboxLimits { enabled: true, deposits_per_minute: 1000, ..Default::default() })));
+        tokio::spawn(antiphon_relay::run_node(sock, Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default()))), Some(mb), None));
+        let mut routes = crate::delivery::default_routes();
+        routes[2].nodes = vec![node.clone()];
+        let profile = |n: &str| crate::config::ProfileData { display_name: n.into(), status_message: String::new() };
+        let card_of = |id: &IdentityKeyPair, n: &str| {
+            let record = crate::delivery::my_record(id, &routes, false, 1);
+            card_as(id, crate::delivery::encode_record(&record), &profile(n), &Appearance::default())
+        };
+
+        let alice = IdentityKeyPair::generate();
+        let bob = IdentityKeyPair::generate();
+        let community = Key([6; 32]);
+        let bob_here = identity_for(&bob, &community, true);
+        let cards = [card_of(&alice, "Alice"), card_of(&bob, "Bob"), card_of(&bob_here, "Robin")];
+        assert_ne!(
+            crate::delivery::mailboxes_in(&cards[1].record().unwrap()),
+            crate::delivery::mailboxes_in(&cards[2].record().unwrap()),
+            "his two inboxes at the node have unrelated labels"
+        );
+        for id in [&alice, &bob, &bob_here] {
+            crate::delivery::collect(id, &routes, false, false, |_| true).await;
+        }
+        let mut a_space = Space::create(&alice, community, Kind::Group, "Friday", cards[0].clone(), false).unwrap();
+        let mut b_space: Option<Space> = None;
+
+        // (sender, Out): sealed with `sender`, to whoever `out.to` is.
+        let mut outs: Vec<(&IdentityKeyPair, Out)> = a_space.invite(&alice, bob.public().identity_key, "Bob").unwrap().into_iter().map(|o| (&alice, o)).collect();
+        let mut alice_heard = Vec::new();
+        let mut alice_froms = Vec::new();
+        let mut r = [Reassembly::default(), Reassembly::default(), Reassembly::default()];
+        for round in 0..20 {
+            if round == 6 {
+                let (o, _) = b_space.as_mut().expect("bob joined").post(0, "hi, it's Robin", None).unwrap();
+                outs.extend(o.into_iter().map(|o| (&bob_here, o)));
+            }
+            for (from, out) in std::mem::take(&mut outs) {
+                let card = cards.iter().find(|c| c.key.0 == out.to).expect("a card for everyone");
+                for f in fragments(&out.wire) {
+                    let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f) };
+                    let sent = crate::delivery::send(from, &out.to, &card.prekey().unwrap(), &card.record().unwrap(), &body, false).await;
+                    assert_eq!(sent, crate::delivery::Sent::Deposited(1));
+                }
+            }
+            for (i, id) in [&alice, &bob, &bob_here].into_iter().enumerate() {
+                let mut wires = Vec::new();
+                let ri = &mut r[i];
+                crate::delivery::collect(id, &routes, false, false, |m| {
+                    if let Some(w) = m.body.group.as_ref().and_then(|f| ri.feed(m.from, f)) {
+                        wires.push((m.from, w));
+                    }
+                    true
+                })
+                .await;
+                for (from, wire) in wires {
+                    match i {
+                        0 => {
+                            alice_froms.push(from);
+                            let h = a_space.handle(&alice, from, wire);
+                            alice_heard.extend(h.events);
+                            outs.extend(h.outs.into_iter().map(|o| (&alice, o)));
+                        }
+                        1 => {
+                            // His main inbox: the invite, answered as Robin.
+                            let Wire::Invite { manifest, card } = wire else { panic!("only the invite comes here") };
+                            let invite = Invite { from: Key(from), manifest, card, name: String::new(), kind: Kind::Group, at_secs: 0 };
+                            let (space, join) = Space::accept(&bob_here, &invite, cards[2].clone(), true).unwrap();
+                            b_space = Some(space);
+                            outs.push((&bob, join));
+                        }
+                        _ => {
+                            let h = b_space.as_mut().unwrap().handle(&bob_here, from, wire);
+                            outs.extend(h.outs.into_iter().map(|o| (&bob_here, o)));
+                        }
+                    }
+                }
+            }
+            if round > 6 && outs.is_empty() {
+                break;
+            }
+        }
+        let robin = bob_here.public().identity_key;
+        assert!(b_space.as_ref().unwrap().joining.is_none(), "the Welcome reached his separate inbox");
+        assert!(a_space.readers().contains(&robin) && !a_space.readers().contains(&bob.public().identity_key));
+        assert!(alice_heard.iter().any(|e| matches!(e, Event::Message { sender, text, .. } if *sender == robin && text == "hi, it's Robin")));
+        // Only the Join came sealed with his main key, and only to Alice
+        // who invited him; everything else arrived as Robin.
+        let main_count = alice_froms.iter().filter(|k| **k == bob.public().identity_key).count();
+        assert!(main_count >= 1);
+        assert!(alice_froms.iter().all(|k| *k == robin || *k == bob.public().identity_key));
     }
 }

@@ -417,7 +417,11 @@ pub fn download(runtime: &tokio::runtime::Handle, file_id: &str, dest: PathBuf) 
                 }
             })
         };
-        let result = swarm::download(&addrs(&file), id, key, crate::delivery::identity(), &dest, progress).await;
+        // A file from a community you're in under a separate identity is
+        // claimed as that identity: the seeder is a member, and your main
+        // key would tell them who you are (spec §7).
+        let me = crate::community::identity_for_link(&file.with).or_else(crate::delivery::identity);
+        let result = swarm::download(&addrs(&file), id, key, me, &dest, progress).await;
         watch.abort();
         match result {
             Ok(()) => {
