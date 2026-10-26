@@ -24,6 +24,10 @@
 //! Either way the newcomer has to *prove* to be the identity named in the
 //! introduction -- checked against the handshake -- so a token that leaked
 //! cannot be used to join a call.
+//!
+//! Once three people are in, the members also run **MLS** over these same
+//! links and seal their audio with **SFrame** under its per-epoch key, so
+//! anyone who leaves can't decrypt what follows -- see `crate::group_keys`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -47,7 +51,7 @@ const JITTER_MAX_WAIT: Duration = Duration::from_millis(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Where a group message came from, so a reply goes back the same way.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Link {
     Primary,
     Leg(u64),
@@ -99,6 +103,8 @@ pub struct Group {
     punch_pairs: Mutex<HashMap<u64, PunchPair>>,
     /// The latest thing worth telling the user, cleared once shown.
     pub notice: Mutex<String>,
+    /// Spec §3 MLS and SFrame: the call's group keys.
+    pub keys: crate::group_keys::GroupKeys,
 }
 
 impl Group {
@@ -133,6 +139,30 @@ impl Group {
     /// Each leg's id and jitter buffer, for the playback loop.
     pub fn leg_audio(&self) -> Vec<(u64, Arc<Mutex<JitterBuffer>>)> {
         self.legs.lock().unwrap().iter().map(|l| (l.id, l.jitter.clone())).collect()
+    }
+
+    /// Every link we have and whose identity is at its far end, leaving
+    /// out legs whose person said they were going.
+    pub fn linked(&self, primary: &Arc<PeerConnection>) -> Vec<(Link, [u8; 32])> {
+        std::iter::once((Link::Primary, primary.peer_identity().identity_key))
+            .chain(
+                self.legs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|l| !l.left.load(Ordering::Relaxed))
+                    .map(|l| (Link::Leg(l.id), l.peer.peer_identity().identity_key)),
+            )
+            .collect()
+    }
+
+    /// Sends one audio payload to every leg: SFrame-sealed (`sealed`) to
+    /// those in our MLS group, plain to anyone not keyed in yet.
+    pub async fn send_audio_to_legs(&self, plain: &[u8], sealed: Option<&[u8]>) {
+        for leg in self.leg_peers() {
+            let frame = self.keys.frame_for(&leg.peer_identity().identity_key, plain, sealed);
+            let _ = leg.send_audio(frame).await;
+        }
     }
 
     fn peer_for(&self, link: Link, primary: &Arc<PeerConnection>) -> Option<Arc<PeerConnection>> {
@@ -175,6 +205,7 @@ impl Group {
                 let _ = recv_peer
                     .recv_loop(move |message| match message {
                         Received::Audio { plaintext, .. } => {
+                            let Some(plaintext) = group.keys.open_audio(&key, &plaintext) else { return };
                             if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
                                 jitter.lock().unwrap().push_with_backup(
                                     decoded.sequence as u64,
@@ -229,7 +260,7 @@ pub fn is_group_message(m: &ControlMessage) -> bool {
             | ControlMessage::GroupPunch { .. }
             | ControlMessage::GroupPunchAddr { .. }
             | ControlMessage::GroupPunchPeer { .. }
-    )
+    ) || crate::group_keys::is_mls_message(m)
 }
 
 /// Whether an identity key is blocked.
@@ -280,6 +311,12 @@ impl Context {
         let others: Vec<(Link, [u8; 32])> = std::iter::once((Link::Primary, self.primary.peer_identity().identity_key))
             .chain(self.group.legs.lock().unwrap().iter().map(|l| (Link::Leg(l.id), l.peer.peer_identity().identity_key)))
             .collect();
+        // Spec §3 MLS: the moment a 1:1 call becomes a group, whoever
+        // brought in the third person starts the MLS group.
+        if self.group.people() == 2 {
+            self.group.keys.ensure(&self.identity);
+            self.group.keys.start_group();
+        }
         let Some(new_id) = self.group.add_leg(peer, relayed, self.hello.clone()) else {
             return Err(format!("A group call holds up to {MAX_PEOPLE} people."));
         };
@@ -321,6 +358,41 @@ impl Context {
             }
         }
         Ok(format!("Added. {} people in the call.", self.group.people()))
+    }
+
+    /// Called on every tick of the call screen: acts on what arrived for
+    /// the group and keeps the MLS keys current.
+    ///
+    /// MLS messages are handled right here, in arrival order, because
+    /// commits have to be applied in the order they were made; connecting
+    /// to people takes seconds, so those messages go to their own tasks.
+    pub fn poll(&self, runtime: &tokio::runtime::Handle) {
+        let inbox: Vec<_> = std::mem::take(&mut *self.group.inbox.lock().unwrap());
+        let linked = self.group.linked(&self.primary);
+        let mut out = Vec::new();
+        if inbox.iter().any(|(_, m)| crate::group_keys::is_mls_message(m)) || self.group.people() >= 3 {
+            self.group.keys.ensure(&self.identity);
+        }
+        for (link, message) in inbox {
+            if crate::group_keys::is_mls_message(&message) {
+                if let Some(from) = self.group.key_for(link, &self.primary) {
+                    out.extend(self.group.keys.handle(link, from, message, &linked));
+                }
+            } else {
+                let ctx = self.clone();
+                runtime.spawn(async move { ctx.handle(link, message).await });
+            }
+        }
+        out.extend(self.group.keys.upkeep(self.group.people(), &linked));
+        if !out.is_empty() {
+            let ctx = self.clone();
+            runtime.spawn(async move {
+                let _order = ctx.group.keys.send_serial.lock().await;
+                for (link, message) in out {
+                    ctx.send(link, message).await;
+                }
+            });
+        }
     }
 
     /// Acts on one group message from `link`.
@@ -584,5 +656,96 @@ mod tests {
         assert_eq!(g_b.leg_keys(), vec![carol.public().identity_key], "Bob should reach Carol directly");
         assert_eq!(g_c.leg_keys(), vec![bob.public().identity_key], "Carol should reach Bob directly");
         assert!(g_b.names()[0].contains("relayed"), "{:?}", g_b.names());
+    }
+
+    /// Spec §3 MLS + SFrame over a real three-person mesh: the members key
+    /// themselves in over their links, audio between them is SFrame-sealed,
+    /// and when one leaves the others move to an epoch the leaver can't
+    /// read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_group_call_keys_itself_with_mls_and_rekeys_when_someone_leaves() {
+        let relay_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let relay_addr = relay_socket.local_addr().unwrap();
+        tokio::spawn(antiphon_relay::run(
+            relay_socket,
+            Arc::new(Mutex::new(antiphon_relay::Relay::new(antiphon_relay::Limits::default()))),
+        ));
+        let (alice, bob, carol) = (
+            Arc::new(IdentityKeyPair::generate()),
+            Arc::new(IdentityKeyPair::generate()),
+            Arc::new(IdentityKeyPair::generate()),
+        );
+        let keys = [alice.public().identity_key, bob.public().identity_key, carol.public().identity_key];
+        let (a_b, b_a) = pair_between(&alice, &bob).await;
+        let (a_c, c_a) = pair_between(&alice, &carol).await;
+        let (g_a, g_b, g_c) = (Arc::new(Group::default()), Arc::new(Group::default()), Arc::new(Group::default()));
+        let (a_b, b_a, c_a) = (Arc::new(a_b), Arc::new(b_a), Arc::new(c_a));
+        pump_primary(a_b.clone(), g_a.clone());
+        pump_primary(b_a.clone(), g_b.clone());
+        pump_primary(c_a.clone(), g_c.clone());
+
+        let ctx_a = context(g_a.clone(), a_b, alice.clone(), Some(relay_addr.to_string()), "Alice");
+        let ctx_b = context(g_b.clone(), b_a, bob.clone(), None, "Bob");
+        let ctx_c = context(g_c.clone(), c_a.clone(), carol.clone(), None, "Carol");
+        ctx_a.add_person(a_c, false).await.unwrap();
+
+        let runtime = tokio::runtime::Handle::current();
+
+        // Everyone polls, as the call screen does, until all three share
+        // one MLS epoch with all three in it.
+        let all = {
+            let mut k = keys.to_vec();
+            k.sort();
+            k
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            for ctx in [&ctx_a, &ctx_b, &ctx_c] {
+                ctx.poll(&runtime);
+            }
+            let epochs = [g_a.keys.epoch(), g_b.keys.epoch(), g_c.keys.epoch()];
+            let keyed = [&g_a, &g_b, &g_c].iter().all(|g| g.keys.members() == all);
+            if keyed && epochs[0].is_some() && epochs.iter().all(|e| *e == epochs[0]) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "MLS never converged: {epochs:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let keyed_epoch = g_a.keys.epoch().unwrap();
+
+        // Bob's audio reaches Carol over their own leg, SFrame-sealed.
+        let frame = antiphon_net::fec::encode(7, &[0.25; 960], None);
+        let sealed = g_b.keys.seal_audio(&frame).unwrap();
+        assert_eq!(sealed[0], crate::group_keys::SFRAME_AUDIO_TAG);
+        assert_eq!(g_b.keys.frame_for(&keys[2], &frame, Some(&sealed)), &sealed[..]);
+        g_b.send_audio_to_legs(&frame, Some(&sealed)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (_, jitter) = g_c.leg_audio().remove(0);
+        assert!(jitter.lock().unwrap().backlog_frames() > 0, "Carol should hear Bob's sealed frame");
+        // Alice can open Bob's frame too (one seal, every member).
+        assert_eq!(g_a.keys.open_audio(&keys[1], &sealed).unwrap(), frame);
+        // And the plain frame from a keyed member is refused.
+        assert!(g_a.keys.open_audio(&keys[1], &frame).is_none());
+
+        // Carol leaves. Alice, the committer, removes her: a new epoch.
+        g_c.announce_leaving(&c_a);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            for ctx in [&ctx_a, &ctx_b] {
+                ctx.poll(&runtime);
+            }
+            let (ea, eb) = (g_a.keys.epoch(), g_b.keys.epoch());
+            if ea > Some(keyed_epoch) && ea == eb && g_b.keys.members().len() == 2 {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "no rekey after Carol left: {ea:?} {eb:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!g_a.keys.members().contains(&keys[2]));
+
+        // Alice's new audio opens for Bob, not for Carol's old keys.
+        let sealed = g_a.keys.seal_audio(&frame).unwrap();
+        assert_eq!(g_b.keys.open_audio(&keys[0], &sealed).unwrap(), frame);
+        assert!(g_c.keys.open_audio(&keys[0], &sealed).is_none());
     }
 }

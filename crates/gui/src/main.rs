@@ -3,6 +3,7 @@ mod caps_lock;
 mod connection_mode;
 mod mixer;
 mod group;
+mod group_keys;
 mod config;
 mod content_store;
 mod crash_report;
@@ -464,15 +465,13 @@ fn main() -> anyhow::Result<()> {
                 app.set_introduction_message(message.into());
             }
 
-            // Spec §3 group calls: act on introductions, notice who
-            // left, and keep the participant line current.
-            let inbox: Vec<_> = std::mem::take(&mut *active.group.inbox.lock().unwrap());
-            if !inbox.is_empty() {
-                let ctx = group_context(&app, &meter_app_state, active);
-                for (link, message) in inbox {
-                    let ctx = ctx.clone();
-                    meter_app_state.runtime.spawn(async move { ctx.handle(link, message).await });
-                }
+            // Spec §3 group calls: act on introductions, keep the MLS
+            // group keys current, notice who left, and keep the
+            // participant line current.
+            let group_busy = !active.group.inbox.lock().unwrap().is_empty()
+                || ((active.group.people() >= 3 || active.group.keys.in_group()) && active.group.keys.poll_due());
+            if group_busy {
+                group_context(&app, &meter_app_state, active).poll(&meter_app_state.runtime);
             }
             for (_, name) in active.group.remove_departed() {
                 *active.group.notice.lock().unwrap() = format!("{name} left the call.");
@@ -482,11 +481,17 @@ fn main() -> anyhow::Result<()> {
                 if !notice.is_empty() {
                     app.set_contacts_message(notice.into());
                 }
-                let names = active.group.names();
+                let mut names = active.group.names().join(", ");
+                // Spec §3: say when the group's audio is under an MLS
+                // key, and which epoch, so a rekey on a join or leave is
+                // visible rather than taken on trust.
+                if let Some(epoch) = active.group.keys.epoch().filter(|_| active.group.people() >= 3) {
+                    names.push_str(&format!(" · group key #{epoch} (MLS + SFrame)"));
+                }
                 let people = active.group.people() as i32;
-                if app.get_group_people() != people || app.get_group_names().as_str() != names.join(", ") {
+                if app.get_group_people() != people || app.get_group_names().as_str() != names {
                     app.set_group_people(people);
-                    app.set_group_names(names.join(", ").into());
+                    app.set_group_names(names.into());
                 }
             }
 

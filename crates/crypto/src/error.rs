@@ -24,6 +24,8 @@ pub enum CryptoError {
     BackupNotSealedForThisDevice,
     #[error("invite link is malformed")]
     MalformedInvite,
+    #[error("SFrame header is malformed or truncated")]
+    MalformedFrame,
     #[error("decryption failed: wrong key, corrupted data, or forged ciphertext")]
     DecryptionFailed,
     #[error("counter {counter} was already consumed or is older than the retained window")]

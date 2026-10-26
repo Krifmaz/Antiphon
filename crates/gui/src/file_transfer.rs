@@ -456,6 +456,9 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
         | ControlMessage::GroupPunchAddr { .. }
         | ControlMessage::GroupPunchPeer { .. }
         | ControlMessage::GroupLeave
+        | ControlMessage::MlsKeyPackage(_)
+        | ControlMessage::MlsWelcome(_)
+        | ControlMessage::MlsCommit(_)
         | ControlMessage::FileLink { .. } => {}
         ControlMessage::FileOffer {
             transfer_id,
