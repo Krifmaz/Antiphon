@@ -57,6 +57,7 @@ pub mod file_seal;
 pub mod mail;
 pub mod memory_seal;
 pub mod mnemonic;
+pub mod onion;
 mod ratchet;
 pub mod relay_token;
 pub mod shamir;
