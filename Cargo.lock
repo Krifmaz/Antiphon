@@ -395,6 +395,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "antiphon-relay"
+version = "0.1.0"
+dependencies = [
+ "antiphon-crypto",
+ "antiphon-net",
+ "antiphon-protocol",
+ "anyhow",
+ "clap",
+ "tokio",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"

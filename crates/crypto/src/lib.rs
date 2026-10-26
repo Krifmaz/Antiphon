@@ -52,6 +52,7 @@ mod invite;
 pub mod keystore;
 pub mod mnemonic;
 mod ratchet;
+pub mod relay_token;
 mod route;
 mod session;
 pub mod store;
