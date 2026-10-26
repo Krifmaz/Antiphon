@@ -1,0 +1,73 @@
+[package]
+name = "antiphon-android"
+description = "Antiphon for Android: the iced GUI on top of the shared Rust core"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+# cargo-apk loads this as the NativeActivity's library. No Java or Kotlin:
+# the activity is the platform's own android.app.NativeActivity.
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+# Everything is Android-only, so `cargo build --workspace` on a desktop
+# compiles an empty crate rather than a second GUI toolkit.
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+android_logger = "0.15"
+log = "0.4"
+jni = "0.21"
+ndk-context = "0.1.1"
+iced_wgpu = "0.14.0"
+iced_runtime = "0.14.0"
+iced_core = "0.14.0"
+iced_widget = { version = "0.14.0", features = ["wgpu"] }
+# The phone has fonts, but the fallback chain cosmic-text builds from them
+# varies by vendor; bundling Fira Sans makes every device render the same.
+iced_graphics = { version = "0.14.0", features = ["fira-sans"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "android-native-activity"] }
+futures = { version = "0.3", features = ["executor"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+antiphon-audio = { version = "0.1.0", path = "../audio" }
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }
+antiphon-net = { version = "0.1.0", path = "../net" }
+
+[package.metadata.android]
+package = "org.antiphon.app"
+apk_name = "antiphon"
+build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
+resources = "res"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "Antiphon"
+icon = "@mipmap/ic_launcher"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+
+[package.metadata.android.application.activity]
+# Rotation and keyboard changes would otherwise restart the activity, which
+# for a NativeActivity means tearing down the Rust side mid-call.
+config_changes = "orientation|screenSize|screenLayout|keyboardHidden|keyboard"
+orientation = "portrait"
+exported = true
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECORD_AUDIO"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MODIFY_AUDIO_SETTINGS"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.microphone"
+required = true
