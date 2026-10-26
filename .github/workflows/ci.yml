@@ -83,14 +83,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # platform: the name a downloader sees in the asset file name.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
             ext: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
             ext: ".exe"
           - os: macos-latest
             target: aarch64-apple-darwin
+            platform: macos-aarch64
             ext: ""
     steps:
       - name: macOS tests must have passed
@@ -150,14 +154,23 @@ jobs:
           done
           # sha256sum on Linux and Git Bash for Windows; macOS ships only shasum.
           cd first
-          if command -v sha256sum >/dev/null; then sha256sum *; else shasum -a 256 *; fi > ../SHA256SUMS-${{ matrix.target }}.txt
-          cat ../SHA256SUMS-${{ matrix.target }}.txt
+          if command -v sha256sum >/dev/null; then sha256sum *; else shasum -a 256 *; fi
+      - name: Stage what ships
+        # Only the verified binaries and the README, at the top of the
+        # archive. The first/second build directories are scratch for the
+        # check above and must not leak into the download.
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp out/first/* dist/
+          cp README.md dist/
+          for f in LICENSE LICENSE-MIT LICENSE-APACHE; do [ -f "$f" ] && cp "$f" dist/; done
+          ls -l dist
       - uses: actions/upload-artifact@v4
         with:
-          name: antiphon-${{ matrix.target }}
-          path: |
-            out/first/*
-            out/SHA256SUMS-${{ matrix.target }}.txt
+          name: ${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
 
   publish:
     name: publish
@@ -175,30 +188,71 @@ jobs:
           path: artifacts
       - name: Linux and Windows builds are required
         run: |
-          for t in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
-            [ -d artifacts/antiphon-$t ] || { echo "::error::no $t build; not publishing"; exit 1; }
+          for p in linux-x86_64 windows-x86_64; do
+            [ -d artifacts/$p ] || { echo "::error::no $p build; not publishing"; exit 1; }
           done
-          [ -d artifacts/antiphon-aarch64-apple-darwin ] || echo "::warning::publishing without a macOS build"
+          [ -d artifacts/macos-aarch64 ] || echo "::warning::publishing without a macOS build"
       - name: Package per platform
+        # antiphon-<version>-<platform>.zip on Windows, .tar.gz elsewhere,
+        # with the app at the top level. One SHA256SUMS.txt for everything:
+        # the archives (what a downloader verifies), then the binaries
+        # inside them (what a reproducible rebuild is compared to).
         run: |
+          VER="${TAG#v}"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          mkdir release
           cd artifacts
-          for d in antiphon-*/; do
-            d=${d%/}
-            case $d in *windows*) (cd $d && zip -r ../$d.zip .) ;; *) tar czf $d.tar.gz -C $d . ;; esac
+          for p in */; do
+            p=${p%/}
+            # upload-artifact drops the executable bit.
+            chmod +x $p/antiphon* 2>/dev/null || true
+            name=antiphon-$VER-$p
+            case $p in
+              windows-*) (cd $p && zip -X -q ../../release/$name.zip *) ;;
+              *) tar czf ../release/$name.tar.gz --owner=0 --group=0 -C $p $(ls $p) ;;
+            esac
           done
-          # Hashes of the archives (what a downloader verifies),
-          # then of the binaries inside them (what a rebuild is compared to).
-          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
-          cat antiphon-*/SHA256SUMS-*.txt >> SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          ls -l
+          cd ../release
+          sha256sum * > ../SHA256SUMS.txt
+          cd ../artifacts
+          sha256sum */antiphon* >> ../SHA256SUMS.txt
+          cd ..
+          mv SHA256SUMS.txt release/
+          cat release/SHA256SUMS.txt
+          ls -l release
+      - name: Release notes
+        run: |
+          kind="Release"
+          case "$TAG" in *-*) kind="Pre-release: for testing, expect rough edges" ;; esac
+          row() { [ -f "release/$2" ] && echo "| $1 | [\`$2\`](https://github.com/${{ github.repository }}/releases/download/$TAG/$2) |"; return 0; }
+          {
+            echo "**$kind.** Built from \`${GITHUB_SHA::7}\`, every binary built twice and checked to be byte-identical before it was published."
+            echo
+            echo "## Download"
+            echo
+            echo "| Platform | File |"
+            echo "|---|---|"
+            row "Windows (x64)" "antiphon-$VER-windows-x86_64.zip"
+            row "Linux (x64)" "antiphon-$VER-linux-x86_64.tar.gz"
+            row "macOS (Apple silicon)" "antiphon-$VER-macos-aarch64.tar.gz"
+            echo
+            echo "Each archive holds \`antiphon\` (the desktop app), \`antiphon-cli\` and the README. Unzip and run \`antiphon\`; nothing to install."
+            echo
+            echo "## Verify"
+            echo
+            echo '```'
+            echo "sha256sum -c SHA256SUMS.txt --ignore-missing"
+            echo '```'
+            echo
+            echo "---"
+          } > notes.md
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          name: Antiphon ${{ env.VER }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ contains(env.TAG, '-') }}
+          body_path: notes.md
           generate_release_notes: true
-          files: |
-            artifacts/*.zip
-            artifacts/*.tar.gz
-            artifacts/SHA256SUMS.txt
+          files: release/*
