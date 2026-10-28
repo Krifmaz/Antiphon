@@ -1,0 +1,15 @@
+[package]
+name = "antiphon-ui"
+description = "Stoop's interface, shared by the desktop and phone apps: one look, one set of screens, in iced"
+edition.workspace = true
+version.workspace = true
+
+# Only iced's portable halves: the widgets and the core. Each app brings the
+# window -- the desktop through `iced` itself, the phones through their own
+# winit runner. `wgpu` names the renderer the views are typed against; the
+# desktop adds the software fallback beside it, and iced_widget's `Renderer`
+# then resolves to the pair, so every view here is the type the app draws.
+
+[dependencies]
+iced_core = "0.14.0"
+iced_widget = { version = "0.14.0", features = ["svg", "canvas", "qr_code", "wgpu"] }
