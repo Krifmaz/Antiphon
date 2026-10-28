@@ -8,6 +8,9 @@ members = [
     "crates/app",
     "crates/gui",
     "crates/relay",
+    "crates/mobile",
+    "crates/android",
+    "crates/ios",
 ]
 
 [workspace.package]

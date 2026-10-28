@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Antiphon.app's Info.plist. build-app.sh copies it into the bundle and
+  fills in @VERSION@, @BUILD@ and @PLATFORM@ (iPhoneOS or iPhoneSimulator).
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>org.antiphon.app</string>
+	<key>CFBundleExecutable</key>
+	<string>antiphon-ios</string>
+	<key>CFBundleName</key>
+	<string>Antiphon</string>
+	<key>CFBundleDisplayName</key>
+	<string>Antiphon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUILD@</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>@PLATFORM@</string>
+	</array>
+	<key>DTPlatformName</key>
+	<string>@PLATFORM_LOWER@</string>
+	<!-- iOS 15 for UIWindowScene.keyWindow; see BUILDING.md. -->
+	<key>MinimumOSVersion</key>
+	<string>15.0</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+		<integer>2</integer>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+		<string>microphone</string>
+	</array>
+	<!-- The shared layout is built for a phone held upright, as on Android. -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+	<!-- An iPad app must allow every orientation or opt out of multitasking. -->
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<!-- Without a launch screen iOS runs the app letterboxed at an old
+	     iPhone's resolution. An empty one is a plain screen in the
+	     background colour, and is enough to get the real size. -->
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIStatusBarStyle</key>
+	<string>UIStatusBarStyleLightContent</string>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Antiphon uses the microphone for calls. Your voice is encrypted on this phone and goes only to the person you are talking to.</string>
+	<!-- audio: a call keeps running when the screen locks or another app is
+	     opened. voip: PushKit wakes the app for incoming calls. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>voip</string>
+	</array>
+	<!-- Received files go to Documents; these two make it show in the Files
+	     app under On My iPhone > Antiphon. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon60x60</string>
+			</array>
+		</dict>
+	</dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon60x60</string>
+				<string>AppIcon76x76</string>
+				<string>AppIcon83.5x83.5</string>
+			</array>
+		</dict>
+	</dict>
+</dict>
+</plist>

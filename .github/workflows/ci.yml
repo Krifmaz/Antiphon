@@ -6,12 +6,17 @@
 #   test-macos -- the same on macOS. Optional: macOS runners are sometimes
 #               unavailable for hours (a queued job gets cancelled without
 #               ever starting), and that should not hold a release back.
+#   android  -- clippy the Android crate and build the APK (Rust + iced)
+#               for every push and pull request. Required for a release.
+#   ios      -- clippy the iOS crate and build the simulator app (and a
+#               device build, signed when the IOS_* secrets exist) on
+#               macOS. Optional, like test-macos; nothing waits on it.
 #   release  -- on a tag, build the release binaries the reproducible way
 #               (BUILDING.md), twice on each platform, and refuse to publish
 #               unless both builds hash identically. That turns "reproducible
 #               in principle" into something checked on every release.
-#   publish  -- attach every platform's binaries and checksums to a GitHub
-#               Release for the tag. Linux and Windows must be there; macOS
+#   publish  -- attach every platform's binaries, the APK, and checksums to a GitHub
+#               Release for the tag. Linux, Windows and the APK must be there; macOS
 #               ships when its tests and reproducible build both passed. A pre-release when the tag says so
 #               (v0.1.0-rc1), a release otherwise. Also reachable by hand
 #               through workflow_dispatch, which creates the tag too.
@@ -45,6 +50,13 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The user chose this (2026-10-26): GitHub's macOS runners are scarce,
+    # and a job can sit queued until it is cancelled without running a
+    # line. macOS still builds and tests on every push, but a missing Mac
+    # runner no longer turns the pipeline red or holds back the release of
+    # the other platforms and the APK.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -65,10 +77,129 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  android:
+    name: android (apk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android, x86_64-linux-android
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: actions/setup-java@v4
+        # javac and d8 for the app's few Java classes. Pinned, like Rust,
+        # so the dex is built by the same compiler every time.
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Android SDK pieces
+        # The runner image carries the SDK and an NDK; this only makes sure
+        # the platform the APK compiles against (TARGET_SDK in
+        # crates/android/build-apk.sh) and a pinned build-tools are present.
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "BUILD_TOOLS_VERSION=35.0.0" >> "$GITHUB_ENV"
+      - name: Clippy (Android)
+        run: cargo clippy -p antiphon-android -p antiphon-mobile --target aarch64-linux-android --locked -- -D warnings
+      - name: Signing key
+        # A release APK must be signed. With the ANDROID_KEYSTORE_BASE64 and
+        # ANDROID_KEYSTORE_PASSWORD secrets set, every build is signed with
+        # that one key, so a new version installs over the old. Without
+        # them a throwaway key is made per build: the APK installs, but an
+        # update means uninstalling first.
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/antiphon-release.keystore"
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KS"
+            PASS="$KEYSTORE_PASSWORD"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; signing with a throwaway key"
+            PASS="$(openssl rand -hex 16)"
+            keytool -genkeypair -noprompt -keystore "$KS" -storepass "$PASS" -keypass "$PASS" \
+              -alias antiphon -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Antiphon"
+          fi
+          echo "::add-mask::$PASS"
+          echo "APK_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "APK_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+      - name: Build APK
+        # crates/android/build-apk.sh rather than cargo-apk, which cannot
+        # package the app's service and push receiver. Same path remapping
+        # as the desktop release builds, so the builder's directories do not
+        # end up inside the shipped library.
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export CARGO_ENCODED_RUSTFLAGS="$(printf -- '--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo' "$PWD" "${CARGO_HOME:-$HOME/.cargo}")"
+          mkdir -p out
+          crates/android/build-apk.sh --out out/antiphon-android.apk
+          cd out && sha256sum antiphon-android.apk | tee SHA256SUMS-android.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-android
+          path: out/*
+
   test-macos:
     name: test (macos-latest)
     runs-on: macos-latest
     steps: *test-steps
+
+  ios:
+    name: ios (simulator app)
+    # Linking for iOS needs Apple's SDK, so this is a macOS job, and so
+    # optional for the same reason as test-macos: a Mac runner that never
+    # turns up must not turn the pipeline red. Nothing needs it, publish
+    # included -- there is no iOS release to attach yet, only a simulator
+    # build to try.
+    runs-on: macos-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+      - name: Clippy (iOS)
+        run: |
+          cargo clippy -p antiphon-ios --target aarch64-apple-ios --locked -- -D warnings
+          cargo clippy -p antiphon-ios --target aarch64-apple-ios-sim --locked -- -D warnings
+      - name: Build the simulator app
+        run: crates/ios/build-app.sh sim
+      - name: Build for devices
+        # Signed when the IOS_* secrets are set (see BUILDING.md), so the
+        # .ipa installs on the phones in the profile; unsigned otherwise,
+        # which at least proves the device build links.
+        env:
+          IOS_CERTIFICATE_P12: ${{ secrets.IOS_CERTIFICATE_P12 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: crates/ios/build-app.sh device
+      - name: Package
+        run: |
+          mkdir -p out
+          ditto -c -k --keepParent target/aarch64-apple-ios-sim/release/Antiphon.app out/Antiphon-simulator.app.zip
+          if [ -f target/aarch64-apple-ios/release/Antiphon.ipa ]; then
+            cp target/aarch64-apple-ios/release/Antiphon.ipa out/
+          fi
+          cd out && shasum -a 256 * | tee SHA256SUMS-ios.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          # Not "antiphon-*": publish packages every artifact named that.
+          name: app-ios
+          path: out/*
 
   release:
     name: release (${{ matrix.os }})
@@ -79,6 +210,8 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     needs: [test, test-macos]
     runs-on: ${{ matrix.os }}
+    # As in test: the macOS build never holds back the other platforms.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -162,12 +295,14 @@ jobs:
   publish:
     name: publish
     # Not skipped when the macOS leg fails; the check below decides.
+    # A failed APK stops it.
     if: >-
       !cancelled() && needs.release.result != 'skipped' &&
+      needs.android.result == 'success' &&
       (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-    needs: release
+    needs: [release, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -182,13 +317,15 @@ jobs:
       - name: Package per platform
         run: |
           cd artifacts
+          # The APK ships as it is: it is already a signed archive.
+          mv apk-android/antiphon-android.apk .
           for d in antiphon-*/; do
             d=${d%/}
             case $d in *windows*) (cd $d && zip -r ../$d.zip .) ;; *) tar czf $d.tar.gz -C $d . ;; esac
           done
           # Hashes of the archives (what a downloader verifies),
           # then of the binaries inside them (what a rebuild is compared to).
-          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          sha256sum *.zip *.tar.gz *.apk > SHA256SUMS.txt
           cat antiphon-*/SHA256SUMS-*.txt >> SHA256SUMS.txt
           cat SHA256SUMS.txt
           ls -l
@@ -201,4 +338,5 @@ jobs:
           files: |
             artifacts/*.zip
             artifacts/*.tar.gz
+            artifacts/*.apk
             artifacts/SHA256SUMS.txt

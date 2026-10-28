@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Antiphon's manifest, read by aapt2 in build-apk.sh. versionCode and
+  versionName are filled in there from the crate version, and minSdk and
+  targetSdk from the script's MIN_SDK and TARGET_SDK, so they live in one
+  place each.
+
+  Written by hand because cargo-apk, which used to generate it, cannot
+  declare a service or a receiver, and the app now needs both: see
+  java/org/antiphon/app.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.antiphon.app">
+
+    <uses-feature android:name="android.hardware.microphone" android:required="true" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Wi-Fi or metered, for "only on Wi-Fi" limits. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- The ongoing-call, incoming-call and message notifications (asked at
+         run time on Android 13 and later). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- An incoming call opens the app over the lock screen. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- The foreground service that keeps a call, listening, or a transfer
+         alive with the app out of sight. Android 14 wants one permission per
+         service type, and MANAGE_OWN_CALLS is what lets a VoIP app use the
+         phoneCall type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- Lets the app ask, with the system's own dialog, to be left out of
+         battery optimisation so it can keep listening. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Android 11 hides other apps unless asked for by what they do; this
+         finds UnifiedPush distributors. -->
+    <queries>
+        <intent>
+            <action android:name="org.unifiedpush.android.distributor.REGISTER" />
+        </intent>
+    </queries>
+
+    <!-- No cloud backup: the app's private storage holds the identity's
+         sealed keys, and a copy of those in someone else's cloud is not a
+         backup this app should make on the user's behalf. -->
+    <application
+        android:label="Antiphon"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+        android:allowBackup="false"
+        android:hasCode="true">
+
+        <!-- Rotation and keyboard changes would otherwise restart the
+             activity, which for a NativeActivity means tearing down the Rust
+             side mid-call. singleTask so a notification's intent reaches the
+             running activity (onNewIntent) rather than starting a second
+             one, with a second copy of the app. -->
+        <activity
+            android:name=".AntiphonActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard"
+            android:screenOrientation="portrait"
+            android:launchMode="singleTask"
+            android:exported="true">
+            <meta-data android:name="android.app.lib_name" android:value="antiphon_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|phoneCall|dataSync|specialUse">
+            <!-- What Android 14 asks a specialUse service to say it is for. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Waiting for incoming peer-to-peer voice calls, which arrive directly from the caller with no server to send a push" />
+        </service>
+
+        <!-- Exported: the UnifiedPush distributor is another app. Messages
+             are checked against the registration's secret token. -->
+        <receiver
+            android:name=".PushReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.NEW_ENDPOINT" />
+                <action android:name="org.unifiedpush.android.connector.REGISTRATION_FAILED" />
+                <action android:name="org.unifiedpush.android.connector.UNREGISTERED" />
+                <action android:name="org.unifiedpush.android.connector.MESSAGE" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

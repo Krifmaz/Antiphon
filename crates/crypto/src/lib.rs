@@ -35,6 +35,9 @@
 //! - **Media a relay forwards is SFrame** ([`sframe`]): RFC 9605, keyed
 //!   per epoch and per sender from the MLS exporter, so a forwarder never
 //!   holds a key and someone who left can't hear what follows.
+//! - **Push wake-ups name nobody** ([`push`]): sealed to the woken
+//!   device's own push key, constant size, so a push service relays a
+//!   knock without learning who knocked or why.
 //!
 //! # Frozen labels
 //!
@@ -63,6 +66,7 @@ pub mod file_seal;
 pub mod mail;
 pub mod memory_seal;
 pub mod mnemonic;
+pub mod push;
 mod ratchet;
 pub mod relay_token;
 pub mod shamir;

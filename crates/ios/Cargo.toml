@@ -1,0 +1,35 @@
+[package]
+name = "antiphon-ios"
+description = "Antiphon for iOS: the shared iced phone app, started from UIApplicationMain"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+# The executable inside Antiphon.app; build-app.sh puts it there with
+# Info.plist beside it. winit's event loop calls UIApplicationMain itself,
+# so a plain `fn main` is the whole entry point: no Swift, no Xcode project.
+name = "antiphon-ios"
+path = "src/main.rs"
+
+# Everything is iOS-only, so `cargo build --workspace` on a desktop
+# compiles an empty binary rather than a second GUI toolkit.
+#
+# The Apple framework bindings are the objc2 0.6 family. winit 0.30 still
+# uses objc2 0.5 internally, but wgpu and cpal already pull 0.6 in, and
+# only 0.6 has CallKit and PushKit bindings, so this adds no third copy.
+[target.'cfg(target_os = "ios")'.dependencies]
+log = "0.4"
+base64 = "0.22.1"
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+antiphon-mobile = { version = "0.1.0", path = "../mobile" }
+objc2 = "0.6.4"
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+objc2-foundation = "0.3.2"
+# The document picker takes UTTypes, which is an optional feature.
+objc2-ui-kit = { version = "0.3.2", features = ["objc2-uniform-type-identifiers"] }
+objc2-avf-audio = "0.3.2"
+objc2-call-kit = "0.3.2"
+objc2-push-kit = "0.3.2"
+objc2-user-notifications = "0.3.2"
+objc2-uniform-type-identifiers = "0.3.2"

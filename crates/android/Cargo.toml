@@ -1,0 +1,25 @@
+[package]
+name = "antiphon-android"
+description = "Antiphon for Android: the shared iced phone app, started from a NativeActivity"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+# AntiphonActivity (java/) loads this as its NativeActivity library. The
+# APK is put together by build-apk.sh, from this, the Java around it,
+# res/ and AndroidManifest.xml.
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+# Everything is Android-only, so `cargo build --workspace` on a desktop
+# compiles an empty crate rather than a second GUI toolkit.
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+android_logger = "0.15"
+log = "0.4"
+jni = "0.21"
+ndk-context = "0.1.1"
+# Only for its Android backend; the window and everything drawn in it is
+# antiphon-mobile's.
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "android-native-activity"] }
+antiphon-mobile = { version = "0.1.0", path = "../mobile" }

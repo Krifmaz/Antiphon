@@ -43,6 +43,95 @@ A release build must use the stated version: rustc's output changes between
 releases, and two people on different compilers cannot produce the same
 bytes no matter what else they do.
 
+## Android
+
+The Android app is [`crates/android`](crates/android): Rust and iced, plus
+four small Java classes in [`crates/android/java`](crates/android/java) for
+what only Java can receive on Android -- an activity result, a foreground
+service for calls in the background, and the UnifiedPush receiver. It is
+part of the workspace but compiles to nothing on a desktop, so `cargo build`
+above is unaffected.
+
+The APK is built by [`crates/android/build-apk.sh`](crates/android/build-apk.sh),
+which runs the SDK's own tools in order: `cargo build` per ABI with the
+NDK's clang as linker, `aapt2` for the resources and the hand-written
+[`AndroidManifest.xml`](crates/android/AndroidManifest.xml), `javac` and
+`d8` for the Java, then `zip`, `zipalign` and `apksigner`. (It replaced
+cargo-apk, which cannot package a service or a receiver.) You need the
+Android SDK with `platforms;android-35` and a build-tools, an NDK, and a
+JDK (17 is what CI uses):
+
+```bash
+rustup target add aarch64-linux-android x86_64-linux-android
+export ANDROID_HOME=~/Android/Sdk ANDROID_NDK_ROOT=~/Android/Sdk/ndk/<version>
+crates/android/build-apk.sh                    # release; target/apk/antiphon.apk
+crates/android/build-apk.sh --debug            # quicker to build, slow to run
+APK_TARGETS=aarch64-linux-android crates/android/build-apk.sh   # one ABI only
+adb install -r target/apk/antiphon.apk
+```
+
+Without a keystore the script signs with the SDK's debug key
+(`~/.android/debug.keystore`, made if missing). To sign with a real key set
+`APK_KEYSTORE` and `APK_KEYSTORE_PASSWORD` (and `APK_KEY_ALIAS` if the
+keystore holds more than one key). CI does this from the
+`ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD` repository
+secrets, or with a throwaway key when they are not set -- that APK installs,
+but the next one will not install over it. The versionCode follows
+cargo-apk's formula from the crate version, so these APKs install over the
+ones cargo-apk built. File times inside the APK are set from
+`SOURCE_DATE_EPOCH` (default: the last commit's time). Logs go to logcat
+under the tag `antiphon`.
+
+Push wake-ups use [UnifiedPush](https://unifiedpush.org): install a
+distributor such as ntfy on the phone and the app registers with it. There
+is no FCM build; see [`docs/mobile-push.md`](docs/mobile-push.md).
+
+Audio needs nothing Android-specific: cpal's Android backend is AAudio,
+through the `ndk` crate, so there is no C++ runtime (`libc++_shared.so`) to
+ship. The script checks, and adds it if a dependency ever starts needing
+it. cpal does not set AAudio's voice-communication input preset, so the
+platform's own echo canceller is not guaranteed to engage; the app's own
+echo canceller in `antiphon-audio` is what a call relies on.
+
+## iOS
+
+The iOS app is [`crates/ios`](crates/ios): the same shared Rust and iced
+app as Android, started from a plain `main` (winit calls
+`UIApplicationMain` itself), with the Apple frameworks reached through
+the `objc2` bindings. No Swift, no Objective-C and no Xcode project. Like
+the Android crate it compiles to nothing on a desktop.
+
+Building it needs a Mac with Xcode (for the iOS SDK the linker needs) and
+the Rust targets:
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+crates/ios/build-app.sh sim       # target/aarch64-apple-ios-sim/release/Antiphon.app
+xcrun simctl install booted target/aarch64-apple-ios-sim/release/Antiphon.app
+xcrun simctl launch --console booted org.antiphon.app
+crates/ios/build-app.sh device    # target/aarch64-apple-ios/release/Antiphon.app
+```
+
+The script runs `cargo build`, then lays out the bundle by hand: the
+binary, [`Info.plist`](crates/ios/Info.plist) (bundle id
+`org.antiphon.app`, iOS 15 or later) and the icons. On Linux,
+`cargo check`/`clippy --target aarch64-apple-ios -p antiphon-ios` work
+without the SDK; only linking does not.
+
+**Signing.** The simulator build is signed ad hoc and runs as it is. A
+phone only installs an app signed with an Apple developer account's
+certificate and a provisioning profile for `org.antiphon.app` (with Push
+Notifications enabled, for PushKit), so without those the device build
+is left unsigned. To sign, set either `IOS_CERTIFICATE_P12` (base64 of
+the .p12), `IOS_CERTIFICATE_PASSWORD` and `IOS_PROVISIONING_PROFILE`
+(base64 of the .mobileprovision), or, on a Mac that already has the
+certificate, `IOS_SIGN_IDENTITY` and `IOS_PROVISIONING_PROFILE_PATH`.
+The script then also writes `Antiphon.ipa`. CI reads the first three from
+repository secrets of the same names.
+
+Logs go to the unified log through `NSLog`: Console.app, or
+`xcrun simctl spawn booted log stream --process antiphon-ios`.
+
 ## Verifying a release binary
 
 The goal is that you can build the published source yourself and get a
@@ -108,7 +197,10 @@ pipeline building every target from the same commit":
 - **Every push and pull request:** build, test and clippy on Linux,
   Windows and macOS, with the toolchain pinned per platform — which is
   the right place to pin it, since a build matrix already knows its
-  target triple.
+  target triple. The iOS app is clippy-checked and built for the
+  simulator (and for devices, signed if the secrets above are set) on a
+  Mac runner, and uploaded as the `app-ios` artifact. That job is
+  optional and no release waits on it.
 - **Every `v*` tag:** the release build above, run **twice from clean on
   each platform**. The job compares the two binaries byte for byte and
   refuses to publish anything that differs, then uploads the binaries with
