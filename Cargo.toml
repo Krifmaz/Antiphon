@@ -7,6 +7,7 @@ members = [
     "crates/net",
     "crates/app",
     "crates/client",
+    "crates/desktop",
     "crates/gui",
     "crates/ui",
     "crates/relay",

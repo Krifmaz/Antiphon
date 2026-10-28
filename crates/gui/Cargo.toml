@@ -1,5 +1,5 @@
 [package]
-name = "antiphon"
+name = "antiphon-classic"
 edition.workspace = true
 version.workspace = true
 
