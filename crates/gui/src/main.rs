@@ -5774,6 +5774,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
     // value forward so every other settings change doesn't silently wipe it.
     let previous = config::load();
     config::AppConfig {
+        // The iced app's own settings; this app only carries them forward.
+        stoop: previous.stoop.clone(),
         profile: config::ProfileData {
             display_name: app.get_display_name().to_string(),
             status_message: app.get_status_message().to_string(),

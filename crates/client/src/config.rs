@@ -25,8 +25,33 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
+/// Settings only the iced app reads. Kept in their own table so the Slint
+/// app's fields keep their meaning while both front ends exist.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct StoopPrefs {
+    /// Theme id (`stoop`, `dark`, `oled`, `light`, `system`).
+    pub theme: String,
+    /// Accent id, or `custom`.
+    pub accent: String,
+    /// Open the door (listen for calls) as soon as the app starts.
+    pub door_on_start: bool,
+    /// Notify about messages that arrive while the window is in the background.
+    pub notify_messages: bool,
+    /// The port the door listens on.
+    pub port: u16,
+}
+
+impl Default for StoopPrefs {
+    fn default() -> Self {
+        StoopPrefs { theme: "stoop".into(), accent: "logo".into(), door_on_start: false, notify_messages: true, port: 6002 }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub stoop: StoopPrefs,
     pub profile: ProfileData,
     pub chain: ChainConfig,
     pub input_device: Option<String>,
@@ -715,6 +740,7 @@ fn default_text_scale() -> f32 {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            stoop: StoopPrefs::default(),
             profile: ProfileData::default(),
             chain: ChainConfig::default_preset(),
             input_device: None,

@@ -200,6 +200,14 @@ pub struct ActiveCall {
     /// their own silencing is all it does -- the receiver's rules are
     /// re-read here and still decide the outcome.
     pub peer_wants_ring: Arc<AtomicBool>,
+    /// Set when the other side said it is leaving (a `GroupLeave` on the
+    /// primary connection). UDP has no close, so without this a 1:1 call
+    /// the other person hung up would look connected until someone
+    /// noticed the silence.
+    pub peer_left: Arc<AtomicBool>,
+    /// How loud they are right now (0..1, peak of the last frame played),
+    /// for a speaking indicator. Zero while deafened.
+    pub peer_level: Arc<Mutex<f32>>,
     /// An incoming "add me" request awaiting the user's answer (spec §3),
     /// holding the requester's display name. `None` when there's nothing
     /// pending.
@@ -638,6 +646,24 @@ impl ActiveCall {
     ///
     /// Does not restart the call: the connection, the keys and the audio
     /// all continue, and only the notification decision is revisited.
+    /// Whether the call is still up: the receive loop is running and the
+    /// other side has not said it left.
+    pub fn is_live(&self) -> bool {
+        !self.recv_task.is_finished() && !self.peer_left.load(Ordering::Relaxed)
+    }
+
+    /// Tells the other side (and anyone else on a group call) that this
+    /// side is leaving, so their app ends the call instead of sitting on a
+    /// silent line. Best effort: one control message each.
+    pub fn say_goodbye(&self, runtime: &tokio::runtime::Handle) {
+        let _guard = runtime.enter();
+        self.group.announce_leaving(&self.peer);
+        let peer = self.peer.clone();
+        runtime.spawn(async move {
+            let _ = peer.send_control(&ControlMessage::GroupLeave.encode()).await;
+        });
+    }
+
     pub fn escalate(&self, runtime: &tokio::runtime::Handle) {
         let peer = self.peer.clone();
         runtime.spawn(async move {
@@ -1374,6 +1400,7 @@ pub fn start_pipeline(
     let reactions: Arc<Mutex<Vec<crate::reactions::Reaction>>> = Arc::new(Mutex::new(Vec::new()));
     let peer_wants_silent = Arc::new(AtomicBool::new(false));
     let peer_wants_ring = Arc::new(AtomicBool::new(false));
+    let peer_left = Arc::new(AtomicBool::new(false));
     let pending_introduction: Arc<Mutex<Option<crate::introduction::Introduction>>> =
         Arc::new(Mutex::new(None));
     let pending_friend_request: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -1639,6 +1666,7 @@ pub fn start_pipeline(
     let recv_resend_peer = peer.clone();
     let recv_silent = peer_wants_silent.clone();
     let recv_ring = peer_wants_ring.clone();
+    let recv_left = peer_left.clone();
     let recv_introduction = pending_introduction.clone();
     let recv_friend_pending = pending_friend_request.clone();
     let recv_friend_accepted = friend_accepted.clone();
@@ -1667,9 +1695,9 @@ pub fn start_pipeline(
                     Some(m) if crate::group::is_group_message(&m) => {
                         recv_group.inbox.lock().unwrap().push((crate::group::Link::Primary, m));
                     }
-                    // The primary connection leaving ends this call, as a
-                    // 1:1 hang-up always has; nothing more to do here.
-                    Some(ControlMessage::GroupLeave) => {}
+                    // The primary connection leaving ends this call; the
+                    // UI sees the flag and hangs up its side too.
+                    Some(ControlMessage::GroupLeave) => recv_left.store(true, Ordering::Relaxed),
                     Some(ControlMessage::Hello(hello)) => {
                         // Spec §9: the caller said up front that this is a
                         // knock. Handled here, on the same flag the
@@ -1813,6 +1841,8 @@ pub fn start_pipeline(
 
     let drain_sink = playback_sink.clone();
     let drain_deafened = deafened.clone();
+    let peer_level = Arc::new(Mutex::new(0.0f32));
+    let drain_peer_level = peer_level.clone();
     let drain_ft_state = file_transfer_state.clone();
     let drain_ft_peer = peer.clone();
     let drain_replay = replay.clone();
@@ -1910,6 +1940,14 @@ pub fn start_pipeline(
                             },
                         );
                     }
+                }
+                let peak = if drain_deafened.load(Ordering::Relaxed) {
+                    0.0
+                } else {
+                    samples.iter().fold(0.0f32, |m, &v| m.max(v.abs()))
+                };
+                if let Ok(mut level) = drain_peer_level.lock() {
+                    *level = peak;
                 }
                 if !drain_deafened.load(Ordering::Relaxed) {
                     // Read live so the Settings slider applies to this call
@@ -2045,6 +2083,8 @@ pub fn start_pipeline(
         started_at: Instant::now(),
         peer_wants_silent,
         peer_wants_ring,
+        peer_left,
+        peer_level,
         pending_introduction,
         pending_friend_request,
         friend_accepted,

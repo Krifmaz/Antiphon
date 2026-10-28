@@ -86,6 +86,10 @@ impl FileSource {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The bytes of chunk `index`.
     ///
     /// For a file on disk, refuses if the file is no longer the length and

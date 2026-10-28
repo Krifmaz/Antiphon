@@ -5,7 +5,7 @@ feature-by-feature status is in [`FEATURES.md`](../FEATURES.md).
 
 ## Done: send-rate control for file transfers
 
-The AIMD pacer ([`crates/gui/src/pacer.rs`](../crates/gui/src/pacer.rs))
+The AIMD pacer ([`crates/client/src/pacer.rs`](../crates/client/src/pacer.rs))
 is wired in. Repairs are served from the same paced loop as new chunks, so
 pause and the upload cap apply to them; the receiver re-requests a missing
 chunk no more than once a second; the sender cuts its rate at most once per
