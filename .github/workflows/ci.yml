@@ -193,7 +193,7 @@ jobs:
           done
           [ -d artifacts/macos-aarch64 ] || echo "::warning::publishing without a macOS build"
       - name: Package per platform
-        # antiphon-<version>-<platform>.zip on Windows, .tar.gz elsewhere,
+        # stoop-<version>-<platform>.zip on Windows, .tar.gz elsewhere,
         # with the app at the top level. One SHA256SUMS.txt for everything:
         # the archives (what a downloader verifies), then the binaries
         # inside them (what a reproducible rebuild is compared to).
@@ -206,7 +206,7 @@ jobs:
             p=${p%/}
             # upload-artifact drops the executable bit.
             chmod +x $p/antiphon* 2>/dev/null || true
-            name=antiphon-$VER-$p
+            name=stoop-$VER-$p
             case $p in
               windows-*) (cd $p && zip -X -q ../../release/$name.zip *) ;;
               *) tar czf ../release/$name.tar.gz --owner=0 --group=0 -C $p $(ls $p) ;;
@@ -232,11 +232,11 @@ jobs:
             echo
             echo "| Platform | File |"
             echo "|---|---|"
-            row "Windows (x64)" "antiphon-$VER-windows-x86_64.zip"
-            row "Linux (x64)" "antiphon-$VER-linux-x86_64.tar.gz"
-            row "macOS (Apple silicon)" "antiphon-$VER-macos-aarch64.tar.gz"
+            row "Windows (x64)" "stoop-$VER-windows-x86_64.zip"
+            row "Linux (x64)" "stoop-$VER-linux-x86_64.tar.gz"
+            row "macOS (Apple silicon)" "stoop-$VER-macos-aarch64.tar.gz"
             echo
-            echo "Each archive holds \`antiphon\` (the desktop app), \`antiphon-cli\` and the README. Unzip and run \`antiphon\`; nothing to install."
+            echo "Each archive holds \`antiphon\` (the Stoop desktop app), \`antiphon-cli\` and the README. Unzip and run \`antiphon\`; nothing to install."
             echo
             echo "## Verify"
             echo
@@ -250,7 +250,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
-          name: Antiphon ${{ env.VER }}
+          name: Stoop ${{ env.VER }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ contains(env.TAG, '-') }}
           body_path: notes.md
