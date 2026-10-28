@@ -19,7 +19,7 @@ const MAIN_MENU: &[&str] =
     &["Wait for a call (listen)", "Call someone", "List audio devices", "Save a settings preset", "Exit"];
 
 pub async fn run() -> Result<()> {
-    println!("Antiphon -- interactive mode (run with a subcommand, e.g. `antiphon-cli listen --help`, to skip this menu)\n");
+    println!("Stoop -- interactive mode (run with a subcommand, e.g. `antiphon-cli listen --help`, to skip this menu)\n");
 
     loop {
         let choice = Select::new("What would you like to do?", MAIN_MENU.to_vec()).prompt()?;

@@ -981,8 +981,8 @@ component SectionHeader {
 // The app's name and mark, in one place: a rename is a change here (and
 // the window title in main.rs), not a hunt through the layout.
 global Brand {
-    out property <string> name: "Antiphon";
-    out property <image> logo: @image-url("tray-icon.png");
+    out property <string> name: "Stoop";
+    out property <image> logo: @image-url("logo.png");
 }
 
 // Surface colours for the default layout (rail, sidebar, cards), taken
@@ -1456,9 +1456,9 @@ export component MainWindow inherits Window {
     // Bound rather than fixed so two instances running different profiles
     // are tellable apart in the taskbar, which is the whole point of
     // being able to run two.
-    in-out property <string> window-title: "Antiphon";
+    in-out property <string> window-title: Brand.name;
     title: window-title;
-    icon: @image-url("tray-icon.png");
+    icon: Brand.logo;
     min-width: 760px;
     min-height: 520px;
     preferred-width: 1280px;
@@ -6062,7 +6062,7 @@ export component MainWindow inherits Window {
 export component AppTrayIcon inherits SystemTrayIcon {
     icon: @image-url("tray-icon.png");
     in-out property <string> status-line: "not connected";
-    tooltip: "Antiphon -- " + status-line;
+    tooltip: Brand.name + " -- " + status-line;
 
     callback show-window();
     callback quit-app();

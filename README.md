@@ -1,4 +1,8 @@
-# Antiphon
+# Stoop
+
+<img src="crates/gui/ui/logo.png" width="96" alt="Stoop logo">
+
+Stoop was called Antiphon until October 2026. The crates and binaries (`antiphon`, `antiphon-cli`, `antiphon-relay`) keep their old names for now; the app shows the new name and keeps your data in a `Stoop` folder, moved there from the old `Antiphon` one on first launch.
 
 A direct, end-to-end encrypted voice app in Rust: two peers, no server in
 the call path, a real multi-stage microphone processing chain, encrypted

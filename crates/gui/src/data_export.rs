@@ -146,7 +146,7 @@ pub fn export_all(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        app: "antiphon",
+        app: "stoop",
         summary: &summary,
         notes: vec![
             "Everything here is plain JSON and WAV. You do not need this app to read it.",

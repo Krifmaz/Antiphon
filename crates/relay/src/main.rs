@@ -13,7 +13,7 @@ use clap::Parser;
 use tokio::net::UdpSocket;
 
 #[derive(Parser)]
-#[command(version, about = "Antiphon relay: forwards encrypted calls between people who can't reach each other directly.", after_help = COMMITMENT)]
+#[command(version, about = "Stoop relay: forwards encrypted calls between people who can't reach each other directly.", after_help = COMMITMENT)]
 struct Args {
     /// Address to listen on.
     #[arg(long, default_value = "0.0.0.0:3479")]

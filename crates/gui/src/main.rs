@@ -200,7 +200,7 @@ fn main() -> anyhow::Result<()> {
     ));
     refresh_invite(&main_window, &app_state);
     if let Some(name) = &profile {
-        main_window.set_window_title(format!("antiphon-app -- {name}").into());
+        main_window.set_window_title(format!("Stoop -- {name}").into());
     }
     let tray = AppTrayIcon::new()?;
 
@@ -2381,7 +2381,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             std::thread::spawn(move || {
                 let Some(path) = rfd::FileDialog::new()
                     .set_title("Export voice preset")
-                    .add_filter("Antiphon preset", &["json"])
+                    .add_filter("Stoop preset", &["json"])
                     .set_file_name(format!("{}.json", preset.name))
                     .save_file()
                 else {
@@ -2410,7 +2410,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             std::thread::spawn(move || {
                 let Some(path) = rfd::FileDialog::new()
                     .set_title("Import a voice preset")
-                    .add_filter("Antiphon preset", &["json"])
+                    .add_filter("Stoop preset", &["json"])
                     .pick_file()
                 else {
                     return;
@@ -3498,8 +3498,8 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let window_weak2 = window_weak.clone();
             std::thread::spawn(move || {
                 let Some(path) = rfd::FileDialog::new()
-                    .set_title("Export Antiphon settings")
-                    .add_filter("Antiphon settings", &["json"])
+                    .set_title("Export Stoop settings")
+                    .add_filter("Stoop settings", &["json"])
                     .set_file_name("antiphon-settings.json")
                     .save_file()
                 else {
@@ -3526,7 +3526,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let state2 = state.clone();
             std::thread::spawn(move || {
                 let Some(path) =
-                    rfd::FileDialog::new().set_title("Import Antiphon settings").add_filter("Antiphon settings", &["json"]).pick_file()
+                    rfd::FileDialog::new().set_title("Import Stoop settings").add_filter("Stoop settings", &["json"]).pick_file()
                 else {
                     return;
                 };

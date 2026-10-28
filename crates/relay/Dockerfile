@@ -1,4 +1,4 @@
-# Self-hosted Antiphon relay (spec §3: "Community owners can self-host").
+# Self-hosted Stoop relay (spec §3: "Community owners can self-host").
 # Build from the repository root:
 #   docker build -f crates/relay/Dockerfile -t antiphon-relay .
 #   docker run -p 3479:3479/udp antiphon-relay
