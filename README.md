@@ -6,8 +6,10 @@ Stoop was called Antiphon until October 2026. The crates and binaries (`antiphon
 
 A direct, end-to-end encrypted voice app in Rust: two peers, no server in
 the call path, a real multi-stage microphone processing chain, encrypted
-text chat and file transfer over the same connection, and a native Slint
-desktop UI with a CLI alongside it.
+text chat and file transfer over the same connection, and a native iced
+interface shared by the desktop and phone apps, with a CLI alongside it.
+
+![Stoop on the desktop, mid-call](docs/screenshots/iced/call.png)
 
 It is a working vertical slice of the [feature spec](docs/voip-app-feature-spec.pdf),
 not the whole of it. The spec describes a multi-year platform -- relays,
@@ -29,7 +31,10 @@ A Cargo workspace, one crate per concern:
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
 | [`crates/app`](crates/app) | §1 Utility | `antiphon-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
 | [`crates/relay`](crates/relay) | §3 Relay, §8 mailbox | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry. With `--mailbox`, also holds sealed mail for registered inboxes; with `--files`, sealed copies of pinned files; with `--dht`, a DHT node and an optional community directory |
-| [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon`: the Slint desktop app -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
+| [`crates/ui`](crates/ui) | -- | `antiphon-ui`: the Stoop interface in iced, one set of screens for the desktop and the phone. Draws a plain `Model` and hands back `Action`s, so it never touches an engine |
+| [`crates/client`](crates/client) | §4, §5, §7, §8, §9, §13 | `antiphon-client`: the call engine and everything around it (contacts, history, outbox, delivery, discovery, file transfer, moderation), shared by both desktop apps |
+| [`crates/desktop`](crates/desktop) | -- | `antiphon`: Stoop for the desktop, the shared interface on the client engine |
+| [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon-classic`: the previous Slint desktop app, kept while the new one catches up -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
 Every crate's `lib.rs` doc comment states its scope against the spec.
 
@@ -102,13 +107,24 @@ cargo test -p antiphon large_file -- --ignored --nocapture
 cargo run -p antiphon
 ```
 
-Opens a window and puts an icon in the system tray; closing the window
-hides it there. An identity is generated silently on first run. Share your
-QR code or `voip://` invite link from the Connect panel, or add a contact
-by address; one side listens, the other calls. Settings -- the audio
-chain, devices, keybinds, theme -- apply live to a running call and
-persist across restarts. `--profile <name>` keeps a separate identity and
-settings directory.
+Opens Stoop. First run asks for your name; an identity is generated
+silently. Open your door (the switch on the front step) to take calls,
+share your invite from the Invite button, and add people from theirs.
+Settings -- devices, how your voice is sent, processing, theme and accent
+-- apply live to a running call and persist across restarts.
+
+- `--profile <name>` keeps a separate identity and settings directory.
+- `--demo` shows the interface with made-up people and a call, nothing
+  on the network.
+- `--screenshot-tour <dir>` walks the demo through every screen and saves
+  a PNG of each (how `docs/screenshots/iced` is made).
+
+The previous Slint app, with its layout editor, tray icon, soundboard and
+the advanced panels not yet in Stoop, is still there:
+
+```bash
+cargo run -p antiphon-classic
+```
 
 ### CLI
 
@@ -171,7 +187,10 @@ crates/
   audio/      DSP chain, echo cancellation, device I/O
   app/        antiphon-cli
   relay/      antiphon-relay, self-hostable
-  gui/        antiphon (Slint UI) + build.rs compiling ui/app.slint
+  client/     antiphon-client: call engine, contacts, history, delivery
+  ui/         antiphon-ui: the shared iced interface (desktop + phone)
+  desktop/    antiphon: Stoop for the desktop
+  gui/        antiphon-classic (Slint UI) + build.rs compiling ui/app.slint
 docs/         the feature spec
 notes/        where work stopped, for picking up on another machine
 .github/      CI: build + test on Linux/Windows/macOS; reproducible release builds
