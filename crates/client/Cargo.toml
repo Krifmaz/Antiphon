@@ -1,0 +1,37 @@
+[package]
+name = "antiphon-client"
+description = "Everything the desktop app does that is not drawing: calls, contacts, chat history, delivery, files, settings"
+edition.workspace = true
+version.workspace = true
+
+# The logic both desktop front ends share. It was the body of the Slint
+# app's crate, moved here unchanged so the iced app (crates/desktop) and the
+# Slint one (crates/gui) run the same code until the Slint one is retired.
+
+[dependencies]
+anyhow = "1.0.104"
+device_query = "4.0.1"
+dirs = "6.0.0"
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+image = "0.25.10"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+zeroize = "1.9.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
+antiphon-audio = { version = "0.1.0", path = "../audio" }
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }
+antiphon-net = { version = "0.1.0", path = "../net" }
+# The mailbox, run in-app when this device holds mail for your others.
+antiphon-relay = { version = "0.1.0", path = "../relay" }
+
+[target.'cfg(windows)'.dependencies]
+# Caps Lock as a held push-to-talk key needs a low-level keyboard hook --
+# see `caps_lock.rs`.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Already linked through device_query; used directly to put Caps Lock back
+# off after it was used as push-to-talk.
+x11 = { version = "2.21.0", features = ["xlib"] }

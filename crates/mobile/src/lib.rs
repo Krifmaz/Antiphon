@@ -57,43 +57,43 @@ mod ui;
 // yet), hence `dead_code`; none of them is edited for the phone's sake.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/content_store.rs"]
+#[path = "../../client/src/content_store.rs"]
 mod content_store;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/control.rs"]
+#[path = "../../client/src/control.rs"]
 mod control;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/file_integrity.rs"]
+#[path = "../../client/src/file_integrity.rs"]
 mod file_integrity;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/file_preview.rs"]
+#[path = "../../client/src/file_preview.rs"]
 mod file_preview;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/file_transfer.rs"]
+#[path = "../../client/src/file_transfer.rs"]
 mod file_transfer;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/history.rs"]
+#[path = "../../client/src/history.rs"]
 mod history;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/outbox.rs"]
+#[path = "../../client/src/outbox.rs"]
 mod outbox;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/pacer.rs"]
+#[path = "../../client/src/pacer.rs"]
 mod pacer;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/reactions.rs"]
+#[path = "../../client/src/reactions.rs"]
 mod reactions;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
-#[path = "../../gui/src/transfer_limits.rs"]
+#[path = "../../client/src/transfer_limits.rs"]
 mod transfer_limits;
 
 /// What `file_transfer` asks of the desktop's `config` module, answered

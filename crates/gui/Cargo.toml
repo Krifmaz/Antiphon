@@ -24,6 +24,7 @@ antiphon-net = { version = "0.1.0", path = "../net" }
 antiphon-protocol = { version = "0.1.0", path = "../protocol" }
 # The mailbox, run in-app when this device holds mail for your others.
 antiphon-relay = { version = "0.1.0", path = "../relay" }
+antiphon-client = { version = "0.1.0", path = "../client" }
 
 [target.'cfg(windows)'.dependencies]
 # Caps Lock as a held push-to-talk key needs a low-level keyboard hook --

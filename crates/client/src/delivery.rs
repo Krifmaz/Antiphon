@@ -381,16 +381,16 @@ pub async fn discover(wait: Duration) -> Vec<SocketAddr> {
 
 /// Resolves a node's `host[:port]` the way `kind` of traffic reaches it --
 /// through the VPN's DNS when that kind is tunneled (spec §6).
-pub(crate) async fn resolve(kind: TrafficKind, node: &str) -> Option<SocketAddr> {
+pub async fn resolve(kind: TrafficKind, node: &str) -> Option<SocketAddr> {
     let with_port = if node.contains(':') { node.to_string() } else { format!("{node}:{DEFAULT_PORT}") };
     crate::vpn::resolve(kind, &with_port).await.ok()
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(crate) fn unhex32(s: &str) -> Option<[u8; 32]> {
+pub fn unhex32(s: &str) -> Option<[u8; 32]> {
     crate::connection_mode::decode_hex32(s)
 }
 
