@@ -38,6 +38,14 @@ pub struct Model {
     pub phone: Option<Phone>,
     /// Keeping the account: the recovery phrase, backups, moving devices.
     pub account: Account,
+    /// Group chats and communities you are in (or waiting to be let into),
+    /// in the order the list shows them.
+    pub communities: Vec<Community>,
+    /// Invitations to group chats and communities, waiting for an answer.
+    pub space_invites: Vec<SpaceInvite>,
+    /// The channel on screen, once the app has loaded it (after
+    /// [`crate::Action::OpenChannel`]).
+    pub channel: Option<ChannelView>,
 }
 
 /// Settings > Account: everything about not losing the account.
@@ -100,6 +108,9 @@ pub struct Device {
     pub files: bool,
     /// A push-to-talk key can be bound (desktop keyboards).
     pub ptt_keys: bool,
+    /// Group chats and communities work on this device; without them the
+    /// screens for them are not offered.
+    pub communities: bool,
 }
 
 /// The person using the app.
@@ -303,6 +314,10 @@ pub struct Line {
     pub mine: bool,
     /// Who wrote it; empty means the conversation's person (or me).
     pub author: String,
+    /// The author's id (identity key, hex) where a conversation has more
+    /// than two people in it; their avatar and taking a message down use
+    /// it. Empty in a conversation with one person.
+    pub author_id: String,
     /// What it says.
     pub text: String,
     /// "14:02".
@@ -315,6 +330,8 @@ pub struct Line {
     pub edited: bool,
     /// Kept at hand (pinned on this device only).
     pub pinned: bool,
+    /// Taken down by its author or a moderator; drawn as a faint note.
+    pub deleted: bool,
     /// (emoji, how many).
     pub reactions: Vec<(String, u32)>,
     /// A file instead of text: (name, size).
@@ -479,4 +496,80 @@ impl std::fmt::Display for Transmit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }
+}
+
+/// A group chat or a community, as the list and its screen show it.
+#[derive(Clone, Debug, Default)]
+pub struct Community {
+    /// Its id (hex), stable for its whole life.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// A group chat (one conversation, anyone may invite) rather than a
+    /// community (channels and roles).
+    pub group: bool,
+    /// A line under the name ("Community · 6 members").
+    pub detail: String,
+    /// Its channels, in order; a group chat has the one.
+    pub channels: Vec<Channel>,
+    /// Who is in it.
+    pub members: Vec<Member>,
+    /// Messages from others not read yet.
+    pub unread: u32,
+    /// Why it can't be used yet, or any more ("Waiting to be let in",
+    /// "You're no longer in this"); `None` while you're in it.
+    pub waiting: Option<String>,
+    /// You may post in it.
+    pub can_post: bool,
+    /// You may invite people.
+    pub can_invite: bool,
+    /// You may add channels.
+    pub can_manage_channels: bool,
+}
+
+/// One channel of a community.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Channel {
+    /// Its number within the community.
+    pub id: u32,
+    /// Its name, without the hash.
+    pub name: String,
+    /// What it is for, if anyone said.
+    pub topic: String,
+}
+
+/// Someone in a group chat or community.
+#[derive(Clone, Debug, Default)]
+pub struct Member {
+    /// Their key there (hex): their avatar seed.
+    pub id: String,
+    /// The name they go by there.
+    pub name: String,
+    /// Their status line there.
+    pub status: String,
+    /// Their role ("Owner", "Moderator", "Member").
+    pub role: String,
+    /// It is me.
+    pub me: bool,
+}
+
+/// An invitation to a group chat or community.
+#[derive(Clone, Debug, Default)]
+pub struct SpaceInvite {
+    /// What it is called.
+    pub name: String,
+    /// Who invited you, and when ("Community · from Robin · 2 h ago").
+    pub detail: String,
+}
+
+/// The messages of one channel.
+#[derive(Clone, Debug, Default)]
+pub struct ChannelView {
+    /// The community's id.
+    pub community: String,
+    /// The channel's number.
+    pub channel: u32,
+    /// The messages, oldest first; [`Line::author`] and
+    /// [`Line::author_id`] say who wrote each.
+    pub lines: Vec<Line>,
 }

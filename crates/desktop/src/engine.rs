@@ -87,6 +87,9 @@ pub enum Out {
     Copy(String),
     /// A restore rewrote the account on disk: restart to load it.
     Relaunch,
+    /// A group chat or community was made or joined: close the dialog and
+    /// open it.
+    SpaceCreated(String),
 }
 
 /// Whether the background task is placing a call or waiting for one.
@@ -195,6 +198,11 @@ pub struct Engine {
     /// each was built from: a tile is rebuilt (and its picture uploaded
     /// again) only when a newer frame has come.
     tiles: HashMap<String, (u64, ui::VideoTile)>,
+    /// Group chats and communities, as the screens last saw them.
+    spaces: crate::spaces::Spaces,
+    /// The channel on screen, as (space id, channel): its messages are
+    /// loaded and it counts as read. Set by the app before each model.
+    viewing: Option<(String, u32)>,
     /// Settings > Account & backup: phrase, backup files, moving devices.
     account: crate::account::AccountState,
 }
@@ -234,6 +242,8 @@ impl Engine {
             their_level: 0.0,
             checking: false,
             tiles: HashMap::new(),
+            spaces: Default::default(),
+            viewing: None,
             account: Default::default(),
         };
         engine.load_previews();
@@ -1263,6 +1273,24 @@ impl Engine {
             | A::CellularLimit(_)
             | A::KeepListening(_)
             | A::ListenOnSaver(_) => {}
+            A::OpenChannel { community, channel } => self.viewing = Some((community, channel)),
+            a @ (A::CreateSpace { .. }
+            | A::AcceptSpaceInvite(_)
+            | A::DeclineSpaceInvite(_)
+            | A::Post { .. }
+            | A::EditPost { .. }
+            | A::DeletePost { .. }
+            | A::InviteToSpace { .. }
+            | A::AddChannel { .. }
+            | A::LeaveSpace(_)) => {
+                let invite = matches!(a, A::InviteToSpace { .. });
+                match self.spaces.act(a) {
+                    Ok(Some(id)) => self.out.push(Out::SpaceCreated(id)),
+                    Ok(None) if invite => self.toast("Invitation sent. They join once they accept it.", ToastKind::Ok),
+                    Ok(None) => {}
+                    Err(why) => self.toast(why, ToastKind::Err),
+                }
+            }
             a @ (A::ShowPhrase(_)
             | A::Restore(_)
             | A::BackupSave { .. }
@@ -1459,7 +1487,15 @@ impl Engine {
     // ---------------------------------------------------------------- model
 
     /// Everything the screens draw, now.
+    /// Tells the engine which channel is on screen, before [`Engine::model`].
+    pub fn set_viewing(&mut self, channel: Option<(&str, u32)>) {
+        self.viewing = channel.map(|(id, ch)| (id.to_string(), ch));
+    }
+
+    /// Everything the screens draw, built from the engine's state.
     pub fn model(&mut self, open: Option<&str>) -> ui::Model {
+        let viewing = self.viewing.clone();
+        let (communities, space_invites, channel) = self.spaces.model(viewing.as_ref().map(|(id, ch)| (id.as_str(), *ch)));
         let me = self.me();
         let people = self.people();
         let mut call = self.call_model();
@@ -1475,9 +1511,12 @@ impl Engine {
             settings: self.settings(),
             notice: None,
             first_run: self.cfg.profile.display_name.trim().is_empty(),
-            device: ui::Device { phone: false, files: true, ptt_keys: true },
+            device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true },
             phone: None,
             account: self.account.model(&self.state.identity),
+            communities,
+            space_invites,
+            channel,
         }
     }
 
@@ -1891,6 +1930,7 @@ impl Engine {
                 pinned: e.pinned,
                 reactions: counts,
                 file: None,
+                ..ui::Line::default()
             });
             last_day = Some(day);
         }

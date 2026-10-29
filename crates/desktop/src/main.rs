@@ -15,6 +15,7 @@ mod account;
 mod app;
 mod demo;
 mod engine;
+mod spaces;
 
 use std::path::PathBuf;
 

@@ -56,6 +56,10 @@ pub enum Route {
     Person(String),
     /// A part of Settings.
     Settings(Section),
+    /// Group chats and communities: the list, invitations, and making one.
+    Spaces,
+    /// One channel of a group chat or community: (its id, the channel).
+    Community(String, u32),
 }
 
 /// A part of Settings.
@@ -128,6 +132,14 @@ pub enum Dialog {
     /// Are you sure: replace this device's account with the one the move
     /// link in the box offers.
     ConfirmReceive,
+    /// Start a group chat or community.
+    NewSpace,
+    /// Invite one of your people into this group chat or community (by id).
+    InviteToSpace(String),
+    /// Add a channel to this community (by id).
+    AddChannel(String),
+    /// Are you sure: leave this group chat or community (by id).
+    ConfirmLeave(String),
 }
 
 /// How a toast is coloured.
@@ -364,6 +376,67 @@ pub enum Action {
     /// Fetch the account this move link offers and make it this device's
     /// (the dialog already asked).
     MoveReceive(String),
+    /// A channel is on screen: load its messages and mark it read.
+    OpenChannel {
+        /// The group chat or community's id.
+        community: String,
+        /// The channel.
+        channel: u32,
+    },
+    /// Start a group chat or community.
+    CreateSpace {
+        /// What to call it.
+        name: String,
+        /// A group chat rather than a community.
+        group: bool,
+    },
+    /// Accept the invitation at this index in [`Model::space_invites`].
+    AcceptSpaceInvite(usize),
+    /// Turn down the invitation at this index.
+    DeclineSpaceInvite(usize),
+    /// Post a message to a channel.
+    Post {
+        /// The group chat or community's id.
+        community: String,
+        /// The channel.
+        channel: u32,
+        /// What it says.
+        text: String,
+    },
+    /// Change the words of a message I posted.
+    EditPost {
+        /// The group chat or community's id.
+        community: String,
+        /// Which message.
+        id: u64,
+        /// The new words.
+        text: String,
+    },
+    /// Take a message down: my own, or someone's I'm allowed to remove.
+    DeletePost {
+        /// The group chat or community's id.
+        community: String,
+        /// Which message.
+        id: u64,
+        /// Who wrote it (their key there, hex).
+        author: String,
+    },
+    /// Invite one of my people into a group chat or community.
+    InviteToSpace {
+        /// The group chat or community's id.
+        community: String,
+        /// The contact's id.
+        person: String,
+    },
+    /// Add a channel to a community.
+    AddChannel {
+        /// The community's id.
+        community: String,
+        /// Its name, without the hash.
+        name: String,
+    },
+    /// Leave a group chat or community (the dialog already asked).
+    LeaveSpace(String),
 }
 
 /// Everything that can happen in the interface.
@@ -452,6 +525,16 @@ pub enum Msg {
     FirstName(String),
     /// Finish first run with the name typed.
     FirstDone,
+    /// The new group chat or community's name box changed.
+    SpaceName(String),
+    /// Make it a group chat (true) or a community.
+    SpaceGroup(bool),
+    /// Start the group chat or community named in the box.
+    SpaceCreate,
+    /// The new channel's name box changed.
+    ChannelName(String),
+    /// Add the channel named in the box to this community (by id).
+    ChannelCreate(String),
     /// Close a toast by its id.
     DismissToast(u64),
     /// Where the pointer is, so a right-click menu opens under it.
@@ -480,7 +563,8 @@ pub struct Ui {
     panel_anim: Animation<bool>,
     /// What is typed in the people search box.
     search: String,
-    /// Unsent composer text, per contact id, kept when switching conversations.
+    /// Unsent composer text, per conversation ([`Ui::draft_key`]), kept
+    /// when switching conversations.
     drafts: HashMap<String, String>,
     /// The message being edited: (id, text so far).
     editing: Option<(u64, String)>,
@@ -521,6 +605,12 @@ pub struct Ui {
     receive_link: String,
     /// The mobile data limit box while it is being edited.
     limit_edit: Option<String>,
+    /// The new group chat or community's name box.
+    space_name: String,
+    /// The new one is a group chat rather than a community.
+    space_group: bool,
+    /// The new channel's name box.
+    channel_name: String,
     /// Toasts on screen, oldest first.
     toasts: Vec<Toast>,
     /// The id the next toast gets.
@@ -585,6 +675,9 @@ impl Ui {
             import_pass: String::new(),
             receive_link: String::new(),
             limit_edit: None,
+            space_name: String::new(),
+            space_group: false,
+            channel_name: String::new(),
             toasts: Vec::new(),
             next_toast: 1,
             cursor: Point::ORIGIN,
@@ -609,6 +702,32 @@ impl Ui {
             Route::Person(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// The group chat or community channel on screen, as (id, channel).
+    pub fn open_channel(&self) -> Option<(&str, u32)> {
+        match &self.route {
+            Route::Community(id, channel) => Some((id, *channel)),
+            _ => None,
+        }
+    }
+
+    /// Where the composer's text is kept for the screen on view: a
+    /// contact's id, or the channel's own key. `None` off a conversation.
+    fn draft_key(&self) -> Option<String> {
+        match &self.route {
+            Route::Person(id) => Some(id.clone()),
+            // A hash can't start a contact id (hex), so the two never meet.
+            Route::Community(id, channel) => Some(format!("#{id}/{channel}")),
+            _ => None,
+        }
+    }
+
+    /// Closes the new group chat dialog after the app made one, and opens it.
+    pub fn space_created(&mut self, id: String) -> Vec<Action> {
+        self.space_name.clear();
+        self.set_dialog(None);
+        self.go(Route::Community(id, 0))
     }
 
     /// The system's insets for this frame, in logical pixels: what the
@@ -688,6 +807,7 @@ impl Ui {
         self.menu = None;
         let open = match &route {
             Route::Person(id) => vec![Action::Open(id.clone())],
+            Route::Community(id, channel) => vec![Action::OpenChannel { community: id.clone(), channel: *channel }],
             _ => Vec::new(),
         };
         self.route = route;
@@ -718,6 +838,9 @@ impl Ui {
                     self.set_dialog(None);
                 } else if self.editing.is_some() {
                     self.editing = None;
+                } else if matches!(self.route, Route::Community(..)) {
+                    // Out of a channel is back to the list it was opened from.
+                    self.route = Route::Spaces;
                 } else if self.route != Route::Home {
                     self.route = Route::Home;
                 }
@@ -742,19 +865,22 @@ impl Ui {
                 Vec::new()
             }
             Msg::Draft(s) => {
-                if let Some(id) = self.open_person() {
-                    self.drafts.insert(id.to_string(), s);
+                if let Some(key) = self.draft_key() {
+                    self.drafts.insert(key, s);
                 }
                 Vec::new()
             }
             Msg::Send => {
-                let Some(id) = self.open_person().map(str::to_string) else { return Vec::new() };
-                let text = self.drafts.remove(&id).unwrap_or_default();
+                let Some(key) = self.draft_key() else { return Vec::new() };
+                let text = self.drafts.remove(&key).unwrap_or_default();
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     return Vec::new();
                 }
-                vec![Action::Send { to: id, text }]
+                match &self.route {
+                    Route::Community(id, channel) => vec![Action::Post { community: id.clone(), channel: *channel, text }],
+                    _ => vec![Action::Send { to: key, text }],
+                }
             }
             Msg::EditStart(id, text) => {
                 self.editing = Some((id, text));
@@ -767,9 +893,13 @@ impl Ui {
                 Vec::new()
             }
             Msg::EditSave => {
-                let Some(to) = self.open_person().map(str::to_string) else { return Vec::new() };
-                match self.editing.take() {
-                    Some((id, text)) if !text.trim().is_empty() => vec![Action::Edit { to, id, text: text.trim().to_string() }],
+                let edit = match self.editing.take() {
+                    Some((id, text)) if !text.trim().is_empty() => (id, text.trim().to_string()),
+                    _ => return Vec::new(),
+                };
+                match &self.route {
+                    Route::Person(to) => vec![Action::Edit { to: to.clone(), id: edit.0, text: edit.1 }],
+                    Route::Community(community, _) => vec![Action::EditPost { community: community.clone(), id: edit.0, text: edit.1 }],
                     _ => Vec::new(),
                 }
             }
@@ -928,6 +1058,36 @@ impl Ui {
                 self.menu = who.map(|id| (id, self.cursor));
                 Vec::new()
             }
+            Msg::SpaceName(s) => {
+                self.space_name = s;
+                Vec::new()
+            }
+            Msg::SpaceGroup(on) => {
+                self.space_group = on;
+                Vec::new()
+            }
+            Msg::SpaceCreate => {
+                let name = self.space_name.trim().to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::CreateSpace { name, group: self.space_group }]
+            }
+            Msg::ChannelName(s) => {
+                // Channel names read like words joined by dashes, as people
+                // expect from other apps: no spaces, no hash, short.
+                self.channel_name = s.to_lowercase().replace(' ', "-").chars().filter(|c| *c != '#').take(32).collect();
+                Vec::new()
+            }
+            Msg::ChannelCreate(community) => {
+                let name = self.channel_name.trim_matches('-').to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                self.channel_name.clear();
+                self.set_dialog(None);
+                vec![Action::AddChannel { community, name }]
+            }
             Msg::DismissToast(id) => {
                 self.toasts.retain(|t| t.id != id);
                 Vec::new()
@@ -956,6 +1116,11 @@ impl Ui {
                         self.set_dialog(None);
                         self.receive_link.clear();
                     }
+                    Action::LeaveSpace(_) => {
+                        self.set_dialog(None);
+                        self.route = Route::Spaces;
+                    }
+                    Action::InviteToSpace { .. } => self.set_dialog(None),
                     _ => {}
                 }
                 vec![action]
@@ -1069,6 +1234,33 @@ mod tests {
         assert_eq!(ui.menu, Some(("ab".into(), Point::new(40.0, 300.0))));
         ui.update(Msg::Back, &m);
         assert!(ui.menu.is_none(), "Escape closes the menu first");
+    }
+
+    #[test]
+    fn a_channel_has_its_own_draft_and_posts_there() {
+        let mut ui = Ui::new();
+        let m = Model::default();
+        let actions = ui.update(Msg::Nav(Route::Community("c1".into(), 2)), &m);
+        assert_eq!(actions, vec![Action::OpenChannel { community: "c1".into(), channel: 2 }]);
+        ui.update(Msg::Draft("hello all".into()), &m);
+        ui.update(Msg::Nav(Route::Person("ab".into())), &m);
+        assert!(ui.update(Msg::Send, &m).is_empty(), "the channel's draft stays with the channel");
+        ui.update(Msg::Nav(Route::Community("c1".into(), 2)), &m);
+        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Post { community: "c1".into(), channel: 2, text: "hello all".into() }]);
+        ui.update(Msg::EditStart(9, "hello all".into()), &m);
+        ui.update(Msg::EditDraft("hello everyone".into()), &m);
+        assert_eq!(ui.update(Msg::EditSave, &m), vec![Action::EditPost { community: "c1".into(), id: 9, text: "hello everyone".into() }]);
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.route(), &Route::Spaces, "back from a channel is the list");
+    }
+
+    #[test]
+    fn channel_names_read_like_words_with_dashes() {
+        let mut ui = Ui::new();
+        let m = Model::default();
+        ui.update(Msg::ChannelName("#Band Practice".into()), &m);
+        assert_eq!(ui.update(Msg::ChannelCreate("c1".into()), &m), vec![Action::AddChannel { community: "c1".into(), name: "band-practice".into() }]);
+        assert!(ui.update(Msg::ChannelCreate("c1".into()), &m).is_empty(), "the box is cleared once used");
     }
 
     #[test]

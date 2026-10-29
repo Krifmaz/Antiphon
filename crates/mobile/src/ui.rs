@@ -841,6 +841,7 @@ impl App {
                 presence: None,
                 wants_silent: false,
                 relay: String::new(),
+                lends_relay: false,
                 routes: String::new(),
             }));
             live.send(ControlMessage::Profile(card));

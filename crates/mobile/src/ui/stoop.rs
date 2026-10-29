@@ -186,7 +186,9 @@ impl App {
             settings,
             notice: self.notice.clone(),
             first_run: self.settings.display_name.trim().is_empty(),
-            device: stoop::Device { phone: true, files: true, ptt_keys: false },
+            // Group chats and communities need the community store and its
+            // courier, which the phone doesn't run yet: their screens stay hidden.
+            device: stoop::Device { phone: true, files: true, ptt_keys: false, communities: false },
             phone: Some(stoop::Phone {
                 speaker: self.settings.speaker,
                 mic_allowed: self.mic_permission,
@@ -202,6 +204,9 @@ impl App {
                 (Ok(identity), true) => Some(antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed())),
                 _ => None,
             }),
+            communities: Vec::new(),
+            space_invites: Vec::new(),
+            channel: None,
         }
     }
 
@@ -329,6 +334,7 @@ impl App {
                 pinned: m.pinned,
                 reactions: reactions.remove(&m.id).unwrap_or_default(),
                 file: None,
+                ..Line::default()
             })
             .collect();
         Some(stoop::Conversation {
@@ -496,6 +502,20 @@ impl App {
             }
             Action::Note(..) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
+            // A phone lends no relay; it has none of its own to lend.
+            Action::LendRelay(_) => {}
+            // Hidden on the phone (`Device::communities` is off), so these
+            // never come.
+            Action::OpenChannel { .. }
+            | Action::CreateSpace { .. }
+            | Action::AcceptSpaceInvite(_)
+            | Action::DeclineSpaceInvite(_)
+            | Action::Post { .. }
+            | Action::EditPost { .. }
+            | Action::DeletePost { .. }
+            | Action::InviteToSpace { .. }
+            | Action::AddChannel { .. }
+            | Action::LeaveSpace(_) => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),
             Action::Theme(theme) => {
