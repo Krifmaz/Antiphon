@@ -363,6 +363,8 @@ pub enum Action {
     EchoCancel(bool),
     /// "Low data" calls on or off.
     LowData(bool),
+    /// Sending a shared screen's sound on or off.
+    ScreenAudio(bool),
     /// Automatic level on or off.
     AutoGain(bool),
     /// Use a voice preset by name.

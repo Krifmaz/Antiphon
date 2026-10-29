@@ -308,6 +308,14 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         ),
     ]
     .spacing(12);
+    if !m.device.phone {
+        processing = processing.push(divider());
+        processing = processing.push(setting(
+            "Share screen audio",
+            Some("When you share your screen, they hear what your computer plays too. Your call itself is taken back out."),
+            switch("Share screen audio", s.screen_audio, |on| Msg::Do(Action::ScreenAudio(on))),
+        ));
+    }
     if !s.presets.is_empty() {
         processing = processing.push(divider());
         processing = processing.push(setting(

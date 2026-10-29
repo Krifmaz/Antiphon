@@ -148,6 +148,7 @@ impl App {
             noise_suppression: chain.noise_suppress.enabled,
             echo_cancel: false,
             low_data: self.settings.data_saver,
+            screen_audio: false,
             auto_gain: matches!(chain.gain, antiphon_audio::GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -612,6 +613,8 @@ impl App {
             Action::NoiseSuppression(on) => self.update(Message::Toggle(super::Stage::NoiseSuppress, on)),
             Action::AutoGain(on) => self.update(Message::Toggle(super::Stage::AutoGain, on)),
             Action::EchoCancel(_) => {}
+            // A phone has no screen share to send the sound of.
+            Action::ScreenAudio(_) => {}
             // The phone's data saver is its "Low data" switch.
             Action::LowData(on) => self.update(Message::DataSaver(on)),
             Action::Preset(name) if name == NATURAL => self.update(Message::ResetChain),

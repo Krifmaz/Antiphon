@@ -23,7 +23,7 @@ pub use chain::{
 pub use chain::{eq_curve_db, eq_preset, eq_preset_names, log_spaced_frequencies};
 pub use chain::AudioChain;
 pub use device::{
-    audio_backend_name, list_input_devices, list_output_devices, start_capture, start_playback, AudioBackend, AudioError,
+    audio_backend_name, list_input_devices, list_output_devices, start_capture, start_playback, start_system_capture, AudioBackend, AudioError,
     CaptureHandle, PlaybackHandle, PlaybackSink,
 };
 pub use echo_cancel::EchoCanceller;

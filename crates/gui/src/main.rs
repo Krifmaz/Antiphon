@@ -163,6 +163,7 @@ fn main() -> anyhow::Result<()> {
         peer_eq: Arc::new(Mutex::new(None)),
         echo_cancel: {
             antiphon_client::link_quality::set_low_data(loaded.low_data_calls);
+            antiphon_client::screen_audio::set_enabled(loaded.share_screen_audio);
             Arc::new(std::sync::atomic::AtomicBool::new(loaded.echo_cancel))
         },
         // Built once for the process, not once per call: the filter it
@@ -5966,6 +5967,7 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         echo_cancel: app.get_echo_cancel(),
         // The classic window has no switch for it; kept as stored.
         low_data_calls: previous.low_data_calls,
+        share_screen_audio: previous.share_screen_audio,
         duck_db: app.get_duck_db().max(0) as u32,
         presence: app.get_my_presence(),
         crash_reporting: app.get_crash_reporting(),

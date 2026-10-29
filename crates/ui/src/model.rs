@@ -498,6 +498,8 @@ pub struct Settings {
     /// "Low data" calls (spec §2 automatic bandwidth): voice held at
     /// 8 kbit/s and no video. On a phone, the data saver.
     pub low_data: bool,
+    /// A shared screen's sound is sent with it (desktop only).
+    pub screen_audio: bool,
     /// Automatic level is on.
     pub auto_gain: bool,
     /// The voice preset in use ("Natural", "Broadcast", ...).
