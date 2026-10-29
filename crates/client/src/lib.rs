@@ -38,6 +38,7 @@ pub mod notify;
 pub mod outbox;
 pub mod pacer;
 pub mod presence;
+pub mod push_wake;
 pub mod reachability;
 pub mod reactions;
 pub mod replay_history;

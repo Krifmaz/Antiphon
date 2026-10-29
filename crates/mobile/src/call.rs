@@ -653,7 +653,7 @@ async fn talk(
             wants_silent: false,
             relay: String::new(),
             lends_relay: false,
-            routes: String::new(),
+            routes: crate::push::published_routes(),
         };
         let bytes = ControlMessage::Hello(hello).encode();
         // The picture and About line follow in their own message, which

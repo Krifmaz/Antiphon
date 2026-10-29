@@ -299,6 +299,8 @@ pub struct App {
     backup_key: Result<BackupKey, String>,
     /// The address book.
     contacts: Contacts,
+    /// The push key and endpoint, and the wake-ups received lately.
+    push: crate::push::Push,
     /// Past calls, newest first.
     calls: Vec<CallRecord>,
     /// The first press of "Clear call history" has been made.
@@ -435,7 +437,14 @@ impl App {
                 }
             }
         }
+        let push = crate::push::Push::load(&dir, identity.as_ref().ok());
+        // Ask for an endpoint on every start: the platform answers at once
+        // with the one it holds, or asks the distributor (Android) or
+        // PushKit (iOS) for one, and a phone with neither just goes on
+        // without wake-ups.
+        platform::register_push();
         let mut app = Self {
+            push,
             port_text: settings.listen_port.to_string(),
             limit_text: if settings.cellular_limit_mb == 0 { String::new() } else { settings.cellular_limit_mb.to_string() },
             contacts,
@@ -610,7 +619,55 @@ impl App {
                 self.engine.set_ptt(false);
                 self.engine.set_open_mic(!muted && self.settings.open_mic);
             }
-            other => log::info!("platform event: {other:?}"),
+            PlatformEvent::PushRegistered(endpoint) => {
+                if let Ok(identity) = &self.identity {
+                    if let Err(e) = self.push.registered(&endpoint, identity) {
+                        log::warn!("push address not published: {e}");
+                    }
+                }
+            }
+            PlatformEvent::Push(sealed) => self.woken(&sealed),
+        }
+    }
+
+    /// A push wake-up arrived. Anything that does not open, is stale or
+    /// repeated, is from someone not saved as a contact, or is over that
+    /// contact's limit is dropped without a sound.
+    fn woken(&mut self, sealed: &[u8]) {
+        let contacts = &self.contacts;
+        let Some(woken) = self.push.open(sealed, |key| contacts.by_key(key).is_some(), now_secs()) else {
+            log::info!("a push wake-up was dropped");
+            return;
+        };
+        match woken {
+            // Be listening when their call lands; the call arriving is
+            // what rings (see `poll`), and on iOS CallKit is already
+            // showing it. No microphone prompt from the background: a
+            // phone that never allowed the mic could not take the call
+            // anyway, and shows why when opened.
+            crate::push::Woken::Ring { .. } => {
+                if self.engine.is_busy() || !self.mic_permission {
+                    return;
+                }
+                if let Ok(identity) = &self.identity {
+                    let identity = IdentityKeyPair::from_master_seed(identity.master_seed());
+                    self.dialled = None;
+                    self.engine.listen(self.settings.listen_port, identity);
+                }
+            }
+            // This phone keeps no mailbox yet, so there is nothing to
+            // fetch from here; say a message is waiting, which is what
+            // the sender wanted the person holding the phone to know.
+            crate::push::Woken::Mail { from } => {
+                if !self.foreground {
+                    platform::notify(&self.display_name_for(&from), "left you a message. Call them to pick it up.");
+                }
+            }
+            crate::push::Woken::File { from } => {
+                if !self.foreground {
+                    platform::notify(&self.display_name_for(&from), "wants to send you a file.");
+                }
+            }
         }
     }
 
@@ -1271,6 +1328,9 @@ impl App {
         // mistaken restore can still be undone by hand.
         match crate::account_backup::replace_identity(&self.dir, &restored) {
             Ok(_) => {
+                // The published push record was signed by the old identity;
+                // contacts of the restored one would refuse it.
+                self.push = crate::push::Push::load(&self.dir, Some(&restored));
                 self.identity = Ok(restored);
                 self.notice = Some("Identity restored.".into());
                 self.restore_text.clear();
