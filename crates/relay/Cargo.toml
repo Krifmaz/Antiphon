@@ -19,6 +19,9 @@ antiphon-net = { version = "0.1.0", path = "../net" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# The mailbox's link as a QR code in the terminal, for the app's node
+# picker to scan.
+qrcode = { version = "0.14.1", default-features = false }
 # Push wake-ups for inbox owners and senders (`--mailbox-push`).
 antiphon-push = { version = "0.1.0", path = "../push" }
 

@@ -54,6 +54,11 @@ struct Args {
     /// code. Without it, anyone may register.
     #[arg(long)]
     mailbox_code: Option<String>,
+    /// The address people reach this node at (`host:port`), for the link
+    /// and QR code it prints for the app's node picker. Without it the
+    /// link names the address it listens on.
+    #[arg(long)]
+    announce: Option<String>,
     /// Wake phones by push: post a wake-up when mail arrives for an inbox
     /// whose owner registered a push endpoint, and pass on senders' own
     /// sealed wake-ups. Makes outgoing HTTPS requests to the endpoints
@@ -497,6 +502,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(m) = &mailbox {
         let open = if m.lock().unwrap().is_open() { "anyone" } else { "members with the code" };
         println!("\nMailbox on: holding sealed mail for {open}.");
+        let address = args.announce.clone().unwrap_or_else(|| socket.local_addr().map(|a| a.to_string()).unwrap_or_default());
+        let link = antiphon_relay::node_link::NodeLink { address, code: args.mailbox_code.clone().unwrap_or_default() }.to_link();
+        println!("Add it in the app by this link, or by scanning the code below:\n{link}");
+        if let Ok(code) = qrcode::QrCode::new(link.as_bytes()) {
+            println!("{}", code.render::<qrcode::render::unicode::Dense1x2>().quiet_zone(true).build());
+        }
     }
     if let Some(s) = &sfu {
         let most = s.lock().unwrap().limits().max_members_per_room;

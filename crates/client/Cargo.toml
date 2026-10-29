@@ -17,6 +17,8 @@ dirs = "6.0.0"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 image = "0.25.10"
+# Reading a mailbox node's QR code from a picture (node_picker.rs).
+rqrr = { version = "0.11.0", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
@@ -43,3 +45,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 # Already linked through device_query; used directly to put Caps Lock back
 # off after it was used as push-to-talk.
 x11 = { version = "2.21.0", features = ["xlib"] }
+
+[dev-dependencies]
+# Drawing a node's QR code for node_picker's test to read back.
+qrcode = { version = "0.14.1", default-features = false }

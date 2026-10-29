@@ -34,6 +34,7 @@ pub mod link_preview;
 pub mod link_quality;
 pub mod mixer;
 pub mod moderation;
+pub mod node_picker;
 pub mod notify;
 pub mod outbox;
 pub mod pacer;

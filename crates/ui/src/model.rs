@@ -468,6 +468,24 @@ pub struct Network {
     pub anonymity: bool,
     /// Its hops, comma-separated `host:port[#key]`.
     pub hops: String,
+    /// The mailbox nodes on your delivery routes, in the order mail
+    /// tries them.
+    pub mailboxes: Vec<Mailbox>,
+    /// Mailbox nodes found on this network at the last look, by address.
+    pub found_nodes: Vec<String>,
+    /// A look for nodes on this network is under way.
+    pub finding_nodes: bool,
+}
+
+/// A mailbox node on your delivery routes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mailbox {
+    /// `host:port`.
+    pub address: String,
+    /// Which route it is on ("A node you trust", "Community node").
+    pub route: String,
+    /// How it answered at the last courier round, if it has.
+    pub status: String,
 }
 
 /// One line of the reachability check.

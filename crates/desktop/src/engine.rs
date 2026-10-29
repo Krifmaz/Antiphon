@@ -20,7 +20,7 @@ use antiphon_client::transfer_queue::TransferQueue;
 use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
-    caps_lock, community, config, connection_mode, delivery, discovery, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
+    caps_lock, community, config, connection_mode, delivery, discovery, node_picker, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
     group, moderation, notify, outbox, presence, profile, push_wake, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
@@ -85,6 +85,10 @@ enum Event {
     /// The directories were read: what they list, what went wrong, and
     /// the keys pinned for them.
     Directory(Vec<discovery::Listed>, Vec<String>, Vec<String>),
+    /// The look for mailbox nodes on this network finished: their addresses.
+    NodesFound(Vec<String>),
+    /// A node read from a QR code picture, or why none was.
+    NodePicked(Result<node_picker::NodeLink, String>),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -242,6 +246,10 @@ pub struct Engine {
     peer_relay_saved: String,
     /// The VPN routes the peer last told us about, saved to their contact.
     peer_routes_saved: String,
+    /// Mailbox nodes found on this network at the last look.
+    found_nodes: Vec<String>,
+    /// A look for mailbox nodes on this network is under way.
+    finding_nodes: bool,
     /// The peer's meter level, decaying between frames.
     their_level: f32,
     /// True while a STUN check is running.
@@ -328,6 +336,8 @@ impl Engine {
             discovery_seen: 0,
             peer_relay_saved: String::new(),
             peer_routes_saved: String::new(),
+            found_nodes: Vec::new(),
+            finding_nodes: false,
             their_level: 0.0,
             checking: false,
             tiles: HashMap::new(),
@@ -562,6 +572,75 @@ impl Engine {
             keys.extend(sfu.member_keys().iter().map(connection_mode::encode_hex32));
         }
         keys
+    }
+
+    // ---------------------------------------------------------- mailboxes
+
+    /// Puts a mailbox node on the delivery routes and says where it went.
+    fn add_node(&mut self, node: &node_picker::NodeLink) {
+        match node_picker::add(&mut self.cfg.routes, node) {
+            Ok(kind) => {
+                self.found_nodes.retain(|a| a != &node.address);
+                self.save_routes();
+                self.toast(format!("Added {} as {}", node.address, kind.title().to_lowercase()), ToastKind::Ok);
+            }
+            Err(why) => self.toast(why, ToastKind::Warn),
+        }
+    }
+
+    /// Saves a changed route list: bumps its sequence so contacts take the
+    /// new one over the old, refreshes the cards members see, and wakes
+    /// the courier.
+    fn save_routes(&mut self) {
+        delivery::normalize(&mut self.cfg.routes);
+        self.cfg.route_sequence = (self.cfg.route_sequence + 1).max(now_secs());
+        self.save();
+        std::thread::spawn(community::refresh_cards);
+        delivery::kick();
+    }
+
+    /// Asks for a picture of a node's QR code and reads it, off the
+    /// window's thread.
+    fn node_from_qr(&self) {
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Choose a picture of the node's QR code")
+                .add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                .pick_file()
+            else {
+                return;
+            };
+            Engine::push(&events, Event::NodePicked(node_picker::read_qr(&path)));
+        });
+    }
+
+    /// Looks for mailbox nodes answering on this network, in the background.
+    fn find_nodes(&mut self) {
+        if self.finding_nodes {
+            return;
+        }
+        self.finding_nodes = true;
+        let events = self.events.clone();
+        self.state.runtime.spawn(async move {
+            let found = delivery::discover(std::time::Duration::from_secs(2)).await;
+            Self::push(&events, Event::NodesFound(found.into_iter().map(|a| a.to_string()).collect()));
+        });
+    }
+
+    /// The mailbox nodes on the routes, with how each answered last.
+    fn mailboxes(&self) -> Vec<ui::Mailbox> {
+        let report = delivery::node_report();
+        self.cfg
+            .routes
+            .iter()
+            .flat_map(|r| r.nodes.iter().map(move |n| (r.kind, n)))
+            .map(|(kind, address)| ui::Mailbox {
+                address: address.clone(),
+                route: kind.title().to_string(),
+                status: report.iter().find(|(a, _)| a == address).map(|(_, s)| s.clone()).unwrap_or_default(),
+            })
+            .collect()
     }
 
     // ---------------------------------------------------------- directories
@@ -1008,6 +1087,15 @@ impl Engine {
                 }
             }
             Event::Toast(text, kind) => self.toast(text, kind),
+            Event::NodesFound(found) => {
+                self.finding_nodes = false;
+                if found.is_empty() {
+                    self.toast("No mailbox nodes answered on this network", ToastKind::Warn);
+                }
+                self.found_nodes = found;
+            }
+            Event::NodePicked(Ok(node)) => self.add_node(&node),
+            Event::NodePicked(Err(why)) => self.toast(why, ToastKind::Err),
             Event::Directory(listed, problems, pins) => {
                 self.cfg.directory_pins = pins;
                 self.save();
@@ -1614,6 +1702,16 @@ impl Engine {
                 self.profile_changed();
             }
             A::PickAvatar => self.pick_avatar(),
+            A::AddNode(text) => match node_picker::parse(&text) {
+                Some(node) => self.add_node(&node),
+                None => self.toast("That isn't a node address (host:port) or node link", ToastKind::Err),
+            },
+            A::AddNodeFromQr => self.node_from_qr(),
+            A::RemoveNode(address) => {
+                node_picker::remove(&mut self.cfg.routes, &address);
+                self.save_routes();
+            }
+            A::FindNodes => self.find_nodes(),
             A::RemoveAvatar => {
                 self.cfg.profile.avatar.clear();
                 self.profile_changed();
@@ -2544,6 +2642,9 @@ impl Engine {
             lend_relay: self.cfg.lend_relay,
             anonymity: self.cfg.anonymity_mode,
             hops: self.cfg.anonymity_hops.join(", "),
+            mailboxes: self.mailboxes(),
+            found_nodes: self.found_nodes.iter().filter(|a| !self.cfg.routes.iter().any(|r| r.nodes.contains(a))).cloned().collect(),
+            finding_nodes: self.finding_nodes,
         }
     }
 

@@ -300,7 +300,7 @@ is mostly mobile and packaging.
 - [x] Route 4: Community node — the same node with `--mailbox-code`, joined with the community's code
 - [x] Route 5: Project relay — the tier exists and works with any node address; it ships with no node in it, by decision (§12 Q2: no project-run relays)
 - [x] Per-route on / off and reorder (Up / Down buttons rather than dragging)
-- [~] Node picker — by address, and **Find nodes on my network** broadcasts and lists every mailbox node that answers. Not by QR yet
+- [x] Node picker — by address or node link, **Find nodes on my network** (broadcasts and lists every mailbox node that answers), and **Add by QR code**: a relay with a mailbox prints its `stoop://node/` link and QR code at start (`--announce host:port` names the address to put in it), and Stoop reads a picture of that code. A link with a members code goes on the community route, one without on the trusted-node route. Settings › Network › Mailboxes
 - [x] Live per-node status: reachable, response time, messages waiting, storage used and the inbox cap, refreshed each courier round (every minute)
 - [x] Remove or replace a node with waiting messages re-routed, not lost — senders keep a message in their outbox until a node accepts it, so a removed node only stops new deposits
 - [x] **Redundancy setting** — first available vs. fan out; fan-out copies are dropped on arrival by sender and message id

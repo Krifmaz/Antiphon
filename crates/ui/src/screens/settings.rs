@@ -399,9 +399,51 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         faint("Add #key after an address to pin the hop's key (shown when its operator starts it). Without one, the first key a hop gives is remembered and a different one is refused.").size(12.5),
     ]
     .spacing(12);
+    let mut nodes = column![].spacing(8);
+    if m.network.mailboxes.is_empty() {
+        nodes = nodes.push(faint("None yet: mail for you waits until you're online, and yours until they are.").size(12.5));
+    }
+    for n in &m.network.mailboxes {
+        let sub = if n.status.is_empty() { n.route.clone() } else { format!("{} · {}", n.route, n.status) };
+        nodes = nodes.push(
+            row![
+                icon(Icon::Door, 15.0, p.faint),
+                column![t(n.address.as_str()).size(13.5).font(theme::semibold()), faint(sub).size(12)].spacing(1).width(Length::Fill),
+                icon_btn(Icon::Trash, "Remove", Some(Msg::Do(Action::RemoveNode(n.address.clone())))),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    nodes = nodes.push(divider());
+    nodes = nodes.push(
+        row![
+            input("Mailbox node to add", "stoop-node-add", "mail.example.org:7000 or stoop://node/…", &ui.node_edit).on_input(Msg::NodeEdit).on_submit(Msg::NodeAdd).padding([9, 12]).size(13.5),
+            btn("Add", Btn::Primary, (!ui.node_edit.trim().is_empty()).then_some(Msg::NodeAdd)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    let finding = m.network.finding_nodes;
+    nodes = nodes.push(
+        row![
+            btn_icon(Icon::Qr, "Add by QR code", Btn::Ghost, Some(Msg::Do(Action::AddNodeFromQr))),
+            btn_icon(Icon::Wifi, if finding { "Looking…" } else { "Find nodes on my network" }, Btn::Ghost, (!finding).then_some(Msg::Do(Action::FindNodes))),
+        ]
+        .spacing(8),
+    );
+    for found in m.network.found_nodes.iter().filter(|f| !m.network.mailboxes.iter().any(|n| n.address == **f)) {
+        nodes = nodes.push(
+            row![faint(format!("Found {found}")).size(12.5).width(Length::Fill), btn_sm("Add", Btn::Ghost, Some(Msg::Do(Action::AddNode(found.clone()))))]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+    }
+    nodes = nodes.push(faint("A node prints its link and QR code when it starts. Pick a picture of the code (a screenshot or a photo) to add it.").size(12));
     column![
         card(check_card),
         titled_card("Your door", None, listen),
+        titled_card("Mailboxes", Some("Nodes that hold sealed mail for you while you're away. They can't read it."), nodes),
         titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay),
         titled_card("Anonymity", None, anonymity),
     ]

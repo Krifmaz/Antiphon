@@ -562,6 +562,10 @@ impl App {
             | Action::AddEmoji(_)
             | Action::RemoveEmoji { .. }
             | Action::ManageSpace { .. }
+            | Action::AddNode(_)
+            | Action::AddNodeFromQr
+            | Action::RemoveNode(_)
+            | Action::FindNodes
             | Action::AddDirectory(_)
             | Action::RemoveDirectory(_)
             | Action::BrowseDirectories

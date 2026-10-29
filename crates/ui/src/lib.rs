@@ -519,6 +519,14 @@ pub enum Action {
     },
     /// Leave a group chat or community (the dialog already asked).
     LeaveSpace(String),
+    /// Add a mailbox node: a node link or a `host:port`.
+    AddNode(String),
+    /// Add a mailbox node by a picture of its QR code (a file is picked).
+    AddNodeFromQr,
+    /// Take a mailbox node off your routes.
+    RemoveNode(String),
+    /// Look for mailbox nodes on this network.
+    FindNodes,
     /// Add a community directory (`host:port`) to browse.
     AddDirectory(String),
     /// Stop browsing a directory.
@@ -744,6 +752,10 @@ pub enum Msg {
     ToggleQueue,
     /// Put `:name:` (a custom emoji) at the end of the composer's text.
     InsertEmoji(String),
+    /// The box for a mailbox node to add changed.
+    NodeEdit(String),
+    /// Add the node typed in the box.
+    NodeAdd,
     /// The directory search box changed.
     DirectoryQuery(String),
     /// The box for a directory to add changed.
@@ -867,6 +879,8 @@ pub struct Ui {
     queue_open: bool,
     /// The new role's name box.
     role_name: String,
+    /// The box for a mailbox node to add.
+    node_edit: String,
     /// The directory search box.
     directory_query: String,
     /// The box for a directory to add.
@@ -960,6 +974,7 @@ impl Ui {
             role_name: String::new(),
             report_pick: Vec::new(),
             directory_query: String::new(),
+            node_edit: String::new(),
             directory_address: String::new(),
             listing_directory: String::new(),
             listing_description: String::new(),
@@ -1415,6 +1430,17 @@ impl Ui {
             Msg::ToggleQueue => {
                 self.queue_open = !self.queue_open;
                 Vec::new()
+            }
+            Msg::NodeEdit(s) => {
+                self.node_edit = s;
+                Vec::new()
+            }
+            Msg::NodeAdd => {
+                let text = std::mem::take(&mut self.node_edit).trim().to_string();
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::AddNode(text)]
             }
             Msg::DirectoryQuery(s) => {
                 self.directory_query = s;
