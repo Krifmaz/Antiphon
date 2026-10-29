@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
 # Package Stoop's release binaries for the OS this runs on, the way Encore packages its desktop app:
-#   Linux    Stoop-<v>-linux-x86_64.AppImage, stoop_<v>_amd64.deb, and stoop-<v>-linux-x86_64.tar.gz
-#            (the plain binaries in a stoop/ folder)
+#   Linux    Stoop-<v>-linux-x86_64.AppImage, stoop_<v>_amd64.deb, stoop-<v>-linux-x86_64.tar.gz (the plain
+#            binaries in a stoop/ folder) and Stoop-<v>-linux-x86_64.flatpak (a single-file Flatpak bundle,
+#            packaging/linux/io.github.krifmaz.stoop.yml)
 #   macOS    Stoop-<v>-macos-aarch64.dmg: Stoop.app, signed ad hoc
 #   Windows  Stoop-<v>-windows-x86_64.exe: the NSIS installer (packaging/windows/stoop.nsi), per user under
-#            %LOCALAPPDATA%\Stoop; run this from Git Bash
+#            %LOCALAPPDATA%\Stoop, and Stoop-<v>-windows-x86_64.msi (packaging/windows/stoop.wxs), per user
+#            under %LOCALAPPDATA%\Programs\Stoop, for deploying with Group Policy, Intune or winget; run this
+#            from Git Bash
 # The release workflow (.github/workflows/release.yml) runs it on binaries it has already built twice and
 # compared; it works the same on your own machine.
 #
 #   packaging/package.sh --version 0.2.0 --bin target/release
 #   --bin <dir>    the folder holding the desktop app and the CLI (APP_BIN and CLI_BIN, below)
 #   --out <dir>    where the files go (default: out/ at the top of the repository)
-#   --only <kinds> appimage,deb,tar on Linux (all three by default)
+#   --only <kinds> appimage,deb,tar,flatpak on Linux, nsis,msi on Windows. Without it every kind is made,
+#                  except that the Flatpak and the MSI are skipped (with a note) when their tools are missing;
+#                  named in --only, a missing tool is an error (the release workflow names them all)
 #
 # The binaries keep their crate names until the rename lands; the packages are called Stoop.
 #   APP_BIN  the desktop app's binary name (default antiphon)
 #   CLI_BIN  the command-line tool's (default antiphon-cli)
 #
-# Needs: Linux – dpkg-deb (dpkg-shlibdeps from dpkg-dev for the Depends line) and curl (appimagetool is fetched
-# once into ~/.cache/stoop-packaging unless APPIMAGETOOL names one); macOS – the Xcode command line tools;
-# Windows – NSIS (makensis) and Git Bash.
+# Needs: Linux – dpkg-deb (dpkg-shlibdeps from dpkg-dev for the Depends line), curl (appimagetool is fetched
+# once into ~/.cache/stoop-packaging unless APPIMAGETOOL names one), and for the Flatpak flatpak-builder with
+# org.freedesktop.Platform and .Sdk 24.08 installed; macOS – the Xcode command line tools; Windows – NSIS
+# (makensis), Git Bash, and for the MSI the WiX Toolset 4 command line (dotnet tool install --global wix).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,6 +56,11 @@ BIN="$(cd "$BIN" && pwd)"
 
 run() { echo "+ $*"; "$@"; }
 want() { [ -z "$ONLY" ] || [[ ",$ONLY," == *",$1,"* ]]; }
+named() { [[ ",$ONLY," == *",$1,"* ]]; } # asked for by name in --only, so a missing tool is an error
+skip_or_die() { # <kind> <why>: an error when --only names <kind>, otherwise a note and carry on
+  if named "$1"; then die "$2"; fi
+  echo "== skipping the $1 package: $2"
+}
 
 case "$(uname -s)" in
   Linux*)  OS=linux; EXE="" ;;
@@ -179,10 +190,42 @@ tarball() {
   run tar -C "$WORK/tar" --owner=0 --group=0 -czf "$out" stoop
 }
 
+# The Flatpak: the same two binaries in org.freedesktop.Platform, built by flatpak-builder from the manifest
+# and exported as a single-file bundle (flatpak install --user Stoop-<v>-linux-x86_64.flatpak). The app id
+# names the desktop file and icons, as Flatpak requires. FLATPAK_CHECK=1 then installs the bundle for this
+# user and fails if the app is missing a shared library inside the runtime (the release workflow does this).
+flatpak_bundle() {
+  local id=io.github.krifmaz.stoop src="$WORK/flatpak" out="$OUT/Stoop-$V-linux-$ARCH.flatpak" s
+  echo "== Flatpak → $out"
+  command -v flatpak-builder >/dev/null || { skip_or_die flatpak "flatpak-builder not found"; return 0; }
+  mkdir -p "$src/stage"
+  install -Dm755 "$APP" "$src/stage/$APP_BIN"
+  install -Dm755 "$CLI" "$src/stage/$CLI_BIN"
+  sed -e "s/@APP_BIN@/$APP_BIN/g" -e "s/^Icon=stoop$/Icon=$id/" "$PKG/linux/stoop.desktop" > "$src/stage/$id.desktop"
+  for s in 32 64 128 256 512; do cp "$PKG/icons/${s}x${s}.png" "$src/stage/icon-$s.png"; done
+  cp "$PKG/icons/stoop.svg" "$src/stage/icon.svg"
+  sed -e "s/@APP_BIN@/$APP_BIN/g" -e "s/@CLI_BIN@/$CLI_BIN/g" "$PKG/linux/$id.yml" > "$src/$id.yml"
+  rm -f "$out"
+  run flatpak-builder --user --force-clean --disable-rofiles-fuse --repo="$src/repo" "$src/build" "$src/$id.yml"
+  run flatpak build-bundle "$src/repo" "$out" "$id"
+  [ -s "$out" ] || die "flatpak build-bundle made no $out"
+  if [ "${FLATPAK_CHECK:-}" = 1 ]; then
+    run flatpak install --user -y --noninteractive --reinstall "$out"
+    local libs missing dbus=()
+    command -v dbus-run-session >/dev/null && dbus=(dbus-run-session --) # flatpak run wants a session bus
+    libs=$("${dbus[@]}" flatpak run --command=ldd "$id" "/app/bin/$APP_BIN" "/app/bin/$CLI_BIN") \
+      || die "could not run ldd inside the Flatpak"
+    missing=$(grep 'not found' <<< "$libs" || true)
+    [ -z "$missing" ] || die "the Flatpak is missing libraries the runtime does not have:"$'\n'"$missing"
+    echo "every library the app links is in the runtime"
+  fi
+}
+
 linux() {
   if want appimage; then appimage; fi
   if want deb; then deb; fi
   if want tar; then tarball; fi
+  if want flatpak; then flatpak_bundle; fi
 }
 
 # ---- macOS ---------------------------------------------------------------------------------------
@@ -230,7 +273,30 @@ find_tool() { # <name> <path>…: on the PATH, else the last of the paths that e
   echo "$found"
 }
 
+# The MSI (WiX Toolset 4): the same files, per user, for whoever deploys software with Group Policy, Intune or
+# winget rather than by running an installer. The product version is $V; Windows Installer compares only the
+# first three parts, so a hotfix (0.2.1.57) replaces the build of the same release before it.
+msi() {
+  local out="$OUT/Stoop-$V-windows-$ARCH.msi" wix
+  echo "== MSI → $out"
+  wix=$(find_tool wix "$HOME/.dotnet/tools/wix.exe") \
+    || { skip_or_die msi "wix not found (dotnet tool install --global wix --version 4.0.6)"; return 0; }
+  rm -f "$out"
+  MSYS2_ARG_CONV_EXCL='*' run "$wix" build -arch x64 -nologo \
+    -d "Version=$V" -d "AppExe=$(winpath "$APP")" -d "AppName=$APP_BIN.exe" \
+    -d "CliExe=$(winpath "$CLI")" -d "CliName=$CLI_BIN.exe" \
+    -d "Readme=$(winpath "$ROOT/README.md")" -d "Icon=$(winpath "$PKG/icons/stoop.ico")" \
+    -o "$(winpath "$out")" "$(winpath "$PKG/windows/stoop.wxs")"
+  [ -s "$out" ] || die "wix made no $out"
+  rm -f "${out%.msi}.wixpdb"
+}
+
 windows() {
+  if want msi; then msi; fi
+  if want nsis; then nsis; fi
+}
+
+nsis() {
   local out="$OUT/Stoop-$V-windows-$ARCH.exe" makensis
   echo "== installer → $out"
   makensis=$(find_tool makensis "/c/Program Files (x86)/NSIS/makensis.exe" "/c/Program Files/NSIS/makensis.exe") \

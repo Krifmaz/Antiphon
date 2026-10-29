@@ -1,0 +1,36 @@
+# Stoop's Flatpak, built by packaging/package.sh (flatpak_bundle) from the release binaries, which it has
+# already built twice and compared: nothing is compiled here. package.sh fills in @APP_BIN@ and @CLI_BIN@ and
+# stages the files beside a copy of this manifest under stage/.
+app-id: io.github.krifmaz.stoop
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: "@APP_BIN@"
+finish-args:
+  # the window: Wayland, or X11 where there is no Wayland
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # calls and chat go straight to the other person, so the network is the whole point
+  - --share=network
+  # the microphone and speakers (PulseAudio, or PipeWire's PulseAudio service)
+  - --socket=pulseaudio
+  # the camera for video calls (/dev/video*); screen share asks through the desktop portal instead
+  - --device=all
+  # sent and received files
+  - --filesystem=xdg-download
+  # notifications for incoming calls and messages
+  - --talk-name=org.freedesktop.Notifications
+modules:
+  - name: stoop
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 @APP_BIN@ /app/bin/@APP_BIN@
+      - install -Dm755 @CLI_BIN@ /app/bin/@CLI_BIN@
+      - install -Dm644 io.github.krifmaz.stoop.desktop /app/share/applications/io.github.krifmaz.stoop.desktop
+      - for s in 32 64 128 256 512; do install -Dm644 icon-$s.png /app/share/icons/hicolor/${s}x${s}/apps/io.github.krifmaz.stoop.png; done
+      - install -Dm644 icon.svg /app/share/icons/hicolor/scalable/apps/io.github.krifmaz.stoop.svg
+    sources:
+      - type: dir
+        path: stage

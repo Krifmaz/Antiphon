@@ -1,0 +1,56 @@
+<!--
+  Stoop: the Windows MSI (WiX Toolset 4).
+
+  Built by packaging/package.sh (msi), which passes:
+    -d Version=<X.Y.Z, or X.Y.Z.N for a hotfix>
+    -d AppExe=<path> -d AppName=<file name>   the desktop app
+    -d CliExe=<path> -d CliName=<file name>   the command-line tool
+    -d Readme=<path> -d Icon=<path to stoop.ico>
+
+  Per user, no administrator rights: Stoop goes to %LOCALAPPDATA%\Programs\Stoop with a Start menu shortcut
+  and an entry in Apps & features. msiexec /i Stoop-<v>-windows-x86_64.msi /qn installs silently. Installing
+  a newer one replaces the older (MajorUpgrade), and so does a hotfix of the same release, since Windows
+  Installer compares only the first three parts of the version. Identity, contacts and settings live
+  elsewhere and are kept when Stoop is uninstalled. The NSIS installer (stoop.nsi) is the same app for people
+  who download and run it; the two install to different folders, so either can be removed on its own.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!-- UpgradeCode never changes: it is how a newer MSI finds the installed one to replace -->
+  <Package Name="Stoop" Manufacturer="Stoop" Version="$(var.Version)" Scope="perUser" Compressed="yes"
+           UpgradeCode="6B0C2E5A-3F41-4C7E-9B8D-2A1F5E7C9D34" Language="1033">
+    <SummaryInformation Description="Stoop: direct, end-to-end encrypted voice calls and chat" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Stoop is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="stoop.ico" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="stoop.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Krifmaz/Stoop" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <!-- for a per-user package this is %LOCALAPPDATA%\Programs -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Stoop">
+        <Component Id="App">
+          <File Id="App" Source="$(var.AppExe)" Name="$(var.AppName)" KeyPath="yes" />
+        </Component>
+        <Component Id="Cli">
+          <File Id="Cli" Source="$(var.CliExe)" Name="$(var.CliName)" KeyPath="yes" />
+        </Component>
+        <Component Id="Readme">
+          <File Id="Readme" Source="$(var.Readme)" Name="README.md" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <!-- a shortcut is not a file, so a registry value marks this component as installed -->
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="Stoop" Name="Stoop" Description="Encrypted voice calls and chat"
+                  Target="[INSTALLFOLDER]$(var.AppName)" WorkingDirectory="INSTALLFOLDER" Icon="stoop.ico" />
+        <RegistryValue Root="HKCU" Key="Software\Stoop\MSI" Name="StartMenuShortcut" Type="integer" Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>

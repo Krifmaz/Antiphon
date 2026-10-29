@@ -16,10 +16,14 @@ name: release
 #
 #   Files (packaging/package.sh; the Android job runs once crates/android is in the tree):
 #     Windows  Stoop-<v>-windows-x86_64.exe     the installer, per user, no administrator rights
-#     Linux    Stoop-<v>-linux-x86_64.AppImage, stoop_<v>_amd64.deb, and stoop-<v>-linux-x86_64.tar.gz
+#              Stoop-<v>-windows-x86_64.msi     the same as an MSI, for Group Policy, Intune or winget
+#     Linux    Stoop-<v>-linux-x86_64.AppImage, stoop_<v>_amd64.deb, stoop-<v>-linux-x86_64.tar.gz and
+#              Stoop-<v>-linux-x86_64.flatpak   (a single-file bundle on org.freedesktop.Platform)
 #     macOS    Stoop-<v>-macos-aarch64.dmg      signed ad hoc
-#     Android  Stoop-android-<v>.apk
+#     Android  Stoop-android-<v>.apk            built twice from clean and compared, like the desktop binaries
 #     SHA256SUMS covers every file of the release, then the bare desktop binaries inside them (BUILDING.md).
+#     Every file also gets a signed build attestation (Sigstore, through GitHub): which workflow run built it,
+#     from which commit. `gh attestation verify <file> -R Krifmaz/Stoop` checks one.
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release,
 #   then an Install section naming the files. Linux, Windows and (when it is built) Android are required.
 #   The release does not wait for macOS, whose runners are sometimes unavailable for hours: mac-attach adds
@@ -165,10 +169,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev libgtk-3-dev dpkg-dev file \
             libpipewire-0.3-dev libspa-0.2-dev libgbm-dev libxcb1-dev libclang-dev
-      - name: NSIS (Windows)
+      - name: NSIS and WiX (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ] || choco install nsis -y --no-progress
+        run: |
+          command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ] || choco install nsis -y --no-progress
+          # WiX 4 for the MSI, pinned like the rest of the toolchain
+          dotnet tool install --global wix --version 4.0.6
+          echo "$USERPROFILE\.dotnet\tools" >> "$GITHUB_PATH"
+      - name: Flatpak runtime (Linux)
+        if: runner.os == 'Linux'
+        # the runtime the Flatpak runs on, and its SDK, which flatpak-builder needs even though nothing compiles
+        run: |
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak --user install -y --noninteractive flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
       - name: Version ${{ env.SV }}
         shell: bash
         run: bash packaging/set-version.sh "$SV"
@@ -222,7 +237,15 @@ jobs:
           cat ../../hashes/${{ matrix.platform }}.sha256
       - name: Package
         shell: bash
-        run: bash packaging/package.sh --version "$V" --bin scratch/first --out dist
+        # every kind named, so a missing tool fails the build instead of quietly leaving a package out;
+        # FLATPAK_CHECK installs the Flatpak and fails if the runtime lacks a library the app links
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   ONLY=(--only appimage,deb,tar,flatpak); export FLATPAK_CHECK=1 ;;
+            Windows) ONLY=(--only nsis,msi) ;;
+            *)       ONLY=() ;;
+          esac
+          bash packaging/package.sh --version "$V" --bin scratch/first --out dist "${ONLY[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: Stoop-${{ matrix.platform }}
@@ -298,13 +321,31 @@ jobs:
           echo "::add-mask::$PASS"
           echo "APK_KEYSTORE=$KS" >> "$GITHUB_ENV"
           echo "APK_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
-      - name: Build APK
+      - name: Reproducible environment
         run: |
-          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          export CARGO_ENCODED_RUSTFLAGS="$(printf -- '--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo' "$PWD" "${CARGO_HOME:-$HOME/.cargo}")"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          printf 'CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo\n' "$PWD" "${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+      - name: Build the APK once
+        run: crates/android/build-apk.sh --out scratch/first.apk
+      - name: Build it again from clean
+        run: |
+          cargo clean
+          crates/android/build-apk.sh --out scratch/second.apk
+      - name: Refuse to ship an APK that does not reproduce
+        # Both builds are signed with the same key, and an RSA signature over the same bytes is the same, so
+        # the two files match byte for byte when the build is reproducible. If not, the entries that differ
+        # are listed.
+        run: |
+          if ! cmp scratch/first.apk scratch/second.apk; then
+            mkdir -p scratch/a scratch/b
+            unzip -q scratch/first.apk -d scratch/a; unzip -q scratch/second.apk -d scratch/b
+            echo "::error::the APK differs between two builds of the same commit; differing entries:"
+            diff -rq scratch/a scratch/b || true
+            exit 1
+          fi
+          sha256sum scratch/first.apk
           mkdir -p dist
-          crates/android/build-apk.sh --out "dist/Stoop-android-$V.apk"
-          ls -la dist
+          cp scratch/first.apk "dist/Stoop-android-$V.apk"
       - name: Remove signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/stoop-release.keystore"
@@ -316,6 +357,10 @@ jobs:
 
   publish:
     needs: [version, build, android]
+    permissions:
+      contents: write
+      id-token: write     # the Sigstore certificate for the attestations
+      attestations: write
     # also when the macOS build did not run or failed (the checks below decide), but not for a cancelled run
     if: ${{ !cancelled() && needs.version.result == 'success' }}
     runs-on: ubuntu-latest
@@ -342,7 +387,7 @@ jobs:
       - name: Linux, Windows and Android are required
         run: |
           ls -la out
-          need="Stoop-$V-windows-x86_64.exe Stoop-$V-linux-x86_64.AppImage stoop_${V}_amd64.deb stoop-$V-linux-x86_64.tar.gz"
+          need="Stoop-$V-windows-x86_64.exe Stoop-$V-windows-x86_64.msi Stoop-$V-linux-x86_64.AppImage stoop_${V}_amd64.deb stoop-$V-linux-x86_64.tar.gz Stoop-$V-linux-x86_64.flatpak"
           [ "$ANDROID" = true ] && need="$need Stoop-android-$V.apk"
           for f in $need; do
             [ -f "out/$f" ] || { echo "::error::no $f: not publishing"; exit 1; }
@@ -368,8 +413,8 @@ jobs:
             echo
             echo "---"
             echo "### Install"
-            echo "* **Windows**: \`Stoop-$V-windows-x86_64.exe\` – the installer, for you only, no administrator rights; Stoop is in the Start menu afterwards"
-            echo "* **Linux**: \`Stoop-$V-linux-x86_64.AppImage\` (make it executable and run it) or \`stoop_${V}_amd64.deb\` (\`sudo apt install ./stoop_${V}_amd64.deb\`) · without installing: \`stoop-$V-linux-x86_64.tar.gz\`"
+            echo "* **Windows**: \`Stoop-$V-windows-x86_64.exe\` – the installer, for you only, no administrator rights; Stoop is in the Start menu afterwards · for deploying to many PCs: \`Stoop-$V-windows-x86_64.msi\`"
+            echo "* **Linux**: \`Stoop-$V-linux-x86_64.AppImage\` (make it executable and run it), \`stoop_${V}_amd64.deb\` (\`sudo apt install ./stoop_${V}_amd64.deb\`) or \`Stoop-$V-linux-x86_64.flatpak\` (\`flatpak install --user Stoop-$V-linux-x86_64.flatpak\`) · without installing: \`stoop-$V-linux-x86_64.tar.gz\`"
             if have "Stoop-$V-macos-aarch64.dmg"; then
               echo "* **macOS** (Apple silicon): \`Stoop-$V-macos-aarch64.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway)"
             fi
@@ -378,7 +423,7 @@ jobs:
               # mac-attach replaces this line (MACOS-PENDING) once the macOS build finishes or fails
               echo "* **macOS**: still building, the .dmg is added here when it finishes <!-- MACOS-PENDING -->"
             fi
-            echo "* Every desktop binary was built twice from clean and the two compared byte for byte before packaging · checksums in \`SHA256SUMS\`"
+            echo "* Every desktop binary and the APK were built twice from clean and the two compared byte for byte · checksums in \`SHA256SUMS\` · every file has a signed build attestation: \`gh attestation verify <file> -R $GITHUB_REPOSITORY\`"
           } >> notes.md
           cat notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
@@ -388,6 +433,13 @@ jobs:
           (cd out && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS)
           cat hashes/*.sha256 >> out/SHA256SUMS
           cat out/SHA256SUMS
+      - name: Sign
+        # a Sigstore-signed provenance statement for every file (and SHA256SUMS): built by this workflow, in
+        # this run, from this commit. Only for a release that is published, so a check run signs nothing.
+        if: env.CHANNEL == 'hotfix' || (env.CHANNEL == 'stable' && inputs.publish)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: out/*
       - name: Publish
         if: env.CHANNEL == 'hotfix' || (env.CHANNEL == 'stable' && inputs.publish)
         run: |
@@ -420,6 +472,10 @@ jobs:
       ${{ !cancelled() && needs.publish.result == 'success'
       && (needs.version.outputs.channel == 'hotfix' || (needs.version.outputs.channel == 'stable' && inputs.publish)) }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     env:
       V: ${{ needs.version.outputs.version }}
       TAG: ${{ needs.version.outputs.tag }}
@@ -435,6 +491,11 @@ jobs:
           pattern: "*-macos-aarch64"
           path: mac
           merge-multiple: true
+      - name: Sign the .dmg
+        if: env.MAC == 'success' && hashFiles(format('mac/Stoop-{0}-macos-aarch64.dmg', env.V)) != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: mac/*.dmg
       - name: Attach the .dmg
         run: |
           grep -q 'MACOS-PENDING' notes.md || { echo "the release already has macOS"; exit 0; }
