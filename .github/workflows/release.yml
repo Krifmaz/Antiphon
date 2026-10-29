@@ -54,13 +54,16 @@ on:
 permissions:
   contents: write
 
-# Nothing waits for anything else: each hotfix (one per push) and each release has a group of its own, so a
-# push never cancels the hotfix of the push before it, and a release never waits for an older run whose macOS
-# job is still queued for a runner. Two runs of the same version only meet in publish, which has a group per
-# tag. A pull request's check is the exception: a newer push to the pull request replaces the older check.
+# Hotfixes are batched: one builds at a time and is never cancelled, so it always gets to publish, and of the
+# pushes that land meanwhile only the newest waits its turn (GitHub keeps one pending run per group and drops
+# the older ones). That keeps a busy day from either cancelling every hotfix or queueing a dozen of them for
+# the runners. A release has a group of its own, so it never waits for a hotfix or for an older release whose
+# macOS job is still queued; two runs of one version only meet in publish, which has a group per tag. A pull
+# request's check is replaced by the next push to that pull request.
 concurrency:
   group: >-
     ${{ github.event_name == 'pull_request' && format('release-check-{0}', github.ref)
+    || github.event_name == 'push' && 'release-hotfix'
     || format('release-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 

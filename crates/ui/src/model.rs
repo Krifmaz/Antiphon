@@ -111,6 +111,8 @@ pub struct Device {
     /// Group chats and communities work on this device; without them the
     /// screens for them are not offered.
     pub communities: bool,
+    /// Voice messages can be recorded here.
+    pub voice_messages: bool,
 }
 
 /// The person using the app.
@@ -303,6 +305,8 @@ pub struct Conversation {
     pub queues: bool,
     /// Disappearing messages ("Messages vanish after 1 day").
     pub expiry: Option<String>,
+    /// A voice message being recorded for them: seconds so far.
+    pub recording: Option<u32>,
 }
 
 /// One message.
@@ -336,6 +340,19 @@ pub struct Line {
     pub reactions: Vec<(String, u32)>,
     /// A file instead of text: (name, size).
     pub file: Option<(String, String)>,
+    /// A voice message instead of text.
+    pub voice: Option<VoiceClip>,
+}
+
+/// A voice message in a conversation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VoiceClip {
+    /// How long it is.
+    pub seconds: u32,
+    /// Playing now.
+    pub playing: bool,
+    /// Still on its way from where it was left; it plays once here.
+    pub fetching: bool,
 }
 
 /// How far a message of mine got.
@@ -558,6 +575,20 @@ pub struct Community {
     pub can_invite: bool,
     /// You may add channels.
     pub can_manage_channels: bool,
+    /// Which of its messages notify you.
+    pub notify: Notify,
+}
+
+/// Which messages notify you, in a space or one channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Notify {
+    /// Every message.
+    #[default]
+    All,
+    /// Only those that mention you by name.
+    Mentions,
+    /// None (they are still counted as unread).
+    Nothing,
 }
 
 /// One channel of a community.
@@ -569,6 +600,8 @@ pub struct Channel {
     pub name: String,
     /// What it is for, if anyone said.
     pub topic: String,
+    /// Its own notification setting; `None` follows the space's.
+    pub notify: Option<Notify>,
 }
 
 /// Someone in a group chat or community.

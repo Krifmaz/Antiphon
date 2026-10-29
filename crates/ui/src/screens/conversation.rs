@@ -24,7 +24,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
         col = col.push(call::stage(ui, m, false));
     }
     col = col.push(container(messages(ui, m, person, false)).height(Length::Fill));
-    col = col.push(transfers(m));
+    col = col.push(transfers(ui, m));
     col = col.push(container(composer(ui, m, person)).padding(pad(4.0, 20.0, 18.0, 20.0)));
     col.height(Length::Fill).into()
 }
@@ -132,6 +132,22 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         .spacing(6)
         .width(Length::Fixed(420.0))
         .into()
+    } else if let Some(clip) = line.voice {
+        let play = round_btn(
+            if clip.playing { Icon::Stop } else { Icon::Play },
+            if clip.playing { "Stop" } else { "Play" },
+            if clip.playing { Btn::RoundOn } else { Btn::Round },
+            Some(Msg::Do(Action::PlayVoice { to: person.id.clone(), id: line.id })),
+            34.0,
+        );
+        let length = format!("{}:{:02}", clip.seconds / 60, clip.seconds % 60);
+        let sub = if clip.fetching { format!("{length} · getting it") } else { length };
+        container(
+            row![play, column![t("Voice message").size(13.5).font(theme::semibold()), faint(sub).size(11.5)].spacing(2)].spacing(10).align_y(Alignment::Center),
+        )
+        .padding([8, 12])
+        .style(if line.mine { theme::bubble_mine } else { theme::card_raised })
+        .into()
     } else if let Some((name, size)) = line.file.as_ref() {
         container(
             row![
@@ -201,7 +217,7 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         row![lead, stack_col, space().width(Length::Fill)].spacing(10).align_y(Alignment::Start).width(Length::Fill).into()
     };
 
-    if editing.is_some() || line.file.is_some() {
+    if editing.is_some() || line.file.is_some() || line.voice.is_some() {
         return container(body).padding([2, 0]).into();
     }
     // The actions float over the far side of the row while the pointer is on it.
@@ -226,7 +242,7 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
 }
 
 /// A file they offered, files on their way, and those waiting their turn.
-pub fn transfers<'a>(m: &'a Model) -> El<'a, Msg> {
+pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut col = column![].spacing(8).padding([0, 20]);
     if let Some((name, size)) = m.transfers.offer.as_ref() {
@@ -272,9 +288,25 @@ pub fn transfers<'a>(m: &'a Model) -> El<'a, Msg> {
         );
     }
     if !m.transfers.queued.is_empty() {
-        let mut rows = column![row![label("Up next"), faint(m.transfers.queued.len().to_string()).size(11)].spacing(8).align_y(Alignment::Center)].spacing(4);
-        let last = m.transfers.queued.len() - 1;
-        for (i, q) in m.transfers.queued.iter().enumerate() {
+        let n = m.transfers.queued.len();
+        let head = button(
+            row![
+                label("Up next"),
+                faint(n.to_string()).size(11),
+                fill(),
+                faint(if ui.queue_open { "Hide" } else { "Show" }).size(11.5),
+                icon(if ui.queue_open { Icon::Up } else { Icon::Down }, 13.0, p.faint),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(0)
+        .style(|_, _| iced_widget::button::Style::default())
+        .on_press(Msg::ToggleQueue);
+        let mut rows = column![head].spacing(4);
+        let last = n - 1;
+        for (i, q) in m.transfers.queued.iter().enumerate().filter(|_| ui.queue_open) {
             let name = t(q.name.as_str()).size(13).font(theme::semibold()).color(if q.held { p.faint } else { p.text }).wrapping(Wrapping::None);
             let detail = if q.held { format!("{} · held", q.detail) } else { q.detail.clone() };
             rows = rows.push(
@@ -315,6 +347,21 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     };
     let draft = ui.drafts.get(&person.id).map(String::as_str).unwrap_or("");
     let can_send = live || queues;
+    // While a voice message records, the composer is its controls.
+    if let Some(secs) = conv.and_then(|c| c.recording) {
+        let max = 120;
+        let bar = row![
+            container(space()).width(10).height(10).style(theme::avatar(p.err)),
+            t(format!("Recording {}:{:02}", secs / 60, secs % 60)).size(14).font(theme::semibold()),
+            faint(format!("· up to {}:{:02}", max / 60, max % 60)).size(12),
+            fill(),
+            btn_sm("Cancel", Btn::Ghost, Some(Msg::Do(Action::FinishVoice { to: person.id.clone(), send: false }))),
+            btn_icon(Icon::Send, "Send", Btn::Primary, Some(Msg::Do(Action::FinishVoice { to: person.id.clone(), send: true }))),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        return column![container(bar).padding([8, 12]).style(theme::composer)].into();
+    }
     let mut input = text_input(&placeholder, draft).id(crate::COMPOSER).size(14).padding([11, 4]).style(theme::input_bare);
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
@@ -331,7 +378,12 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     let bar = row![
         icon_btn(Icon::Paperclip, file_tip, file_ok.then_some(Msg::Do(Action::SendFile))),
         input,
-        icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send)),
+        // With nothing typed, the button records a voice message instead.
+        if draft.trim().is_empty() && can_send && m.device.voice_messages {
+            icon_btn(Icon::Mic, "Record a voice message", Some(Msg::Do(Action::RecordVoice(person.id.clone()))))
+        } else {
+            icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send))
+        },
     ]
     .spacing(6)
     .align_y(Alignment::Center);

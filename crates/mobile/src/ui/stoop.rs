@@ -190,7 +190,7 @@ impl App {
             first_run: self.settings.display_name.trim().is_empty(),
             // Group chats and communities need the community store and its
             // courier, which the phone doesn't run yet: their screens stay hidden.
-            device: stoop::Device { phone: true, files: true, ptt_keys: false, communities: false },
+            device: stoop::Device { phone: true, files: true, ptt_keys: false, communities: false, voice_messages: false },
             phone: Some(stoop::Phone {
                 speaker: self.settings.speaker,
                 mic_allowed: self.mic_permission,
@@ -346,6 +346,7 @@ impl App {
             live,
             queues: !live,
             expiry: chat.expire_after_secs().map(|s| format!("Messages vanish after {}", super::Expiry::from_secs(Some(s)))),
+            recording: None,
         })
     }
 
@@ -528,6 +529,9 @@ impl App {
             // does not run; the setting is the desktop's.
             Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
+            // Voice messages aren't recorded on the phone yet (the
+            // button is hidden by `Device::voice_messages`).
+            Action::RecordVoice(_) | Action::FinishVoice { .. } | Action::PlayVoice { .. } => {}
             // Through the same messages as the phone's own buttons, so the
             // queue is saved after every change and survives a restart.
             Action::QueueMove { id, up } => self.update(if up { Message::QueueUp(id) } else { Message::QueueDown(id) }),
@@ -547,6 +551,7 @@ impl App {
             | Action::DeletePost { .. }
             | Action::InviteToSpace { .. }
             | Action::AddChannel { .. }
+            | Action::SpaceNotify { .. }
             | Action::LeaveSpace(_) => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),
