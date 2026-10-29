@@ -5968,6 +5968,7 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         // The classic window has no switch for it; kept as stored.
         low_data_calls: previous.low_data_calls,
         share_screen_audio: previous.share_screen_audio,
+        local_api: previous.local_api,
         duck_db: app.get_duck_db().max(0) as u32,
         presence: app.get_my_presence(),
         crash_reporting: app.get_crash_reporting(),
@@ -6230,6 +6231,9 @@ fn read_chain_config(app: &MainWindow) -> ChainConfig {
             damping: app.get_reverb_damping(),
             wet_dry: app.get_reverb_wet(),
         },
+        // The classic window has no plugin list; the plugins chosen in the
+        // main app are kept in its config, not edited here.
+        plugins: Vec::new(),
     }
 }
 

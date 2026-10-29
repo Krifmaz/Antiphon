@@ -422,6 +422,7 @@ dependencies = [
  "iced",
  "image",
  "rfd",
+ "serde_json",
  "tokio",
 ]
 
@@ -444,16 +445,20 @@ dependencies = [
 name = "antiphon-audio"
 version = "0.1.0"
 dependencies = [
+ "antiphon-test-plugins",
  "approx",
  "cpal",
  "jni 0.21.1",
  "libc",
+ "libloading",
  "ndk-context",
  "ndk-sys",
  "nnnoiseless",
  "ringbuf",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "vst3",
 ]
 
 [[package]]
@@ -686,6 +691,13 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tokio",
+]
+
+[[package]]
+name = "antiphon-test-plugins"
+version = "0.1.0"
+dependencies = [
+ "vst3",
 ]
 
 [[package]]
@@ -1751,6 +1763,12 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "com-scrape-types"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ce183b975b8fc736a20919c4002717255fbd867df575c792aeefa9a56a73ad0"
 
 [[package]]
 name = "combine"
@@ -9724,6 +9742,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vst3"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e31e3fe7a6f028ded8c5a9984cf283319e6dc63572c9b71da1d4ee9d71d3b6bf"
+dependencies = [
+ "com-scrape-types",
+]
 
 [[package]]
 name = "vtable"

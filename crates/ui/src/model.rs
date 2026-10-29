@@ -475,6 +475,10 @@ pub struct Network {
     pub found_nodes: Vec<String>,
     /// A look for nodes on this network is under way.
     pub finding_nodes: bool,
+    /// The local API for scripts and bots is on (desktop only).
+    pub local_api: bool,
+    /// Where a script finds its port and token, while it is on.
+    pub api_file: String,
 }
 
 /// A mailbox node on your delivery routes.
@@ -547,6 +551,8 @@ pub struct Settings {
     pub low_data: bool,
     /// A shared screen's sound is sent with it (desktop only).
     pub screen_audio: bool,
+    /// The plugin host's list (desktop only).
+    pub plugins: Plugins,
     /// Automatic level is on.
     pub auto_gain: bool,
     /// The voice preset in use ("Natural", "Broadcast", ...).
@@ -567,6 +573,42 @@ pub struct Settings {
     pub version: String,
     /// Where settings and history are kept, for About.
     pub data_dir: String,
+}
+
+/// Spec §1 "Plugin Host", as Settings shows it (desktop only).
+#[derive(Clone, Debug, Default)]
+pub struct Plugins {
+    /// The plugins in the microphone chain, in the order they run.
+    pub chain: Vec<PluginRow>,
+    /// What was found on this computer, as "Name · Format", once looked
+    /// for; `None` before.
+    pub found: Option<Vec<String>>,
+    /// Looking is under way.
+    pub scanning: bool,
+}
+
+/// One plugin in the chain.
+#[derive(Clone, Debug, Default)]
+pub struct PluginRow {
+    pub name: String,
+    /// "LADSPA", "LV2" or "VST3".
+    pub format: String,
+    pub enabled: bool,
+    /// Why it isn't running, when it isn't (gone, failed to start).
+    pub problem: Option<String>,
+    pub params: Vec<PluginParam>,
+}
+
+/// One of a plugin's parameters.
+#[derive(Clone, Debug, Default)]
+pub struct PluginParam {
+    pub id: String,
+    pub name: String,
+    pub min: f32,
+    pub max: f32,
+    pub value: f32,
+    /// An on/off switch rather than a range.
+    pub toggle: bool,
 }
 
 /// How the microphone decides to send.

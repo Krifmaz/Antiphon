@@ -81,6 +81,7 @@ impl Demo {
                 echo_cancel: true,
                 low_data: false,
                 screen_audio: true,
+                plugins: Default::default(),
                 auto_gain: true,
                 preset: "Natural".into(),
                 presets: ["Natural", "Warm", "Clear", "Broadcast", "Thin Mic Rescue"].map(String::from).to_vec(),
@@ -338,6 +339,12 @@ impl Demo {
             Action::AutoGain(on) => self.model.settings.auto_gain = on,
             Action::LowData(on) => self.model.settings.low_data = on,
             Action::ScreenAudio(on) => self.model.settings.screen_audio = on,
+            Action::FindPlugins
+            | Action::AddPlugin(_)
+            | Action::RemovePlugin(_)
+            | Action::PluginOn(..)
+            | Action::PluginEarlier(_)
+            | Action::PluginParam(..) => {}
             Action::ReducedMotion(on) => self.model.settings.reduced_motion = on,
             Action::SetName(n) => self.model.me.name = n,
             Action::SetStatus(s) => self.model.me.status = s,

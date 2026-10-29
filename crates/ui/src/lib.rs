@@ -376,6 +376,18 @@ pub enum Action {
     LowData(bool),
     /// Sending a shared screen's sound on or off.
     ScreenAudio(bool),
+    /// Look for plugins installed on this computer.
+    FindPlugins,
+    /// Add the found plugin at this index to the end of the chain.
+    AddPlugin(usize),
+    /// Take the chain's plugin at this index out.
+    RemovePlugin(usize),
+    /// Turn the chain's plugin at this index on or off.
+    PluginOn(usize, bool),
+    /// Move the chain's plugin at this index one place earlier.
+    PluginEarlier(usize),
+    /// Set a parameter (by id) of the chain's plugin at this index.
+    PluginParam(usize, String, f32),
     /// Automatic level on or off.
     AutoGain(bool),
     /// Use a voice preset by name.
@@ -398,6 +410,8 @@ pub enum Action {
     Anonymity(bool),
     /// The hops for anonymity mode, comma-separated `host:port[#key]`.
     AnonymityHops(String),
+    /// The local API for scripts and bots on or off.
+    LocalApi(bool),
     /// The port the door listens on.
     Port(u16),
     /// Re-run the reachability check.

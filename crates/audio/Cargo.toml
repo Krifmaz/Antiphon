@@ -34,5 +34,12 @@ libc = "0.2"
 jni = "0.21"
 ndk-context = "0.1.1"
 
+# The plugin host's loaders (spec §1 "Plugin Host"), desktops only.
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
+libloading = "0.8"
+vst3 = "0.3.0"
+
 [dev-dependencies]
+serde_json = "1"
+antiphon-test-plugins = { path = "../test-plugins" }
 approx = "0.5.1"

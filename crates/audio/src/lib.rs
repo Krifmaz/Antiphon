@@ -12,6 +12,7 @@ mod aaudio;
 mod chain;
 mod echo_cancel;
 mod device;
+pub mod plugins;
 mod stages;
 mod time_compress;
 mod util;

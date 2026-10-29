@@ -75,6 +75,8 @@ enum Event {
     Avatar(Result<String, String>),
     /// Files picked to send to this contact (id), for the queue.
     Queue(Vec<PathBuf>, String),
+    /// The plugin search finished (spec §1 "Plugin Host").
+    PluginsFound(Vec<antiphon_audio::plugins::PluginInfo>),
     /// A voice message was left (or why it couldn't be).
     VoiceSent(Result<(), String>),
     /// A picture picked to be a community's emoji: (community, file name,
@@ -197,6 +199,18 @@ struct ConvCache {
 pub struct Engine {
     /// Shared state the audio pipeline and network tasks also hold.
     state: Arc<AppState>,
+    /// The local API for scripts and bots, while it is on.
+    api: Option<crate::api::Api>,
+    /// Clients that asked for events.
+    api_listeners: Vec<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+    /// The last message seen per contact, and the call's phase, so events
+    /// go out once per change.
+    api_seen: HashMap<String, (String, u64)>,
+    api_phase: String,
+    /// Plugins found on this computer, once looked for.
+    plugins_found: Option<Vec<antiphon_audio::plugins::PluginInfo>>,
+    /// The plugin search is running.
+    plugins_scanning: bool,
     /// Results from background tasks, drained on each tick.
     events: Arc<Mutex<Vec<Event>>>,
     /// What the app should do in the interface; the app takes these.
@@ -332,6 +346,12 @@ impl Engine {
             inputs: antiphon_audio::list_input_devices(),
             outputs: antiphon_audio::list_output_devices(),
             ptt_capturing: false,
+            plugins_found: None,
+            plugins_scanning: false,
+            api: None,
+            api_listeners: Vec::new(),
+            api_seen: HashMap::new(),
+            api_phase: String::new(),
             delivery_seen: 0,
             discovery_seen: 0,
             peer_relay_saved: String::new(),
@@ -355,6 +375,8 @@ impl Engine {
             directory: ui::Directory::default(),
         };
         engine.load_previews();
+        engine.api_seen = engine.previews.clone();
+        engine.set_api(engine.cfg.local_api || crate::has_flag("--api"));
         engine.refresh_invite();
         if engine.cfg.stoop.door_on_start {
             engine.set_door(true);
@@ -399,6 +421,7 @@ impl Engine {
         for e in events {
             self.on_event(e);
         }
+        self.serve_api(open);
 
         // The far end hung up, or the connection died under us.
         let ended = self.state.call.lock().unwrap().as_ref().is_some_and(|a| !a.is_live());
@@ -1106,6 +1129,10 @@ impl Engine {
                     .map(|l| ui::Listing { name: l.entry.name, description: l.entry.description, link: l.entry.invite, directory: l.directory })
                     .collect();
             }
+            Event::PluginsFound(found) => {
+                self.plugins_scanning = false;
+                self.plugins_found = Some(found);
+            }
             Event::Theme(file) => {
                 self.cfg.stoop.theme = file.theme;
                 self.cfg.stoop.accent = file.accent;
@@ -1789,6 +1816,32 @@ impl Engine {
                 antiphon_client::link_quality::set_low_data(on);
                 self.save();
             }
+            A::FindPlugins => self.find_plugins(),
+            A::AddPlugin(i) => self.add_plugin(i),
+            A::RemovePlugin(i) => {
+                if i < self.cfg.chain.plugins.len() {
+                    self.cfg.chain.plugins.remove(i);
+                    self.chain_changed();
+                }
+            }
+            A::PluginOn(i, on) => {
+                if let Some(p) = self.cfg.chain.plugins.get_mut(i) {
+                    p.enabled = on;
+                    self.chain_changed();
+                }
+            }
+            A::PluginEarlier(i) => {
+                if i > 0 && i < self.cfg.chain.plugins.len() {
+                    self.cfg.chain.plugins.swap(i - 1, i);
+                    self.chain_changed();
+                }
+            }
+            A::PluginParam(i, id, value) => {
+                if let Some(p) = self.cfg.chain.plugins.get_mut(i) {
+                    p.set_param(&id, value);
+                    self.chain_changed();
+                }
+            }
             A::ScreenAudio(on) => {
                 self.cfg.share_screen_audio = on;
                 antiphon_client::screen_audio::set_enabled(on);
@@ -1820,6 +1873,11 @@ impl Engine {
             A::OpenOnStart(on) => {
                 self.cfg.stoop.door_on_start = on;
                 self.save();
+            }
+            A::LocalApi(on) => {
+                self.cfg.local_api = on;
+                self.save();
+                self.set_api(on);
             }
             A::Anonymity(on) => {
                 self.cfg.anonymity_mode = on;
@@ -2000,6 +2058,207 @@ impl Engine {
     }
 
     /// Applies the edited voice chain to a running call and saves it.
+    /// Set up for running with no window: the API on and the door open, so
+    /// the bot can be reached and driven. Says where the API's details are.
+    pub fn headless(&mut self) {
+        self.set_api(true);
+        self.set_door(true);
+        match (&self.api, &self.dir) {
+            (Some(_), Some(dir)) => println!("Local API on; port and key in {}", dir.join("api.json").display()),
+            _ => println!("The local API didn't start"),
+        }
+    }
+
+    /// Starts or stops the local API (see `api.rs`).
+    fn set_api(&mut self, on: bool) {
+        if !on {
+            self.api = None;
+            self.api_listeners.clear();
+            return;
+        }
+        if self.api.is_some() {
+            return;
+        }
+        let Some(dir) = self.dir.clone() else { return };
+        match crate::api::start(&dir, &self.state.runtime) {
+            Ok(api) => self.api = Some(api),
+            Err(e) => self.toast(format!("The local API couldn't start: {e}"), ToastKind::Err),
+        }
+    }
+
+    /// Answers waiting API commands and sends events to subscribers.
+    fn serve_api(&mut self, open: Option<&str>) {
+        let mut requests = Vec::new();
+        if let Some(api) = &mut self.api {
+            while let Ok(r) = api.requests.try_recv() {
+                requests.push(r);
+            }
+        }
+        for r in requests {
+            let answer = self.api_call(&r.body, open);
+            if r.body.get("cmd").and_then(|c| c.as_str()) == Some("subscribe") && answer.is_ok() {
+                self.api_listeners.push(r.events);
+            }
+            let _ = r.reply.send(answer);
+        }
+        if self.api_listeners.is_empty() {
+            self.api_seen = self.previews.clone();
+            return;
+        }
+        let mut events = Vec::new();
+        let changed: Vec<String> =
+            self.previews.iter().filter(|(id, p)| self.api_seen.get(*id) != Some(p)).map(|(id, _)| id.clone()).collect();
+        for id in changed {
+            if self.last_from_them(&id) {
+                let (Some(dir), Some(key)) = (&self.dir, &self.key) else { break };
+                if let Some(m) = history::load(dir, &id, key).last() {
+                    let name = self.cfg.contacts.iter().find(|c| c.identity_key == id).map(|c| c.name.clone()).unwrap_or_default();
+                    events.push(serde_json::json!({ "event": "message", "from": id, "name": name, "text": m.text, "at": m.at_secs }));
+                }
+            }
+        }
+        self.api_seen = self.previews.clone();
+        let phase = format!("{:?}", self.call.phase);
+        if phase != self.api_phase {
+            events.push(serde_json::json!({ "event": "call", "phase": api_phase(&self.call.phase), "with": self.call.peer }));
+            self.api_phase = phase;
+        }
+        for e in events {
+            self.api_listeners.retain(|l| l.send(e.clone()).is_ok());
+        }
+    }
+
+    /// One API command, done the way the matching button does it.
+    fn api_call(&mut self, body: &serde_json::Value, open: Option<&str>) -> Result<serde_json::Value, String> {
+        use crate::api::arg;
+        use serde_json::json;
+        let known = |e: &Self, id: &str| e.cfg.contacts.iter().any(|c| c.identity_key == id);
+        match arg(body, "cmd")? {
+            "me" => {
+                let me = self.me();
+                Ok(json!({ "id": me.id, "name": me.name, "status": me.status, "invite": me.invite, "door_open": me.door_open }))
+            }
+            "contacts" => Ok(self
+                .people()
+                .iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id, "name": p.name, "online": p.presence == ui::Presence::Online,
+                        "verified": p.verified, "unread": p.unread, "last": p.last,
+                    })
+                })
+                .collect()),
+            "messages" => {
+                let with = arg(body, "with")?;
+                if !known(self, with) {
+                    return Err("no contact with that id".into());
+                }
+                let limit = body.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
+                let lines = self.stored_lines(with);
+                let start = lines.len().saturating_sub(limit);
+                Ok(lines[start..]
+                    .iter()
+                    .filter(|l| !l.deleted)
+                    .map(|l| json!({ "id": l.id, "mine": l.mine, "author": l.author, "text": l.text, "time": l.time, "edited": l.edited }))
+                    .collect())
+            }
+            "send" => {
+                let (to, text) = (arg(body, "to")?.to_string(), arg(body, "text")?.to_string());
+                if !known(self, &to) {
+                    return Err("no contact with that id".into());
+                }
+                if text.trim().is_empty() {
+                    return Err("nothing to send".into());
+                }
+                self.act(ui::Action::Send { to, text }, open);
+                Ok(serde_json::Value::Null)
+            }
+            "call" => {
+                let to = arg(body, "to")?.to_string();
+                if !known(self, &to) {
+                    return Err("no contact with that id".into());
+                }
+                self.act(ui::Action::Call(to), open);
+                Ok(serde_json::Value::Null)
+            }
+            "hangup" => {
+                self.act(ui::Action::Hangup, open);
+                Ok(serde_json::Value::Null)
+            }
+            "mute" => {
+                let on = body.get("on").and_then(|v| v.as_bool()).ok_or("'on' is missing")?;
+                self.act(ui::Action::Mute(on), open);
+                Ok(serde_json::Value::Null)
+            }
+            "door" => {
+                let on = body.get("open").and_then(|v| v.as_bool()).ok_or("'open' is missing")?;
+                self.act(ui::Action::Door(on), open);
+                Ok(serde_json::Value::Null)
+            }
+            "status" => Ok(json!({ "phase": api_phase(&self.call.phase), "with": self.call.peer, "name": self.call.name, "code": self.call.code })),
+            "subscribe" => Ok(serde_json::Value::Null),
+            other => Err(format!("unknown command '{other}'")),
+        }
+    }
+
+    /// Looks for installed plugins in the background (it opens every
+    /// plugin library, which can take a while).
+    fn find_plugins(&mut self) {
+        if self.plugins_scanning {
+            return;
+        }
+        self.plugins_scanning = true;
+        let events = self.events.clone();
+        self.state.runtime.spawn_blocking(move || {
+            Self::push(&events, Event::PluginsFound(antiphon_audio::plugins::scan()));
+        });
+    }
+
+    /// Adds found plugin `i` to the end of the chain, if it starts.
+    fn add_plugin(&mut self, i: usize) {
+        let Some(info) = self.plugins_found.as_ref().and_then(|f| f.get(i)) else { return };
+        let config = info.to_config();
+        // Tried once here, so a plugin that won't start says so now rather
+        // than leaving the chain silently without it.
+        if let Err(e) = antiphon_audio::plugins::load(&config, 48_000) {
+            self.toast(format!("{} couldn't start: {e}", info.name), ToastKind::Err);
+            return;
+        }
+        self.toast(format!("{} added", info.name), ToastKind::Ok);
+        self.cfg.chain.plugins.push(config);
+        self.chain_changed();
+    }
+
+    /// The plugin list as Settings shows it.
+    fn plugins_model(&self) -> ui::Plugins {
+        let chain = self
+            .cfg
+            .chain
+            .plugins
+            .iter()
+            .map(|p| ui::PluginRow {
+                name: p.name.clone(),
+                format: p.format.label().to_string(),
+                enabled: p.enabled,
+                problem: (!p.path.exists()).then(|| format!("{} isn't installed any more", p.path.display())),
+                params: p
+                    .described
+                    .iter()
+                    .map(|d| ui::PluginParam {
+                        id: d.id.clone(),
+                        name: d.name.clone(),
+                        min: d.min,
+                        max: d.max,
+                        value: p.param(&d.id).unwrap_or(d.default),
+                        toggle: d.toggle,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let found = self.plugins_found.as_ref().map(|f| f.iter().map(|p| format!("{} · {}", p.name, p.format.label())).collect());
+        ui::Plugins { chain, found, scanning: self.plugins_scanning }
+    }
+
     fn chain_changed(&mut self) {
         let chain = self.cfg.chain.clone();
         self.with_call(|a| a.apply_chain_config(chain));
@@ -2656,6 +2915,8 @@ impl Engine {
             mailboxes: self.mailboxes(),
             found_nodes: self.found_nodes.iter().filter(|a| !self.cfg.routes.iter().any(|r| r.nodes.contains(a))).cloned().collect(),
             finding_nodes: self.finding_nodes,
+            local_api: self.api.is_some(),
+            api_file: self.dir.as_ref().map(|d| d.join("api.json").display().to_string()).unwrap_or_default(),
         }
     }
 
@@ -2684,6 +2945,7 @@ impl Engine {
             echo_cancel: self.cfg.echo_cancel,
             low_data: self.cfg.low_data_calls,
             screen_audio: self.cfg.share_screen_audio,
+            plugins: self.plugins_model(),
             auto_gain: matches!(self.cfg.chain.gain, GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -3239,6 +3501,16 @@ fn open_folder(path: &std::path::Path) {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let program = "xdg-open";
     let _ = std::process::Command::new(program).arg(path).spawn();
+}
+
+/// A call phase as the API names it.
+fn api_phase(phase: &ui::Phase) -> &'static str {
+    match phase {
+        ui::Phase::Idle => "idle",
+        ui::Phase::Dialing => "dialing",
+        ui::Phase::Connected => "connected",
+        ui::Phase::Ended(_) => "ended",
+    }
 }
 
 #[cfg(test)]

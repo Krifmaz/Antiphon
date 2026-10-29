@@ -149,6 +149,7 @@ impl App {
             echo_cancel: false,
             low_data: self.settings.data_saver,
             screen_audio: false,
+            plugins: Default::default(),
             auto_gain: matches!(chain.gain, antiphon_audio::GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -547,6 +548,8 @@ impl App {
             // Anonymity mode runs on the desktop's call path; the phone
             // doesn't offer it yet.
             Action::Anonymity(_) | Action::AnonymityHops(_) => {}
+            // The local API is a desktop's.
+            Action::LocalApi(_) => {}
             // Hidden on the phone (`Device::communities` is off), so these
             // never come.
             Action::OpenChannel { .. }
@@ -626,6 +629,13 @@ impl App {
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}
+            // Plugins are a desktop's: the phone never shows them.
+            Action::FindPlugins
+            | Action::AddPlugin(_)
+            | Action::RemovePlugin(_)
+            | Action::PluginOn(..)
+            | Action::PluginEarlier(_)
+            | Action::PluginParam(..) => {}
             // The phone's data saver is its "Low data" switch.
             Action::LowData(on) => self.update(Message::DataSaver(on)),
             Action::Preset(name) if name == NATURAL => self.update(Message::ResetChain),
