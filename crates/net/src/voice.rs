@@ -265,6 +265,61 @@ impl VoiceSender {
     }
 }
 
+/// Marks a voice clip encoded by [`encode_clip`].
+const CLIP_MAGIC: &[u8; 4] = b"AVC1";
+
+/// Encodes a whole recording, such as a voice message, as Opus at 16
+/// kbit/s wideband: about 2 KB a second, against 192 KB for raw audio.
+///
+/// Unlike a call there is no DTX -- skipped silence would shorten the
+/// clip -- and no FEC, since a file arrives whole or not at all. The
+/// container is this app's own and minimal: a 4-byte tag, then each Opus
+/// packet as `[length: u16 BE][packet]`. Every packet is 20 ms.
+pub fn encode_clip(samples: &[f32], device_rate: u32) -> Vec<u8> {
+    let rate = codec_rate(device_rate);
+    let mut resampled = Vec::with_capacity(samples.len());
+    match (rate != device_rate).then(|| Resampler::new(device_rate, rate)) {
+        Some(mut r) => r.process(samples, &mut resampled),
+        None => resampled.extend_from_slice(samples),
+    }
+    let frame = (rate / 50) as usize;
+    // The last part-frame is padded with silence rather than dropped.
+    resampled.resize(resampled.len().div_ceil(frame) * frame, 0.0);
+
+    let mut encoder =
+        Encoder::builder(rate, Channels::Mono, Application::Voip).build().expect("Opus accepts its own sample rates in mono");
+    let _ = encoder.set_signal(Signal::Voice);
+    let _ = encoder.set_bitrate(Bitrate::Bits(16_000));
+    let _ = encoder.set_max_bandwidth(Bandwidth::Wideband);
+    let mut out = CLIP_MAGIC.to_vec();
+    let mut packet = [0u8; MAX_PACKET];
+    for chunk in resampled.chunks_exact(frame) {
+        let Ok(n) = encoder.encode_float(chunk, &mut packet) else { continue };
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+        out.extend_from_slice(&packet[..n]);
+    }
+    out
+}
+
+/// Decodes a clip made by [`encode_clip`] to audio at `device_rate`.
+/// `None` for anything that isn't one, or is cut short.
+pub fn decode_clip(bytes: &[u8], device_rate: u32) -> Option<Vec<f32>> {
+    let mut rest = bytes.strip_prefix(CLIP_MAGIC)?;
+    let mut rx = VoiceReceiver::new(device_rate);
+    let mut out = Vec::new();
+    let mut pcm = vec![0f32; MAX_FRAME_SAMPLES];
+    while !rest.is_empty() {
+        let (len, after) = rest.split_first_chunk::<2>()?;
+        let len = u16::from_be_bytes(*len) as usize;
+        let packet = after.get(..len)?;
+        rest = &after[len..];
+        let n = rx.decoder.decode_float(packet, &mut pcm, false).ok()?;
+        let decoded = pcm[..n].to_vec();
+        out.extend(rx.at_device_rate(&decoded));
+    }
+    Some(out)
+}
+
 /// Counts packets seen and lost on the wire, for the receiver's reports.
 ///
 /// Loss is counted when the sequence jumps: a jump of three means two
@@ -582,6 +637,25 @@ mod tests {
         let d = rx.decode(&raw).unwrap();
         assert_eq!(d.sequence, 9);
         assert_eq!(d.primary, vec![0.25; 480]);
+    }
+
+    #[test]
+    fn a_recorded_clip_comes_back_the_same_length_at_a_fraction_of_the_size() {
+        for rate in [48_000, 44_100] {
+            let audio = speech(rate, 3.0);
+            let clip = encode_clip(&audio, rate);
+            // 16 kbit/s is 2 KB a second; raw f32 would be 4 bytes a sample.
+            assert!(clip.len() < 8_000, "{} bytes for 3 s", clip.len());
+            let back = decode_clip(&clip, rate).unwrap();
+            let diff = back.len() as i64 - audio.len() as i64;
+            assert!((-2..=rate as i64 / 50 + 10).contains(&diff), "{diff} samples off at {rate}");
+            let ratio = rms(&back) / rms(&audio);
+            assert!((0.5..1.6).contains(&ratio), "level ratio {ratio}");
+        }
+        assert!(decode_clip(b"nope", 48_000).is_none());
+        let mut cut = encode_clip(&speech(48_000, 0.5), 48_000);
+        cut.truncate(cut.len() - 3);
+        assert!(decode_clip(&cut, 48_000).is_none(), "a truncated clip is refused");
     }
 
     #[test]

@@ -72,11 +72,22 @@ pub struct CallVideo {
     /// automatic bandwidth (spec §2); 0 pauses sending. Shared with every
     /// sender thread.
     share: Arc<AtomicU8>,
+    /// Everyone else in a mesh group call, who gets the same datagrams as
+    /// the primary connection. Shared with every sender thread.
+    extra: Arc<Mutex<Vec<Arc<PeerConnection>>>>,
+    /// Their pictures, by group leg id.
+    legs: Mutex<HashMap<u64, Decoder>>,
 }
 
 impl Default for CallVideo {
     fn default() -> Self {
-        Self { remote: Mutex::default(), senders: Mutex::default(), share: Arc::new(AtomicU8::new(100)) }
+        Self {
+            remote: Mutex::default(),
+            senders: Mutex::default(),
+            share: Arc::new(AtomicU8::new(100)),
+            extra: Arc::default(),
+            legs: Mutex::default(),
+        }
     }
 }
 
@@ -91,6 +102,38 @@ impl CallVideo {
     /// other side's tile goes away) until the link recovers.
     pub fn set_share(&self, percent: u8) {
         self.share.store(percent.min(100), Ordering::Relaxed);
+    }
+
+    /// Sets who else in a group call our video goes to, besides the
+    /// primary connection (spec §3 group calls). Called as people come
+    /// and go; a newcomer gets a whole picture straight away.
+    pub fn set_group_peers(&self, peers: Vec<Arc<PeerConnection>>) {
+        *self.extra.lock().unwrap() = peers;
+    }
+
+    /// Takes one video datagram from group leg `leg`.
+    pub fn receive_from(&self, leg: u64, datagram: &[u8]) {
+        self.legs.lock().unwrap().entry(leg).or_default().push(datagram);
+    }
+
+    /// The group's pictures now showing, as `(leg, stream, version)`.
+    /// Pictures that went quiet are dropped, and so are people with none.
+    pub fn leg_versions(&self) -> Vec<(u64, Stream, u64)> {
+        let mut legs = self.legs.lock().unwrap();
+        let mut out = Vec::new();
+        legs.retain(|id, d| {
+            d.expire();
+            let v = d.versions();
+            out.extend(v.iter().map(|(s, n)| (*id, *s, *n)));
+            !v.is_empty()
+        });
+        out.sort_by_key(|(id, s, _)| (*id, *s == Stream::Screen));
+        out
+    }
+
+    /// A copy of one of group leg `leg`'s pictures.
+    pub fn leg_picture(&self, leg: u64, stream: Stream) -> Option<Picture> {
+        self.legs.lock().unwrap().get(&leg)?.picture(stream)
     }
 
     /// Whether video is paused for the link's sake.
@@ -149,6 +192,7 @@ impl CallVideo {
         let failed = Arc::new(Mutex::new(None));
         let (t_stop, t_preview, t_failed) = (stop.clone(), preview.clone(), failed.clone());
         let t_share = self.share.clone();
+        let t_extra = self.extra.clone();
         let thread = std::thread::Builder::new()
             .name(format!("{stream:?} sender"))
             .spawn(move || {
@@ -159,12 +203,21 @@ impl CallVideo {
                 let period = Duration::from_secs(1) / encoder.fps();
                 let mut last = None;
                 let mut paused = false;
+                // How many group legs got the last frame: one more means a
+                // newcomer, who needs a whole picture rather than patches.
+                let mut sent_to = 0;
                 while !t_stop.load(Ordering::Relaxed) {
                     let started = Instant::now();
                     if let Some(why) = source.failed() {
                         *t_failed.lock().unwrap() = Some(why);
                         break;
                     }
+                    // Spec §3 group calls: the same datagrams to everyone.
+                    let extra: Vec<Arc<PeerConnection>> = t_extra.lock().unwrap().clone();
+                    if extra.len() > sent_to {
+                        encoder.request_keyframe();
+                    }
+                    sent_to = extra.len();
                     // Spec §2 automatic bandwidth: pausing tells the other
                     // side once, as stopping does; resuming starts with a
                     // whole picture, since theirs was cleared.
@@ -174,8 +227,10 @@ impl CallVideo {
                             paused = true;
                             let stop = encoder.stop();
                             runtime.block_on(async {
-                                for _ in 0..3 {
-                                    let _ = peer.send_video(&stop).await;
+                                for to in std::iter::once(&peer).chain(&extra) {
+                                    for _ in 0..3 {
+                                        let _ = to.send_video(&stop).await;
+                                    }
                                 }
                             });
                         }
@@ -183,15 +238,19 @@ impl CallVideo {
                         paused = false;
                         encoder.request_keyframe();
                     }
-                    encoder.set_budget_percent(share.max(1));
+                    // Every person in a mesh is another upload of the same
+                    // datagrams, so the budget is split between them.
+                    encoder.set_budget_percent((share as usize / (1 + extra.len())).max(1) as u8);
                     if let Some((n, frame)) = source.latest().filter(|(n, _)| Some(*n) != last) {
                         last = Some(n);
                         *t_preview.lock().unwrap() = Some((n, Arc::new(preview_of(&frame, stream))));
                         let datagrams = if paused { Vec::new() } else { encoder.encode(&frame) };
                         if !datagrams.is_empty() {
                             runtime.block_on(async {
-                                for d in &datagrams {
-                                    let _ = peer.send_video(d).await;
+                                for to in std::iter::once(&peer).chain(&extra) {
+                                    for d in &datagrams {
+                                        let _ = to.send_video(d).await;
+                                    }
                                 }
                             });
                         }
@@ -202,9 +261,12 @@ impl CallVideo {
                 // would leave our last picture frozen on their side until
                 // it times out.
                 let stop = encoder.stop();
+                let extra: Vec<Arc<PeerConnection>> = t_extra.lock().unwrap().clone();
                 runtime.block_on(async {
-                    for _ in 0..3 {
-                        let _ = peer.send_video(&stop).await;
+                    for to in std::iter::once(&peer).chain(&extra) {
+                        for _ in 0..3 {
+                            let _ = to.send_video(&stop).await;
+                        }
                     }
                 });
             });
@@ -228,6 +290,7 @@ impl CallVideo {
         let old: Vec<Sender> = self.senders.lock().unwrap().drain().map(|(_, s)| s).collect();
         drop(old);
         self.remote.lock().unwrap().clear();
+        self.legs.lock().unwrap().clear();
     }
 }
 

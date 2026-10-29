@@ -1707,6 +1707,27 @@ impl Engine {
             });
             tiles.extend(tile);
         }
+        // Everyone else in a group call, a tile per picture they send.
+        for (leg, stream, version) in a.video.leg_versions() {
+            let who = a.group.leg_name(leg).unwrap_or_else(|| "Someone".into());
+            let (key, label) = match stream {
+                Stream::Camera => (format!("leg-{leg}-camera"), who),
+                Stream::Screen => (format!("leg-{leg}-screen"), format!("{who}'s screen")),
+            };
+            let tile = self.tile(&key, version, || {
+                let p = a.video.leg_picture(leg, stream)?;
+                Some(ui::VideoTile {
+                    key: key.clone(),
+                    label,
+                    image: iced::widget::image::Handle::from_rgba(p.width, p.height, p.rgba),
+                    width: p.width,
+                    height: p.height,
+                    mine: false,
+                    screen: stream == Stream::Screen,
+                })
+            });
+            tiles.extend(tile);
+        }
         for stream in [Stream::Camera, Stream::Screen] {
             let Some((n, frame)) = a.video.preview(stream) else { continue };
             let (key, label) = match stream {

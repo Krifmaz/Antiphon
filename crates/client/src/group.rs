@@ -117,6 +117,9 @@ pub struct Group {
     /// The sound card's sample rate, which decoded voice is produced at;
     /// 0 until the call sets it, read as 48 kHz.
     pub device_rate: std::sync::atomic::AtomicU32,
+    /// The call's video, so each leg's pictures reach it (spec §3 group
+    /// calls); set once the call is up.
+    pub video: Mutex<Option<Arc<crate::video::CallVideo>>>,
 }
 
 impl Group {
@@ -161,7 +164,8 @@ impl Group {
             .collect()
     }
 
-    /// One person's name by leg id, for labelling their captions (spec §7).
+    /// One person's name by leg id, for labelling their captions (spec §7)
+    /// and their video tiles.
     pub fn leg_name(&self, id: u64) -> Option<String> {
         self.legs.lock().unwrap().iter().find(|l| l.id == id).map(Leg::name)
     }
@@ -292,8 +296,13 @@ impl Group {
                             Some(m) if is_group_message(&m) => group.inbox.lock().unwrap().push((Link::Leg(id), m)),
                             _ => {}
                         },
+                        Received::Video(bytes) => {
+                            if let Some(video) = group.video.lock().unwrap().as_ref() {
+                                video.receive_from(id, &bytes);
+                            }
+                        }
                         // Files and chat stay on the primary connection.
-                        Received::File(_) | Received::Video(_) => {}
+                        Received::File(_) => {}
                     })
                     .await;
             })
