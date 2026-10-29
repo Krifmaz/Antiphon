@@ -290,8 +290,8 @@ jobs:
 
   publish:
     needs: [version, build, android]
-    # also when the macOS build did not run or failed: the checks below decide
-    if: always() && needs.version.result == 'success'
+    # also when the macOS build did not run or failed (the checks below decide), but not for a cancelled run
+    if: ${{ !cancelled() && needs.version.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.version.outputs.version }}
