@@ -19,7 +19,7 @@ use antiphon_client::control::Hello;
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
     caps_lock, config, connection_mode, delivery, discovery, file_integrity, file_preview, file_transfer, history, key_capture, moderation,
-    notify, outbox, presence, reachability, reactions, sharing, video_capture, vpn,
+    notify, outbox, presence, push_wake, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
 use antiphon_ui::{self as ui, ToastKind};
@@ -712,6 +712,11 @@ impl Engine {
         let identity = self.state.identity.clone();
         let lookup = self.cfg.dht_enabled && !contact.identity_key.is_empty();
         let handle = self.state.runtime.spawn(async move {
+            // A phone asleep in a pocket isn't listening; if the dial has
+            // not connected within a moment, knock through its push
+            // service so it wakes and starts listening while we keep
+            // trying. Aborted below once the dial is over either way.
+            let wake = push_wake::wake_later(identity.clone(), &contact.identity_key, &contact.route_record, Vec::new());
             *args.state.relay_addr.lock().unwrap() = None;
             let result = match plan {
                 connection_mode::Plan::Direct { address } if lookup => call_with_lookup(&contact, address, identity, &args).await,
@@ -728,6 +733,9 @@ impl Engine {
                 }
                 .await,
             };
+            if let Some(wake) = wake {
+                wake.abort();
+            }
             let result = result.map_err(|e| anyhow::anyhow!("Couldn't reach {}: {e}", contact.name));
             args.finish(result, false);
         });

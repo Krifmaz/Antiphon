@@ -52,6 +52,8 @@ mod files;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod platform;
 #[cfg(any(target_os = "android", target_os = "ios"))]
+mod push;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod runner;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod settings;

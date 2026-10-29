@@ -29,6 +29,8 @@ antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
 # Camera and screen video on calls, with the desktop capture.
 antiphon-video = { version = "0.1.0", path = "../video", features = ["capture"] }
+# Waking a contact's phone by push before a call or after leaving mail.
+antiphon-push = { version = "0.1.0", path = "../push" }
 # The mailbox, run in-app when this device holds mail for your others.
 antiphon-relay = { version = "0.1.0", path = "../relay" }
 

@@ -16,6 +16,7 @@ members = [
     "crates/mobile",
     "crates/android",
     "crates/ios",
+    "crates/push",
 ]
 
 [workspace.package]

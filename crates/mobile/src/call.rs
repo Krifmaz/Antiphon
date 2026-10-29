@@ -642,7 +642,7 @@ async fn talk(
             presence: None,
             wants_silent: false,
             relay: String::new(),
-            routes: String::new(),
+            routes: crate::push::published_routes(),
         };
         let bytes = ControlMessage::Hello(hello).encode();
         let peer = peer.clone();
