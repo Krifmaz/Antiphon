@@ -51,6 +51,7 @@ pub mod swarm;
 pub mod theme_presets;
 pub mod profile;
 pub mod transfer_limits;
+pub mod transfer_queue;
 pub mod video;
 pub mod video_capture;
 pub mod voice_message;

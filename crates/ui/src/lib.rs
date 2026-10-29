@@ -251,6 +251,22 @@ pub enum Action {
     DeclineFile,
     /// Stop the file on its way, in either direction.
     CancelTransfer,
+    /// Move a waiting file one place earlier (true) or later.
+    QueueMove {
+        /// Which file ([`QueuedFile::id`]).
+        id: u64,
+        /// Earlier rather than later.
+        up: bool,
+    },
+    /// Hold a waiting file back (true), or let it go again.
+    QueueHold {
+        /// Which file.
+        id: u64,
+        /// Hold it.
+        held: bool,
+    },
+    /// Take a file out of the queue without sending it.
+    QueueRemove(u64),
     /// Add a contact from an invite link (or `host:port`).
     AddPerson {
         /// What to call them.

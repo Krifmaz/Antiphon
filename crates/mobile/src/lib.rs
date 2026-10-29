@@ -35,6 +35,9 @@
 
 pub mod data_rules;
 pub mod fling;
+// The desktop's own send queue, shared by path so both order files the
+// same way.
+#[path = "../../client/src/transfer_queue.rs"]
 pub mod queue;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]

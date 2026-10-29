@@ -386,6 +386,22 @@ impl App {
             };
             t.active.push(stoop::Transfer { name: active.entry.item.name.clone(), incoming: false, progress, detail, paused: active.user_paused });
         }
+        let on_call_with = live.as_ref().map(|l| hex(&l.peer_key));
+        t.queued = self
+            .files
+            .queue
+            .iter()
+            .map(|e| {
+                let q = &e.item;
+                let size = q.size.map(data_rules::size).unwrap_or_default();
+                let detail = if on_call_with.as_deref() == Some(q.peer_hex.as_str()) {
+                    size
+                } else {
+                    format!("{size} · for {}, on your next call", self.contacts.name_for(&q.peer_hex))
+                };
+                stoop::QueuedFile { id: e.id, name: q.name.clone(), detail, held: e.held }
+            })
+            .collect();
         t
     }
 
@@ -503,6 +519,19 @@ impl App {
             }
             Action::Note(..) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
+            Action::QueueMove { id, up } => {
+                if up {
+                    self.files.queue.move_up(id);
+                } else {
+                    self.files.queue.move_down(id);
+                }
+            }
+            Action::QueueHold { id, held } => {
+                self.files.queue.set_held(id, held);
+            }
+            Action::QueueRemove(id) => {
+                self.files.queue.remove(id);
+            }
             // A phone lends no relay; it has none of its own to lend.
             Action::LendRelay(_) => {}
             // Anonymity mode runs on the desktop's call path; the phone

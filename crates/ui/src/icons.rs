@@ -111,6 +111,10 @@ pub enum Icon {
     Sparkle,
     /// A keyboard: push-to-talk key.
     Keyboard,
+    /// A chevron pointing up: earlier, sooner.
+    Up,
+    /// A chevron pointing down: later.
+    Down,
     /// A hash: a channel in a community.
     Hash,
     /// A door with an arrow out: leave.
@@ -184,6 +188,8 @@ impl Icon {
             Icon::Screen => r#"<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M9 10l3-3 3 3M12 7v6"/>"#,
             Icon::ScreenOff => r#"<path d="M7 3h13a2 2 0 0 1 2 2v10a2 2 0 0 1-1 1.7M4 3.3A2 2 0 0 0 2 5v10a2 2 0 0 0 2 2h13"/><path d="M8 21h8M12 17v4"/><path d="m2 2 20 20"/>"#,
             Icon::Keyboard => r#"<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M8 16h8M10 13h4"/>"#,
+            Icon::Up => r#"<path d="m18 15-6-6-6 6"/>"#,
+            Icon::Down => r#"<path d="m6 9 6 6 6-6"/>"#,
             Icon::Hash => r#"<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>"#,
             Icon::LogOut => r#"<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/>"#,
             Icon::Spaces => r#"<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/>"#,

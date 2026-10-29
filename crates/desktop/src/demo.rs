@@ -49,7 +49,14 @@ impl Demo {
             people,
             call: ui::Call::default(),
             conversation: None,
-            transfers: ui::Transfers::default(),
+            transfers: ui::Transfers {
+                active: vec![ui::Transfer { name: "porch-photos.zip".into(), incoming: false, progress: 0.42, detail: "18 MB of 43 MB".into(), paused: false }],
+                queued: vec![
+                    ui::QueuedFile { id: 1, name: "kind-of-blue-liner-notes.pdf".into(), detail: "2.4 MB".into(), held: false },
+                    ui::QueuedFile { id: 2, name: "setlist.txt".into(), detail: "3 KB".into(), held: true },
+                ],
+                ..ui::Transfers::default()
+            },
             network: ui::Network {
                 checks: vec![
                     check("Calling out", CheckState::Good, "Connections you start are what every home router already allows."),
@@ -247,6 +254,21 @@ impl Demo {
                 }
             }
             Action::OpenChannel { community, channel } => self.open_channel(&community, channel),
+            Action::QueueMove { id, up } => {
+                let q = &mut self.model.transfers.queued;
+                if let Some(at) = q.iter().position(|f| f.id == id) {
+                    let to = if up { at.checked_sub(1) } else { (at + 1 < q.len()).then_some(at + 1) };
+                    if let Some(to) = to {
+                        q.swap(at, to);
+                    }
+                }
+            }
+            Action::QueueHold { id, held } => {
+                if let Some(f) = self.model.transfers.queued.iter_mut().find(|f| f.id == id) {
+                    f.held = held;
+                }
+            }
+            Action::QueueRemove(id) => self.model.transfers.queued.retain(|f| f.id != id),
             Action::Post { community, channel, text } => {
                 self.next_id += 1;
                 if let Some(v) = self.model.channel.as_mut().filter(|v| v.community == community && v.channel == channel) {

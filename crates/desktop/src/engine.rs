@@ -10,12 +10,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use antiphon_audio::{ChainConfig, GainConfig};
 use antiphon_client::control::{ControlMessage, Hello, ProfileCard};
+use antiphon_client::transfer_queue::TransferQueue;
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
     caps_lock, config, connection_mode, delivery, discovery, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
@@ -71,6 +72,8 @@ enum Event {
     /// A picked profile picture, made small: the base64 to save, or why
     /// the file couldn't be used.
     Avatar(Result<String, String>),
+    /// Files picked to send to this contact (id), for the queue.
+    Queue(Vec<PathBuf>, String),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -122,6 +125,18 @@ struct CallInfo {
     status: Option<String>,
     /// When the call ended, to clear the reason after [`ENDED_FOR`].
     ended_at: Option<Instant>,
+}
+
+/// A file waiting in the send queue.
+struct QueuedSend {
+    /// Where it is.
+    path: PathBuf,
+    /// Its name, as offered.
+    name: String,
+    /// Its size when picked, for the queue's line.
+    size: u64,
+    /// The contact it is for (id): it goes on a call with them.
+    peer: String,
 }
 
 /// The open conversation, built once per change rather than per frame.
@@ -203,6 +218,11 @@ pub struct Engine {
     /// The channel on screen, as (space id, channel): its messages are
     /// loaded and it counts as read. Set by the app before each model.
     viewing: Option<(String, u32)>,
+    /// Files waiting to be sent, one at a time, each to its contact.
+    send_queue: TransferQueue<QueuedSend>,
+    /// The queued file being read or sent now, and a flag raised once
+    /// that is over (sent, failed, declined or cancelled).
+    sending: Option<Arc<AtomicBool>>,
     /// Settings > Account & backup: phrase, backup files, moving devices.
     account: crate::account::AccountState,
 }
@@ -244,6 +264,8 @@ impl Engine {
             tiles: HashMap::new(),
             spaces: Default::default(),
             viewing: None,
+            send_queue: TransferQueue::default(),
+            sending: None,
             account: Default::default(),
         };
         engine.load_previews();
@@ -350,6 +372,7 @@ impl Engine {
         }
 
         self.watch_call(open);
+        self.pump_queue();
     }
 
     /// Reads a yes/no from the running call; false when there is none.
@@ -628,6 +651,14 @@ impl Engine {
                 self.toast("Picture updated", ToastKind::Ok);
             }
             Event::Avatar(Err(why)) => self.toast(why, ToastKind::Err),
+            Event::Queue(paths, peer) => {
+                for path in paths {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    self.send_queue.push(QueuedSend { path, name, size, peer: peer.clone() });
+                }
+                self.pump_queue();
+            }
         }
     }
 
@@ -1073,6 +1104,20 @@ impl Engine {
             A::CancelTransfer => {
                 self.with_call(|a| a.cancel_file_transfer(&rt));
             }
+            A::QueueMove { id, up } => {
+                if up {
+                    self.send_queue.move_up(id);
+                } else {
+                    self.send_queue.move_down(id);
+                }
+            }
+            A::QueueHold { id, held } => {
+                self.send_queue.set_held(id, held);
+                self.pump_queue();
+            }
+            A::QueueRemove(id) => {
+                self.send_queue.remove(id);
+            }
             A::AddPerson { name, invite } => self.add_person(name, invite),
             A::Remove(id) => {
                 if let Some(i) = contact_index(&self.cfg, &id) {
@@ -1423,32 +1468,77 @@ impl Engine {
         }
     }
 
-    /// Asks for a file and offers it to the person on the call.
+    /// Asks for files to send to the person on the call. They join the
+    /// queue, which sends them one at a time.
     fn send_file(&mut self) {
-        if self.state.call.lock().unwrap().is_none() {
+        let Some(peer) = self.with_call(|a| delivery::hex(&a.peer_identity().identity_key)) else {
             self.toast("Files go to the person you're on a call with", ToastKind::Info);
             return;
-        }
-        let state = self.state.clone();
+        };
         let events = self.events.clone();
         std::thread::spawn(move || {
-            let Some(path) = rfd::FileDialog::new().set_title("Send a file").pick_file() else { return };
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+            let Some(paths) = rfd::FileDialog::new().set_title("Send files").pick_files() else { return };
+            if !paths.is_empty() {
+                Self::push(&events, Event::Queue(paths, peer));
+            }
+        });
+    }
+
+    /// Starts the next queued file for the person on the call, once
+    /// nothing else is going out. Called whenever the queue or the call
+    /// may have moved on.
+    fn pump_queue(&mut self) {
+        if let Some(flag) = &self.sending {
+            if !flag.load(Ordering::SeqCst) {
+                return;
+            }
+            self.sending = None;
+        }
+        let Some((peer, busy)) = self.with_call(|a| {
+            // A send started by hand (or an older one still finishing)
+            // keeps the link; the queue waits behind it.
+            let ft = a.file_transfer.lock().unwrap();
+            let busy = ft.outgoing.as_ref().is_some_and(|o| !o.done && o.error.is_none());
+            (delivery::hex(&a.peer_identity().identity_key), busy)
+        }) else {
+            return;
+        };
+        if busy {
+            return;
+        }
+        let Some(entry) = self.send_queue.take_next(|q| q.peer == peer) else { return };
+        let flag = Arc::new(AtomicBool::new(false));
+        self.sending = Some(flag.clone());
+        let (state, events) = (self.state.clone(), self.events.clone());
+        // Reading and hashing a large file takes a while: off the window's
+        // thread, and off the call's runtime.
+        std::thread::spawn(move || {
+            let QueuedSend { path, name, peer, .. } = entry.item;
             let (source, sha256) = match file_integrity::open_and_hash(&path) {
                 Ok(opened) => opened,
                 Err(reason) => {
                     Self::push(&events, Event::Toast(reason.explain(&name), ToastKind::Err));
+                    flag.store(true, Ordering::SeqCst);
                     return;
                 }
             };
             let thumbnail = file_preview::generate(&path).map(|png| file_transfer::encode_b64(&png)).unwrap_or_default();
-            let with = {
+            {
                 let call = state.call.lock().unwrap();
-                let Some(active) = call.as_ref() else { return };
-                active.send_file(&state.runtime, name.clone(), source, sha256, thumbnail);
-                delivery::hex(&active.peer_identity().identity_key)
-            };
-            if let Some(link) = sharing::share(&state.runtime, &path, &name, &with) {
+                // The call ended, or is now with someone else, while the
+                // file was read: it waits for next time.
+                let Some(active) = call.as_ref().filter(|a| delivery::hex(&a.peer_identity().identity_key) == peer) else {
+                    flag.store(true, Ordering::SeqCst);
+                    return;
+                };
+                let (link, ft, done) = (active.peer.clone(), active.file_transfer.clone(), flag.clone());
+                let name = name.clone();
+                state.runtime.spawn(async move {
+                    file_transfer::send_file(link, ft, name, Arc::new(source), sha256, thumbnail).await;
+                    done.store(true, Ordering::SeqCst);
+                });
+            }
+            if let Some(link) = sharing::share(&state.runtime, &path, &name, &peer) {
                 if let Some(active) = state.call.lock().unwrap().as_ref() {
                     active.send_control(&state.runtime, link);
                 }
@@ -1747,7 +1837,11 @@ impl Engine {
     fn transfers(&self) -> ui::Transfers {
         let mut t = ui::Transfers::default();
         let call = self.state.call.lock().unwrap();
-        let Some(a) = call.as_ref() else { return t };
+        let Some(a) = call.as_ref() else {
+            drop(call);
+            t.queued = self.queued_files(None);
+            return t;
+        };
         let ft = a.file_transfer.lock().unwrap();
         if let Some(offer) = ft.pending_offer.as_ref() {
             t.offer = Some((offer.file_name.clone(), human_size(offer.file_size)));
@@ -1771,7 +1865,29 @@ impl Engine {
             };
             t.active.push(ui::Transfer { name: i.file_name.clone(), incoming: true, progress, detail, paused: false });
         }
+        drop(ft);
+        let on_call_with = delivery::hex(&a.peer_identity().identity_key);
+        drop(call);
+        t.queued = self.queued_files(Some(&on_call_with));
         t
+    }
+
+    /// The send queue as the screens show it. Files for someone other
+    /// than `on_call_with` say who they wait for.
+    fn queued_files(&self, on_call_with: Option<&str>) -> Vec<ui::QueuedFile> {
+        self.send_queue
+            .iter()
+            .map(|e| {
+                let q = &e.item;
+                let detail = if Some(q.peer.as_str()) == on_call_with {
+                    human_size(q.size)
+                } else {
+                    let who = find_contact(&self.cfg, &q.peer).map(|c| c.name.clone()).unwrap_or_else(|| "them".into());
+                    format!("{} · for {who}, on your next call", human_size(q.size))
+                };
+                ui::QueuedFile { id: e.id, name: q.name.clone(), detail, held: e.held }
+            })
+            .collect()
     }
 
     /// The reachability checks and network settings.

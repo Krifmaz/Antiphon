@@ -361,6 +361,23 @@ pub struct Transfers {
     pub offer: Option<(String, String)>,
     /// Transfers under way.
     pub active: Vec<Transfer>,
+    /// Files waiting their turn, in the order they will go. One goes at a
+    /// time: the call and the files share one connection.
+    pub queued: Vec<QueuedFile>,
+}
+
+/// A file waiting to be sent.
+#[derive(Clone, Debug, Default)]
+pub struct QueuedFile {
+    /// Its place in the queue, stable while it waits.
+    pub id: u64,
+    /// The file's name.
+    pub name: String,
+    /// Its size, and who it is for when that isn't the person on screen
+    /// ("4.2 MB · for Robin, on your next call").
+    pub detail: String,
+    /// Held back: skipped until let go, without losing its place.
+    pub held: bool,
 }
 
 /// A file on its way.
