@@ -36,7 +36,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use antiphon_crypto::onion::{HopSecret, LayerKeys};
-use antiphon_net::onion::{exit_backward, hop_backward, hop_forward, Cell, Setup, CREATED_MARK};
+use antiphon_net::onion::{exit_backward, hop_backward, hop_forward, open_create, pad_create, Cell, Setup, CREATED_MARK};
 
 /// Bounds on what a hop node holds, so offering hops cannot be turned into
 /// a way to exhaust the operator's memory or sockets.
@@ -144,15 +144,6 @@ struct Circuit {
     last_seen: Instant,
 }
 
-impl Circuit {
-    /// Adds this hop's backward layer to a payload heading for the caller.
-    fn wrap_backward(&mut self, payload: &[u8]) -> Vec<u8> {
-        let layer = self.keys.seal_backward(self.back_seq, payload);
-        self.back_seq += 1;
-        layer
-    }
-}
-
 /// The hop side of anonymity mode: a socket-free state machine holding the
 /// hop key and every circuit through this node.
 pub struct HopNode {
@@ -227,7 +218,7 @@ impl HopNode {
                 let Next::Pending { addr, circ } = c.next else { return out };
                 c.next = Next::Linked { addr, circ };
                 c.last_seen = now;
-                let layer = c.wrap_backward(&layer);
+                let Some(layer) = hop_backward(&c.keys, &mut c.back_seq, c.position, &layer) else { return out };
                 out.push(Action::Send(c.prev, Cell::Created { circ: c.prev_circ, layer }.encode()));
             }
             Cell::Forward { circ, layer } => {
@@ -333,7 +324,7 @@ impl HopNode {
         // Garbage, or a CREATE for some other hop key, is dropped without
         // a word: answering would confirm to a scanner that keys differ.
         let Ok(keys) = self.secret.keys_for(ephemeral) else { return vec![] };
-        let Some(setup) = keys.open_setup(sealed).ok().and_then(|p| Setup::decode(&p)) else { return vec![] };
+        let Some(setup) = open_create(&keys, sealed) else { return vec![] };
 
         let id = self.next_id;
         self.next_id += 1;
@@ -353,7 +344,7 @@ impl HopNode {
                     }
                 };
                 self.by_next.insert((next, next_circ), id);
-                out.push(Action::Send(next, Cell::Create { circ: next_circ, ephemeral, sealed }.encode()));
+                out.push(Action::Send(next, Cell::Create { circ: next_circ, ephemeral, sealed: pad_create(sealed) }.encode()));
                 Next::Pending { addr: next, circ: next_circ }
             }
             Setup::Exit { target, .. } => {
@@ -366,7 +357,7 @@ impl HopNode {
         };
         let mut c = Circuit { prev: from, prev_circ: circ, next, keys, position, back_seq: 0, last_seen: now };
         if matches!(c.next, Next::Exit { .. }) {
-            let layer = c.wrap_backward(CREATED_MARK);
+            let Some(layer) = exit_backward(&c.keys, &mut c.back_seq, c.position, CREATED_MARK) else { return vec![] };
             out.push(Action::Send(from, Cell::Created { circ, layer }.encode()));
         }
         self.circuits.insert(id, c);

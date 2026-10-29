@@ -78,9 +78,12 @@
 //! its position in its sealed setup, which is how it knows how much of a
 //! cell is filler. An observer of any link sees one of a handful of sizes,
 //! and the same size on every link, so sizes no longer say where on the
-//! path a link is. What still varies: the one-off CREATE and CREATED that
-//! build a circuit, and the size bucket, which says roughly how big the
-//! datagram inside is.
+//! path a link is. The cells that build a circuit are fixed too: every
+//! CREATE carries a setup topped up to [`CREATE_SEALED_LEN`] (each hop's
+//! setup has a fixed size for its position, and a hop pads what it passes
+//! on with filler), and CREATED is framed and padded exactly like the
+//! smallest data cell. What still varies is the size bucket, which says
+//! roughly how big the datagram inside is.
 //!
 //! # Known limitations
 //!
@@ -99,7 +102,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use antiphon_crypto::onion::{client_keys, LayerKeys, LAYER_OVERHEAD};
+use antiphon_crypto::onion::{client_keys, LayerKeys, LAYER_OVERHEAD, SETUP_OVERHEAD};
 use tokio::net::UdpSocket;
 
 use crate::AppSocket;
@@ -121,7 +124,8 @@ pub const OP_FORWARD: u8 = 0x03;
 pub const OP_DESTROY: u8 = 0x04;
 /// A node's answer to [`OP_HOPKEY_REQUEST`]: its hop public key.
 pub const OP_HOPKEY: u8 = 0x81;
-/// The circuit is built; the layer wraps [`CREATED_MARK`] once per hop.
+/// The circuit is built; the layer wraps [`CREATED_MARK`] once per hop,
+/// framed and padded like a data cell so it is the same size on every link.
 pub const OP_CREATED: u8 = 0x82;
 /// A data layer travelling back towards the caller.
 pub const OP_BACKWARD: u8 = 0x83;
@@ -136,6 +140,60 @@ pub const HOPKEY_REQUEST_LEN: usize = 40;
 pub const MIN_HOPS: usize = 2;
 /// More hops add latency to every 20 ms voice frame and little privacy.
 pub const MAX_HOPS: usize = 3;
+
+/// What a sealed setup adds to its plaintext: the AEAD tag (the rest of
+/// [`SETUP_OVERHEAD`] is the ephemeral key, which travels beside it).
+const SETUP_TAG: usize = SETUP_OVERHEAD - 32;
+
+/// An address in a setup, always padded to the IPv6 form's length so the
+/// family doesn't change the setup's size.
+const SETUP_ADDR_LEN: usize = 1 + 16 + 2;
+
+/// The plaintext length of every setup for the hop at `position`, Extend
+/// or Exit alike. The deepest possible hop can only be an exit; every hop
+/// before it carries the next hop's ephemeral key and sealed setup. Being
+/// fixed per position (not per path) is what lets every CREATE be the same
+/// size: see [`CREATE_SEALED_LEN`].
+pub const fn setup_plain_len(position: usize) -> usize {
+    let mut len = 2 + SETUP_ADDR_LEN;
+    let mut p = MAX_HOPS - 1;
+    while p > position {
+        len = 2 + SETUP_ADDR_LEN + 32 + len + SETUP_TAG;
+        p -= 1;
+    }
+    len
+}
+
+/// The sealed length of the setup for the hop at `position`.
+pub const fn setup_sealed_len(position: usize) -> usize {
+    setup_plain_len(position) + SETUP_TAG
+}
+
+/// The sealed part of every CREATE on every link, filler included. A hop
+/// passes on a shorter setup than it got (its own is peeled off) and tops
+/// it up with random filler, so a CREATE is the same size whether it is
+/// the first link of a three-hop path or the last of a two-hop one.
+pub const CREATE_SEALED_LEN: usize = setup_sealed_len(0);
+
+/// Tops a sealed setup up to [`CREATE_SEALED_LEN`] with random filler.
+pub fn pad_create(mut sealed: Vec<u8>) -> Vec<u8> {
+    let short = CREATE_SEALED_LEN.saturating_sub(sealed.len());
+    sealed.extend_from_slice(&filler(short));
+    sealed
+}
+
+/// Opens this hop's setup from a padded CREATE. The hop doesn't know its
+/// position until it has opened the setup, so it tries each position's
+/// length in turn (at most [`MAX_HOPS`] AEAD checks; the filler after the
+/// real setup makes every wrong length fail) and keeps the one whose
+/// setup names that same position.
+pub fn open_create(keys: &LayerKeys, sealed: &[u8]) -> Option<Setup> {
+    (0..MAX_HOPS).find_map(|p| {
+        let plain = keys.open_setup(sealed.get(..setup_sealed_len(p))?).ok()?;
+        let setup = Setup::decode(&plain)?;
+        (usize::from(setup.position()) == p).then_some(setup)
+    })
+}
 
 /// What the exit wraps up and sends back when the circuit is built. Every
 /// hop adds its layer to it, so opening it proves each one has its keys.
@@ -392,7 +450,15 @@ impl Setup {
                 encode_addr(&mut out, target);
             }
         }
+        out.resize(setup_plain_len(usize::from(self.position())), 0);
         out
+    }
+
+    /// This hop's place on the path, 0 for the entry.
+    pub fn position(&self) -> u8 {
+        match self {
+            Setup::Extend { position, .. } | Setup::Exit { position, .. } => *position,
+        }
     }
 
     /// `None` for a setup that is malformed or carries trailing bytes.
@@ -402,17 +468,27 @@ impl Setup {
         if usize::from(position) >= MAX_HOPS {
             return None;
         }
-        let (addr, rest) = decode_addr(rest)?;
-        match kind {
-            SETUP_EXTEND if rest.len() > 32 => Some(Setup::Extend {
-                position,
-                next: addr,
-                ephemeral: rest[..32].try_into().expect("32 bytes"),
-                sealed: rest[32..].to_vec(),
-            }),
-            SETUP_EXIT if rest.is_empty() => Some(Setup::Exit { position, target: addr }),
-            _ => None,
+        if bytes.len() != setup_plain_len(usize::from(position)) {
+            return None;
         }
+        let (addr, rest) = decode_addr(rest)?;
+        // Whatever follows the setup itself is padding, and must be zeros.
+        let (setup, padding) = match kind {
+            SETUP_EXTEND if usize::from(position) + 1 < MAX_HOPS => {
+                let end = 32 + setup_sealed_len(usize::from(position) + 1);
+                let body = rest.get(..end)?;
+                let setup = Setup::Extend {
+                    position,
+                    next: addr,
+                    ephemeral: body[..32].try_into().expect("32 bytes"),
+                    sealed: body[32..].to_vec(),
+                };
+                (setup, &rest[end..])
+            }
+            SETUP_EXIT => (Setup::Exit { position, target: addr }, rest),
+            _ => return None,
+        };
+        padding.iter().all(|&b| b == 0).then_some(setup)
     }
 }
 
@@ -580,13 +656,14 @@ impl Plan {
         keys.reverse();
         let (ephemeral, sealed) = inner.expect("at least one hop");
         let circ = random_u32();
-        Ok(Self { circ, create: Cell::Create { circ, ephemeral, sealed }.encode(), hops: keys })
+        Ok(Self { circ, create: Cell::Create { circ, ephemeral, sealed: pad_create(sealed) }.encode(), hops: keys })
     }
 
     /// Checks a CREATED cell: every hop's layer, then the exit's mark.
     pub fn confirms(&self, cell: &[u8]) -> bool {
         let Some(Cell::Created { circ, layer }) = Cell::decode(cell) else { return false };
-        circ == self.circ && peel_backward(&self.hops, layer).is_some_and(|inner| inner == CREATED_MARK)
+        circ == self.circ
+            && peel_backward(&self.hops, layer).is_some_and(|inner| unframe(&inner) == Some(&CREATED_MARK[..]))
     }
 
     /// The keys, once [`Self::confirms`] has said the circuit holds.
@@ -901,11 +978,16 @@ mod tests {
         for s in [
             Setup::Exit { position: 1, target: addr(3479) },
             Setup::Exit { position: 2, target: v6 },
-            Setup::Extend { position: 0, next: v6, ephemeral: [1; 32], sealed: vec![7; 50] },
-            Setup::Extend { position: 1, next: addr(1), ephemeral: [2; 32], sealed: vec![8; 1] },
+            Setup::Extend { position: 0, next: v6, ephemeral: [1; 32], sealed: vec![7; setup_sealed_len(1)] },
+            Setup::Extend { position: 1, next: addr(1), ephemeral: [2; 32], sealed: vec![8; setup_sealed_len(2)] },
         ] {
-            assert_eq!(Setup::decode(&s.encode()), Some(s));
+            let plain = s.encode();
+            assert_eq!(plain.len(), setup_plain_len(usize::from(s.position())), "fixed size per position");
+            assert_eq!(Setup::decode(&plain), Some(s));
         }
+        let mut dirty = Setup::Exit { position: 1, target: addr(1) }.encode();
+        *dirty.last_mut().unwrap() = 1;
+        assert!(Setup::decode(&dirty).is_none(), "padding must be zeros");
         assert!(Setup::decode(&[SETUP_EXIT, 0, 4, 1, 2]).is_none());
         assert!(Setup::decode(&[9, 0, 4, 1, 2, 3, 4, 0, 1]).is_none());
         assert!(Setup::decode(&[SETUP_EXIT, 3, 4, 1, 2, 3, 4, 0, 1]).is_none(), "no fourth hop");
@@ -948,16 +1030,21 @@ mod tests {
         let target = addr(3479);
         let plan = Plan::new(&hops, target).unwrap();
 
+        let create_len = plan.create.len();
         let Some(Cell::Create { mut ephemeral, mut sealed, .. }) = Cell::decode(&plan.create) else { panic!() };
         let mut hop_keys = Vec::new();
         for (i, s) in secrets.iter().enumerate() {
             let k = s.keys_for(&ephemeral).unwrap();
-            let setup = Setup::decode(&k.open_setup(&sealed).unwrap()).unwrap();
+            let setup = open_create(&k, &sealed).unwrap();
             hop_keys.push(k);
             match setup {
                 Setup::Extend { position, next, ephemeral: e, sealed: s } => {
                     assert_eq!(usize::from(position), i);
                     assert_eq!(next, hops[i + 1].0);
+                    // What the hop passes on is as big as what it got.
+                    let passed = Cell::Create { circ: 1, ephemeral: e, sealed: pad_create(s) }.encode();
+                    assert_eq!(passed.len(), create_len, "CREATE is the same size on every link");
+                    let Some(Cell::Create { ephemeral: e, sealed: s, .. }) = Cell::decode(&passed) else { panic!() };
                     ephemeral = e;
                     sealed = s;
                 }
@@ -968,10 +1055,14 @@ mod tests {
             }
         }
 
-        // Created: the exit marks, every hop wraps on the way back.
-        let mut back = hop_keys[2].seal_backward(0, CREATED_MARK);
-        back = hop_keys[1].seal_backward(0, &back);
-        back = hop_keys[0].seal_backward(0, &back);
+        // Created: the exit marks, every hop wraps on the way back, and it
+        // stays one size, the smallest data cell's.
+        let mut seq = 0;
+        let mut back = exit_backward(&hop_keys[2], &mut seq, 2, CREATED_MARK).unwrap();
+        assert_eq!(back.len(), CELL_BUCKETS[0]);
+        back = hop_backward(&hop_keys[1], &mut seq, 1, &back).unwrap();
+        back = hop_backward(&hop_keys[0], &mut seq, 0, &back).unwrap();
+        assert_eq!(back.len(), CELL_BUCKETS[0]);
         assert!(plan.confirms(&Cell::Created { circ: plan.circ, layer: back.clone() }.encode()));
         assert!(!plan.confirms(&Cell::Created { circ: plan.circ ^ 1, layer: back }.encode()));
 
