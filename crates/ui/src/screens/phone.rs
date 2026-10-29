@@ -10,6 +10,7 @@ use crate::theme::{self, Btn};
 use crate::widgets::*;
 use crate::{Dialog, El, Model, Msg, Route, Section, Ui};
 
+/// The whole phone layout: top bar, the current screen, call banner and tab bar.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let screen: El<'a, Msg> = match &ui.route {
         Route::Person(id) => match m.people.iter().find(|p| &p.id == id) {

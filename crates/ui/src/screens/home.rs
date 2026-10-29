@@ -11,6 +11,7 @@ use crate::theme::{self, Btn};
 use crate::widgets::*;
 use crate::{Action, CheckState, Dialog, El, Model, Msg, Route, Section, Ui};
 
+/// The home screen: greeting, door switch, invite and add cards, and recent people.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let mut col = column![].spacing(22).max_width(940);
     let hello = if m.me.greeting.is_empty() { format!("Hello, {}", m.me.name) } else { format!("{}, {}", m.me.greeting, m.me.name) };

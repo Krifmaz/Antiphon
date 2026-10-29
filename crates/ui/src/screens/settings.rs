@@ -10,6 +10,7 @@ use crate::theme::{self, Btn, ACCENTS, THEMES};
 use crate::widgets::*;
 use crate::{Action, CheckState, Dialog, El, Model, Msg, Route, Section, Transmit, Ui};
 
+/// Settings on a wide window: the section list beside the chosen section.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     let p = theme::look();
     let mut nav = column![container(h2("Settings")).padding(pad(6.0, 0.0, 12.0, 10.0))].spacing(2);
@@ -36,6 +37,7 @@ pub fn stacked<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     scrollable(container(col).padding([18, 14])).height(Length::Fill).style(theme::scroll).into()
 }
 
+/// The cards for one section.
 fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     let body = match section {
         Section::Profile => profile(ui, m),
@@ -58,6 +60,7 @@ fn edit_box<'a>(placeholder: &'a str, edited: &'a Option<String>, saved: &'a str
     r.into()
 }
 
+/// Your name, status, and the key that proves who you are.
 fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let me = row![
@@ -94,6 +97,7 @@ fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     .into()
 }
 
+/// Theme, accent colour and motion.
 fn appearance<'a>(m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut themes = row![].spacing(10);
@@ -148,6 +152,7 @@ fn appearance<'a>(m: &'a Model) -> El<'a, Msg> {
     .into()
 }
 
+/// A plain filled box of colour `c` with corner radius `r`, for swatches.
 fn flat(c: iced_core::Color, r: f32) -> iced_widget::container::Style {
     iced_widget::container::Style {
         background: Some(iced_core::Background::Color(c)),
@@ -156,6 +161,7 @@ fn flat(c: iced_core::Color, r: f32) -> iced_widget::container::Style {
     }
 }
 
+/// Microphone, speakers, how you talk (voice or push to talk), clean-up and output volume.
 fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     let s = &m.settings;
     let device = |label: &'a str, list: &'a [String], chosen: &'a str, f: fn(String) -> Action| -> El<'a, Msg> {
@@ -246,6 +252,7 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     .into()
 }
 
+/// Whether people can reach you, the port, and the relay to fall back on.
 fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut checks = column![].spacing(10);
@@ -293,6 +300,7 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     .into()
 }
 
+/// Version, where your data lives, and the crash-report switch.
 fn about<'a>(m: &'a Model) -> El<'a, Msg> {
     let s = &m.settings;
     column![

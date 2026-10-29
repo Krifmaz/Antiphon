@@ -4,15 +4,19 @@
 use antiphon_ui::{self as ui, Action, CheckState, Delivery, Line, Person, Phase, Presence};
 use iced::widget::qr_code;
 
+/// Robin's made-up id: the contact the demo call is with.
 const ROBIN: &str = "7f3a9c21d4e8b6f0a1c2e3d4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4";
 
 /// The demo's whole state: just a model the actions edit.
 pub struct Demo {
+    /// Everything the interface draws.
     pub model: ui::Model,
+    /// The next message id to hand out.
     next_id: u64,
 }
 
 impl Demo {
+    /// The demo's starting state: five people, no call, the door open.
     pub fn new() -> Self {
         let invite = "antiphon://4be1c07d9f2a83e6b5d4c3f2a1908e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7@203.0.113.24:6002".to_string();
         let people = vec![
@@ -95,6 +99,7 @@ impl Demo {
         };
     }
 
+    /// Robin's id, for the tour to open their conversation.
     pub fn robin() -> String {
         ROBIN.into()
     }
@@ -185,6 +190,7 @@ impl Demo {
     }
 }
 
+/// A made-up contact.
 fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, at: &str, unread: u32) -> Person {
     Person {
         id: id.into(),
@@ -204,6 +210,7 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
     }
 }
 
+/// A made-up message; `day` starts a new day above it.
 fn line(id: u64, mine: bool, text: &str, time: &str, day: Option<&str>) -> Line {
     Line {
         id,
@@ -217,6 +224,7 @@ fn line(id: u64, mine: bool, text: &str, time: &str, day: Option<&str>) -> Line 
     }
 }
 
+/// A made-up reachability check.
 fn check(label: &str, state: CheckState, detail: &str) -> ui::Check {
     ui::Check { label: label.into(), state, detail: detail.into() }
 }

@@ -13,54 +13,103 @@ use crate::El;
 /// Every icon the app draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
+    /// A house: the home screen.
     Home,
+    /// A handset: start a call.
     Phone,
+    /// A handset, crossed: hang up.
     PhoneOff,
+    /// A microphone.
     Mic,
+    /// A microphone, crossed: muted.
     MicOff,
+    /// Headphones.
     Headphones,
+    /// Headphones, crossed: deafened.
     HeadphonesOff,
+    /// A cog: settings.
     Gear,
+    /// A plus: add.
     Plus,
+    /// A cross: close or remove.
     X,
+    /// A paper plane: send a message.
     Send,
+    /// A paperclip: attach a file.
     Paperclip,
+    /// A QR code: your invite to scan.
     Qr,
+    /// A chain link: an invite link.
     Link,
+    /// Two sheets: copy.
     Copy,
+    /// A tick: done or delivered.
     Check,
+    /// A magnifier: search.
     Search,
+    /// A shield: trust and safety.
     Shield,
+    /// A shield with a tick: verified.
     ShieldCheck,
+    /// Two people: a group.
     Users,
+    /// A person with a plus: add someone.
     UserPlus,
+    /// Wi-Fi waves: the network.
     Wifi,
+    /// A globe: your public address.
     Globe,
+    /// A page: a file.
     File,
+    /// An arrow into a tray: save.
     Download,
+    /// A split window: show or hide the details panel.
     Panel,
+    /// Three dots: more options.
     More,
+    /// A left arrow: go back.
     Back,
+    /// A small right arrow: go into.
     Chevron,
+    /// A closed door: not taking calls.
     Door,
+    /// An open door: taking calls.
     DoorOpen,
+    /// A speech bubble: messages.
     Message,
+    /// A smiling face: reactions.
     Smile,
+    /// A padlock: encrypted.
     Lock,
+    /// A circular arrow: check again.
     Refresh,
+    /// A bin: delete.
     Trash,
+    /// A pencil: edit.
     Edit,
+    /// A bell: notifications.
     Bell,
+    /// A bell, crossed: notifications off.
     BellOff,
+    /// A speaker: volume.
     Volume,
+    /// A speaker, crossed: silenced.
     VolumeOff,
+    /// A sun: the light theme.
     Sun,
+    /// A moon: the dark theme.
     Moon,
+    /// A painter's palette: appearance.
     Palette,
+    /// Sliders: voice clean-up.
     Sliders,
+    /// An i in a circle: about.
     Info,
+    /// A clock: time or expiry.
     Clock,
+    /// A sparkle: something new.
     Sparkle,
+    /// A keyboard: push-to-talk key.
     Keyboard,
 }
 

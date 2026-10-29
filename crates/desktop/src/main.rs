@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use antiphon_client::{config, crash_report};
 use antiphon_ui::theme;
 
+/// The value after flag `name` (`--name value` or `--name=value`).
 fn flag_value(name: &str) -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -33,6 +34,7 @@ fn flag_value(name: &str) -> Option<String> {
     None
 }
 
+/// Whether flag `name` was given.
 fn has_flag(name: &str) -> bool {
     std::env::args().skip(1).any(|a| a == name)
 }

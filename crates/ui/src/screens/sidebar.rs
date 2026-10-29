@@ -3,7 +3,7 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, row, scrollable, space, text_input};
+use iced_widget::{button, column, container, row, scrollable, text_input};
 
 use super::{clip, clock, fill, presence_color};
 use crate::icons::{icon, logo, Icon};
@@ -11,6 +11,7 @@ use crate::theme::{self, Btn};
 use crate::widgets::*;
 use crate::{Action, Dialog, El, Model, Msg, Person, Route, Section, Ui};
 
+/// The whole sidebar for a wide window.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let brand = row![
@@ -129,6 +130,7 @@ pub fn person_row<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Ms
     iced_widget::mouse_area(row).on_right_press(Msg::Menu(Some(person.id.clone()))).into()
 }
 
+/// The muted text colour, a step dimmer, for previews in the list.
 fn mix_muted() -> iced_core::Color {
     let p = theme::look();
     theme::mix(p.muted, p.text, 0.35)
@@ -222,7 +224,3 @@ fn me_bar<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         .into()
 }
 
-#[allow(dead_code)]
-fn gap<'a>(h: f32) -> El<'a, Msg> {
-    space().height(h).into()
-}

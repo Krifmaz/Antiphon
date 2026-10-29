@@ -50,6 +50,7 @@ impl Default for StoopPrefs {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
+    /// The Stoop app's own preferences; absent in older configs.
     #[serde(default)]
     pub stoop: StoopPrefs,
     pub profile: ProfileData,

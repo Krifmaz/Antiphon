@@ -11,14 +11,20 @@ use iced_widget::qr_code;
 /// Everything the screens draw.
 #[derive(Default)]
 pub struct Model {
+    /// The person using the app.
     pub me: Me,
+    /// Contacts, in the order the list shows them.
     pub people: Vec<Person>,
+    /// The call, if any.
     pub call: Call,
     /// The conversation with the person on screen, once the app has loaded
     /// it (after [`crate::Action::Open`]).
     pub conversation: Option<Conversation>,
+    /// Files on their way.
     pub transfers: Transfers,
+    /// Reachability and connection settings.
     pub network: Network,
+    /// Everything Settings shows.
     pub settings: Settings,
     /// A line across the top of the window: something the person should
     /// know now ("Your microphone is blocked").
@@ -43,7 +49,9 @@ pub struct Device {
 /// The person using the app.
 #[derive(Default)]
 pub struct Me {
+    /// Display name.
     pub name: String,
+    /// Status line ("Around this evening").
     pub status: String,
     /// Their identity key, hex: the avatar colour seed.
     pub id: String,
@@ -68,17 +76,21 @@ pub struct Me {
 pub struct Person {
     /// Their identity key, hex. Stable: what every action names them by.
     pub id: String,
+    /// The name you gave them.
     pub name: String,
     /// Where they were last reached.
     pub address: String,
     /// The fingerprint was compared out loud and matched.
     pub verified: bool,
+    /// What they last said about being around.
     pub presence: Presence,
     /// The last message, one line.
     pub last: Option<String>,
     /// When it was, short ("14:02", "Tue").
     pub last_at: Option<String>,
+    /// Messages from them not seen yet.
     pub unread: u32,
+    /// Their key's fingerprint in groups, for reading aloud.
     pub fingerprint: String,
     /// A private note about them.
     pub note: String,
@@ -95,8 +107,11 @@ pub struct Person {
 /// What a person last said about being around.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Presence {
+    /// Around.
     Online,
+    /// Around, but not paying attention.
     Away,
+    /// Asking not to be interrupted.
     Busy,
     /// Said nothing, or has not been reached this session.
     #[default]
@@ -106,6 +121,7 @@ pub enum Presence {
 /// The call, if any.
 #[derive(Clone, Debug, Default)]
 pub struct Call {
+    /// Where the call is.
     pub phase: Phase,
     /// The contact on the call, when they are one.
     pub peer: Option<String>,
@@ -119,7 +135,9 @@ pub struct Call {
     pub mode_detail: String,
     /// Seconds since it connected.
     pub seconds: u64,
+    /// My microphone is muted.
     pub muted: bool,
+    /// I am not hearing the call.
     pub deafened: bool,
     /// Loudness of my microphone after processing, 0..1.
     pub my_level: f32,
@@ -141,9 +159,11 @@ pub struct Call {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
     #[default]
+    /// No call.
     Idle,
     /// Placing a call.
     Dialing,
+    /// The call is up.
     Connected,
     /// It ended; why, for a moment.
     Ended(String),
@@ -166,6 +186,7 @@ impl Call {
 pub struct Conversation {
     /// The contact it is with.
     pub person: String,
+    /// The messages, oldest first.
     pub lines: Vec<Line>,
     /// Messages go live now (they are on a call).
     pub live: bool,
@@ -178,16 +199,23 @@ pub struct Conversation {
 /// One message.
 #[derive(Clone, Debug, Default)]
 pub struct Line {
+    /// The message's id within the conversation.
     pub id: u64,
+    /// I sent it.
     pub mine: bool,
+    /// Who wrote it; empty means the conversation's person (or me).
     pub author: String,
+    /// What it says.
     pub text: String,
     /// "14:02".
     pub time: String,
     /// Shown above the first message of a new day ("Today", "Monday 26 October").
     pub day: Option<String>,
+    /// How far it got, for my own messages.
     pub delivery: Delivery,
+    /// Its sender changed it after sending.
     pub edited: bool,
+    /// Kept at hand (pinned on this device only).
     pub pinned: bool,
     /// (emoji, how many).
     pub reactions: Vec<(String, u32)>,
@@ -199,11 +227,15 @@ pub struct Line {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Delivery {
     #[default]
+    /// Not mine, or nothing to say.
     None,
     /// Waiting in the outbox for them to be reachable.
     Queued,
+    /// Handed to the connection, not confirmed yet.
     Sent,
+    /// They have it.
     Delivered,
+    /// It could not be sent.
     Failed,
 }
 
@@ -212,72 +244,97 @@ pub enum Delivery {
 pub struct Transfers {
     /// A file they offered, waiting for yes or no: (name, size).
     pub offer: Option<(String, String)>,
+    /// Transfers under way.
     pub active: Vec<Transfer>,
 }
 
 /// A file on its way.
 #[derive(Clone, Debug, Default)]
 pub struct Transfer {
+    /// The file's name.
     pub name: String,
+    /// Coming to me rather than going out.
     pub incoming: bool,
     /// 0..1.
     pub progress: f32,
     /// "2.1 MB of 8 MB · 1.2 MB/s".
     pub detail: String,
+    /// Paused by the sender.
     pub paused: bool,
 }
 
 /// Whether people can reach this device.
 #[derive(Clone, Debug, Default)]
 pub struct Network {
+    /// The reachability check's answers.
     pub checks: Vec<Check>,
+    /// The port the door listens on.
     pub port: u16,
+    /// The relay to be reachable through; empty for none.
     pub relay: String,
 }
 
 /// One line of the reachability check.
 #[derive(Clone, Debug, Default)]
 pub struct Check {
+    /// The question ("Being called").
     pub label: String,
+    /// How it came out.
     pub state: CheckState,
+    /// One line on what it means.
     pub detail: String,
 }
 
 /// How a reachability check came out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CheckState {
+    /// Works.
     Good,
+    /// Works with a caveat, or needs a hand.
     Warn,
+    /// Does not work.
     Bad,
     #[default]
+    /// Not checked yet.
     Unknown,
 }
 
 /// The settings the screens show and change.
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
+    /// The theme's id.
     pub theme: String,
+    /// The accent's id.
     pub accent: String,
+    /// Microphones found.
     pub inputs: Vec<String>,
+    /// Speakers and headphones found.
     pub outputs: Vec<String>,
     /// The chosen devices; empty is the system default.
     pub input: String,
+    /// The chosen output device; empty is the system default.
     pub output: String,
+    /// How the microphone decides to send.
     pub transmit: Transmit,
     /// The push-to-talk key, as a name ("Caps Lock").
     pub ptt_key: String,
     /// Waiting for a key press to bind push-to-talk.
     pub ptt_capturing: bool,
+    /// Noise suppression is on.
     pub noise_suppression: bool,
+    /// Echo cancellation is on.
     pub echo_cancel: bool,
+    /// Automatic level is on.
     pub auto_gain: bool,
     /// The voice preset in use ("Natural", "Broadcast", ...).
     pub preset: String,
+    /// The voice presets to choose from.
     pub presets: Vec<String>,
     /// The microphone test is running, and its level.
     pub mic_test: Option<f32>,
     /// Master output volume, dB.
     pub output_db: f32,
+    /// Animations are off.
     pub reduced_motion: bool,
     /// Show a notification for messages while the window is not focused.
     pub notify_messages: bool,
@@ -292,15 +349,20 @@ pub struct Settings {
 /// How the microphone decides to send.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transmit {
+    /// Only while a key is held.
     PushToTalk,
     #[default]
+    /// When the microphone hears speech.
     Voice,
+    /// All the time.
     Open,
 }
 
 impl Transmit {
+    /// Every mode, in the order Settings offers them.
     pub const ALL: [Transmit; 3] = [Transmit::Voice, Transmit::PushToTalk, Transmit::Open];
 
+    /// The mode as Settings names it.
     pub fn label(self) -> &'static str {
         match self {
             Transmit::PushToTalk => "Push to talk",

@@ -46,22 +46,30 @@ pub enum Route {
     Home,
     /// A conversation.
     Person(String),
+    /// A part of Settings.
     Settings(Section),
 }
 
 /// A part of Settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
+    /// Your name and status.
     Profile,
+    /// Theme, accent and motion.
     Appearance,
+    /// Devices, how your voice is sent, and processing.
     Voice,
+    /// Whether people can reach you: port, relay, the reachability check.
     Network,
+    /// Version and where data is kept.
     About,
 }
 
 impl Section {
+    /// Every section, in the order the navigation lists them.
     pub const ALL: [Section; 5] = [Section::Profile, Section::Appearance, Section::Voice, Section::Network, Section::About];
 
+    /// The section's name as the navigation shows it.
     pub fn label(self) -> &'static str {
         match self {
             Section::Profile => "Profile",
@@ -72,6 +80,7 @@ impl Section {
         }
     }
 
+    /// The icon beside the section's name.
     pub fn icon(self) -> icons::Icon {
         match self {
             Section::Profile => icons::Icon::Users,
@@ -99,18 +108,26 @@ pub enum Dialog {
 /// How a toast is coloured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
+    /// Neutral news.
     Info,
+    /// Something worked.
     Ok,
+    /// Worth knowing, nothing broke.
     Warn,
+    /// Something failed.
     Err,
 }
 
 /// A short message in the corner.
 #[derive(Clone, Debug)]
 pub struct Toast {
+    /// Stable id, so a click can dismiss this toast and no other.
     pub id: u64,
+    /// What it says.
     pub text: String,
+    /// Its colour and icon.
     pub kind: ToastKind,
+    /// When it appeared, for its time-out.
     pub at: Instant,
 }
 
@@ -138,7 +155,9 @@ pub enum Action {
     CallAddress(String),
     /// Leave the call, or stop placing it.
     Hangup,
+    /// Stop or resume sending my voice.
     Mute(bool),
+    /// Stop or resume hearing the call.
     Deafen(bool),
     /// The person on the call: volume trim, dB (for someone not saved).
     PeerVolume(f32),
@@ -147,46 +166,112 @@ pub enum Action {
     /// Silence this contact for you only, or undo it; remembered.
     MuteFor(String, bool),
     /// Send a message.
-    Send { to: String, text: String },
-    Edit { to: String, id: u64, text: String },
-    Delete { to: String, id: u64 },
-    React { to: String, id: u64, emoji: String },
-    Pin { to: String, id: u64, pinned: bool },
+    Send {
+        /// The contact it goes to.
+        to: String,
+        /// What it says.
+        text: String,
+    },
+    /// Change the words of a message you sent.
+    Edit {
+        /// The contact the conversation is with.
+        to: String,
+        /// Which message.
+        id: u64,
+        /// The new words.
+        text: String,
+    },
+    /// Take back a message you sent, on both sides.
+    Delete {
+        /// The contact the conversation is with.
+        to: String,
+        /// Which message.
+        id: u64,
+    },
+    /// Add an emoji reaction to a message, or take yours off.
+    React {
+        /// The contact the conversation is with.
+        to: String,
+        /// Which message.
+        id: u64,
+        /// The emoji.
+        emoji: String,
+    },
+    /// Pin a message to the top of the conversation, or unpin it.
+    Pin {
+        /// The contact the conversation is with.
+        to: String,
+        /// Which message.
+        id: u64,
+        /// True to pin, false to unpin.
+        pinned: bool,
+    },
     /// Choose a file and offer it to the person on the call.
     SendFile,
+    /// Take the file the person on the call offered.
     AcceptFile,
+    /// Turn the offered file down.
     DeclineFile,
+    /// Stop the file on its way, in either direction.
     CancelTransfer,
     /// Add a contact from an invite link (or `host:port`).
-    AddPerson { name: String, invite: String },
+    AddPerson {
+        /// What to call them.
+        name: String,
+        /// Their invite link or `host:port`.
+        invite: String,
+    },
+    /// Remove a contact (their history stays on disk).
     Remove(String),
+    /// Block a contact: calls from them are refused and they are not told.
     Block(String),
+    /// Mark a contact verified (the words matched), or take it back.
     Verify(String, bool),
+    /// Give a contact a new name: (id, name).
     Rename(String, String),
+    /// Save a private note about a contact: (id, note).
     Note(String, String),
     /// Make a new invite link (the old one stops working for new people).
     RefreshInvite,
     /// Put text on the clipboard.
     Copy(String),
+    /// My display name, sent at the start of every call.
     SetName(String),
+    /// My status line, sent at the start of every call.
     SetStatus(String),
+    /// Pick a theme by its id (see [`theme::THEMES`]).
     Theme(String),
+    /// Pick an accent by its id (see [`theme::ACCENTS`]).
     Accent(String),
+    /// Use this microphone; empty is the system default.
     Input(String),
+    /// Use these speakers or headphones; empty is the system default.
     Output(String),
+    /// How the microphone decides to send.
     Transmit(Transmit),
     /// Wait for the next key press and bind it to push-to-talk.
     BindPtt,
+    /// Noise suppression on or off.
     NoiseSuppression(bool),
+    /// Echo cancellation on or off.
     EchoCancel(bool),
+    /// Automatic level on or off.
     AutoGain(bool),
+    /// Use a voice preset by name.
     Preset(String),
+    /// Start or stop hearing my own microphone.
     MicTest(bool),
+    /// Master output volume, dB.
     OutputVolume(f32),
+    /// Turn animations off (or back on).
     ReducedMotion(bool),
+    /// Notify about messages while the window is in the background.
     NotifyMessages(bool),
+    /// Open the door when the app starts.
     OpenOnStart(bool),
+    /// The relay to be reachable through; empty for none.
     Relay(String),
+    /// The port the door listens on.
     Port(u16),
     /// Re-run the reachability check.
     CheckNetwork,
@@ -203,35 +288,61 @@ pub enum Msg {
     Resized(Size),
     /// An animation frame (or a tick): advances animations and toasts.
     Frame(Instant),
+    /// Go to a screen.
     Nav(Route),
     /// Back: the phone layout's back arrow, the mouse's back button, Escape.
     Back,
+    /// The people search box changed.
     Search(String),
+    /// Open a dialog, or close the one that is open.
     Dialog(Option<Dialog>),
+    /// Show or hide the details panel beside a conversation.
     TogglePanel,
+    /// The composer's text changed.
     Draft(String),
+    /// Send what is in the composer.
     Send,
+    /// Start editing one of my messages: (id, its text).
     EditStart(u64, String),
+    /// The text being edited changed.
     EditDraft(String),
+    /// Save the edit.
     EditSave,
+    /// Drop the edit.
     EditCancel,
+    /// The add-person dialog's name box changed.
     AddName(String),
+    /// The add-person dialog's invite box changed.
     AddInvite(String),
+    /// Add the person from the invite typed in.
     AddSubmit,
     /// Call whatever is typed in the add-person box as an address.
     AddCall,
+    /// My name is being edited in Settings.
     NameEdit(String),
+    /// Save my name.
     NameSave,
+    /// My status is being edited in Settings.
     StatusEdit(String),
+    /// Save my status.
     StatusSave,
+    /// The relay box is being edited.
     RelayEdit(String),
+    /// Save the relay.
     RelaySave,
+    /// The port box is being edited (digits only are kept).
     PortEdit(String),
+    /// Save the port.
     PortSave,
+    /// The note about the open person is being edited.
     NoteEdit(String),
+    /// Save the note.
     NoteSave,
+    /// The first-run name box changed.
     FirstName(String),
+    /// Finish first run with the name typed.
     FirstDone,
+    /// Close a toast by its id.
     DismissToast(u64),
     /// Where the pointer is, so a right-click menu opens under it.
     Cursor(Point),
@@ -245,34 +356,57 @@ pub enum Msg {
 
 /// The interface's own state: what is open and what is typed.
 pub struct Ui {
+    /// The screen on view.
     route: Route,
+    /// The dialog that is open, if any.
     dialog: Option<Dialog>,
     /// Kept while the dialog animates out, so it can still be drawn.
     dialog_shown: Option<Dialog>,
+    /// Rises the dialog in and sinks it out.
     dialog_anim: Animation<bool>,
+    /// Whether the details panel should be open.
     panel_open: bool,
+    /// Slides the details panel open and shut.
     panel_anim: Animation<bool>,
+    /// What is typed in the people search box.
     search: String,
+    /// Unsent composer text, per contact id, kept when switching conversations.
     drafts: HashMap<String, String>,
+    /// The message being edited: (id, text so far).
     editing: Option<(u64, String)>,
+    /// The add-person dialog's name box.
     add_name: String,
+    /// The add-person dialog's invite (or address) box.
     add_invite: String,
+    /// Why adding failed, shown under the invite box.
     add_error: String,
+    /// My name while it is being edited; `None` shows the saved one.
     name_edit: Option<String>,
+    /// My status while it is being edited.
     status_edit: Option<String>,
+    /// The relay while it is being edited.
     relay_edit: Option<String>,
+    /// The port while it is being edited.
     port_edit: Option<String>,
+    /// The open person's note while it is being edited: (id, text).
     note_edit: Option<(String, String)>,
+    /// The first-run name box.
     first_name: String,
+    /// Toasts on screen, oldest first.
     toasts: Vec<Toast>,
+    /// The id the next toast gets.
     next_toast: u64,
+    /// Where the pointer last was, in window coordinates.
     cursor: Point,
     /// The person whose right-click menu is open, and where it opened.
     menu: Option<(String, Point)>,
+    /// The window's size, which picks the wide or phone layout.
     size: Size,
+    /// The time of the latest frame, which drives every animation.
     now: Instant,
     /// When the app started, for the looping pulses.
     epoch: Instant,
+    /// Animations off: everything jumps to its end state.
     reduced_motion: bool,
 }
 
@@ -283,6 +417,7 @@ impl Default for Ui {
 }
 
 impl Ui {
+    /// A fresh interface on the front step.
     pub fn new() -> Self {
         let now = Instant::now();
         Ui {
@@ -375,6 +510,7 @@ impl Ui {
         self.go(route)
     }
 
+    /// Opens or closes a dialog, starting its animation.
     fn set_dialog(&mut self, dialog: Option<Dialog>) {
         let at = self.now.max(Instant::now());
         self.now = at;
@@ -385,6 +521,7 @@ impl Ui {
         self.dialog = dialog;
     }
 
+    /// Moves to a screen, dropping per-screen state (an edit, a menu).
     fn go(&mut self, route: Route) -> Vec<Action> {
         self.editing = None;
         self.menu = None;

@@ -8,6 +8,7 @@ use crate::theme::{self, Btn};
 use crate::widgets::*;
 use crate::{El, Model, Msg, Ui};
 
+/// The welcome card: asks for a name before anything else.
 pub fn view<'a>(ui: &'a Ui, _m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let point = |i: Icon, title: &'a str, line: &'a str| -> El<'a, Msg> {

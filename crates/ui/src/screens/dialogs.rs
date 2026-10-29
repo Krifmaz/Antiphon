@@ -10,6 +10,7 @@ use crate::theme::{self, Btn};
 use crate::widgets::*;
 use crate::{Action, Dialog, El, Model, Msg, Ui};
 
+/// Draws dialog `d` as a card over a dimmed window; `rise` (0 to 1) slides it in.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Msg> {
     let close = Msg::Dialog(None);
     match d {

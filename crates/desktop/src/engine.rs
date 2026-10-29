@@ -35,84 +35,149 @@ const ENDED_FOR: Duration = Duration::from_secs(3);
 enum Event {
     /// A line about how a call attempt is going ("Looking them up...").
     Status(String),
-    Connected { incoming: bool, peer: String, name: String, code: String, mode: reachability::Mode, warning: Option<String>, known: bool },
+    /// The call is up and the audio is running.
+    Connected {
+        /// True when they called us.
+        incoming: bool,
+        /// Their contact id (public key, hex).
+        peer: String,
+        /// Their name, as saved or as they gave it.
+        name: String,
+        /// The words both sides read aloud to be sure.
+        code: String,
+        /// How the audio travels: direct, through the router, or relayed.
+        mode: reachability::Mode,
+        /// A trust warning to show, such as a key that changed.
+        warning: Option<String>,
+        /// Whether they are a saved contact.
+        known: bool,
+    },
     /// The call could not be made, or the audio would not start.
     Failed(String),
     /// Listening on the door's port failed.
     ListenFailed(String),
+    /// The STUN check finished: our public address, or why not.
     Public(Result<String, String>),
+    /// The router port mapping finished: the outside port, or why not.
     PortMap(Result<u16, String>),
+    /// A push-to-talk key capture finished: the key's name, or why not.
     Key(Result<String, String>),
+    /// A note to show the person.
     Toast(String, ToastKind),
 }
 
 /// What the app should do in the interface after the engine acted.
 pub enum Out {
+    /// Show a toast.
     Toast(String, ToastKind),
     /// Open this screen (an incoming call from a contact).
     Show(ui::Route),
     /// A contact was added: close the dialog and open them.
     Added(String),
+    /// Adding a contact failed: keep the dialog open and say why.
     AddFailed(String),
+    /// Put this text on the clipboard.
     Copy(String),
 }
 
 /// Whether the background task is placing a call or waiting for one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskKind {
+    /// Waiting for someone to call in on the door's port.
     Listen,
+    /// Placing a call out.
     Dial,
 }
 
+/// The call as the interface sees it, kept between ticks.
 #[derive(Default)]
 struct CallInfo {
+    /// Dialing, connected, ended, or nothing.
     phase: ui::Phase,
+    /// The other side's contact id, once known.
     peer: Option<String>,
+    /// The other side's name.
     name: String,
+    /// The verification words.
     code: String,
+    /// Short name of the route ("Direct", "Relayed").
     mode: String,
+    /// A sentence explaining the route.
     mode_detail: String,
+    /// A trust warning from connecting, if any.
     warning: Option<String>,
+    /// Progress while dialing, or why the call ended.
     status: Option<String>,
+    /// When the call ended, to clear the reason after [`ENDED_FOR`].
     ended_at: Option<Instant>,
 }
 
 /// The open conversation, built once per change rather than per frame.
 struct ConvCache {
+    /// Whose conversation it is.
     person: String,
+    /// Whether it was built from the live call's chat (vs. saved history).
     live: bool,
+    /// The live chat's revision counter when built; a change means rebuild.
     rev: u32,
+    /// The built lines.
     lines: Vec<ui::Line>,
 }
 
+/// The call engine: owns the client state, the saved config, and whatever
+/// background task is listening or dialing.
 pub struct Engine {
+    /// Shared state the audio pipeline and network tasks also hold.
     state: Arc<AppState>,
+    /// Results from background tasks, drained on each tick.
     events: Arc<Mutex<Vec<Event>>>,
+    /// What the app should do in the interface; the app takes these.
     pub out: Vec<Out>,
+    /// Saved settings and contacts.
     cfg: config::AppConfig,
+    /// The background task listening or dialing, and which it is.
     task: Option<(TaskKind, tokio::task::JoinHandle<()>)>,
+    /// The call as shown.
     call: CallInfo,
+    /// Whether we are taking calls (listening on the port).
     door: bool,
+    /// Our public address from STUN, once known.
     public: Option<String>,
+    /// What the checks found about being reachable.
     reach: reachability::Reachability,
+    /// Our invite link.
     invite: String,
+    /// The invite as a QR code, built once.
     qr: Option<Arc<qr_code::Data>>,
+    /// The config folder, if there is one.
     dir: Option<PathBuf>,
+    /// The key that seals saved history and backups.
     key: Option<BackupKey>,
+    /// The open conversation, cached.
     conv: Option<ConvCache>,
     /// Last message per contact: (text, unix seconds).
     previews: HashMap<String, (String, u64)>,
+    /// Unread message count per contact.
     unread: HashMap<String, u32>,
     /// How many chat lines the call had at the last look, to count new ones.
     seen_lines: usize,
+    /// Microphone names, listed at start.
     inputs: Vec<String>,
+    /// Speaker names, listed at start.
     outputs: Vec<String>,
+    /// True while waiting for a key press to set push-to-talk.
     ptt_capturing: bool,
+    /// The last delivery round handled; a new number means messages moved.
     delivery_seen: u64,
+    /// The last LAN discovery count handled; a new number means new peers.
     discovery_seen: u64,
+    /// The relay the peer last told us about, saved to their contact.
     peer_relay_saved: String,
+    /// The VPN routes the peer last told us about, saved to their contact.
     peer_routes_saved: String,
+    /// The peer's meter level, decaying between frames.
     their_level: f32,
+    /// True while a STUN check is running.
     checking: bool,
 }
 
@@ -159,14 +224,17 @@ impl Engine {
         engine
     }
 
+    /// Queues a background result for the next tick.
     fn push(events: &Arc<Mutex<Vec<Event>>>, e: Event) {
         events.lock().unwrap().push(e);
     }
 
+    /// Asks the app to show a toast.
     fn toast(&mut self, text: impl Into<String>, kind: ToastKind) {
         self.out.push(Out::Toast(text.into(), kind));
     }
 
+    /// Writes the config to disk.
     fn save(&self) {
         config::save(&self.cfg);
     }
@@ -245,6 +313,7 @@ impl Engine {
         self.watch_call(open);
     }
 
+    /// Reads a yes/no from the running call; false when there is none.
     fn flag(&self, read: impl Fn(&state::ActiveCall) -> bool) -> bool {
         self.state.call.lock().unwrap().as_ref().map(read).unwrap_or(false)
     }
@@ -355,15 +424,18 @@ impl Engine {
         }
     }
 
+    /// Whether the newest saved message with `id` came from them.
     fn last_from_them(&self, id: &str) -> bool {
         let (Some(dir), Some(key)) = (&self.dir, &self.key) else { return false };
         history::load(dir, id, key).last().is_some_and(|m| !m.from_me)
     }
 
+    /// Whether we are connected to `id` right now.
     fn call_with(&self, id: &str) -> bool {
         self.call.peer.as_deref() == Some(id) && self.call.phase == ui::Phase::Connected
     }
 
+    /// Reads the last saved message of every contact, for the list previews.
     fn load_previews(&mut self) {
         let (Some(dir), Some(key)) = (&self.dir, &self.key) else { return };
         for c in &self.cfg.contacts {
@@ -378,6 +450,7 @@ impl Engine {
         }
     }
 
+    /// Applies one background result.
     fn on_event(&mut self, e: Event) {
         match e {
             Event::Status(s) => self.call.status = Some(s),
@@ -480,6 +553,7 @@ impl Engine {
         }
     }
 
+    /// Everything a connect task needs, cloned out of the engine.
     fn pipeline_args(&self) -> Connect {
         Connect {
             state: self.state.clone(),
@@ -491,6 +565,7 @@ impl Engine {
         }
     }
 
+    /// Cancels the listen or dial task, if one is running.
     fn stop_task(&mut self) {
         if let Some((_, t)) = self.task.take() {
             t.abort();
@@ -536,6 +611,7 @@ impl Engine {
         Some((relay, Box::new(move || connection_mode::listening_tokens(&config::load().contacts, &identity, Some(secret), now_secs()))))
     }
 
+    /// Opens or closes the door: listen and map a router port, or stop.
     fn set_door(&mut self, open: bool) {
         self.door = open;
         if open {
@@ -548,6 +624,7 @@ impl Engine {
         }
     }
 
+    /// Asks the router to forward our port inward, in the background.
     fn map_port(&mut self) {
         let port = self.cfg.stoop.port;
         let state = self.state.clone();
@@ -564,6 +641,7 @@ impl Engine {
         });
     }
 
+    /// Runs the STUN check for our public address, unless one is running.
     fn check_network(&mut self) {
         if self.checking {
             return;
@@ -598,6 +676,7 @@ impl Engine {
         }
     }
 
+    /// Calls a saved contact, by the route their contact says (direct, DHT lookup or relay).
     fn call_contact(&mut self, id: &str) {
         if self.call.phase == ui::Phase::Connected || self.call.phase == ui::Phase::Dialing {
             self.toast("You're already on a call", ToastKind::Warn);
@@ -643,6 +722,7 @@ impl Engine {
         self.task = Some((TaskKind::Dial, handle));
     }
 
+    /// Calls a bare `host:port` someone typed.
     fn call_address(&mut self, address: String) {
         if self.call.phase == ui::Phase::Connected || self.call.phase == ui::Phase::Dialing {
             self.toast("You're already on a call", ToastKind::Warn);
@@ -694,6 +774,7 @@ impl Engine {
         self.end(why);
     }
 
+    /// Marks the call ended, with the reason to show for a moment.
     fn end(&mut self, why: String) {
         self.call.phase = ui::Phase::Ended(why);
         self.call.ended_at = Some(Instant::now());
@@ -701,6 +782,7 @@ impl Engine {
         self.their_level = 0.0;
     }
 
+    /// Runs `f` on the running call, if there is one.
     fn with_call<R>(&self, f: impl FnOnce(&state::ActiveCall) -> R) -> Option<R> {
         self.state.call.lock().unwrap().as_ref().map(f)
     }
@@ -992,12 +1074,14 @@ impl Engine {
         }
     }
 
+    /// Applies the edited voice chain to a running call and saves it.
     fn chain_changed(&mut self) {
         let chain = self.cfg.chain.clone();
         self.with_call(|a| a.apply_chain_config(chain));
         self.save();
     }
 
+    /// Copies the saved transmit mode and push-to-talk key into the live state.
     fn sync_transmit(&self) {
         let t = &self.state.transmit;
         let mode = transmit_mode(self.cfg.transmit_mode);
@@ -1008,6 +1092,7 @@ impl Engine {
         caps_lock::set_bound(*t.ptt_key.lock().unwrap() == Keycode::CapsLock && mode == MODE_PTT);
     }
 
+    /// Waits, in the background, for the next key press and makes it the push-to-talk key.
     fn bind_ptt(&mut self) {
         if self.ptt_capturing {
             return;
@@ -1026,6 +1111,7 @@ impl Engine {
         });
     }
 
+    /// Starts or stops hearing your own microphone.
     fn mic_test(&mut self, on: bool) {
         let mut loopback = self.state.loopback.lock().unwrap();
         if !on {
@@ -1046,6 +1132,7 @@ impl Engine {
         }
     }
 
+    /// Asks for a file and offers it to the person on the call.
     fn send_file(&mut self) {
         if self.state.call.lock().unwrap().is_none() {
             self.toast("Files go to the person you're on a call with", ToastKind::Info);
@@ -1078,6 +1165,7 @@ impl Engine {
         });
     }
 
+    /// Adds a contact from an invite link typed or pasted as `text`.
     fn add_person(&mut self, name: String, text: String) {
         let invite = match antiphon_crypto::Invite::parse(text.trim()) {
             Ok(invite) => invite,
@@ -1143,6 +1231,7 @@ impl Engine {
         }
     }
 
+    /// Your card: name, status, invite, addresses and greeting.
     fn me(&self) -> ui::Me {
         let key = self.state.identity.public().identity_key;
         let hour = chrono::Timelike::hour(&chrono::Local::now());
@@ -1167,6 +1256,7 @@ impl Engine {
         }
     }
 
+    /// Every contact as the interface shows them, most recent first.
     fn people(&self) -> Vec<ui::Person> {
         let mut people: Vec<ui::Person> = self
             .cfg
@@ -1215,6 +1305,7 @@ impl Engine {
         people
     }
 
+    /// The call as the interface shows it.
     fn call_model(&self) -> ui::Call {
         let c = &self.call;
         let mut m = ui::Call {
@@ -1256,6 +1347,7 @@ impl Engine {
         m
     }
 
+    /// Files on their way in either direction.
     fn transfers(&self) -> ui::Transfers {
         let mut t = ui::Transfers::default();
         let call = self.state.call.lock().unwrap();
@@ -1286,6 +1378,7 @@ impl Engine {
         t
     }
 
+    /// The reachability checks and network settings.
     fn network(&self) -> ui::Network {
         let checks = self
             .reach
@@ -1305,6 +1398,7 @@ impl Engine {
         ui::Network { checks, port: self.cfg.stoop.port, relay: self.cfg.relay_server.clone() }
     }
 
+    /// The settings screen's values.
     fn settings(&self) -> ui::Settings {
         let mut presets = vec![NATURAL.to_string()];
         presets.extend(antiphon_audio::eq_preset_names().iter().map(|s| s.to_string()));
@@ -1460,11 +1554,17 @@ impl Engine {
 
 /// What finishing a connection needs, captured before the task starts.
 struct Connect {
+    /// The shared client state the call is set up in.
     state: Arc<AppState>,
+    /// Where to report how it went.
     events: Arc<Mutex<Vec<Event>>>,
+    /// The voice chain to start the microphone with.
     chain: ChainConfig,
+    /// The microphone to use; `None` for the system default.
     input: Option<String>,
+    /// The speakers to use; `None` for the system default.
     output: Option<String>,
+    /// Our name and details, sent to the other side first.
     hello: Hello,
 }
 
@@ -1736,6 +1836,7 @@ pub fn start_state(runtime: tokio::runtime::Handle) -> anyhow::Result<Arc<AppSta
 
 // ---------------------------------------------------------------- helpers
 
+/// The live transmit mode for the saved number (0 push to talk, 1 voice, 2 open mic).
 fn transmit_mode(stored: i32) -> u32 {
     match stored {
         1 => MODE_VOICE_ACTIVATION,
@@ -1757,26 +1858,32 @@ fn key_label(name: &str) -> String {
     out
 }
 
+/// A contact's id: their key, or their address for one saved before keys.
 fn contact_id(c: &config::Contact) -> String {
     if c.identity_key.is_empty() { c.address.clone() } else { c.identity_key.clone() }
 }
 
+/// Where contact `id` is in the list.
 fn contact_index(cfg: &config::AppConfig, id: &str) -> Option<usize> {
     cfg.contacts.iter().position(|c| contact_id(c) == id)
 }
 
+/// Contact `id`, if saved.
 fn find_contact<'a>(cfg: &'a config::AppConfig, id: &str) -> Option<&'a config::Contact> {
     contact_index(cfg, id).map(|i| &cfg.contacts[i])
 }
 
+/// Contact `id`, to edit.
 fn contact_mut<'a>(cfg: &'a mut config::AppConfig, id: &str) -> Option<&'a mut config::Contact> {
     contact_index(cfg, id).map(move |i| &mut cfg.contacts[i])
 }
 
+/// Seconds since the Unix epoch.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Unix seconds as local time.
 fn local(secs: u64) -> chrono::DateTime<chrono::Local> {
     chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default().with_timezone(&chrono::Local)
 }
@@ -1808,6 +1915,7 @@ pub fn short_time(secs: u64) -> String {
     }
 }
 
+/// How long messages last, as a sentence ("Messages vanish after 2 hours").
 fn expiry_label(secs: u64) -> String {
     let span = match secs {
         s if s < 3600 => format!("{} minutes", s / 60),
@@ -1818,6 +1926,7 @@ fn expiry_label(secs: u64) -> String {
     format!("Messages vanish after {span}")
 }
 
+/// A byte count people can read ("3.4 MB").
 pub fn human_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["KB", "MB", "GB"];
     if bytes < 1024 {
@@ -1840,10 +1949,12 @@ fn local_ip() -> Option<std::net::IpAddr> {
     socket.local_addr().ok().map(|a| a.ip())
 }
 
+/// The Downloads folder in your home, if it exists.
 fn dirs_downloads() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads")).filter(|p| p.exists())
 }
 
+/// Opens `path` in the file manager.
 fn open_folder(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     let program = "explorer";

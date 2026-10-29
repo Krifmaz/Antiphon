@@ -86,6 +86,7 @@ impl FileSource {
         }
     }
 
+    /// Whether the file has no bytes.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

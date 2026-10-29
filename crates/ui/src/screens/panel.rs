@@ -10,6 +10,7 @@ use crate::theme::{self, Badge, Btn};
 use crate::widgets::*;
 use crate::{Action, Dialog, El, Model, Msg, Person, Phase, Ui};
 
+/// The details panel for `person`, shown beside their conversation.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
     let p = theme::look();
     // The avatar hangs off the banner's bottom edge; the first layer sets

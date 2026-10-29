@@ -14,6 +14,7 @@ use crate::{Action, Delivery, El, Line, Model, Msg, Person, Phase, Ui};
 /// Reactions offered on a message.
 const QUICK: [&str; 4] = ["👍", "❤️", "😂", "😮"];
 
+/// The conversation with `person`: header, call stage, messages and composer.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
     let Some(person) = m.people.iter().find(|p| p.id == id) else {
         return container(empty(Icon::Users, "They are not in your contacts", "They may have been removed.")).center(Length::Fill).into();

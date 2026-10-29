@@ -10,6 +10,7 @@ use crate::theme::{self, Btn};
 use crate::widgets::*;
 use crate::{Action, Dialog, El, Model, Msg, Route, Ui};
 
+/// How wide the menu card is.
 const WIDTH: f32 = 264.0;
 /// Roughly how tall the menu is, to keep it on screen near the bottom edge.
 const HEIGHT: f32 = 236.0;

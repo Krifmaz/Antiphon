@@ -121,6 +121,7 @@ pub fn to_hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b))
 }
 
+/// Relative luminance (0 dark to 1 light) per WCAG, from linearised sRGB.
 fn luminance(c: Color) -> f32 {
     let f = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
     0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
@@ -222,6 +223,8 @@ pub fn palette(theme: &str, accent: &str, custom: &str, system_dark: bool) -> Pa
     }
 }
 
+/// The palette every style reads: set by `set`, read by `look`, so styles
+/// need no palette argument (iced style functions only get the `Theme`).
 static LOOK: RwLock<Option<Palette>> = RwLock::new(None);
 
 /// Makes `p` the look every style reads.
@@ -265,6 +268,7 @@ pub fn mono() -> Font {
     Font::MONOSPACE
 }
 
+/// No shadow at all.
 fn no_shadow() -> Shadow {
     Shadow::default()
 }
@@ -281,6 +285,7 @@ pub fn shadow(p: &Palette) -> Shadow {
     }
 }
 
+/// The accent fill, a diagonal blend of the two accent colours.
 fn accent_gradient(p: &Palette) -> Background {
     Background::Gradient(iced_core::Gradient::Linear(
         iced_core::gradient::Linear::new(iced_core::Radians(2.356)).add_stop(0.0, p.accent).add_stop(1.0, p.accent2),
@@ -327,6 +332,7 @@ pub fn btn(kind: Btn) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| button_style(kind, status)
 }
 
+/// How a button of `kind` looks in `status` (resting, hovered, pressed, disabled).
 fn button_style(kind: Btn, status: button::Status) -> button::Style {
     use button::Status::{Disabled, Hovered, Pressed};
     let p = look();
@@ -574,6 +580,7 @@ pub fn scroll(_: &Theme, status: scrollable::Status) -> scrollable::Style {
 
 // ----- containers ----------------------------------------------------------
 
+/// A rounded box with background `bg` and a 1 px `line` border.
 fn boxed(bg: Color, line: Color, radius: f32) -> container::Style {
     container::Style {
         text_color: None,
@@ -584,6 +591,7 @@ fn boxed(bg: Color, line: Color, radius: f32) -> container::Style {
     }
 }
 
+/// A square box of plain colour `bg`.
 fn filled(bg: Color) -> container::Style {
     container::Style { text_color: Some(look().text), background: Some(Background::Color(bg)), ..container::Style::default() }
 }
@@ -787,11 +795,17 @@ pub fn bubble_mine(_: &Theme) -> container::Style {
 /// The badge kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Badge {
+    /// Grey, for plain facts.
     Plain,
+    /// Green, for good news.
     Ok,
+    /// Amber, for something to look at.
     Warn,
+    /// Red, for something wrong.
     Err,
+    /// Blue, for a neutral note.
     Info,
+    /// The accent colour, for what is yours.
     Accent,
 }
 
