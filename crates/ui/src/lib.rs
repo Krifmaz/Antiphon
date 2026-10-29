@@ -353,6 +353,9 @@ pub enum Action {
     Speaker(bool),
     /// Turn my camera on (true) or off.
     Camera(bool),
+    /// Switch to the other camera, front or back. Only a phone shows the
+    /// button: a desktop's webcam has no other side.
+    FlipCamera,
     /// Start (true) or stop sharing my screen.
     ShareScreen(bool),
     /// The push-to-talk pad was pressed (true) or let go.

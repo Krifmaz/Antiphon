@@ -33,3 +33,8 @@ objc2-call-kit = "0.3.2"
 objc2-push-kit = "0.3.2"
 objc2-user-notifications = "0.3.2"
 objc2-uniform-type-identifiers = "0.3.2"
+# The phone's camera for video calls: a capture session whose frames come
+# to a delegate as CoreMedia sample buffers holding CoreVideo pixel buffers.
+objc2-av-foundation = { version = "0.3.2", features = ["block2", "dispatch2", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"

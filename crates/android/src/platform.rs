@@ -21,9 +21,12 @@ use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use antiphon_mobile::camera::CameraRequest;
 use antiphon_mobile::platform::{BackgroundWork, Network, Platform};
 use jni::objects::{JClass, JObject, JValue};
 use jni::{JNIEnv, JavaVM};
+
+use crate::camera;
 
 /// Android's half of [`Platform`]. It holds nothing: the activity and the
 /// JavaVM are fetched from `ndk-context` on every call, so it is free to
@@ -103,10 +106,39 @@ impl Platform for Android {
     fn request_battery_exemption(&self) {
         call_activity("asking for a battery exemption", "requestBatteryExemption");
     }
+
+    /// Every Android phone this app runs on has at least one camera
+    /// service; a phone without a camera fails when it is started.
+    fn has_camera(&self) -> bool {
+        true
+    }
+
+    fn has_camera_permission(&self) -> bool {
+        has_permission(CAMERA)
+    }
+
+    fn request_camera_permission(&self) {
+        request_permission(CAMERA, CAMERA_REQUEST);
+    }
+
+    fn start_camera(&self, request: CameraRequest) -> Result<(), String> {
+        camera::start(request)
+    }
+
+    fn stop_camera(&self) {
+        camera::stop();
+    }
 }
 
 /// `Manifest.permission.RECORD_AUDIO`, the run-time microphone permission.
 const RECORD_AUDIO: &str = "android.permission.RECORD_AUDIO";
+/// `Manifest.permission.CAMERA`, the run-time camera permission.
+const CAMERA: &str = "android.permission.CAMERA";
+/// The request code for the microphone prompt.
+const MIC_REQUEST: i32 = 1;
+/// The request code for the camera prompt. `AntiphonActivity` uses 2 for
+/// the file picker and 3 for notifications, so this takes the next.
+const CAMERA_REQUEST: i32 = 4;
 /// `PackageManager.PERMISSION_GRANTED`.
 const PERMISSION_GRANTED: i32 = 0;
 /// `AudioManager.MODE_NORMAL`: no call, audio plays as media.
@@ -161,8 +193,21 @@ fn with_activity<T>(what: &str, f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::er
 /// Whether the user has granted microphone access. Android asks at run
 /// time, not at install, so this can change while the app is open.
 fn has_mic_permission() -> bool {
-    with_activity("checking microphone permission", |env, activity| {
-        let name = env.new_string(RECORD_AUDIO)?;
+    has_permission(RECORD_AUDIO)
+}
+
+/// Shows the system's microphone permission prompt. The answer is not
+/// reported back to native code, so callers check [`has_mic_permission`]
+/// again when the activity resumes.
+fn request_mic_permission() {
+    request_permission(RECORD_AUDIO, MIC_REQUEST);
+}
+
+/// Whether the user has granted the run-time permission `permission`
+/// (a `Manifest.permission` name).
+fn has_permission(permission: &str) -> bool {
+    with_activity("checking a permission", |env, activity| {
+        let name = env.new_string(permission)?;
         let result = env
             .call_method(activity, "checkSelfPermission", "(Ljava/lang/String;)I", &[JValue::Object(&name)])?
             .i()?;
@@ -171,14 +216,14 @@ fn has_mic_permission() -> bool {
     .unwrap_or(false)
 }
 
-/// Shows the system's microphone permission prompt. The answer is not
-/// reported back to native code, so callers check [`has_mic_permission`]
-/// again when the activity resumes.
-fn request_mic_permission() {
-    with_activity("requesting microphone permission", |env, activity| {
-        let name = env.new_string(RECORD_AUDIO)?;
+/// Shows the system's prompt for `permission`. `code` only tells the
+/// answers apart in `onRequestPermissionsResult`, which the shared code
+/// does not use: it checks [`has_permission`] again instead.
+fn request_permission(permission: &str, code: i32) {
+    with_activity("requesting a permission", |env, activity| {
+        let name = env.new_string(permission)?;
         let array = env.new_object_array(1, "java/lang/String", &name)?;
-        env.call_method(activity, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&array), JValue::Int(1)])?;
+        env.call_method(activity, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&array), JValue::Int(code)])?;
         Ok(())
     });
 }

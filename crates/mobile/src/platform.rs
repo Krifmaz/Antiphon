@@ -114,6 +114,39 @@ pub trait Platform: Send + Sync + 'static {
         let end = start.saturating_add(len).min(bytes.len());
         Ok(bytes[start..end].to_vec())
     }
+
+    // The camera, for sending video on a call. A platform that leaves
+    // these as they are has no camera button: [`Platform::has_camera`]
+    // says no.
+
+    /// Whether this platform can run a camera through
+    /// [`Platform::start_camera`] at all. Decides whether the call screen
+    /// offers a camera button; a phone whose camera is refused or busy
+    /// still says yes here and fails when it is started.
+    fn has_camera(&self) -> bool {
+        false
+    }
+    /// Whether the user has allowed the camera. Asked at run time on both
+    /// platforms, so this can change while the app is open.
+    fn has_camera_permission(&self) -> bool {
+        false
+    }
+    /// Shows the system's camera prompt. The answer arrives later; the
+    /// shared code checks [`Platform::has_camera_permission`] again when
+    /// the app resumes, as for the microphone.
+    fn request_camera_permission(&self) {}
+    /// Starts the camera on `request.facing`'s side, as near the asked
+    /// size and rate as it offers, closing whichever camera was open
+    /// first (that is how the shared code switches cameras). Frames go to
+    /// [`camera_frame`] on any thread; a camera that stops by itself
+    /// afterwards says so through [`camera_failed`]. The error is a
+    /// sentence for the user, for a camera that cannot start at all.
+    fn start_camera(&self, _request: crate::camera::CameraRequest) -> Result<(), String> {
+        Err("This phone's camera is not supported yet".into())
+    }
+    /// Closes the camera, and with it the camera light. Does nothing when
+    /// none is open.
+    fn stop_camera(&self) {}
 }
 
 /// The network the phone is on.
@@ -357,4 +390,50 @@ pub fn request_battery_exemption() {
     if let Some(p) = get() {
         p.request_battery_exemption();
     }
+}
+
+/// [`Platform::has_camera`], or `false` before a platform is installed.
+pub fn has_camera() -> bool {
+    get().is_some_and(|p| p.has_camera())
+}
+
+/// [`Platform::has_camera_permission`], or `false` before a platform is
+/// installed.
+pub fn has_camera_permission() -> bool {
+    get().is_some_and(|p| p.has_camera_permission())
+}
+
+/// [`Platform::request_camera_permission`].
+pub fn request_camera_permission() {
+    if let Some(p) = get() {
+        p.request_camera_permission();
+    }
+}
+
+/// [`Platform::start_camera`], or an error before a platform is installed.
+pub fn start_camera(request: crate::camera::CameraRequest) -> Result<(), String> {
+    get().map_or(Err("No camera".into()), |p| p.start_camera(request))
+}
+
+/// [`Platform::stop_camera`].
+pub fn stop_camera() {
+    if let Some(p) = get() {
+        p.stop_camera();
+    }
+}
+
+/// Hands one camera picture to the shared code, from whatever thread the
+/// platform's camera calls back on. The image is only borrowed: it is
+/// converted (or skipped, when it came sooner than the frame rate wants)
+/// before this returns, so the platform can release its buffer straight
+/// after.
+pub fn camera_frame(image: &crate::camera::CameraImage) {
+    crate::camera_source::deliver(image);
+}
+
+/// Says the camera stopped by itself, with a sentence for the user: taken
+/// by another app, disconnected, or an error. The call stops sending video
+/// and the button shows the camera off.
+pub fn camera_failed(why: impl Into<String>) {
+    crate::camera_source::fail(why.into());
 }

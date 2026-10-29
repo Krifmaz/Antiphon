@@ -368,6 +368,11 @@ pub struct Transfers {
     /// Files waiting their turn, in the order they will go. One goes at a
     /// time: the call and the files share one connection.
     pub queued: Vec<QueuedFile>,
+    /// Files can be chosen for a person with no call up: they join
+    /// [`queued`](Self::queued) and go at the next call with them. The
+    /// phone app keeps its queue across restarts by file handle; the
+    /// desktop offers files only during a call.
+    pub pick_anytime: bool,
 }
 
 /// A file waiting to be sent.

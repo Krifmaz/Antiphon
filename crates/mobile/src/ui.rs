@@ -9,6 +9,7 @@
 //! messages, file progress, the end of a call -- reaches the screen and
 //! the disk.
 
+mod camera;
 mod stoop;
 
 use std::collections::HashMap;
@@ -372,6 +373,13 @@ pub struct App {
     tiles: HashMap<String, (u64, antiphon_ui::VideoTile)>,
     /// Muted from the call screen: nothing is sent, however the mic is keyed.
     muted: bool,
+    /// The camera button is on: the camera is sending, or will be once the
+    /// permission prompt is answered or the app is back on screen.
+    camera_wanted: bool,
+    /// Which camera to open, front or back, as last switched to.
+    camera_facing: crate::camera::Facing,
+    /// The camera permission prompt is up, waiting for an answer.
+    camera_prompt: Option<camera::PermissionWait>,
     /// The push-to-talk pad is held.
     talking: bool,
     /// When the call on now connected, for its clock.
@@ -469,6 +477,9 @@ impl App {
             previews,
             tiles: HashMap::new(),
             muted: false,
+            camera_wanted: false,
+            camera_facing: crate::camera::Facing::default(),
+            camera_prompt: None,
             talking: false,
             connected_at: None,
             size: Size::new(0.0, 0.0),
@@ -522,6 +533,7 @@ impl App {
         if self.live_peer.is_some() && self.stoop.open_person() == self.live_peer.as_deref() {
             self.unread = 0;
         }
+        self.camera_resumed();
         self.refresh();
     }
 
@@ -532,6 +544,7 @@ impl App {
     /// something the user started.
     pub fn suspended(&mut self) {
         self.foreground = false;
+        self.camera_suspended();
         self.battery_saver = platform::battery_saver();
         let keep = data_rules::listen_in_background(
             self.settings.keep_listening_in_background,
@@ -765,6 +778,7 @@ impl App {
         let link = self.link();
         let saver = data_rules::data_saver_active(self.data_settings(), link);
         self.engine.set_data_saver(saver);
+        crate::camera_source::set_low_data(saver);
         crate::config::set_transfer_limits(crate::transfer_limits::TransferLimits {
             upload_kbps: data_rules::upload_cap_kbps(self.data_settings(), link),
             ..Default::default()
@@ -848,6 +862,8 @@ impl App {
                 relay: String::new(),
                 lends_relay: false,
                 routes: String::new(),
+                // The phone runs no relay of its own to lend.
+                lends_relay: false,
             }));
             live.send(ControlMessage::Profile(card));
         }

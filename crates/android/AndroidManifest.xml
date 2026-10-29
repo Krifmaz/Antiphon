@@ -13,10 +13,20 @@
     package="org.antiphon.app">
 
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
+    <!-- A camera is for video on a call, which is optional: a phone or
+         tablet without one still installs the app and makes voice calls. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Sending video from the phone's camera on a call (asked at run time,
+         when the camera button is first pressed). The camera is only used
+         while the app is on screen: it is turned off when the app goes to
+         the background and back on when it returns, so the call service
+         needs no camera foreground-service type. -->
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Wi-Fi or metered, for "only on Wi-Fi" limits. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
