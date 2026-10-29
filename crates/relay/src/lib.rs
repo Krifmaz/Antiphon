@@ -32,6 +32,7 @@
 //! The core is a plain state machine ([`Relay::handle`]) so it can be
 //! tested without sockets; [`run`] is the thin loop around it.
 
+pub mod board;
 pub mod node_link;
 pub mod federation;
 pub mod files;

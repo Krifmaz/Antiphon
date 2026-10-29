@@ -551,8 +551,8 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(m) = &mailbox {
                     let m = m.lock().unwrap().stats();
                     println!(
-                        "mailbox inboxes={} held={} held_bytes={} bytes_in={} bytes_out={} refused={}",
-                        m.inboxes, m.held, m.held_bytes, m.bytes_in, m.bytes_out, m.refused
+                        "mailbox inboxes={} held={} held_bytes={} boards={} board_bytes={} bytes_in={} bytes_out={} refused={}",
+                        m.inboxes, m.held, m.held_bytes, m.boards, m.board_bytes, m.bytes_in, m.bytes_out, m.refused
                     );
                 }
                 if let Some(s) = &sfu {
