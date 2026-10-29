@@ -1,0 +1,379 @@
+name: release
+
+# Stoop's releases, the way Encore makes them. Two kinds:
+#   Releases: Actions → release → Run workflow. A normal GitHub release tagged v<version>, titled
+#   "Stoop <version>" and marked Latest. Versions are plain MAJOR.MINOR.PATCH: by default the next number
+#   bumps PATCH of the newest v<version> release; pick "minor"/"major" or type the version by hand (e.g.
+#   1.0.0). The first release takes the version in Cargo.toml. The tag is created through the release (the
+#   API may create tags; a git push from the Actions token may not). Untick "publish" to build and package
+#   everything without making a release: the files stay on the run as artifacts, the notes in its summary.
+#   Hotfixes: every push to main. Version <newest release>.<run number> (0.2.1.57), tagged hotfix-<version>,
+#   titled "Stoop <version> (hotfix)" and marked Latest, so the download link always has the newest build.
+#   Only the newest three hotfixes are kept; a full release counts as newer than all of them, and the bump
+#   above only looks at v<version> releases, so it never picks up a hotfix number.
+#   A pull request that changes the packaging runs everything but the publish step, so a broken installer
+#   shows up before a release needs it.
+#
+#   Files (packaging/package.sh; the Android job runs once crates/android is in the tree):
+#     Windows  Stoop-<v>-windows-x86_64.exe     the installer, per user, no administrator rights
+#     Linux    Stoop-<v>-linux-x86_64.AppImage, stoop_<v>_amd64.deb, and stoop-<v>-linux-x86_64.tar.gz
+#     macOS    Stoop-<v>-macos-aarch64.dmg      signed ad hoc
+#     Android  Stoop-android-<v>.apk
+#     SHA256SUMS covers every file of the release, then the bare desktop binaries inside them (BUILDING.md).
+#   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release,
+#   then an Install section naming the files. Linux, Windows and (when it is built) Android are required;
+#   macOS is not (its runners are sometimes unavailable for hours, and GitHub cancels a job no runner takes
+#   within about 15 minutes): a release without it says so under "Not in this release".
+#   Every desktop binary is built twice from clean and compared byte for byte before it is packaged
+#   (spec §10); one that differs fails its platform. The version is written into the workspace first
+#   (packaging/set-version.sh), so `--version` and the About screen show it.
+#   Re-running a version replaces its release. cleanup-releases.yml deletes old ones.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which number to bump for the next version"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "Or type the version to release (MAJOR.MINOR.PATCH); overrides bump"
+        type: string
+        default: ""
+      publish:
+        description: "Publish the release (untick to build and package only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# releases queue one after the other; a hotfix gets its own group, where a newer push cancels the hotfix still
+# on its way; a pull request's check gets one of its own
+concurrency:
+  group: >-
+    ${{ github.event_name == 'pull_request' && format('release-check-{0}', github.ref)
+    || github.event_name == 'push' && 'release-hotfix' || 'release' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # BUILDING.md: the stated toolchain
+  RUST_VERSION: "1.97.0"
+  # the binaries keep their crate names until the rename lands; the packages are called Stoop
+  APP_BIN: antiphon
+  CLI_BIN: antiphon-cli
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      semver: ${{ steps.v.outputs.semver }}
+      channel: ${{ steps.v.outputs.channel }}
+      tag: ${{ steps.v.outputs.tag }}
+      android: ${{ steps.v.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          BUMP: ${{ inputs.bump }}
+          WANT: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          semver() { echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
+          # the newest release so far: tags v<MAJOR.MINOR.PATCH> (the old -rc and -test ones and hotfixes don't count)
+          LAST=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
+                  | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          CARGO_V=$(awk '/^\[workspace\.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^version *= *"/ { gsub(/.*= *"|".*/, ""); print; exit }' Cargo.toml)
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              # a hotfix: the newest release with the run number as a fourth part
+              CHANNEL=hotfix; SV="${LAST:-$CARGO_V}"; V="$SV.$GITHUB_RUN_NUMBER"; TAG="hotfix-$V" ;;
+            *)
+              CHANNEL=stable
+              [ "$GITHUB_EVENT_NAME" = pull_request ] && CHANNEL=check
+              if [ -n "$WANT" ]; then
+                V="${WANT#v}"
+              elif [ -z "$LAST" ]; then
+                V="$CARGO_V"                            # the first release
+              else
+                IFS=. read -r A B C <<< "$LAST"
+                case "$BUMP" in
+                  major) V="$((A + 1)).0.0" ;;
+                  minor) V="$A.$((B + 1)).0" ;;
+                  *)     V="$A.$B.$((C + 1))" ;;
+                esac
+              fi
+              SV="$V"; TAG="v$V" ;;
+          esac
+          semver "$SV" || { echo "::error::bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
+          {
+            echo "version=$V"; echo "semver=$SV"; echo "channel=$CHANNEL"; echo "tag=$TAG"
+            # the Android app is built once its crate is in the tree
+            [ -x crates/android/build-apk.sh ] && echo "android=true" || echo "android=false"
+          } >> "$GITHUB_OUTPUT"
+          echo "$CHANNEL: Stoop $V ($TAG)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            ext: ".exe"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            ext: ""
+    env:
+      V: ${{ needs.version.outputs.version }}
+      SV: ${{ needs.version.outputs.semver }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - name: System packages (Linux)
+        if: runner.os == 'Linux'
+        # the build libraries, then dpkg-dev for the .deb's Depends line and `file` for appimagetool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev libgtk-3-dev dpkg-dev file
+      - name: NSIS (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ] || choco install nsis -y --no-progress
+      - name: Version ${{ env.SV }}
+        shell: bash
+        run: bash packaging/set-version.sh "$SV"
+      - name: Tests
+        shell: bash
+        run: cargo test --workspace --locked
+      - name: Reproducible environment
+        shell: bash
+        # CARGO_ENCODED_RUSTFLAGS rather than RUSTFLAGS, and Windows-form
+        # paths on Windows: under Git Bash $PWD is /d/a/... while rustc sees
+        # D:\a\..., so a POSIX-form prefix never matches and the path ships
+        # in the binary. See BUILDING.md.
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          SRC="$PWD"; CH="${CARGO_HOME:-$HOME/.cargo}"; EXTRA=""
+          if [ "$RUNNER_OS" = Windows ]; then
+            SRC="$(cygpath -w "$SRC")"; CH="$(cygpath -w "$CH")"
+            # The MSVC linker stamps the current time into the PE header
+            # unless told otherwise; see .cargo/config.toml. Setting the
+            # environment variable replaces that file's flags, so repeat it.
+            EXTRA=$'\x1f-Clink-arg=/Brepro'
+          fi
+          printf 'CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo%s\n' "$SRC" "$CH" "$EXTRA" >> "$GITHUB_ENV"
+      - name: Build once
+        shell: bash
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} --bin "$APP_BIN" --bin "$CLI_BIN"
+          mkdir -p scratch/first
+          cp target/${{ matrix.target }}/release/{$APP_BIN,$CLI_BIN}${{ matrix.ext }} scratch/first/
+      - name: Build again from clean
+        shell: bash
+        run: |
+          cargo clean
+          cargo build --release --locked --target ${{ matrix.target }} --bin "$APP_BIN" --bin "$CLI_BIN"
+          mkdir -p scratch/second
+          cp target/${{ matrix.target }}/release/{$APP_BIN,$CLI_BIN}${{ matrix.ext }} scratch/second/
+      - name: Refuse to ship anything that does not reproduce
+        shell: bash
+        run: |
+          for bin in $APP_BIN${{ matrix.ext }} $CLI_BIN${{ matrix.ext }}; do
+            cmp scratch/first/$bin scratch/second/$bin || {
+              echo "::error::$bin differs between two builds of the same commit ($(cmp -l scratch/first/$bin scratch/second/$bin | wc -l) bytes, first at offset $(cmp -l scratch/first/$bin scratch/second/$bin | head -1 | awk '{print $1}'))"
+              exit 1
+            }
+          done
+          # the bare binaries' hashes, for SHA256SUMS (sha256sum on Linux and Git Bash, shasum on macOS)
+          mkdir -p hashes
+          cd scratch/first
+          if command -v sha256sum >/dev/null; then sha256sum -- *; else shasum -a 256 -- *; fi \
+            | sed 's|^\([0-9a-f]*\) [ *]|\1  ${{ matrix.platform }}/|' > ../../hashes/${{ matrix.platform }}.sha256
+          cat ../../hashes/${{ matrix.platform }}.sha256
+      - name: Package
+        shell: bash
+        run: bash packaging/package.sh --version "$V" --bin scratch/first --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stoop-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hashes-${{ matrix.platform }}
+          path: hashes/*
+
+  android:
+    needs: version
+    if: needs.version.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+      SV: ${{ needs.version.outputs.semver }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: actions/setup-java@v4
+        # javac and d8 for the app's few Java classes, pinned like Rust
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Android SDK pieces
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "BUILD_TOOLS_VERSION=35.0.0" >> "$GITHUB_ENV"
+      - name: Version ${{ env.SV }}
+        run: bash packaging/set-version.sh "$SV"
+      - name: Signing key
+        # With the ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets every release is signed with that
+        # one key, so a new version installs over the old. Without them a throwaway key is made per build: the
+        # APK installs, but an update means uninstalling first.
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/stoop-release.keystore"
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KS"
+            PASS="$KEYSTORE_PASSWORD"
+          else
+            echo "::warning title=Android signing::ANDROID_KEYSTORE_BASE64 is not set; this APK is signed with a throwaway key"
+            PASS="$(openssl rand -hex 16)"
+            keytool -genkeypair -noprompt -keystore "$KS" -storepass "$PASS" -keypass "$PASS" \
+              -alias antiphon -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Stoop"
+          fi
+          echo "::add-mask::$PASS"
+          echo "APK_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "APK_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+      - name: Build APK
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export CARGO_ENCODED_RUSTFLAGS="$(printf -- '--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo' "$PWD" "${CARGO_HOME:-$HOME/.cargo}")"
+          mkdir -p dist
+          crates/android/build-apk.sh --out "dist/Stoop-android-$V.apk"
+          ls -la dist
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/stoop-release.keystore"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stoop-android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build, android]
+    # also when the macOS build did not run or failed (the checks below decide), but not for a cancelled run
+    if: ${{ !cancelled() && needs.version.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      CHANNEL: ${{ needs.version.outputs.channel }}
+      ANDROID: ${{ needs.version.outputs.android }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Stoop-*
+          path: out
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hashes-*
+          path: hashes
+          merge-multiple: true
+      - name: Linux, Windows and Android are required
+        run: |
+          ls -la out
+          need="Stoop-$V-windows-x86_64.exe Stoop-$V-linux-x86_64.AppImage stoop_${V}_amd64.deb stoop-$V-linux-x86_64.tar.gz"
+          [ "$ANDROID" = true ] && need="$need Stoop-android-$V.apk"
+          for f in $need; do
+            [ -f "out/$f" ] || { echo "::error::no $f: not publishing"; exit 1; }
+          done
+      - name: Notes
+        run: |
+          have() { [ -f "out/$1" ]; }
+          # the previous release (a hotfix also counts the hotfixes before it)
+          if [ "$CHANNEL" = hotfix ]; then PATTERN='^(v[0-9]+\.[0-9]+\.[0-9]+|hotfix-.*)$'; else PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'; fi
+          PREV=$(git tag -l --sort=-creatordate | grep -E "$PATTERN" | grep -vx "$TAG" | head -1 || true)
+          [ -n "$PREV" ] || PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | grep -vx "$TAG" | head -1 || true)
+          if [ "$CHANNEL" != hotfix ] && [ -f "docs/releases/$V.md" ]; then cp "docs/releases/$V.md" notes.md; else
+            {
+              if [ "$CHANNEL" = hotfix ]; then
+                echo "Hotfix build of \`${GITHUB_SHA::7}\` (main after ${PREV:-the first release}). The next full release replaces it."
+                echo
+              fi
+              echo "## Changes"
+              git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60
+            } > notes.md
+          fi
+          {
+            echo
+            echo "---"
+            echo "### Install"
+            echo "* **Windows**: \`Stoop-$V-windows-x86_64.exe\` – the installer, for you only, no administrator rights; Stoop is in the Start menu afterwards"
+            echo "* **Linux**: \`Stoop-$V-linux-x86_64.AppImage\` (make it executable and run it) or \`stoop_${V}_amd64.deb\` (\`sudo apt install ./stoop_${V}_amd64.deb\`) · without installing: \`stoop-$V-linux-x86_64.tar.gz\`"
+            if have "Stoop-$V-macos-aarch64.dmg"; then
+              echo "* **macOS** (Apple silicon): \`Stoop-$V-macos-aarch64.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway)"
+            fi
+            if have "Stoop-android-$V.apk"; then echo "* **Android**: \`Stoop-android-$V.apk\`"; fi
+            if ! have "Stoop-$V-macos-aarch64.dmg"; then
+              echo "* **Not in this release:** macOS – its build did not run this time; the next release has it"
+            fi
+            echo "* Every desktop binary was built twice from clean and the two compared byte for byte before packaging · checksums in \`SHA256SUMS\`"
+          } >> notes.md
+          cat notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Checksums
+        # every file of the release, then the bare binaries inside them (what a rebuild is compared to, BUILDING.md)
+        run: |
+          (cd out && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS)
+          cat hashes/*.sha256 >> out/SHA256SUMS
+          cat out/SHA256SUMS
+      - name: Publish
+        if: env.CHANNEL == 'hotfix' || (env.CHANNEL == 'stable' && inputs.publish)
+        run: |
+          TITLE="Stoop $V"; [ "$CHANNEL" = hotfix ] && TITLE="Stoop $V (hotfix)"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" out/* --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA" --latest
+      - name: Keep only the newest three hotfixes
+        if: env.CHANNEL == 'hotfix'
+        # a failed clean-up never fails the hotfix: the next one tries again
+        continue-on-error: true
+        run: |
+          OLD=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^hotfix-\([0-9.]*\)$/\1/p' | sort -rV | tail -n +4)
+          for v in $OLD; do echo "deleting hotfix-$v"; gh release delete "hotfix-$v" --yes --cleanup-tag || true; done
+      - name: Not published
+        if: env.CHANNEL == 'check' || (env.CHANNEL == 'stable' && !inputs.publish)
+        run: echo "Not published (a pull request check, or publish unticked); the files are this run's Stoop-* artifacts" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -50,6 +50,7 @@ file identical to the one that was distributed.
 
 ```bash
 git checkout <the tagged commit>
+packaging/set-version.sh <the release version>   # e.g. 0.2.0, as the release build did
 
 # Same directory layout, same timestamps, same paths baked into the binary.
 export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
@@ -102,19 +103,24 @@ the binary is the source — no trust required.
 
 ## The pipeline
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) is spec §10's "one
-pipeline building every target from the same commit":
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) and
+[`.github/workflows/release.yml`](.github/workflows/release.yml) are spec §10's
+"one pipeline building every target from the same commit":
 
-- **Every push and pull request:** build, test and clippy on Linux,
+- **Every push and pull request** (`ci.yml`): build, test and clippy on Linux,
   Windows and macOS, with the toolchain pinned per platform — which is
   the right place to pin it, since a build matrix already knows its
   target triple.
-- **Every `v*` tag:** the release build above, run **twice from clean on
-  each platform**. The job compares the two binaries byte for byte and
-  refuses to publish anything that differs, then uploads the binaries with
-  a `SHA256SUMS` file. So reproducibility is not a property someone
-  asserted once; it is checked on every release, and a regression in it
-  fails the build rather than shipping.
+- **Every release** (`release.yml`, started by hand: Actions → release → Run
+  workflow): the release build above, run **twice from clean on each
+  platform**. The job compares the two binaries byte for byte and refuses
+  to package anything that differs; only then are the installers made
+  (`packaging/package.sh`) and published with a `SHA256SUMS` file whose
+  last lines are the bare binaries' hashes, `<platform>/<binary>`. So
+  reproducibility is not a property someone asserted once; it is checked on
+  every release, and a regression in it fails the build rather than
+  shipping. The installers themselves (NSIS, AppImage, .deb, .dmg) are not
+  claimed to be reproducible; the binaries inside them are.
 
 ## Cross-check
 
