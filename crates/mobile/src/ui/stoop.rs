@@ -182,7 +182,7 @@ impl App {
             call,
             conversation,
             transfers,
-            network: stoop::Network { checks, port: self.settings.listen_port, relay: String::new() },
+            network: stoop::Network { checks, port: self.settings.listen_port, relay: String::new(), ..Default::default() },
             settings,
             notice: self.notice.clone(),
             first_run: self.settings.display_name.trim().is_empty(),

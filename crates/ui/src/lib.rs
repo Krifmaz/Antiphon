@@ -305,6 +305,8 @@ pub enum Action {
     OpenOnStart(bool),
     /// The relay to be reachable through; empty for none.
     Relay(String),
+    /// Let contacts with no relay of their own listen at yours.
+    LendRelay(bool),
     /// The port the door listens on.
     Port(u16),
     /// Re-run the reachability check.

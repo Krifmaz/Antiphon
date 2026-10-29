@@ -7,6 +7,7 @@
 
 pub mod account_move;
 mod error;
+pub mod federation;
 pub mod fec;
 pub mod file_transfer;
 mod jitter;

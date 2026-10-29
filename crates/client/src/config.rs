@@ -118,6 +118,16 @@ pub struct AppConfig {
     /// Whether the project's own relays are tried after yours.
     #[serde(default = "default_true")]
     pub use_project_relays: bool,
+    /// Let contacts with no relay of their own listen at `relay_server`,
+    /// so they can be rung too (spec §8 "Server-side opt-in": off by
+    /// default). Said in invite links and at the start of every call.
+    #[serde(default)]
+    pub lend_relay: bool,
+    /// Relays that relays you used said they peer with, kept so they are
+    /// there to fall back on when those relays are down. Learned, never
+    /// typed; see `crate::fallback_relay`.
+    #[serde(default)]
+    pub mesh_relays: Vec<String>,
     /// Anonymity mode (spec §3): relays to route calls through, `host:port`
     /// each, in order. Two or more turn it on. See `crate::anonymity`.
     #[serde(default)]
@@ -610,6 +620,10 @@ pub struct Contact {
     /// their relay before you have ever spoken.
     #[serde(default)]
     pub relay_secret: String,
+    /// They let contacts with no relay of their own listen at `relay`, as
+    /// their invite or their last call said. See `crate::fallback_relay`.
+    #[serde(default)]
+    pub lends_relay: bool,
     /// Per-conversation override (spec §3): 0 automatic, 1 direct, 2 relay.
     /// See `crate::connection_mode`.
     #[serde(default)]
@@ -853,6 +867,8 @@ impl Default for AppConfig {
             relay_invite_secret: String::new(),
             fallback_relays: Vec::new(),
             use_project_relays: true,
+            lend_relay: false,
+            mesh_relays: Vec::new(),
             anonymity_hops: Vec::new(),
             anonymity_mode: false,
             routes: crate::delivery::default_routes(),

@@ -704,6 +704,7 @@ fn local_hello(app: &MainWindow) -> Hello {
         // answering is not something you do quietly.
         wants_silent: app.get_start_call_silently(),
         relay: network_ui::effective_relay(app),
+        lends_relay: false,
         routes: delivery::my_record_hex(),
     }
 }
@@ -5084,6 +5085,7 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 prekey: previous.map(|p| p.prekey.clone()).unwrap_or_default(),
                 relay: previous.map(|p| p.relay.clone()).unwrap_or_default(),
                 relay_secret: previous.map(|p| p.relay_secret.clone()).unwrap_or_default(),
+                lends_relay: previous.is_some_and(|p| p.lends_relay),
                 connection_mode: c.connection_mode,
                 route_record: previous.map(|p| p.route_record.clone()).unwrap_or_default(),
                 route_sequence: previous.and_then(|p| p.route_sequence),
@@ -5885,6 +5887,9 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         relay_invite_secret: previous.relay_invite_secret.clone(),
         fallback_relays: fallback_relay::parse_list(&app.get_fallback_relays_text()),
         use_project_relays: app.get_use_project_relays(),
+        // Carried forward from the iced app, which is where they are set.
+        lend_relay: previous.lend_relay,
+        mesh_relays: previous.mesh_relays.clone(),
         anonymity_mode: app.get_anonymity_mode(),
         anonymity_hops: fallback_relay::parse_list(&app.get_anonymity_hops_text()),
         routes: previous.routes.clone(),

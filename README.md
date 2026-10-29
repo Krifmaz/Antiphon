@@ -30,7 +30,7 @@ A Cargo workspace, one crate per concern:
 | [`crates/net`](crates/net) | §2, §3, §5, §6 | UDP peer connection, STUN discovery + hole punching, NAT-PMP port mapping with renewal, adaptive jitter buffer, forward error correction, audio retransmit requests, file chunking with per-chunk hashes |
 | [`crates/audio`](crates/audio) | §1 Audio Suite | The mic chain -- noise suppression, gate, high/low-pass, de-esser, parametric EQ (bell/shelf/notch), compressor, limiter, gain/auto-gain, pitch shift with formant preservation, reverb -- plus an NLMS echo canceller with delay estimation and double-talk detection, SOLA catch-up playback, and `cpal` device I/O |
 | [`crates/app`](crates/app) | §1 Utility | `antiphon-cli`: flag-driven, or an arrow-key interactive menu with no flags to memorise |
-| [`crates/relay`](crates/relay) | §3 Relay, §8 mailbox | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry. With `--mailbox`, also holds sealed mail for registered inboxes; with `--files`, sealed copies of pinned files; with `--dht`, a DHT node and an optional community directory |
+| [`crates/relay`](crates/relay) | §3 Relay, §8 mailbox | `antiphon-relay`: a self-hostable relay. Pairs two sockets on a blinded, daily-rotating token and forwards sealed frames byte for byte -- no keys, no logs, nothing kept past expiry. With `--mailbox`, also holds sealed mail for registered inboxes; with `--files`, sealed copies of pinned files; with `--dht`, a DHT node and an optional community directory; with `--federate`, peers with other relays so a call reaches someone at any relay in the mesh |
 | [`crates/ui`](crates/ui) | -- | `antiphon-ui`: the Stoop interface in iced, one set of screens for the desktop and the phone. Draws a plain `Model` and hands back `Action`s, so it never touches an engine |
 | [`crates/client`](crates/client) | §4, §5, §7, §8, §9, §13 | `antiphon-client`: the call engine and everything around it (contacts, history, outbox, delivery, discovery, file transfer, moderation), shared by both desktop apps |
 | [`crates/desktop`](crates/desktop) | -- | `antiphon`: Stoop for the desktop, the shared interface on the client engine |
@@ -202,6 +202,18 @@ records under keys that change daily, and can't tell whose they are.
 per line as `name | description | invite link`. In the app: Settings >
 Call > Finding contacts -- switch the DHT on and add bootstrap nodes
 (none are built in), or add a directory and press Browse.
+
+To peer with other relays, add `--federate` (off by default) and name
+one or more with `--peer <host:port>` (repeatable; `host:port#key` pins
+its key, printed at its start-up). Relays then learn of each other from
+their peers, each proving its key before it is used. Someone registered
+at any relay in the mesh can be rung through any other: a relay that
+doesn't hold the dialled token asks its peers with a hash of it, believes
+only an answer that proves the peer holds it, and passes the sealed call
+through. Apps also learn a relay's peers and fall back to them.
+`--peer-key <path>` keeps the key (default `antiphon-peer.key`);
+`--federate-max-peers`, `--federate-max-bridges` and
+`--federate-allow-private` set limits.
 
 ### Test peer
 

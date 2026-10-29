@@ -54,6 +54,7 @@ impl Demo {
                 ],
                 port: 6002,
                 relay: String::new(),
+                ..Default::default()
             },
             settings: ui::Settings {
                 theme: "stoop".into(),

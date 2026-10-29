@@ -18,8 +18,8 @@ use antiphon_audio::{ChainConfig, GainConfig};
 use antiphon_client::control::{ControlMessage, Hello, ProfileCard};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
-    caps_lock, config, connection_mode, delivery, discovery, file_integrity, file_preview, file_transfer, history, key_capture, moderation,
-    notify, outbox, presence, profile, reachability, reactions, sharing, video_capture, vpn,
+    caps_lock, config, connection_mode, delivery, discovery, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
+    moderation, notify, outbox, presence, profile, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
 use antiphon_ui::{self as ui, ToastKind};
@@ -59,6 +59,9 @@ enum Event {
     ListenFailed(String),
     /// The STUN check finished: our public address, or why not.
     Public(Result<String, String>),
+    /// The relay check finished: the relay to use, if any answered, and the
+    /// relays it said it peers with.
+    RelayChosen(Option<fallback_relay::Choice>, Vec<String>),
     /// The router port mapping finished: the outside port, or why not.
     PortMap(Result<u16, String>),
     /// A push-to-talk key capture finished: the key's name, or why not.
@@ -149,6 +152,9 @@ pub struct Engine {
     door: bool,
     /// Our public address from STUN, once known.
     public: Option<String>,
+    /// The relay in use when it is not simply ours: a fallback, one from
+    /// the mesh, or a contact's lent relay. `None` until a check finds one.
+    relay_choice: Option<fallback_relay::Choice>,
     /// What the checks found about being reachable.
     reach: reachability::Reachability,
     /// Our invite link.
@@ -208,6 +214,7 @@ impl Engine {
             task: None,
             call: CallInfo::default(),
             public: None,
+            relay_choice: None,
             reach: reachability::Reachability::default(),
             invite: String::new(),
             qr: None,
@@ -302,7 +309,7 @@ impl Engine {
             listen_port: if self.door { self.cfg.stoop.port } else { 0 },
             mapped_port: self.state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()),
             stun_public: self.public.clone(),
-            relay: self.cfg.relay_server.trim().to_string(),
+            relay: self.my_relay(),
         });
         let found = discovery::revision();
         if found != self.discovery_seen {
@@ -362,8 +369,9 @@ impl Engine {
                 if self.call.peer.is_none() && !peer.display_name.is_empty() {
                     self.call.name = peer.display_name.clone();
                 }
-                if !peer.relay.is_empty() && peer.relay != self.peer_relay_saved {
-                    save_relay = Some(peer.relay.clone());
+                let said = format!("{}|{}", peer.relay, peer.lends_relay);
+                if !peer.relay.is_empty() && said != self.peer_relay_saved {
+                    save_relay = Some((peer.relay.clone(), peer.lends_relay, said));
                 }
                 if !peer.routes.is_empty() && peer.routes != self.peer_routes_saved {
                     save_routes = Some(peer.routes.clone());
@@ -381,11 +389,12 @@ impl Engine {
         if let Some(card) = card {
             self.save_card(key.as_deref(), card);
         }
-        if let Some(relay) = save_relay {
-            self.peer_relay_saved = relay.clone();
+        if let Some((relay, lends, said)) = save_relay {
+            self.peer_relay_saved = said;
             if let Some(c) = key.as_deref().and_then(|k| self.cfg.contacts.iter_mut().find(|c| c.identity_key == k)) {
-                if c.relay != relay {
+                if c.relay != relay || c.lends_relay != lends {
                     c.relay = relay;
+                    c.lends_relay = lends;
                     self.save();
                 }
             }
@@ -558,6 +567,24 @@ impl Engine {
                 }
                 self.refresh_invite();
             }
+            Event::RelayChosen(choice, mesh) => {
+                if !mesh.is_empty() {
+                    let merged = fallback_relay::merge_mesh(&self.cfg.mesh_relays, &mesh);
+                    if merged != self.cfg.mesh_relays {
+                        self.cfg.mesh_relays = merged;
+                        self.save();
+                    }
+                }
+                if choice != self.relay_choice {
+                    if let Some(fallback_relay::Choice { source: fallback_relay::Source::Borrowed, lender: Some(who), .. }) = &choice {
+                        self.toast(format!("You have no relay of your own, so you can be reached through {who}'s"), ToastKind::Info);
+                    }
+                    self.relay_choice = choice;
+                    self.invite.clear();
+                    self.refresh_invite();
+                    self.relisten();
+                }
+            }
             Event::PortMap(r) => match r {
                 Ok(port) => {
                     self.reach.port_forwarded = true;
@@ -653,7 +680,8 @@ impl Engine {
             status_message: self.cfg.profile.status_message.clone(),
             presence: chosen.should_publish().then(|| chosen.to_i32()),
             wants_silent: false,
-            relay: self.cfg.relay_server.trim().to_string(),
+            relay: self.my_relay(),
+            lends_relay: self.lends_relay(),
             routes: delivery::my_record_hex(),
         }
     }
@@ -707,13 +735,46 @@ impl Engine {
 
     /// What to register at our relay while listening, if there is one.
     fn listen_relay(&self) -> Option<(String, state::RelayTokens)> {
-        let relay = self.cfg.relay_server.trim().to_string();
+        let relay = self.my_relay();
         if relay.is_empty() {
             return None;
         }
         let identity = self.state.identity.clone();
         let secret = relay_invite_secret();
         Some((relay, Box::new(move || connection_mode::listening_tokens(&config::load().contacts, &identity, Some(secret), now_secs()))))
+    }
+
+    /// The relay to listen at and tell people about: the one the last check
+    /// chose, or yours unchecked, or none (empty).
+    fn my_relay(&self) -> String {
+        match &self.relay_choice {
+            Some(choice) => choice.relay.clone(),
+            None => self.cfg.relay_server.trim().to_string(),
+        }
+    }
+
+    /// Whether we tell contacts they may listen at our relay: only when we
+    /// said so, and only for a relay that is ours -- a borrowed or fallback
+    /// relay is not ours to lend.
+    fn lends_relay(&self) -> bool {
+        let own = self.cfg.relay_server.trim();
+        self.cfg.lend_relay && !own.is_empty() && self.my_relay() == own
+    }
+
+    /// Works out, in the background, which relay to use: yours, your
+    /// fallbacks, the mesh's, or a contact's lent relay -- and learns the
+    /// mesh from whichever answers.
+    fn choose_relay(&mut self) {
+        let cfg = self.cfg.clone();
+        let events = self.events.clone();
+        self.state.runtime.spawn(async move {
+            let choice = fallback_relay::choose(&cfg).await;
+            let mesh = match &choice {
+                Some(c) => fallback_relay::learn_mesh(&c.relay).await,
+                None => Vec::new(),
+            };
+            Self::push(&events, Event::RelayChosen(choice, mesh));
+        });
     }
 
     /// Opens or closes the door: listen and map a router port, or stop.
@@ -759,6 +820,7 @@ impl Engine {
             let r = state::discover_public_address(0).await.map(|(addr, _)| addr.ip().to_string()).map_err(|e| e.to_string());
             Self::push(&events, Event::Public(r));
         });
+        self.choose_relay();
         if self.door && self.state.port_map.lock().unwrap().is_none() {
             self.map_port();
         }
@@ -769,10 +831,11 @@ impl Engine {
         let port = self.state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()).unwrap_or(self.cfg.stoop.port);
         let address = self.public.as_ref().map(|ip| if ip.contains(':') { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }).unwrap_or_default();
         let mut invite = antiphon_crypto::Invite::new(self.state.identity.public().identity_key, address);
-        let relay = self.cfg.relay_server.trim().to_string();
+        let relay = self.my_relay();
         if !relay.is_empty() {
             invite.relay = relay;
             invite.relay_secret = Some(relay_invite_secret());
+            invite.lends_relay = self.lends_relay();
         }
         let link = invite.to_link();
         if link != self.invite {
@@ -1149,9 +1212,17 @@ impl Engine {
                 self.cfg.stoop.door_on_start = on;
                 self.save();
             }
+            A::LendRelay(on) => {
+                self.cfg.lend_relay = on;
+                self.save();
+                self.invite.clear();
+                self.refresh_invite();
+            }
             A::Relay(relay) => {
                 self.cfg.relay_server = relay;
+                self.relay_choice = None;
                 self.save();
+                self.choose_relay();
                 self.invite.clear();
                 self.refresh_invite();
                 self.relisten();
@@ -1361,6 +1432,7 @@ impl Engine {
             if !invite.relay.is_empty() {
                 existing.relay = invite.relay.clone();
                 existing.relay_secret = secret;
+                existing.lends_relay = invite.lends_relay;
             }
             let who = existing.name.clone();
             self.save();
@@ -1376,6 +1448,7 @@ impl Engine {
             first_seen_secs: now_secs(),
             relay: invite.relay.clone(),
             relay_secret: secret,
+            lends_relay: invite.lends_relay,
             ..Default::default()
         });
         self.save();
@@ -1661,7 +1734,23 @@ impl Engine {
                 detail,
             })
             .collect();
-        ui::Network { checks, port: self.cfg.stoop.port, relay: self.cfg.relay_server.clone() }
+        let relay_note = match &self.relay_choice {
+            Some(c) => match (c.source, &c.lender) {
+                (fallback_relay::Source::Own, _) => String::new(),
+                (fallback_relay::Source::Borrowed, Some(who)) => format!("Yours isn't set, so you're reachable through {who}'s relay ({}).", c.relay),
+                (fallback_relay::Source::Mesh, _) => format!("Using {}, a relay your relay peers with.", c.relay),
+                _ => format!("Using the fallback relay {}.", c.relay),
+            },
+            None if self.cfg.relay_server.trim().is_empty() => String::new(),
+            None => "Your relay hasn't answered a check yet.".to_string(),
+        };
+        ui::Network {
+            checks,
+            port: self.cfg.stoop.port,
+            relay: self.cfg.relay_server.clone(),
+            relay_note,
+            lend_relay: self.cfg.lend_relay,
+        }
     }
 
     /// The settings screen's values.

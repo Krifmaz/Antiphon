@@ -654,6 +654,7 @@ async fn talk(
             presence: None,
             wants_silent: false,
             relay: String::new(),
+            lends_relay: false,
             routes: String::new(),
         };
         let bytes = ControlMessage::Hello(hello).encode();

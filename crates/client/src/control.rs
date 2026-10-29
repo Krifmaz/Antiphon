@@ -30,6 +30,11 @@ pub struct Hello {
     /// exchanging another link. Defaulted for peers on older builds.
     #[serde(default)]
     pub relay: String,
+    /// Whether this person lets contacts with no relay of their own listen
+    /// at `relay` (spec §8 "Server-side opt-in"). Defaulted to no for peers
+    /// on older builds.
+    #[serde(default)]
+    pub lends_relay: bool,
     /// This person's signed route list (spec §8), hex: where to leave
     /// mail for them while they're offline. Defaulted for older builds.
     #[serde(default)]
@@ -266,6 +271,7 @@ mod tests {
             presence: Some(1),
             wants_silent: true,
             relay: "relay.example:3479".to_string(),
+            lends_relay: true,
             routes: String::new(),
         });
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();

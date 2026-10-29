@@ -328,7 +328,15 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         setting("Open my door when Stoop starts", None, switch(m.settings.open_on_start, |on| Msg::Do(Action::OpenOnStart(on)))),
     ]
     .spacing(12);
-    let relay = field("Relay", edit_box("relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave));
+    let mut relay = column![field("Relay", edit_box("relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave))].spacing(12);
+    if !m.network.relay_note.is_empty() {
+        relay = relay.push(faint(m.network.relay_note.as_str()).size(12.5));
+    }
+    relay = relay.push(divider()).push(setting(
+        "Let contacts use my relay",
+        Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
+        switch(m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
+    ));
     column![
         card(check_card),
         titled_card("Your door", None, listen),

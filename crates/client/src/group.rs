@@ -655,6 +655,7 @@ mod tests {
             presence: None,
             wants_silent: false,
             relay: String::new(),
+            lends_relay: false,
             routes: String::new(),
         }
     }

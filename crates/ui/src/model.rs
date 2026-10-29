@@ -370,6 +370,11 @@ pub struct Network {
     pub port: u16,
     /// The relay to be reachable through; empty for none.
     pub relay: String,
+    /// A line on the relay actually in use when it is not simply yours
+    /// (a fallback, the mesh's, a contact's); empty when there is nothing to say.
+    pub relay_note: String,
+    /// Whether contacts with no relay may listen at yours.
+    pub lend_relay: bool,
 }
 
 /// One line of the reachability check.
