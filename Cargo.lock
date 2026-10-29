@@ -575,6 +575,7 @@ dependencies = [
  "antiphon-audio",
  "antiphon-crypto",
  "antiphon-net",
+ "antiphon-ui",
  "anyhow",
  "futures",
  "iced_core",

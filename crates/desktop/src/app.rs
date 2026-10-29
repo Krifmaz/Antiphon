@@ -126,14 +126,17 @@ const TOUR: &[Step] = &[
         size: (400.0, 820.0),
         setup: |app| {
             let _ = app.send(Msg::Dialog(None));
+            app.demo().as_phone(true);
             app.go(Route::Home);
         },
     },
     Step { name: "phone-call", size: (400.0, 820.0), setup: |app| app.go(Route::Person(Demo::robin())) },
+    Step { name: "phone-settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Phone)) },
     Step {
         name: "light",
         size: (1280.0, 820.0),
         setup: |app| {
+            app.demo().as_phone(false);
             app.demo().act(Action::Theme("light".into()));
             app.go(Route::Person(Demo::robin()));
         },

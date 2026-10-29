@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use iced_core::{clipboard, mouse, renderer, window as core_window, Event, Pixels, Size, Theme};
+use iced_core::{clipboard, mouse, renderer, window as core_window, Event, Pixels, Size};
 use iced_graphics::{Shell, Viewport};
 use iced_runtime::user_interface::{self, UserInterface};
 use iced_wgpu::{wgpu, Engine};
@@ -19,7 +19,7 @@ use winit::window::{Window, WindowId};
 
 use crate::convert;
 use crate::platform;
-use crate::ui::{App, Renderer, FONT};
+use crate::ui::{App, Renderer};
 
 /// Sent by the call engine when something it owns changed.
 #[derive(Debug, Clone, Copy)]
@@ -110,8 +110,6 @@ pub struct Runner {
     /// Whether the soft keyboard has been asked for, so it is requested or
     /// dismissed only when a text field gains or loses focus.
     keyboard_shown: bool,
-    /// The palette the interface is drawn with.
-    theme: Theme,
 }
 
 impl Runner {
@@ -130,7 +128,6 @@ impl Runner {
             fingers: 0,
             insets: (0.0, 0.0),
             keyboard_shown: false,
-            theme: Theme::Dark,
         }
     }
 
@@ -216,7 +213,15 @@ impl Runner {
                 .ok_or("the surface supports no formats")?;
 
             let engine = Engine::new(&adapter, device.clone(), queue.clone(), format, None, Shell::headless());
-            let renderer = Renderer::new(engine, FONT, Pixels::from(17));
+            // Stoop's own face, Inter, bundled so every phone draws the
+            // interface the same; Fira Sans stays as the fallback.
+            {
+                let mut fonts = iced_graphics::text::font_system().write().expect("font system");
+                for bytes in antiphon_ui::theme::FONT_FILES {
+                    fonts.load_font(std::borrow::Cow::Borrowed(bytes));
+                }
+            }
+            let renderer = Renderer::new(engine, antiphon_ui::theme::FONT, Pixels::from(15));
             let size = window.inner_size();
             let viewport = Viewport::with_physical_size(Size::new(size.width, size.height), window.scale_factor() as f32);
             return Ok(Graphics { window, surface, device, format, renderer, viewport, needs_configure: true });
@@ -304,6 +309,8 @@ impl Runner {
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        app.resized(graphics.viewport.logical_size());
+        app.frame();
         let scale = graphics.viewport.scale_factor();
         let (top, bottom) = (self.insets.0 / scale, self.insets.1 / scale);
         let mut interface = UserInterface::build(
@@ -330,8 +337,9 @@ impl Runner {
             }
         }
 
-        let palette = self.theme.palette();
-        interface.draw(&mut graphics.renderer, &self.theme, &renderer::Style { text_color: palette.text }, self.cursor);
+        let theme = app.theme();
+        let palette = theme.palette();
+        interface.draw(&mut graphics.renderer, &theme, &renderer::Style { text_color: palette.text }, self.cursor);
         self.cache = interface.into_cache();
         graphics.renderer.present(Some(palette.background), frame.texture.format(), &view, &graphics.viewport);
         frame.present();

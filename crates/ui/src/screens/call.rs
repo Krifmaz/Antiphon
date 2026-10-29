@@ -3,13 +3,13 @@
 //! the call and the chat beside it are one place.
 
 use iced_core::{Alignment, Length};
-use iced_widget::{column, container, row, space};
+use iced_widget::{column, container, mouse_area, row, space};
 
 use super::{clock, fill};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::*;
-use crate::{Action, El, Model, Msg, Phase, Ui};
+use crate::{Action, El, Model, Msg, Phase, Transmit, Ui};
 
 /// The stage. `compact` is the phone's: smaller avatars, controls in one row.
 pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
@@ -77,6 +77,9 @@ pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
     if let Some(w) = c.warning.as_deref() {
         col = col.push(warn_box(row![icon(Icon::Shield, 16.0, p.warn), t(w).size(13)].spacing(10).align_y(Alignment::Center)));
     }
+    if let Some(pad) = talk_pad(m) {
+        col = col.push(pad);
+    }
     col = col.push(controls(m, compact));
 
     container(col).padding(if compact { [16, 14] } else { [22, 28] }).width(Length::Fill).style(theme::call_stage).into()
@@ -127,6 +130,15 @@ fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
     ]
     .spacing(12)
     .align_y(Alignment::Center);
+    if let Some(ph) = &m.phone {
+        r = r.push(round_btn(
+            if ph.speaker { Icon::Volume } else { Icon::Phone },
+            if ph.speaker { "Earpiece" } else { "Loudspeaker" },
+            if ph.speaker { Btn::RoundOn } else { Btn::Round },
+            Some(Msg::Do(Action::Speaker(!ph.speaker))),
+            size,
+        ));
+    }
     if m.device.files {
         r = r.push(round_btn(Icon::Paperclip, "Send a file", Btn::Round, Some(Msg::Do(Action::SendFile)), size));
     }
@@ -147,4 +159,24 @@ fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
     r = r.push(round_btn(Icon::PhoneOff, "Leave the call", Btn::DangerSolid, Some(Msg::Do(Action::Hangup)), size));
     let _ = fill;
     row![space().width(Length::Fill), r, space().width(Length::Fill)].align_y(Alignment::Center).into()
+}
+
+/// The phone's push-to-talk pad: hold it to talk. Shown on a connected
+/// call when the voice is sent only while talking.
+fn talk_pad<'a>(m: &'a Model) -> Option<El<'a, Msg>> {
+    let ph = m.phone.as_ref()?;
+    if m.call.phase != Phase::Connected || m.settings.transmit != Transmit::PushToTalk {
+        return None;
+    }
+    let p = theme::look();
+    let (label, color) = if ph.talking { ("Talking…", p.ok) } else { ("Hold to talk", p.muted) };
+    let pad = container(column![icon(Icon::Mic, 28.0, color), t(label).size(15).font(theme::semibold()).color(color)].spacing(6).align_x(Alignment::Center))
+        .width(Length::Fill)
+        .height(110)
+        .center_x(Length::Fill)
+        .center_y(110)
+        .style(theme::inset);
+    // Let go anywhere and it stops: the runner also ends it when every
+    // finger leaves the screen.
+    Some(mouse_area(pad).on_press(Msg::Do(Action::Talk(true))).on_release(Msg::Do(Action::Talk(false))).into())
 }

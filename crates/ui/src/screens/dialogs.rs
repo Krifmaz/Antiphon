@@ -43,6 +43,18 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
                 rise,
             )
         }
+        Dialog::ConfirmRestore => {
+            let phrase = ui.restore_edit.trim().to_string();
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Replace", Btn::DangerSolid, Some(Msg::Do(Action::Restore(phrase))))].spacing(8);
+            modal(
+                "Replace this identity?",
+                muted("This device becomes the identity the phrase restores. The one it has now is gone unless you saved its phrase, and people who verified it will see a new key.").size(14),
+                Some(footer.into()),
+                460.0,
+                close,
+                rise,
+            )
+        }
     }
 }
 

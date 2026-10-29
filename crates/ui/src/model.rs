@@ -33,6 +33,34 @@ pub struct Model {
     pub first_run: bool,
     /// What this device can do.
     pub device: Device,
+    /// What only a phone has: the loudspeaker, battery and data rules, the
+    /// recovery phrase. `None` on a desktop, which hides all of it.
+    pub phone: Option<Phone>,
+}
+
+/// The phone's own settings and state.
+#[derive(Clone, Debug, Default)]
+pub struct Phone {
+    /// Calls play through the loudspeaker rather than the earpiece.
+    pub speaker: bool,
+    /// Whether the microphone may be used; false shows a way to allow it.
+    pub mic_allowed: bool,
+    /// Files move only on Wi-Fi.
+    pub wifi_only: bool,
+    /// Lower quality and fewer background checks on mobile data.
+    pub data_saver: bool,
+    /// The monthly mobile data limit for files, in MB; 0 for none.
+    pub cellular_limit_mb: u32,
+    /// Mobile data used by files this month, as people read it ("12 MB").
+    pub cellular_used: String,
+    /// Keep the door open while the app is in the background.
+    pub keep_listening: bool,
+    /// Keep listening in the background even on battery saver.
+    pub listen_on_saver: bool,
+    /// The recovery phrase, while it is shown; `None` while hidden.
+    pub phrase: Option<String>,
+    /// The push-to-talk pad is held.
+    pub talking: bool,
 }
 
 /// This device's abilities, so a screen offers only what works here.

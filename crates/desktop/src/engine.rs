@@ -1063,6 +1063,17 @@ impl Engine {
                     open_folder(&dir);
                 }
             }
+            // Only the phone shows the controls that send these.
+            A::Speaker(_)
+            | A::Talk(_)
+            | A::RequestMic
+            | A::WifiOnly(_)
+            | A::DataSaver(_)
+            | A::CellularLimit(_)
+            | A::KeepListening(_)
+            | A::ListenOnSaver(_)
+            | A::ShowPhrase(_)
+            | A::Restore(_) => {}
         }
         let _ = open;
     }
@@ -1228,6 +1239,7 @@ impl Engine {
             notice: None,
             first_run: self.cfg.profile.display_name.trim().is_empty(),
             device: ui::Device { phone: false, files: true, ptt_keys: true },
+            phone: None,
         }
     }
 

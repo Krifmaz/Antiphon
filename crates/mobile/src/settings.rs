@@ -43,6 +43,12 @@ pub struct Settings {
     /// Bytes counted in `cellular_month`; together they make the
     /// `CellularMeter` the transfer rules read.
     pub cellular_used_bytes: u64,
+    /// The interface's theme id (`stoop`, `dark`, `oled`, `light`, `system`).
+    pub theme: String,
+    /// The interface's accent id.
+    pub accent: String,
+    /// Dialogs and panels appear at once instead of sliding.
+    pub reduced_motion: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +70,9 @@ impl Default for Settings {
             listen_on_battery_saver: false,
             cellular_month: 0,
             cellular_used_bytes: 0,
+            theme: "stoop".into(),
+            accent: "logo".into(),
+            reduced_motion: false,
         }
     }
 }

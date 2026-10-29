@@ -76,6 +76,7 @@ impl Demo {
             notice: None,
             first_run: false,
             device: ui::Device { phone: false, files: true, ptt_keys: true },
+            phone: None,
         };
         Demo { model, next_id: 100 }
     }
@@ -97,6 +98,25 @@ impl Demo {
             talk_hint: Some("Speak to talk".into()),
             ..ui::Call::default()
         };
+    }
+
+    /// Makes the demo a phone (push to talk, the loudspeaker, battery and
+    /// data settings), or a desktop again.
+    pub fn as_phone(&mut self, on: bool) {
+        self.model.device.phone = on;
+        self.model.settings.transmit = if on { ui::Transmit::PushToTalk } else { ui::Transmit::Voice };
+        self.model.phone = on.then(|| ui::Phone {
+            speaker: true,
+            mic_allowed: true,
+            wifi_only: true,
+            data_saver: true,
+            cellular_limit_mb: 500,
+            cellular_used: "Used this month: 38 MB.".into(),
+            keep_listening: true,
+            listen_on_saver: false,
+            phrase: None,
+            talking: false,
+        });
     }
 
     /// Robin's id, for the tour to open their conversation.
@@ -178,6 +198,16 @@ impl Demo {
             Action::SetName(n) => self.model.me.name = n,
             Action::SetStatus(s) => self.model.me.status = s,
             Action::Preset(p) => self.model.settings.preset = p,
+            Action::Talk(on) => {
+                if let Some(ph) = self.model.phone.as_mut() {
+                    ph.talking = on;
+                }
+            }
+            Action::Speaker(on) => {
+                if let Some(ph) = self.model.phone.as_mut() {
+                    ph.speaker = on;
+                }
+            }
             _ => {}
         }
     }

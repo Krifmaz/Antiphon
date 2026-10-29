@@ -254,26 +254,9 @@ impl Conversation {
         true
     }
 
-    /// What to show against one of our messages.
-    pub fn status(&self, id: u64, live: bool) -> &'static str {
-        outbox::status_of(&self.outbox, id, live).wording()
+    /// How far one of our messages has got: sent, sending, or waiting
+    /// for them to come online.
+    pub fn status(&self, id: u64, live: bool) -> outbox::Status {
+        outbox::status_of(&self.outbox, id, live)
     }
-}
-
-/// The reactions on offer, with a word beside each: the bundled font has
-/// no emoji, and whether the phone fills them in from its own fonts
-/// varies by vendor, so the word keeps the button readable either way.
-pub fn reaction_label(emoji: &str) -> String {
-    let word = match emoji {
-        "👍" => "Like",
-        "👎" => "Dislike",
-        "❤️" => "Love",
-        "😂" => "Funny",
-        "😮" => "Wow",
-        "😢" => "Sad",
-        "🎉" => "Hooray",
-        "✅" => "Done",
-        _ => "",
-    };
-    format!("{emoji} {word}")
 }

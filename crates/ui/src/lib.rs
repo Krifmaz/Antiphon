@@ -63,11 +63,13 @@ pub enum Section {
     Network,
     /// Version and where data is kept.
     About,
+    /// Battery, mobile data and the recovery phrase; phones only.
+    Phone,
 }
 
 impl Section {
     /// Every section, in the order the navigation lists them.
-    pub const ALL: [Section; 5] = [Section::Profile, Section::Appearance, Section::Voice, Section::Network, Section::About];
+    pub const ALL: [Section; 6] = [Section::Profile, Section::Appearance, Section::Voice, Section::Network, Section::Phone, Section::About];
 
     /// The section's name as the navigation shows it.
     pub fn label(self) -> &'static str {
@@ -77,6 +79,7 @@ impl Section {
             Section::Voice => "Voice & audio",
             Section::Network => "Network",
             Section::About => "About",
+            Section::Phone => "Battery & data",
         }
     }
 
@@ -88,6 +91,7 @@ impl Section {
             Section::Voice => icons::Icon::Sliders,
             Section::Network => icons::Icon::Globe,
             Section::About => icons::Icon::Info,
+            Section::Phone => icons::Icon::Phone,
         }
     }
 }
@@ -103,6 +107,9 @@ pub enum Dialog {
     ConfirmRemove(String),
     /// Are you sure: block this contact.
     ConfirmBlock(String),
+    /// Are you sure: replace this device's identity with the one the
+    /// recovery phrase in the box restores.
+    ConfirmRestore,
 }
 
 /// How a toast is coloured.
@@ -279,6 +286,26 @@ pub enum Action {
     Welcome(String),
     /// Open the folder where received files go.
     OpenDownloads,
+    /// Play the call through the loudspeaker (true) or the earpiece.
+    Speaker(bool),
+    /// The push-to-talk pad was pressed (true) or let go.
+    Talk(bool),
+    /// Ask the system for the microphone.
+    RequestMic,
+    /// Move files only on Wi-Fi.
+    WifiOnly(bool),
+    /// Turn the data saver on or off.
+    DataSaver(bool),
+    /// The monthly mobile data limit for files, in MB; 0 for none.
+    CellularLimit(u32),
+    /// Keep the door open in the background.
+    KeepListening(bool),
+    /// Keep listening in the background on battery saver too.
+    ListenOnSaver(bool),
+    /// Show (true) or hide the recovery phrase.
+    ShowPhrase(bool),
+    /// Restore the identity this recovery phrase makes, replacing this one.
+    Restore(String),
 }
 
 /// Everything that can happen in the interface.
@@ -338,6 +365,12 @@ pub enum Msg {
     NoteEdit(String),
     /// Save the note.
     NoteSave,
+    /// The recovery phrase box changed.
+    RestoreEdit(String),
+    /// The mobile data limit box changed (digits only are kept).
+    LimitEdit(String),
+    /// Save the mobile data limit box.
+    LimitSave,
     /// The first-run name box changed.
     FirstName(String),
     /// Finish first run with the name typed.
@@ -392,6 +425,10 @@ pub struct Ui {
     note_edit: Option<(String, String)>,
     /// The first-run name box.
     first_name: String,
+    /// The recovery phrase box, for restoring an identity on a phone.
+    restore_edit: String,
+    /// The mobile data limit box while it is being edited.
+    limit_edit: Option<String>,
     /// Toasts on screen, oldest first.
     toasts: Vec<Toast>,
     /// The id the next toast gets.
@@ -439,6 +476,8 @@ impl Ui {
             port_edit: None,
             note_edit: None,
             first_name: String::new(),
+            restore_edit: String::new(),
+            limit_edit: None,
             toasts: Vec::new(),
             next_toast: 1,
             cursor: Point::ORIGIN,
@@ -472,6 +511,12 @@ impl Ui {
     /// on every frame rather than on its slower tick.
     pub fn animating(&self) -> bool {
         self.dialog_anim.is_animating(self.now) || self.panel_anim.is_animating(self.now)
+    }
+
+    /// Whether the app should keep sending [`Msg::Frame`]: something is
+    /// animating, or a toast is up and will need taking down on time.
+    pub fn needs_frames(&self) -> bool {
+        self.animating() || !self.toasts.is_empty()
     }
 
     /// Turns animations off (or back on) without waiting for a model.
@@ -684,6 +729,19 @@ impl Ui {
                 Some((id, note)) => vec![Action::Note(id, note.trim().to_string())],
                 None => Vec::new(),
             },
+            Msg::RestoreEdit(s) => {
+                self.restore_edit = s;
+                Vec::new()
+            }
+            Msg::LimitEdit(s) => {
+                self.limit_edit = Some(s.chars().filter(char::is_ascii_digit).take(6).collect());
+                Vec::new()
+            }
+            Msg::LimitSave => match self.limit_edit.take() {
+                // Empty means no limit.
+                Some(s) => vec![Action::CellularLimit(s.parse().unwrap_or(0))],
+                None => Vec::new(),
+            },
             Msg::FirstName(s) => {
                 self.first_name = s;
                 Vec::new()
@@ -719,6 +777,10 @@ impl Ui {
                         self.route = Route::Home;
                     }
                     Action::RefreshInvite => self.toast("New invite link made", ToastKind::Ok),
+                    Action::Restore(_) => {
+                        self.set_dialog(None);
+                        self.restore_edit.clear();
+                    }
                     _ => {}
                 }
                 vec![action]

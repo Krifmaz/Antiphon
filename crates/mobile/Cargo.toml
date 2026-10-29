@@ -1,6 +1,6 @@
 [package]
 name = "antiphon-mobile"
-description = "Antiphon's phone app, shared by Android and iOS: iced on winit and wgpu"
+description = "Stoop's phone app, shared by Android and iOS: iced on winit and wgpu"
 edition.workspace = true
 version.workspace = true
 
@@ -24,6 +24,8 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "s
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
+# Stoop's interface, the same screens the desktop draws.
+antiphon-ui = { version = "0.1.0", path = "../ui" }
 # The desktop's chat history, outbox and file-transfer modules are compiled
 # into this crate as they are (see `lib.rs`); these are their dependencies
 # rather than choices made here.

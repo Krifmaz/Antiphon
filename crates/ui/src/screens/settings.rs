@@ -14,7 +14,7 @@ use crate::{Action, CheckState, Dialog, El, Model, Msg, Route, Section, Transmit
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     let p = theme::look();
     let mut nav = column![container(h2("Settings")).padding(pad(6.0, 0.0, 12.0, 10.0))].spacing(2);
-    for s in Section::ALL {
+    for s in Section::ALL.into_iter().filter(|s| shown(m, *s)) {
         let on = s == section;
         nav = nav.push(
             button(row![icon(s.icon(), 16.0, if on { p.text } else { p.muted }), t(s.label()).size(14).font(theme::semibold())].spacing(10).align_y(Alignment::Center))
@@ -31,10 +31,15 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
 /// Every section, one after another, for the phone.
 pub fn stacked<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let mut col = column![].spacing(28);
-    for s in Section::ALL {
+    for s in Section::ALL.into_iter().filter(|s| shown(m, *s)) {
         col = col.push(section_view(ui, m, s));
     }
     scrollable(container(col).padding([18, 14])).height(Length::Fill).style(theme::scroll).into()
+}
+
+/// Whether this device has section `s`: the phone's own section only on a phone.
+fn shown(m: &Model, s: Section) -> bool {
+    s != Section::Phone || m.phone.is_some()
 }
 
 /// The cards for one section.
@@ -45,6 +50,7 @@ fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
         Section::Voice => voice(m),
         Section::Network => network(ui, m),
         Section::About => about(m),
+        Section::Phone => phone(ui, m),
     };
     column![h1(section.label()), body].spacing(18).into()
 }
@@ -242,13 +248,18 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         ));
     }
 
-    column![
-        titled_card("Devices", None, devices),
+    let mut cards = column![].spacing(14);
+    // A phone's microphone and speaker are the system's to choose.
+    if m.phone.is_none() {
+        cards = cards.push(titled_card("Devices", None, devices));
+    }
+    cards
+        .push(column![
         titled_card("Microphone test", None, test),
         titled_card("When to send your voice", None, talk),
         titled_card("Processing", None, processing),
     ]
-    .spacing(14)
+    .spacing(14))
     .into()
 }
 
@@ -326,4 +337,78 @@ fn about<'a>(m: &'a Model) -> El<'a, Msg> {
     ]
     .spacing(14)
     .into()
+}
+
+/// The phone's own settings: the microphone permission, listening in the
+/// background, mobile data, and the recovery phrase.
+fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    let p = theme::look();
+    let Some(ph) = m.phone.as_ref() else { return column![].into() };
+    let mut cards = column![].spacing(14);
+    if !ph.mic_allowed {
+        cards = cards.push(card(setting(
+            "Microphone",
+            Some("Stoop needs it to send your voice. Nothing is recorded."),
+            btn("Allow", Btn::Primary, Some(Msg::Do(Action::RequestMic))),
+        )));
+    }
+    let background = column![
+        setting(
+            "Take calls in the background",
+            Some("Keeps your door open when Stoop is not on screen. Uses a little battery."),
+            switch(ph.keep_listening, |on| Msg::Do(Action::KeepListening(on)))
+        ),
+        divider(),
+        setting(
+            "Even on battery saver",
+            Some("Otherwise the door closes in the background while battery saver is on."),
+            switch(ph.listen_on_saver, |on| Msg::Do(Action::ListenOnSaver(on)))
+        ),
+    ]
+    .spacing(12);
+    let limit_text = if ph.cellular_limit_mb == 0 { String::new() } else { ph.cellular_limit_mb.to_string() };
+    let limit_value = ui.limit_edit.as_deref().unwrap_or(&limit_text);
+    let mut limit = row![text_input("No limit", limit_value).on_input(Msg::LimitEdit).on_submit(Msg::LimitSave).width(110).padding([9, 12]).size(14).style(theme::input), faint("MB").size(13)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if ui.limit_edit.as_deref().is_some_and(|e| e != limit_text) {
+        limit = limit.push(btn("Save", Btn::Primary, Some(Msg::LimitSave)));
+    }
+    let data = column![
+        setting("Files only on Wi-Fi", Some("Files wait for Wi-Fi instead of using mobile data."), switch(ph.wifi_only, |on| Msg::Do(Action::WifiOnly(on)))),
+        divider(),
+        setting("Data saver", Some("Smaller pictures and fewer checks on mobile data."), switch(ph.data_saver, |on| Msg::Do(Action::DataSaver(on)))),
+        divider(),
+        setting("Monthly limit for files", Some(ph.cellular_used.as_str()), limit),
+    ]
+    .spacing(12);
+    let phrase: El<'a, Msg> = match ph.phrase.as_deref() {
+        Some(words) => column![
+            container(t(words).size(13.5).font(theme::mono()).color(p.text)).padding([10, 12]).width(Length::Fill).style(theme::inset),
+            row![
+                btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Msg::Copy(words.to_string(), "Recovery phrase"))),
+                btn("Hide", Btn::Ghost, Some(Msg::Do(Action::ShowPhrase(false)))),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10)
+        .into(),
+        None => row![btn_icon(Icon::Lock, "Show my recovery phrase", Btn::Default, Some(Msg::Do(Action::ShowPhrase(true))))].into(),
+    };
+    let ready = !ui.restore_edit.trim().is_empty();
+    let restore = column![
+        text_input("The 24 words, in order", &ui.restore_edit).on_input(Msg::RestoreEdit).padding([10, 12]).size(14).style(theme::input),
+        row![btn("Restore", Btn::Danger, ready.then_some(Msg::Dialog(Some(Dialog::ConfirmRestore))))],
+    ]
+    .spacing(10);
+    cards
+        .push(titled_card("In the background", None, background))
+        .push(titled_card("Mobile data", None, data))
+        .push(titled_card(
+            "Recovery phrase",
+            Some("These words bring your identity back on a new phone. Anyone who has them can be you, so keep them somewhere only you can reach."),
+            phrase,
+        ))
+        .push(titled_card("Restore from a phrase", Some("Moving from another device? Type its phrase here."), restore))
+        .into()
 }

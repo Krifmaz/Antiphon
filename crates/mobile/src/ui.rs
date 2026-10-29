@@ -1,24 +1,25 @@
-//! The interface, in iced: the call, chat, files, contacts, recent calls,
-//! voice, settings and identity, as tabs.
+//! The phone app's state and rules: the call, chat, files, contacts,
+//! voice, settings and identity.
 //!
-//! Plain Elm-style state, messages and view, so it reads like any other
-//! iced app; [`crate::runner`] is what feeds it events and draws it, and
-//! calls [`App::poll`] whenever it wakes so what the call delivered --
+//! What is on screen is Stoop's shared interface (`antiphon-ui`), the same
+//! screens as the desktop; [`stoop`] turns this state into the model it
+//! draws and carries out what it asks for, mostly by sending a
+//! [`Message`] handled here. [`crate::runner`] feeds it events, draws it,
+//! and calls [`App::poll`] whenever it wakes so what the call delivered --
 //! messages, file progress, the end of a call -- reaches the screen and
-//! the disk. The newer screens' views are in [`views`].
+//! the disk.
 
-mod views;
+mod stoop;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
-use antiphon_audio::{eq_preset, eq_preset_names, ChainConfig, GainConfig, THIN_VOICE_WARNING_STRENGTH};
-use antiphon_crypto::{BackupKey, IdentityKeyPair, Invite};
-use iced_core::text::Wrapping;
-use iced_core::{Alignment, Element, Font, Length, Padding, Theme};
-use iced_widget::{
-    button, column, container, mouse_area, pick_list, progress_bar, row, scrollable, slider, space, text, text_input,
-    toggler,
-};
+use antiphon_audio::{eq_preset, ChainConfig, GainConfig};
+use antiphon_crypto::{BackupKey, IdentityKeyPair};
+use iced_core::{Element, Length, Padding, Size, Theme};
+use iced_widget::{container, qr_code};
 
 use crate::call::{self, now_secs, CallEngine, Phase, Waker};
 use crate::call_log::{self, CallRecord};
@@ -30,38 +31,13 @@ use crate::files::{self, FileManager};
 use crate::platform::{self, BackgroundWork, Network};
 use crate::settings::Settings;
 
-/// iced's wgpu renderer, the one every view here is built for.
-pub type Renderer = iced_wgpu::Renderer;
-
-/// The face bundled through iced's `fira-sans` feature, named so cosmic-text
-/// never falls back to whatever the vendor ships as sans-serif.
-pub const FONT: Font = Font::with_name("Fira Sans");
-
-
-/// The eight screens, chosen from two rows of tab buttons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    /// Calling, waiting for a call, and the call in progress.
-    Call,
-    /// The conversation on screen, or the list of them.
-    Chat,
-    /// The send queue, the transfers running, and received files.
-    Files,
-    /// The address book.
-    Contacts,
-    /// Past calls.
-    Recent,
-    /// The microphone chain and the mic test.
-    Voice,
-    /// Display name and the battery and data rules.
-    Settings,
-    /// This phone's key, its recovery phrase, and restoring from one.
-    Identity,
-}
+/// The renderer the shared interface is typed against: iced's wgpu one.
+pub type Renderer = iced_widget::Renderer;
 
 /// A stage of the microphone chain, for the switch that turns it on and
 /// off on the Voice screen.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // the full voice chain screen; see the note on `Message`
 pub enum Stage {
     /// Removes steady background noise, even under speech.
     NoiseSuppress,
@@ -87,6 +63,7 @@ pub enum Stage {
 
 /// A slider on the Voice screen, each setting one field of the chain.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // the full voice chain screen; see the note on `Message`
 pub enum Param {
     /// How hard noise suppression works, from 0 to 1.
     SuppressStrength,
@@ -108,23 +85,20 @@ pub enum Param {
     ReverbRoom,
 }
 
-/// Everything a tap or a keystroke can ask the interface to do. Handled
+/// Everything a tap or a keystroke can ask the interface to do.
+///
+/// The variants marked `allow(dead_code)` belong to phone screens the
+/// shared interface does not have yet -- the file queue, recent calls,
+/// the full voice chain, saving a caller, the message timer. Their rules
+/// stay here, tested by use before, so those screens only need drawing. Handled
 /// by [`App::update`] on the interface thread; the call, contacts and
 /// settings ones change state and save it straight away.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Switch to a screen.
-    Tab(Tab),
     /// The listening port box changed; only digits are kept.
     PortChanged(String),
-    /// The dial box changed.
-    RemoteChanged(String),
-    /// Fill the dial box from the clipboard.
-    PasteRemote,
     /// Start waiting for a call on the port in the box.
     Listen,
-    /// Dial what is in the dial box.
-    Call,
     /// Hang up, stop waiting, or cancel a dial.
     Stop,
     /// The push-to-talk pad was pressed.
@@ -135,19 +109,11 @@ pub enum Message {
     OpenMic(bool),
     /// Switch between loudspeaker and earpiece.
     Speaker(bool),
-    /// Copy this text to the clipboard: a key or an invite link.
-    Copy(String),
     /// Show or hide the recovery phrase.
     ShowPhrase(bool),
-    /// The restore phrase box changed.
-    RestoreChanged(String),
-    /// Fill the restore phrase box from the clipboard.
-    PasteRestore,
     /// Restore from the phrase in the box; the first press only arms it
     /// when it would replace a different identity.
     Restore,
-    /// Back out of an armed restore and clear the box.
-    CancelRestore,
     /// Show the system's microphone permission prompt.
     RequestMic,
     /// Start or stop the mic test.
@@ -157,52 +123,32 @@ pub enum Message {
     /// Turn a chain stage on or off.
     Toggle(Stage, bool),
     /// Move a chain slider to a new value, in that slider's units.
+    #[allow(dead_code)] // see the note on `Message`
     Param(Param, f32),
     /// Put the whole chain back to the default preset.
     ResetChain,
 
     // Contacts.
-    /// The new contact's name box changed.
-    ContactName(String),
-    /// The new contact's invite box changed.
-    ContactInvite(String),
-    /// Fill the invite box from the clipboard.
-    PasteContactInvite,
-    /// Add the contact from the name and invite boxes.
-    AddContact,
     /// Call the contact with this key (hex).
     CallContact(String),
-    /// Remove the contact with this key (hex); the first press only arms
-    /// it.
-    RemoveContact(String),
     /// The name box for saving the person on the call changed.
+    #[allow(dead_code)] // see the note on `Message`
     SaveCallerName(String),
     /// Save the person on the call under the name in the box.
+    #[allow(dead_code)] // see the note on `Message`
     SaveCaller,
     /// Mark the contact with this key (hex) verified, or not.
     MarkVerified(String, bool),
 
     // Chat.
-    /// Open the conversation with this key (hex) and show the Chat screen.
-    OpenChat(String),
-    /// Close the open conversation, back to the list.
-    CloseChat,
-    /// The message box changed.
-    Draft(String),
     /// Send the message box, or save it over the message being edited.
     SendChat,
-    /// Show the actions for one message, or (`None`) hide them.
-    SelectChat(Option<u64>),
-    /// Start editing one of our messages: its text goes into the message
-    /// box.
-    EditChat(u64),
-    /// Stop editing and clear the message box.
-    CancelEdit,
     /// Delete one of our messages.
     DeleteChat(u64),
     /// Toggle our reaction on a message.
     React(u64, &'static str),
     /// Set the open conversation's disappearing-message timer.
+    #[allow(dead_code)] // see the note on `Message`
     Expiry(Expiry),
 
     // Files.
@@ -216,22 +162,29 @@ pub enum Message {
     /// Stop receiving the file arriving.
     CancelIncoming,
     /// Pause (`true`) or resume the file being sent.
+    #[allow(dead_code)] // see the note on `Message`
     PauseSend(bool),
     /// Stop sending the file being sent.
     CancelSend,
     /// Move a queued file one place earlier.
+    #[allow(dead_code)] // see the note on `Message`
     QueueUp(u64),
     /// Move a queued file one place later.
+    #[allow(dead_code)] // see the note on `Message`
     QueueDown(u64),
     /// Hold (`true`) or release a queued file.
+    #[allow(dead_code)] // see the note on `Message`
     QueueHold(u64, bool),
     /// Take a file out of the queue.
+    #[allow(dead_code)] // see the note on `Message`
     QueueRemove(u64),
 
     // Recent calls.
     /// Call back the call at this index in the history, newest first.
+    #[allow(dead_code)] // see the note on `Message`
     CallBack(usize),
     /// Clear the call history; the first press only arms it.
+    #[allow(dead_code)] // see the note on `Message`
     ClearCalls,
 
     // Settings.
@@ -248,6 +201,9 @@ pub enum Message {
     KeepListening(bool),
     /// Switch listening in the background even on battery saver.
     ListenOnSaver(bool),
+
+    /// Something happened in the shared interface: a tap, typing, a frame.
+    Ui(antiphon_ui::Msg),
 }
 
 /// The disappearing-message choices offered. A short list, as on the
@@ -317,8 +273,6 @@ pub struct App {
     identity: Result<IdentityKeyPair, String>,
     /// Runs calls and the mic test.
     engine: CallEngine,
-    /// The screen shown.
-    tab: Tab,
     /// The listening port box as typed, which may not be a valid port yet.
     port_text: String,
     /// The EQ preset last chosen, for the picker; `None` once the chain is
@@ -348,12 +302,6 @@ pub struct App {
     calls: Vec<CallRecord>,
     /// The first press of "Clear call history" has been made.
     clear_calls_armed: bool,
-    /// The new contact's name box.
-    contact_name: String,
-    /// The new contact's invite box.
-    contact_invite: String,
-    /// The key (hex) of the contact whose Remove was pressed once.
-    remove_armed: Option<String>,
     /// The name box for saving the person on the call. Filled from their
     /// Hello when it arrives and the box is still empty.
     save_name: String,
@@ -369,8 +317,6 @@ pub struct App {
     /// The id of our message being edited, if the message box holds an
     /// edit.
     editing: Option<u64>,
-    /// The message whose actions are shown, if any.
-    selected: Option<u64>,
     /// Messages from them that arrived while the Chat screen was not
     /// showing, for the tab's badge.
     unread: usize,
@@ -398,6 +344,27 @@ pub struct App {
     /// What the platform was last told must keep running, so it is told
     /// only when that changes.
     background_work: BackgroundWork,
+
+    /// The shared interface's own state: the screen, dialogs, drafts.
+    stoop: antiphon_ui::Ui,
+    /// What the interface draws, rebuilt by [`refresh`](Self::refresh)
+    /// after every change and before every frame.
+    model: antiphon_ui::Model,
+    /// The theme and accent the palette was last built for.
+    look: (String, String),
+    /// The invite link and its QR code, rebuilt only when the link changes.
+    qr: Option<(String, Arc<qr_code::Data>)>,
+    /// The last message with each person, hex key to (text, unix seconds),
+    /// for the people list.
+    previews: HashMap<String, (String, u64)>,
+    /// Muted from the call screen: nothing is sent, however the mic is keyed.
+    muted: bool,
+    /// The push-to-talk pad is held.
+    talking: bool,
+    /// When the call on now connected, for its clock.
+    connected_at: Option<Instant>,
+    /// The window's logical size as last told to the interface.
+    size: Size,
 }
 
 /// Loads this phone's identity from `dir`, creating one on first start.
@@ -424,16 +391,27 @@ impl App {
             .map_err(|e| format!("Could not open the key that protects your messages: {e}"));
         let calls = backup_key.as_ref().map(|key| call_log::load(&dir, key)).unwrap_or_default();
         let meter = CellularMeter { month: settings.cellular_month, used_bytes: settings.cellular_used_bytes };
-        Ok(Self {
+        let contacts = Contacts::load(&dir);
+        // The people list shows each person's last message; read once here
+        // and kept up to date as messages come and go.
+        let mut previews = HashMap::new();
+        if let Ok(key) = &backup_key {
+            for c in &contacts.list {
+                if let Some(last) = crate::history::load(&dir, &c.identity_key, key).into_iter().rev().find(|m| !m.deleted) {
+                    let text = if last.from_me { format!("You: {}", last.text) } else { last.text };
+                    previews.insert(c.identity_key.clone(), (text, last.at_secs));
+                }
+            }
+        }
+        let mut app = Self {
             port_text: settings.listen_port.to_string(),
             limit_text: if settings.cellular_limit_mb == 0 { String::new() } else { settings.cellular_limit_mb.to_string() },
-            contacts: Contacts::load(&dir),
+            contacts,
             files: FileManager::new(dir.clone()),
             dir,
             settings,
             identity,
             engine,
-            tab: Tab::Call,
             eq_choice: None,
             phrase_visible: false,
             restore_text: String::new(),
@@ -444,15 +422,11 @@ impl App {
             backup_key,
             calls,
             clear_calls_armed: false,
-            contact_name: String::new(),
-            contact_invite: String::new(),
-            remove_armed: None,
             save_name: String::new(),
             dialled: None,
             chat: None,
             draft: String::new(),
             editing: None,
-            selected: None,
             unread: 0,
             live_peer: None,
             peer_display_name: None,
@@ -461,14 +435,27 @@ impl App {
             battery_saver: platform::battery_saver(),
             meter,
             background_work: BackgroundWork::default(),
-        })
+            stoop: antiphon_ui::Ui::new(),
+            model: antiphon_ui::Model::default(),
+            look: Default::default(),
+            qr: None,
+            previews,
+            muted: false,
+            talking: false,
+            connected_at: None,
+            size: Size::new(0.0, 0.0),
+        };
+        app.refresh();
+        Ok(app)
     }
 
     /// Something is moving on screen -- a call or mic test's level meter,
     /// and with a call, any file's progress bar -- so the runner should
     /// keep redrawing rather than wait for input.
     pub fn is_animating(&self) -> bool {
-        self.engine.mic_test_running() || matches!(self.engine.phase(), Phase::Connected { .. })
+        self.engine.mic_test_running()
+            || matches!(self.engine.phase(), Phase::Connected { .. } | Phase::Dialing { .. })
+            || self.stoop.needs_frames()
     }
 
     /// The activity came back to the front, possibly from the permission
@@ -479,9 +466,10 @@ impl App {
         self.local_ip = call::local_ip();
         self.network = platform::network();
         self.battery_saver = platform::battery_saver();
-        if self.tab == Tab::Chat {
+        if self.live_peer.is_some() && self.stoop.open_person() == self.live_peer.as_deref() {
             self.unread = 0;
         }
+        self.refresh();
     }
 
     /// The app went to the background. Waiting for calls keeps a socket
@@ -599,7 +587,6 @@ impl App {
         let expiry = self.contacts.by_key(key_hex).and_then(|c| c.expire_after_secs);
         self.chat = Some(Conversation::open(&self.dir, key, key_hex, expiry));
         self.editing = None;
-        self.selected = None;
         self.draft.clear();
     }
 
@@ -624,6 +611,16 @@ impl App {
             self.live_peer = live_peer.clone();
             self.peer_display_name = None;
             self.unread = 0;
+            self.connected_at = live_peer.as_ref().map(|_| Instant::now());
+            self.muted = false;
+            self.talking = false;
+            // A call that starts brings up their conversation, with the
+            // call at the top of it.
+            if let Some(peer) = &live_peer {
+                for action in self.stoop.show(antiphon_ui::Route::Person(peer.clone())) {
+                    self.act(action);
+                }
+            }
             if let (Some(peer), Some(live)) = (&live_peer, &live) {
                 // A call starts: their conversation comes up, and anything
                 // typed to them while they were away goes now.
@@ -664,7 +661,8 @@ impl App {
                     },
                 };
                 if let Some(text) = new_text {
-                    if !self.foreground || self.tab != Tab::Chat {
+                    self.previews.insert(peer.clone(), (text.clone(), now_secs()));
+                    if !self.foreground || self.stoop.open_person() != Some(peer.as_str()) {
                         self.unread += 1;
                     }
                     if !self.foreground {
@@ -738,6 +736,7 @@ impl App {
     /// Every finger is off the screen. Push-to-talk must never stay keyed
     /// because the release landed somewhere the button did not see.
     pub fn touch_ended(&mut self) {
+        self.talking = false;
         self.engine.set_ptt(false);
     }
 
@@ -758,40 +757,32 @@ impl App {
     /// Any message but the ones a held button or typing send clears the
     /// notice, and anything else disarms a pending two-press action.
     pub fn update(&mut self, message: Message) {
-        if !matches!(message, Message::PttPressed | Message::PttReleased | Message::Draft(_)) {
+        let clears_notice = match &message {
+            // Frames, typing and the like leave it; a tap that does
+            // something, or moves to another screen, clears it.
+            Message::Ui(m) => matches!(m, antiphon_ui::Msg::Do(_) | antiphon_ui::Msg::Nav(_) | antiphon_ui::Msg::Back),
+            Message::PttPressed | Message::PttReleased => false,
+            _ => true,
+        };
+        if clears_notice {
             self.notice = None;
+        }
+        if let Message::Ui(msg) = message {
+            let actions = self.stoop.update(msg, &self.model);
+            for action in actions {
+                self.act(action);
+            }
+            self.refresh();
+            return;
         }
         if !matches!(message, Message::ClearCalls) {
             self.clear_calls_armed = false;
         }
-        if !matches!(message, Message::RemoveContact(_)) {
-            self.remove_armed = None;
-        }
         match message {
-            Message::Tab(tab) => {
-                self.tab = tab;
-                if tab == Tab::Chat {
-                    self.unread = 0;
-                    // During a call, Chat means the person on it.
-                    if let Some(peer) = self.live_peer.clone() {
-                        self.open_chat(&peer);
-                    }
-                }
-            }
             Message::PortChanged(value) => {
                 self.port_text = value.chars().filter(char::is_ascii_digit).take(5).collect();
                 if let Ok(port) = self.port_text.parse::<u16>() {
                     self.settings.listen_port = port;
-                    self.save();
-                }
-            }
-            Message::RemoteChanged(value) => {
-                self.settings.last_remote = value;
-                self.save();
-            }
-            Message::PasteRemote => {
-                if let Some(text) = platform::read_clipboard() {
-                    self.settings.last_remote = text.trim().to_string();
                     self.save();
                 }
             }
@@ -803,14 +794,6 @@ impl App {
                 };
                 self.dialled = None;
                 self.engine.listen(port, identity);
-            }
-            Message::Call => {
-                let target = self.settings.last_remote.trim().to_string();
-                if target.is_empty() {
-                    self.notice = Some("Enter their address (ip:port) or paste their invite link.".into());
-                    return;
-                }
-                self.start_call(&target);
             }
             Message::Stop => self.engine.stop(),
             Message::PttPressed => self.engine.set_ptt(true),
@@ -825,26 +808,8 @@ impl App {
                 self.engine.set_speaker(on);
                 self.save();
             }
-            Message::Copy(value) => {
-                platform::copy_to_clipboard(&value);
-                self.notice = Some("Copied.".into());
-            }
             Message::ShowPhrase(show) => self.phrase_visible = show,
-            Message::RestoreChanged(value) => {
-                self.restore_text = value;
-                self.restore_armed = false;
-            }
-            Message::PasteRestore => {
-                if let Some(text) = platform::read_clipboard() {
-                    self.restore_text = text;
-                    self.restore_armed = false;
-                }
-            }
             Message::Restore => self.restore(),
-            Message::CancelRestore => {
-                self.restore_armed = false;
-                self.restore_text.clear();
-            }
             Message::RequestMic => platform::request_mic_permission(),
             Message::MicTest(on) => {
                 if on {
@@ -929,7 +894,6 @@ impl App {
         if let Some(identity) = self.call_identity() {
             self.dialled = Some(target.to_string());
             self.engine.call(target, identity);
-            self.tab = Tab::Call;
         }
     }
 
@@ -938,24 +902,6 @@ impl App {
         let live = self.engine.live();
         let live_here = |chat: &Conversation| live.as_ref().filter(|l| hex(&l.peer_key) == chat.peer_hex).cloned();
         match message {
-            Message::ContactName(value) => self.contact_name = value,
-            Message::ContactInvite(value) => self.contact_invite = value,
-            Message::PasteContactInvite => {
-                if let Some(text) = platform::read_clipboard() {
-                    self.contact_invite = text.trim().to_string();
-                }
-            }
-            Message::AddContact => {
-                match self.contacts.add_from_invite(&self.contact_name, &self.contact_invite, now_secs()) {
-                    Ok(line) => {
-                        self.contacts.save(&self.dir);
-                        self.contact_name.clear();
-                        self.contact_invite.clear();
-                        self.notice = Some(line);
-                    }
-                    Err(e) => self.notice = Some(e),
-                }
-            }
             Message::CallContact(key) => {
                 let Some(contact) = self.contacts.by_key(&key) else { return };
                 match contact.dial_target() {
@@ -966,18 +912,6 @@ impl App {
                             contact.name
                         ))
                     }
-                }
-            }
-            Message::RemoveContact(key) => {
-                // Two presses, like restoring an identity: a contact is a
-                // pinned key, and removing it means the next call from that
-                // key is a stranger's.
-                if self.remove_armed.as_deref() == Some(&key) {
-                    self.contacts.remove(&key);
-                    self.contacts.save(&self.dir);
-                    self.remove_armed = None;
-                } else {
-                    self.remove_armed = Some(key);
                 }
             }
             Message::SaveCallerName(value) => self.save_name = value,
@@ -1004,16 +938,6 @@ impl App {
                 }
             }
 
-            Message::OpenChat(key) => {
-                self.open_chat(&key);
-                self.tab = Tab::Chat;
-            }
-            Message::CloseChat => {
-                self.chat = None;
-                self.editing = None;
-                self.selected = None;
-            }
-            Message::Draft(value) => self.draft = value,
             Message::SendChat => {
                 let Some(chat) = self.chat.as_mut() else { return };
                 let here = live_here(chat);
@@ -1027,33 +951,19 @@ impl App {
                 }
                 self.draft.clear();
             }
-            Message::SelectChat(id) => self.selected = id,
-            Message::EditChat(id) => {
-                if let Some(message) = self.chat.as_ref().and_then(|c| c.messages.iter().find(|m| m.id == id && m.from_me)) {
-                    self.draft = message.text.clone();
-                    self.editing = Some(id);
-                    self.selected = None;
-                }
-            }
-            Message::CancelEdit => {
-                self.editing = None;
-                self.draft.clear();
-            }
             Message::DeleteChat(id) => {
                 if let Some(chat) = self.chat.as_mut() {
                     let here = live_here(chat);
                     chat.delete(id, here.as_deref());
                 }
-                self.selected = None;
-            }
+                    }
             Message::React(id, emoji) => {
                 if let Some(chat) = self.chat.as_mut() {
                     if let Some(live) = live_here(chat) {
                         chat.react(id, emoji, &live);
                     }
                 }
-                self.selected = None;
-            }
+                    }
             Message::Expiry(expiry) => {
                 let Some(chat) = self.chat.as_mut() else { return };
                 chat.set_expiry(expiry.secs());
@@ -1216,392 +1126,39 @@ impl App {
         }
     }
 
-    /// `top` and `bottom` are the logical pixels the system draws over.
+    /// The whole screen. `top` and `bottom` are the logical pixels the
+    /// system draws over (status bar, gesture bar or keyboard), kept clear.
     pub fn view(&self, top: f32, bottom: f32) -> Element<'_, Message, Theme, Renderer> {
-        // Eight tabs in two rows of four: one row of eight is too narrow to
-        // tap on a phone held upright, and a menu hides where things are.
-        let tab_button = |label: String, tab: Tab| {
-            button(text(label).size(14).width(Length::Fill).align_x(Alignment::Center))
-                .width(Length::Fill)
-                .padding([10, 2])
-                .style(if self.tab == tab { button::primary } else { button::secondary })
-                .on_press(Message::Tab(tab))
-        };
-        let chat_label = if self.unread > 0 { format!("Chat ({})", self.unread) } else { "Chat".to_string() };
-        let offer_waiting = self.engine.live().is_some_and(|l| l.files.lock().unwrap().pending_offer.is_some());
-        let files_label = if offer_waiting { "Files (!)".to_string() } else { "Files".to_string() };
-        let tabs = column![
-            row![
-                tab_button("Call".into(), Tab::Call),
-                tab_button(chat_label, Tab::Chat),
-                tab_button(files_label, Tab::Files),
-                tab_button("Contacts".into(), Tab::Contacts),
-            ]
-            .spacing(6),
-            row![
-                tab_button("Recent".into(), Tab::Recent),
-                tab_button("Voice".into(), Tab::Voice),
-                tab_button("Settings".into(), Tab::Settings),
-                tab_button("Identity".into(), Tab::Identity),
-            ]
-            .spacing(6),
-        ]
-        .spacing(6);
-
-        let body = match self.tab {
-            Tab::Call => self.call_view(),
-            Tab::Chat => self.chat_view(),
-            Tab::Files => self.files_view(),
-            Tab::Contacts => self.contacts_view(),
-            Tab::Recent => self.recent_view(),
-            Tab::Voice => self.voice_view(),
-            Tab::Settings => self.settings_view(),
-            Tab::Identity => self.identity_view(),
-        };
-
-        let mut page = column![tabs].spacing(16);
-        if let Some(notice) = &self.notice {
-            page = page.push(container(text(notice.as_str())).padding(10).width(Length::Fill).style(container::rounded_box));
-        }
-        // An open conversation scrolls its messages itself, so its input
-        // stays put at the bottom instead of scrolling away with them.
-        if self.tab == Tab::Chat && self.chat.is_some() {
-            page = page.push(container(body).height(Length::Fill));
-        } else {
-            page = page.push(scrollable(container(body).padding(Padding { right: 12.0, ..Padding::ZERO })).height(Length::Fill));
-        }
-
-        container(page)
-            .padding(Padding { top: top + 12.0, bottom: bottom + 12.0, left: 16.0, right: 16.0 })
+        container(self.stoop.view(&self.model).map(Message::Ui))
+            .padding(Padding { top, bottom, ..Padding::ZERO })
             .width(Length::Fill)
             .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced_core::Background::Color(antiphon_ui::theme::look().bg)),
+                ..Default::default()
+            })
             .into()
     }
 
-    /// A banner asking for the microphone, while permission is missing.
-    fn mic_banner(&self) -> Option<Element<'_, Message, Theme, Renderer>> {
-        (!self.mic_permission).then(|| {
-            container(
-                column![
-                    text("Microphone access is off. Calls and the mic test need it."),
-                    button("Allow microphone").on_press(Message::RequestMic),
-                ]
-                .spacing(8),
-            )
-            .padding(12)
-            .width(Length::Fill)
-            .style(container::rounded_box)
-            .into()
-        })
+    /// The iced theme for the current palette, which also gives the
+    /// colour behind the system bars.
+    pub fn theme(&self) -> Theme {
+        antiphon_ui::theme::iced_theme(&antiphon_ui::theme::look())
     }
 
-    /// The Call screen: the call in progress, or waiting, dialling, and the
-    /// forms to start either.
-    fn call_view(&self) -> Element<'_, Message, Theme, Renderer> {
-        let mut content = column![].spacing(14);
-        if let Some(banner) = self.mic_banner() {
-            content = content.push(banner);
+    /// The window's size changed, in logical pixels: the interface picks
+    /// its phone or tablet layout from it.
+    pub fn resized(&mut self, size: Size) {
+        if size != self.size {
+            self.size = size;
+            let _ = self.stoop.update(antiphon_ui::Msg::Resized(size), &self.model);
         }
-
-        match self.engine.phase() {
-            Phase::Connected { remote, code, peer_key } => {
-                return self.connected_view(remote, code, peer_key);
-            }
-            Phase::Listening { local, public } => {
-                content = content.push(text("Waiting for a call").size(24));
-                content = content.push(text(format!("On your network: {local}")));
-                match &public {
-                    Some(public) => content = content.push(text(format!("From the internet: {public}"))),
-                    None => content = content.push(text("Looking up your internet address...")),
-                }
-                if let Ok(identity) = &self.identity {
-                    let address = public.unwrap_or(local);
-                    let link = Invite::new(identity.public().identity_key, address).to_link();
-                    content = content.push(text("Send them this invite. It carries your address and who you are, so nobody else can answer in your place."));
-                    content = content.push(text(link.clone()).size(13).wrapping(Wrapping::Glyph));
-                    content = content.push(button("Copy invite").on_press(Message::Copy(link)));
-                }
-                content = content.push(button("Stop waiting").style(button::danger).on_press(Message::Stop));
-                return content.into();
-            }
-            Phase::Dialing { remote } => {
-                content = content.push(text("Calling...").size(24));
-                content = content.push(text(remote).wrapping(Wrapping::Glyph));
-                content = content.push(button("Cancel").style(button::danger).on_press(Message::Stop));
-                return content.into();
-            }
-            Phase::Ended { message } => {
-                content = content.push(container(text(message)).padding(10).width(Length::Fill).style(container::rounded_box));
-            }
-            Phase::Idle => {}
-        }
-
-        content = content.push(text("Call someone").size(22));
-        content = content.push(text("Their address as ip:port, or the invite link they sent you."));
-        content = content.push(
-            text_input("192.168.1.20:5000 or antiphon://...", &self.settings.last_remote)
-                .on_input(Message::RemoteChanged)
-                .on_submit(Message::Call)
-                .padding(10),
-        );
-        content = content.push(
-            row![
-                button("Paste").style(button::secondary).on_press(Message::PasteRemote),
-                button("Call").style(button::success).on_press(Message::Call),
-            ]
-            .spacing(10),
-        );
-
-        content = content.push(space().height(8));
-        content = content.push(text("Wait for a call").size(22));
-        content = content.push(text("Opens this port and shows an invite to send. Over the internet, your router may need to forward the port to this phone."));
-        content = content.push(
-            row![
-                text_input("5000", &self.port_text)
-                    .on_input(Message::PortChanged)
-                    .on_submit(Message::Listen)
-                    .padding(10)
-                    .width(Length::Fixed(110.0)),
-                button("Wait for a call").on_press(Message::Listen),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-        );
-        if let Some(ip) = &self.local_ip {
-            content = content.push(text(format!("This phone on your network: {ip}")).size(14));
-        }
-        content.into()
     }
 
-    /// The call in progress: the verification code, who it is with, the
-    /// push-to-talk pad and the switches.
-    fn connected_view(&self, remote: String, code: String, peer_key: [u8; 32]) -> Element<'_, Message, Theme, Renderer> {
-        let transmitting = self.engine.transmitting();
-        let key_hex = hex(&peer_key);
-        let mut content = column![
-            text(format!("In a call with {}", self.display_name_for(&key_hex))).size(24),
-            text(remote).size(14),
-            text("Verification code").size(14),
-            text(code).size(30),
-            text("Read it to each other out loud. If it differs, someone is in the middle of this call: hang up."),
-        ]
-        .spacing(10);
-        content = content.push(self.caller_card(&key_hex));
-        content = content.push(
-            row![
-                button(text(if self.unread > 0 { format!("Chat ({})", self.unread) } else { "Chat".into() }))
-                    .style(button::secondary)
-                    .on_press(Message::Tab(Tab::Chat)),
-                button("Send a file").style(button::secondary).on_press(Message::PickFile),
-                button("Files").style(button::secondary).on_press(Message::Tab(Tab::Files)),
-            ]
-            .spacing(10),
-        );
-        content = content.push(progress_bar(0.0..=1.0, self.engine.level().min(1.0)).girth(10));
-
-        if self.settings.open_mic {
-            content = content.push(text("Open mic: you are always transmitting."));
-        } else {
-            let label = if transmitting { "Talking..." } else { "Hold to talk" };
-            let pad = container(text(label).size(26))
-                .center(Length::Fill)
-                .height(Length::Fixed(160.0))
-                .style(if transmitting { container::success } else { container::secondary });
-            content = content.push(mouse_area(pad).on_press(Message::PttPressed).on_release(Message::PttReleased));
-        }
-
-        content = content
-            .push(toggler(self.settings.open_mic).label("Open mic").on_toggle(Message::OpenMic))
-            .push(toggler(self.settings.speaker).label("Speaker").on_toggle(Message::Speaker))
-            .push(
-                button(text("Hang up").width(Length::Fill).align_x(Alignment::Center))
-                    .width(Length::Fill)
-                    .padding(14)
-                    .style(button::danger)
-                    .on_press(Message::Stop),
-            );
-        content.into()
-    }
-
-    /// The Voice screen: the mic test and every stage of the chain, each
-    /// with a sentence on what it does and its sliders while on.
-    fn voice_view(&self) -> Element<'_, Message, Theme, Renderer> {
-        let chain = &self.settings.chain;
-        let mut content = column![
-            text("Your voice").size(22),
-            text("Every stage runs on this phone before anything is sent. Changes apply straight away, even mid-call."),
-        ]
-        .spacing(12);
-        if let Some(banner) = self.mic_banner() {
-            content = content.push(banner);
-        }
-
-        let testing = self.engine.mic_test_running();
-        content = content.push(toggler(testing).label("Hear yourself (use headphones)").on_toggle(Message::MicTest));
-        if testing {
-            content = content.push(progress_bar(0.0..=1.0, self.engine.level().min(1.0)).girth(10));
-        }
-
-        let mut presets: Vec<String> = vec!["Flat".to_string()];
-        presets.extend(eq_preset_names().iter().map(|s| s.to_string()));
-        content = content.push(
-            row![
-                text("EQ"),
-                pick_list(presets, self.eq_choice.clone(), Message::EqPreset).placeholder("Choose a starting EQ"),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-        );
-
-        let stage = |label: &'static str, help: &'static str, on: bool, which: Stage| {
-            column![toggler(on).label(label).on_toggle(move |v| Message::Toggle(which, v)), text(help).size(13)].spacing(4)
-        };
-        let knob = |label: String, range: std::ops::RangeInclusive<f32>, value: f32, step: f32, which: Param| {
-            column![text(label).size(14), slider(range, value, move |v| Message::Param(which, v)).step(step)].spacing(4)
-        };
-
-        let mut suppress = stage(
-            "Noise suppression",
-            "Removes steady background sound -- fans, hiss, air conditioning -- even under your voice.",
-            chain.noise_suppress.enabled,
-            Stage::NoiseSuppress,
-        );
-        if chain.noise_suppress.enabled {
-            suppress = suppress.push(knob(
-                format!("Strength {:.0}%", chain.noise_suppress.strength * 100.0),
-                0.0..=1.0,
-                chain.noise_suppress.strength,
-                0.05,
-                Param::SuppressStrength,
-            ));
-            if chain.noise_suppress.strength > THIN_VOICE_WARNING_STRENGTH {
-                suppress = suppress.push(text("This strong, it starts removing parts of your voice too: speech and background share frequencies.").size(13));
-            }
-        }
-        content = content.push(suppress);
-
-        let mut gate = stage("Noise gate", "Mutes the mic between words, so the room is not heard while you are quiet.", chain.noise_gate.enabled, Stage::NoiseGate);
-        if chain.noise_gate.enabled {
-            gate = gate.push(knob(format!("Threshold {:.0} dB", chain.noise_gate.threshold_db), -80.0..=-10.0, chain.noise_gate.threshold_db, 1.0, Param::GateThreshold));
-        }
-        content = content.push(gate);
-
-        let mut high = stage("High-pass filter", "Cuts rumble and handling noise below your voice.", chain.high_pass.enabled, Stage::HighPass);
-        if chain.high_pass.enabled {
-            high = high.push(knob(format!("Cutoff {:.0} Hz", chain.high_pass.cutoff_hz), 20.0..=300.0, chain.high_pass.cutoff_hz, 5.0, Param::HighPassCutoff));
-        }
-        content = content.push(high);
-
-        let mut low = stage("Low-pass filter", "Cuts hiss above your voice.", chain.low_pass.enabled, Stage::LowPass);
-        if chain.low_pass.enabled {
-            low = low.push(knob(format!("Cutoff {:.0} Hz", chain.low_pass.cutoff_hz), 3000.0..=20000.0, chain.low_pass.cutoff_hz, 250.0, Param::LowPassCutoff));
-        }
-        content = content.push(low);
-
-        content = content.push(stage("De-esser", "Softens harsh s and sh sounds.", chain.de_esser.enabled, Stage::DeEsser));
-
-        let mut comp = stage("Compressor", "Evens out loud and quiet moments so you stay at one level.", chain.compressor.enabled, Stage::Compressor);
-        if chain.compressor.enabled {
-            comp = comp
-                .push(knob(format!("Threshold {:.0} dB", chain.compressor.threshold_db), -50.0..=0.0, chain.compressor.threshold_db, 1.0, Param::CompressorThreshold))
-                .push(knob(format!("Ratio {:.1}:1", chain.compressor.ratio), 1.0..=10.0, chain.compressor.ratio, 0.5, Param::CompressorRatio));
-        }
-        content = content.push(comp);
-
-        content = content.push(stage("Limiter", "A hard ceiling, so a shout or a bump never clips.", chain.limiter.enabled, Stage::Limiter));
-
-        let gain_on = match chain.gain {
-            GainConfig::Fixed { enabled, .. } | GainConfig::Auto { enabled, .. } => enabled,
-        };
-        content = content.push(stage("Auto gain", "Turns a quiet mic up and a loud one down, slowly.", gain_on, Stage::AutoGain));
-
-        let mut pitch = stage("Pitch shift", "Raises or lowers your voice, keeping it sounding like speech.", chain.pitch_shift.enabled, Stage::PitchShift);
-        if chain.pitch_shift.enabled {
-            pitch = pitch.push(knob(format!("{:+.0} semitones", chain.pitch_shift.semitones), -12.0..=12.0, chain.pitch_shift.semitones, 1.0, Param::PitchSemitones));
-        }
-        content = content.push(pitch);
-
-        let mut reverb = stage("Reverb", "Adds a room around your voice.", chain.reverb.enabled, Stage::Reverb);
-        if chain.reverb.enabled {
-            reverb = reverb
-                .push(knob(format!("Room {:.0}%", chain.reverb.room_size * 100.0), 0.0..=1.0, chain.reverb.room_size, 0.05, Param::ReverbRoom))
-                .push(knob(format!("Mix {:.0}%", chain.reverb.wet_dry * 100.0), 0.0..=1.0, chain.reverb.wet_dry, 0.05, Param::ReverbMix));
-        }
-        content = content.push(reverb);
-
-        content = content.push(button("Reset to defaults").style(button::secondary).on_press(Message::ResetChain));
-        content.into()
-    }
-
-    /// The Identity screen: this phone's key, the recovery phrase behind a
-    /// button, and restoring from a phrase.
-    fn identity_view(&self) -> Element<'_, Message, Theme, Renderer> {
-        let mut content = column![
-            text("Your identity").size(22),
-            text("A key made on this phone. There is no account and no server: this key is who you are to your contacts."),
-        ]
-        .spacing(12);
-
-        match &self.identity {
-            Ok(identity) => {
-                let key = hex(&identity.public().identity_key);
-                let link = Invite::new(identity.public().identity_key, String::new()).to_link();
-                content = content
-                    .push(text(key.clone()).size(14).wrapping(Wrapping::Glyph))
-                    .push(
-                        row![
-                            button("Copy key").style(button::secondary).on_press(Message::Copy(key)),
-                            button("Copy invite").style(button::secondary).on_press(Message::Copy(link)),
-                        ]
-                        .spacing(10),
-                    );
-
-                content = content.push(space().height(8)).push(text("Recovery phrase").size(20));
-                if self.phrase_visible {
-                    let phrase = antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed());
-                    content = content
-                        .push(text("Write these 24 words down and keep them somewhere safe. Anyone who reads them becomes you, and nobody can reset your identity if you lose them."))
-                        .push(container(text(phrase).size(15)).padding(12).width(Length::Fill).style(container::rounded_box))
-                        .push(button("Hide").style(button::secondary).on_press(Message::ShowPhrase(false)));
-                } else {
-                    content = content
-                        .push(text("24 words that rebuild this identity on a new phone."))
-                        .push(button("Show recovery phrase").on_press(Message::ShowPhrase(true)));
-                }
-            }
-            Err(e) => {
-                content = content.push(text(e.as_str()));
-            }
-        }
-
-        content = content
-            .push(space().height(8))
-            .push(text("Restore from a phrase").size(20))
-            .push(text("Replaces this phone's identity with the one the phrase belongs to."))
-            .push(
-                text_input("24 words, separated by spaces", &self.restore_text)
-                    .on_input(Message::RestoreChanged)
-                    .padding(10),
-            );
-        if self.restore_armed {
-            content = content
-                .push(text("This phone already has a different identity. Every contact who knows it will see a key-change warning. Replace it?"))
-                .push(
-                    row![
-                        button("Yes, replace it").style(button::danger).on_press(Message::Restore),
-                        button("Cancel").style(button::secondary).on_press(Message::CancelRestore),
-                    ]
-                    .spacing(10),
-                );
-        } else {
-            content = content.push(
-                row![
-                    button("Paste").style(button::secondary).on_press(Message::PasteRestore),
-                    button("Restore").on_press(Message::Restore),
-                ]
-                .spacing(10),
-            );
-        }
-        content.into()
+    /// A frame is about to be drawn: moves animations and timers on, and
+    /// brings the model up to date (meters, the call clock).
+    pub fn frame(&mut self) {
+        let _ = self.stoop.update(antiphon_ui::Msg::Frame(Instant::now()), &self.model);
+        self.refresh();
     }
 }
