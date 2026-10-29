@@ -43,27 +43,28 @@ pub const MODEL_DIR: &str = "captions-whisper-tiny.en";
 /// because at this size the multilingual one is noticeably worse at
 /// English. Revision-pinned URLs would be better still; the hashes are
 /// what is actually relied on.
-//
-// TODO(parent): fill in the three hashes (`sha256sum` of each file from
-// these URLs) -- they could not be fetched from the build sandbox.
+///
+/// The sizes and hashes were taken from these URLs by the manual
+/// `whisper-model` workflow (`.github/workflows/whisper-model.yml`), which
+/// also runs the real-model test against the downloaded files.
 pub const FILES: &[ModelFile] = &[
     ModelFile {
         name: "config.json",
         url: "https://huggingface.co/openai/whisper-tiny.en/resolve/main/config.json",
-        size: 2_000,
-        sha256: None,
+        size: 1_937,
+        sha256: Some("b5366317df280f79e6cc366f259f379674f81a8721d458acf2e00680ccb10b1d"),
     },
     ModelFile {
         name: "tokenizer.json",
         url: "https://huggingface.co/openai/whisper-tiny.en/resolve/main/tokenizer.json",
-        size: 2_500_000,
-        sha256: None,
+        size: 2_405_679,
+        sha256: Some("5eb60cec1e77aeeb6869a2bb5a8e01a84c3fe5d072d75369343021fe6f5310d0"),
     },
     ModelFile {
         name: "model.safetensors",
         url: "https://huggingface.co/openai/whisper-tiny.en/resolve/main/model.safetensors",
-        size: 151_000_000,
-        sha256: None,
+        size: 151_060_136,
+        sha256: Some("db59695928ded6043adaef491a53ef4e12da9611184d77c53baa691a60b958ad"),
     },
 ];
 

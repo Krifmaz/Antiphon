@@ -1,0 +1,49 @@
+# Checks the speech model live captions download (spec §7 "On-device live
+# captions"). The app refuses any model file whose SHA-256 doesn't match
+# the pins in crates/captions/src/model_files.rs, so when the files on
+# Hugging Face change -- or to fill the pins in the first time -- run this
+# from the Actions tab: it downloads the three files from exactly the URLs
+# the app uses, prints their sizes and hashes, and runs the captions test
+# that needs the real model.
+name: Whisper model
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the model files the app uses
+        run: |
+          set -euo pipefail
+          mkdir -p model
+          # Same URLs as model_files.rs, read from it so the two can't drift.
+          grep -o 'https://huggingface.co/[^"]*' crates/captions/src/model_files.rs | while read -r url; do
+            name="${url##*/}"
+            curl --fail --location --silent --show-error --proto '=https' -o "model/$name" "$url"
+          done
+          ls -l model
+
+      - name: Print sizes and SHA-256
+        run: |
+          cd model
+          for f in config.json tokenizer.json model.safetensors; do
+            echo "PIN $f size=$(stat -c %s "$f") sha256=$(sha256sum "$f" | cut -d' ' -f1)"
+          done
+
+      # The toolchain CI uses (ci.yml's RUST_VERSION).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+
+      - name: Run the captions test against the real model
+        env:
+          ANTIPHON_WHISPER_DIR: ${{ github.workspace }}/model
+        run: cargo test -p antiphon-captions --release -- --ignored real_model --nocapture
