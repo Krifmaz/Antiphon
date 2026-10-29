@@ -1,0 +1,27 @@
+# A test setup: the headless echo peer and a relay. From the repo root:
+#   docker compose -f docker/compose.yaml up -d
+# Or skip the build and use the published images by swapping each
+# `build:` for its `image:` line.
+services:
+  echo:
+    # image: ghcr.io/krifmaz/antiphon-echo:latest
+    build:
+      context: ..
+    restart: unless-stopped
+    ports:
+      - "5000:5000/udp"
+    volumes:
+      # Keeps the identity key, so clients pin it once.
+      - antiphon-data:/data
+
+  relay:
+    # image: ghcr.io/krifmaz/antiphon-relay:latest
+    build:
+      context: ..
+      dockerfile: crates/relay/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3479:3479/udp"
+
+volumes:
+  antiphon-data:
