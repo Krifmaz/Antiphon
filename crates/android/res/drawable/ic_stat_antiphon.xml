@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The launcher icon's two facing waves, as the status bar wants them:
-     24dp, one colour (the system tints it), cropped to the waves. -->
+<!-- The launcher icon's swirl, as the status bar wants it: 24dp, one
+     colour (the system tints it), cropped to the swirl. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
-    android:viewportWidth="60"
-    android:viewportHeight="60">
+    android:viewportWidth="52"
+    android:viewportHeight="52">
     <group
-        android:translateX="-24"
-        android:translateY="-24">
+        android:translateX="-6"
+        android:translateY="-6">
         <path
             android:strokeColor="#FFFFFFFF"
-            android:strokeWidth="5"
+            android:strokeWidth="5.5"
             android:strokeLineCap="round"
             android:fillColor="#00000000"
-            android:pathData="M46,38 A18,18 0 0,0 46,70 M38,30 A28,28 0 0,0 38,78 M62,38 A18,18 0 0,1 62,70 M70,30 A28,28 0 0,1 70,78" />
+            android:pathData="M35.56,10.53 A13.0,13.0 0 0,0 27.05,32.71 M28.44,53.47 A13.0,13.0 0 0,0 36.95,31.29" />
     </group>
 </vector>

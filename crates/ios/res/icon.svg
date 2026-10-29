@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The Android launcher icon (crates/android/res), flattened onto its
-     background: two voices answering each other. The PNGs beside this file
-     were rendered from it once and are committed, so building the app
-     needs no SVG renderer. Re-render them if this changes. -->
+<!-- The iOS app icon: Stoop's swirl on its charcoal, full bleed (iOS rounds
+     the corners), laid out like the Android launcher icon. The PNGs beside
+     this file were rendered from it once and are committed, so building the
+     app needs no SVG renderer. Re-render them if this changes. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 108 108">
-  <rect width="108" height="108" fill="#1E2A3A"/>
-  <path d="M46,38 A18,18 0 0,0 46,70 M38,30 A28,28 0 0,0 38,78" fill="none" stroke="#7FB2FF" stroke-width="5" stroke-linecap="round"/>
-  <path d="M62,38 A18,18 0 0,1 62,70 M70,30 A28,28 0 0,1 70,78" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round"/>
+  <rect width="108" height="108" fill="#222224"/>
+  <path d="M58.28,28.24 A15.6,15.6 0 0,0 48.06,54.85 M49.72,79.76 A15.6,15.6 0 0,0 59.94,53.15" fill="none" stroke="#F0EAD6" stroke-width="6.6" stroke-linecap="round"/>
 </svg>
