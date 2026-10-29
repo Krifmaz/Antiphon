@@ -1835,6 +1835,7 @@ export component MainWindow inherits Window {
     in-out property <bool> monitor-enabled: false;
     in-out property <int> monitor-latency-ms: 120;
     in-out property <int> current-tab: 0;
+    in-out property <int> spaces-unread: 0;
     // The default layout's own view state; nothing here is saved.
     in-out property <int> selected-contact: -1;
     in-out property <bool> right-panel-open: true;
@@ -1845,7 +1846,6 @@ export component MainWindow inherits Window {
     // First letter of a name, uppercased, for letter avatars. Rust does it
     // because .slint has no way to take part of a string.
     pure callback initial-of(string) -> string;
-    in-out property <int> spaces-unread: 0;
     in-out property <int> settings-category: 0;
 
     // Settings search (spec §0). Rust owns the filtering and writes the
@@ -2392,46 +2392,6 @@ export component MainWindow inherits Window {
         width: 100%;
         height: 100%;
         spacing: 0px;
-        // Spec §6: a slim strip so reachability is always on screen.
-        if !server-mode : HorizontalLayout {
-            height: 28px;
-            padding-left: 8px;
-            padding-right: 8px;
-            padding-top: 3px;
-            padding-bottom: 3px;
-            Rectangle { horizontal-stretch: 1; }
-            // Spec §6: reachability is always visible, never discovered
-            // through a call that failed. Click to check again.
-            Rectangle {
-                border-radius: 10px;
-                background: network-status-ok ? Theme.panel-hover : #6b2a2a;
-                width: net-chip.preferred-width + 16px;
-                height: 22px;
-                accessible-role: button;
-                accessible-label: "Connection: " + network-status;
-                net-chip := Text {
-                    text: network-status;
-                    font-size: 10px * text-scale;
-                    vertical-alignment: center;
-                    color: network-status-ok ? Theme.muted-text : #ffd0d0;
-                }
-                net-touch := TouchArea { clicked => { recheck-network(); } }
-                if net-touch.has-hover && network-status-explanation != "" : Rectangle {
-                    y: parent.height + 4px;
-                    x: parent.width - 320px;
-                    width: 320px;
-                    height: net-tip.preferred-height + 12px;
-                    background: Palette.background; border-width: 1px; border-color: Theme.divider;
-                    border-radius: 6px;
-                    net-tip := Text {
-                        x: 6px; y: 6px; width: parent.width - 12px;
-                        text: network-status-explanation + (active-relay != "" ? "\nRelay in use: " + active-relay : "");
-                        wrap: word-wrap;
-                        font-size: 10px * text-scale;
-                    }
-                }
-            }
-        }
 
         // Server mode replaces the whole widget UI with a console -- the
         // profile widget/settings/canvas are all deliberately unreachable
@@ -2527,6 +2487,29 @@ export component MainWindow inherits Window {
                         reduced-motion: reduced-motion;
                         clicked => { selected-contact = i; }
                     }
+                    // Spec §9: group chats and communities are their own page.
+                    Rectangle {
+                        width: 72px;
+                        height: 56px;
+                        RailItem {
+                            label: spaces-unread > 0 ? "Groups & communities (\{spaces-unread} unread)" : "Groups & communities";
+                            has-icon: true;
+                            icon: @image-url("icons/users.svg");
+                            reduced-motion: reduced-motion;
+                            clicked => { current-tab = 2; open-communities(); }
+                        }
+                        if spaces-unread > 0 : Rectangle {
+                            x: 44px;
+                            y: 36px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: Surface.danger;
+                            border-width: 3px;
+                            border-color: Surface.ground;
+                            Text { text: spaces-unread > 9 ? "9+" : "\{spaces-unread}"; color: #16161f; font-size: 9px; font-weight: 700; }
+                        }
+                    }
                     RailItem {
                         label: "Add a contact or server";
                         has-icon: true;
@@ -2542,15 +2525,6 @@ export component MainWindow inherits Window {
                         icon: @image-url("icons/qr.svg");
                         reduced-motion: reduced-motion;
                         clicked => { connect-dialog-tab = 0; connect-dialog-open = true; }
-                    }
-                    // Spec §9: groups and communities have their own page.
-                    RailItem {
-                        label: spaces-unread > 0 ? "Groups & communities (" + spaces-unread + ")" : "Groups & communities";
-                        has-icon: true;
-                        action: true;
-                        icon: @image-url("icons/users.svg");
-                        reduced-motion: reduced-motion;
-                        clicked => { current-tab = 2; open-communities(); }
                     }
                     Rectangle { vertical-stretch: 1; }
                 }
@@ -2812,6 +2786,41 @@ export component MainWindow inherits Window {
                         if connected && peer-status-message != "" : Rectangle { width: 1px; height: 20px; y: 14px; background: Surface.line; }
                         if connected && peer-status-message != "" : Text { text: peer-status-message; color: Surface.muted; font-size: 13px * text-scale; vertical-alignment: center; overflow: elide; }
                         Rectangle { horizontal-stretch: 1; }
+                        // Spec §6: reachability is always visible, never
+                        // discovered through a call that failed. Click to
+                        // check again; hover for what it means.
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                height: 24px;
+                                width: net-chip.preferred-width + 20px;
+                                border-radius: 12px;
+                                background: network-status-ok ? Surface.hover : Surface.danger.with-alpha(0.2);
+                                accessible-role: button;
+                                accessible-label: "Connection: " + network-status;
+                                net-chip := Text {
+                                    text: network-status;
+                                    font-size: 12px * text-scale;
+                                    color: network-status-ok ? Surface.muted : Surface.danger;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { recheck-network(); }
+                                    changed has-hover => {
+                                        if (self.has-hover && network-status-explanation != "") {
+                                            TooltipState.text = network-status-explanation + (active-relay != "" ? "\nRelay in use: " + active-relay : "");
+                                            TooltipState.anchor-x = self.absolute-position.x - 140px;
+                                            TooltipState.anchor-y = self.absolute-position.y + 28px;
+                                            TooltipState.scale = text-scale;
+                                            TooltipState.visible = true;
+                                        } else if (!self.has-hover) {
+                                            TooltipState.visible = false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Connection state as a quiet pill rather than a
                         // line of diagnostics in the corner.
                         VerticalLayout {
@@ -3110,6 +3119,41 @@ export component MainWindow inherits Window {
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Spec §7 live captions, subtitle-style just above
+                        // the composer. Shown only while captions are
+                        // actually running in a call.
+                        if captions-live && (caption-lines.length > 0 || captions-status != "") : HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-top: 8px;
+                            Rectangle {
+                                background: #000000c8;
+                                border-radius: 10px;
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 2px;
+                                    for line in caption-lines : Text {
+                                        text: line.who + ": " + line.text;
+                                        color: #ffffff;
+                                        wrap: word-wrap;
+                                        font-size: 15px * text-scale;
+                                        accessible-role: text;
+                                        accessible-label: line.who + " said " + line.text;
+                                    }
+                                    if captions-status != "" : Text {
+                                        text: captions-status;
+                                        color: #ffffffb0;
+                                        wrap: word-wrap;
+                                        font-size: 11px * text-scale;
+                                    }
+                                    if captions-have-transcript : HorizontalLayout {
+                                        alignment: end;
+                                        Button { text: "Save transcript..."; clicked => { captions-save-transcript(); } }
                                     }
                                 }
                             }
@@ -3435,6 +3479,14 @@ export component MainWindow inherits Window {
                                             }
                                         }
                                         Button { text: "Ask them to add me"; clicked => { send-friend-request(); } }
+                                        ToggleSwitch {
+                                            text: "Live captions";
+                                            checked <=> captions-enabled;
+                                            reduced-motion: reduced-motion;
+                                            text-scale: text-scale;
+                                            help: "Writes what is said as subtitles, on this device only. Set up the speech model in Settings > Call > Live captions.";
+                                            toggled => { captions-settings-changed(); }
+                                        }
                                     }
 
                                     // ---- A contact, not on a call ----
@@ -3562,11 +3614,9 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
-
             }
         }
 
-        // Groups & communities: the same slim header as Settings.
         if current-tab == 2 && !server-mode : Rectangle {
             height: 52px;
             background: Surface.base;
@@ -3577,14 +3627,15 @@ export component MainWindow inherits Window {
                 spacing: 10px;
                 VerticalLayout {
                     alignment: center;
-                    IconButton { icon: @image-url("icons/x.svg"); tip: "Back (Esc)"; clicked => { current-tab = 0; } }
+                    IconButton { icon: @image-url("icons/x.svg"); tip: "Back"; clicked => { current-tab = 0; } }
                 }
                 Text { text: "Groups & communities"; font-size: 20px * text-scale; font-weight: 800; color: Surface.text; vertical-alignment: center; horizontal-stretch: 1; }
             }
         }
 
         if current-tab == 2 && !server-mode : HorizontalBox {
-            padding: 0px;
+            padding: 16px;
+            vertical-stretch: 1;
             spacing: 10px;
 
             // Yours, invitations, and making a new one.
@@ -6375,42 +6426,6 @@ export component MainWindow inherits Window {
     // even after the widget's been moved.
     // Connect & invite: your invite (QR and link) and the network tools
     // that used to sit on screen all the time.
-    // Spec §7 live captions, subtitle-style along the bottom
-    // and above every panel, so moving panels around can never
-    // hide them. Shown only while captions are actually
-    // running in a call.
-    if captions-live && (caption-lines.length > 0 || captions-status != "") : Rectangle {
-        width: min(680px, parent.width - 24px);
-        height: captions-layout.preferred-height;
-        x: (parent.width - self.width) / 2;
-        y: parent.height - self.height - 12px;
-        background: #000000c8;
-        border-radius: 8px;
-
-        captions-layout := VerticalLayout {
-            padding: 10px;
-            spacing: 2px;
-            for line in caption-lines : Text {
-                text: line.who + ": " + line.text;
-                color: #ffffff;
-                wrap: word-wrap;
-                font-size: 15px * text-scale;
-                accessible-role: text;
-                accessible-label: line.who + " said " + line.text;
-            }
-            if captions-status != "" : Text {
-                text: captions-status;
-                color: #ffffffb0;
-                wrap: word-wrap;
-                font-size: 10px * text-scale;
-            }
-            if captions-have-transcript : HorizontalLayout {
-                alignment: end;
-                Button { text: "Save transcript..."; clicked => { captions-save-transcript(); } }
-            }
-        }
-    }
-
     if connect-dialog-open && current-tab == 0 && !server-mode : Modal {
         title: "Connect & invite";
         card-width: 640px;
