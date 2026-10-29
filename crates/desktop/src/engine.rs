@@ -7,19 +7,21 @@
 //! turns its state into a [`ui::Model`] on demand and carries out the
 //! [`ui::Action`]s the interface hands it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use antiphon_audio::{ChainConfig, GainConfig};
-use antiphon_client::control::Hello;
+use antiphon_client::control::{ControlMessage, Hello, ProfileCard};
+use antiphon_client::transfer_queue::TransferQueue;
+use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
-    caps_lock, config, connection_mode, delivery, discovery, file_integrity, file_preview, file_transfer, history, key_capture, moderation,
-    notify, outbox, presence, reachability, reactions, sharing, video_capture, vpn,
+    caps_lock, config, connection_mode, delivery, discovery, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
+    moderation, notify, outbox, presence, profile, push_wake, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
 use antiphon_ui::{self as ui, ToastKind};
@@ -59,12 +61,27 @@ enum Event {
     ListenFailed(String),
     /// The STUN check finished: our public address, or why not.
     Public(Result<String, String>),
+    /// The relay check finished: the relay to use, if any answered, and the
+    /// relays it said it peers with.
+    RelayChosen(Option<fallback_relay::Choice>, Vec<String>),
     /// The router port mapping finished: the outside port, or why not.
     PortMap(Result<u16, String>),
     /// A push-to-talk key capture finished: the key's name, or why not.
     Key(Result<String, String>),
     /// A note to show the person.
     Toast(String, ToastKind),
+    /// A picked profile picture, made small: the base64 to save, or why
+    /// the file couldn't be used.
+    Avatar(Result<String, String>),
+    /// Files picked to send to this contact (id), for the queue.
+    Queue(Vec<PathBuf>, String),
+    /// A voice message was left (or why it couldn't be).
+    VoiceSent(Result<(), String>),
+    /// A picture picked to be a community's emoji: (community, file name,
+    /// the picture made small), or why it couldn't be used.
+    EmojiPicked(Result<(String, String, String), String>),
+    /// A theme file was chosen and read: use what it says.
+    Theme(ui::theme_file::ThemeFile),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -79,6 +96,11 @@ pub enum Out {
     AddFailed(String),
     /// Put this text on the clipboard.
     Copy(String),
+    /// A restore rewrote the account on disk: restart to load it.
+    Relaunch,
+    /// A group chat or community was made or joined: close the dialog and
+    /// open it.
+    SpaceCreated(String),
 }
 
 /// Whether the background task is placing a call or waiting for one.
@@ -113,6 +135,44 @@ struct CallInfo {
     ended_at: Option<Instant>,
 }
 
+/// The rate voice messages are decoded and played at.
+const CLIP_RATE: u32 = 48_000;
+
+/// A voice message being recorded.
+struct Recording {
+    /// The contact it is for.
+    to: String,
+    /// Raised to stop recording.
+    stop: Arc<AtomicBool>,
+    /// Raised (before `stop`) to send what was recorded rather than drop it.
+    send: Arc<AtomicBool>,
+    /// When it started, for the counter and the length cap.
+    started: Instant,
+}
+
+/// A voice message's clip, decoded: one I sent from the copy kept when it
+/// was made, or one I received once its fetch has finished.
+fn load_clip(link: &VoiceLink, mine: bool) -> Option<Vec<f32>> {
+    if mine {
+        let path = config::config_dir()?.join("voice-messages").join(&link.name);
+        antiphon_net::voice::decode_clip(&std::fs::read(path).ok()?, CLIP_RATE)
+    } else {
+        voice_message::load_fetched(link, CLIP_RATE)
+    }
+}
+
+/// A file waiting in the send queue.
+struct QueuedSend {
+    /// Where it is.
+    path: PathBuf,
+    /// Its name, as offered.
+    name: String,
+    /// Its size when picked, for the queue's line.
+    size: u64,
+    /// The contact it is for (id): it goes on a call with them.
+    peer: String,
+}
+
 /// The open conversation, built once per change rather than per frame.
 struct ConvCache {
     /// Whose conversation it is.
@@ -144,6 +204,9 @@ pub struct Engine {
     door: bool,
     /// Our public address from STUN, once known.
     public: Option<String>,
+    /// The relay in use when it is not simply ours: a fallback, one from
+    /// the mesh, or a contact's lent relay. `None` until a check finds one.
+    relay_choice: Option<fallback_relay::Choice>,
     /// What the checks found about being reachable.
     reach: reachability::Reachability,
     /// Our invite link.
@@ -184,6 +247,31 @@ pub struct Engine {
     /// each was built from: a tile is rebuilt (and its picture uploaded
     /// again) only when a newer frame has come.
     tiles: HashMap<String, (u64, ui::VideoTile)>,
+    /// Group chats and communities, as the screens last saw them.
+    spaces: crate::spaces::Spaces,
+    /// The channel on screen, as (space id, channel): its messages are
+    /// loaded and it counts as read. Set by the app before each model.
+    viewing: Option<(String, u32)>,
+    /// Files waiting to be sent, one at a time, each to its contact.
+    send_queue: TransferQueue<QueuedSend>,
+    /// The queued file being read or sent now, and a flag raised once
+    /// that is over (sent, failed, declined or cancelled).
+    sending: Option<Arc<AtomicBool>>,
+    /// A voice message being recorded.
+    recording: Option<Recording>,
+    /// Voice messages seen in conversations, by (contact, message id):
+    /// the link to the clip, and whether it is one I sent.
+    voice_links: HashMap<(String, u64), (VoiceLink, bool)>,
+    /// Received clips whose fetch has been started, by file id.
+    voice_fetched: HashSet<String>,
+    /// A clip asked to play before it had arrived: (contact, message id),
+    /// and when it was last looked for. It plays once it is here.
+    voice_waiting: Option<(String, u64, Instant)>,
+    /// The clip playing: (contact, message id), the stream to keep
+    /// alive, and when it ends.
+    playing: Option<(String, u64, antiphon_audio::PlaybackHandle, Instant)>,
+    /// Settings > Account & backup: phrase, backup files, moving devices.
+    account: crate::account::AccountState,
 }
 
 impl Engine {
@@ -201,6 +289,7 @@ impl Engine {
             task: None,
             call: CallInfo::default(),
             public: None,
+            relay_choice: None,
             reach: reachability::Reachability::default(),
             invite: String::new(),
             qr: None,
@@ -220,6 +309,16 @@ impl Engine {
             their_level: 0.0,
             checking: false,
             tiles: HashMap::new(),
+            spaces: Default::default(),
+            viewing: None,
+            send_queue: TransferQueue::default(),
+            sending: None,
+            recording: None,
+            voice_links: HashMap::new(),
+            voice_fetched: HashSet::new(),
+            voice_waiting: None,
+            playing: None,
+            account: Default::default(),
         };
         engine.load_previews();
         engine.refresh_invite();
@@ -247,7 +346,12 @@ impl Engine {
 
     /// Whether a call is up or being placed, so the app ticks faster.
     pub fn busy(&self) -> bool {
-        self.call.phase != ui::Phase::Idle || self.state.loopback.lock().unwrap().is_some() || self.ptt_capturing
+        self.call.phase != ui::Phase::Idle
+            || self.state.loopback.lock().unwrap().is_some()
+            || self.ptt_capturing
+            || self.recording.is_some()
+            || self.playing.is_some()
+            || self.voice_waiting.is_some()
     }
 
     // ---------------------------------------------------------------- tick
@@ -255,6 +359,8 @@ impl Engine {
     /// Catches up with everything that happened since the last tick.
     /// `open` is the conversation on screen, which counts as read.
     pub fn tick(&mut self, open: Option<&str>) {
+        let outcomes = self.account.tick();
+        self.account_outcomes(outcomes);
         let events = std::mem::take(&mut *self.events.lock().unwrap());
         for e in events {
             self.on_event(e);
@@ -292,7 +398,7 @@ impl Engine {
             listen_port: if self.door { self.cfg.stoop.port } else { 0 },
             mapped_port: self.state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()),
             stun_public: self.public.clone(),
-            relay: self.cfg.relay_server.trim().to_string(),
+            relay: self.my_relay(),
         });
         let found = discovery::revision();
         if found != self.discovery_seen {
@@ -323,6 +429,8 @@ impl Engine {
         }
 
         self.watch_call(open);
+        self.pump_queue();
+        self.voice_upkeep();
     }
 
     /// Reads a yes/no from the running call; false when there is none.
@@ -337,6 +445,7 @@ impl Engine {
         let mut save_routes = None;
         let mut new_lines = 0usize;
         let ready;
+        let card;
         {
             let call = self.state.call.lock().unwrap();
             let Some(active) = call.as_ref() else {
@@ -351,8 +460,9 @@ impl Engine {
                 if self.call.peer.is_none() && !peer.display_name.is_empty() {
                     self.call.name = peer.display_name.clone();
                 }
-                if !peer.relay.is_empty() && peer.relay != self.peer_relay_saved {
-                    save_relay = Some(peer.relay.clone());
+                let said = format!("{}|{}", peer.relay, peer.lends_relay);
+                if !peer.relay.is_empty() && said != self.peer_relay_saved {
+                    save_relay = Some((peer.relay.clone(), peer.lends_relay, said));
                 }
                 if !peer.routes.is_empty() && peer.routes != self.peer_routes_saved {
                     save_routes = Some(peer.routes.clone());
@@ -364,13 +474,18 @@ impl Engine {
                 self.seen_lines = log.len();
             }
             ready = active.file_transfer.lock().unwrap().ready_to_save.take();
+            card = active.peer_card.lock().unwrap().take();
         }
         let key = self.call.peer.clone();
-        if let Some(relay) = save_relay {
-            self.peer_relay_saved = relay.clone();
+        if let Some(card) = card {
+            self.save_card(key.as_deref(), card);
+        }
+        if let Some((relay, lends, said)) = save_relay {
+            self.peer_relay_saved = said;
             if let Some(c) = key.as_deref().and_then(|k| self.cfg.contacts.iter_mut().find(|c| c.identity_key == k)) {
-                if c.relay != relay {
+                if c.relay != relay || c.lends_relay != lends {
                     c.relay = relay;
+                    c.lends_relay = lends;
                     self.save();
                 }
             }
@@ -392,6 +507,70 @@ impl Engine {
         if let Some((name, stored)) = ready {
             self.save_received(name, stored);
         }
+    }
+
+    /// Keeps the card the person on the call sent: saved to their contact
+    /// when they are one (so it shows between calls, and is in backups),
+    /// and shown on the call either way.
+    fn save_card(&mut self, key: Option<&str>, card: ProfileCard) {
+        let avatar = if profile::decode_avatar(&card.avatar).is_some() { card.avatar } else { String::new() };
+        let bio = profile::clean_bio(&card.bio);
+        let color = if ui::avatars::named_color(&card.color).is_some() { card.color } else { String::new() };
+        match key.and_then(|k| contact_mut(&mut self.cfg, k)) {
+            Some(c) => {
+                if (&c.avatar, &c.bio, &c.color) != (&avatar, &bio, &color) {
+                    (c.avatar, c.bio, c.color) = (avatar, bio, color);
+                    self.save();
+                }
+            }
+            // Someone not saved yet: their avatar on the call is keyed by
+            // the name shown.
+            None => ui::avatars::set(&self.call.name, &avatar, &color, profile::decode_avatar),
+        }
+    }
+
+    /// Saves the theme, accent and reading font to a theme file the person
+    /// picks, off the window's thread.
+    fn export_theme(&mut self) {
+        let s = &self.cfg.stoop;
+        let file = ui::theme_file::ThemeFile::new(&s.theme, &s.accent, &s.custom_accent, &s.font);
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Export theme")
+                .set_file_name(ui::theme_file::FILE_NAME)
+                .add_filter("Stoop theme", &["json"])
+                .save_file()
+            else {
+                return;
+            };
+            let (text, kind) = match std::fs::write(&path, file.to_json()) {
+                Ok(()) => (format!("Theme saved to {}", path.display()), ToastKind::Ok),
+                Err(e) => (format!("Couldn't save the theme: {e}"), ToastKind::Err),
+            };
+            Self::push(&events, Event::Toast(text, kind));
+        });
+    }
+
+    /// Asks for a theme file, reads and checks it off the window's thread,
+    /// and hands it back as [`Event::Theme`]. Nothing in it is run: it is
+    /// parsed as data and every value checked (see `theme_file`).
+    fn import_theme(&mut self) {
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Import theme").add_filter("Stoop theme", &["json"]).pick_file() else { return };
+            // Refuse anything too big before reading it into memory.
+            let too_big = std::fs::metadata(&path).map(|m| m.len() > ui::theme_file::MAX_BYTES as u64).unwrap_or(false);
+            let parsed = if too_big {
+                Err("That file is too big to be a theme file.".to_string())
+            } else {
+                std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read the theme: {e}")).and_then(|t| ui::theme_file::ThemeFile::parse(&t))
+            };
+            match parsed {
+                Ok(file) => Self::push(&events, Event::Theme(file)),
+                Err(why) => Self::push(&events, Event::Toast(why, ToastKind::Err)),
+            }
+        });
     }
 
     /// Offers a save dialog for a received file, off the window's thread.
@@ -483,6 +662,9 @@ impl Engine {
                     status: None,
                     ended_at: None,
                 };
+                // Our picture, About line and colour go out at the start
+                // of every call, so they always see the current ones.
+                self.send_card();
                 if incoming {
                     let ring = delivery::unhex32(&peer).map(|k| ring_outcome(&k, false)).unwrap_or(notify::Outcome::Ring);
                     if ring != notify::Outcome::Ignore {
@@ -520,6 +702,24 @@ impl Engine {
                 }
                 self.refresh_invite();
             }
+            Event::RelayChosen(choice, mesh) => {
+                if !mesh.is_empty() {
+                    let merged = fallback_relay::merge_mesh(&self.cfg.mesh_relays, &mesh);
+                    if merged != self.cfg.mesh_relays {
+                        self.cfg.mesh_relays = merged;
+                        self.save();
+                    }
+                }
+                if choice != self.relay_choice {
+                    if let Some(fallback_relay::Choice { source: fallback_relay::Source::Borrowed, lender: Some(who), .. }) = &choice {
+                        self.toast(format!("You have no relay of your own, so you can be reached through {who}'s"), ToastKind::Info);
+                    }
+                    self.relay_choice = choice;
+                    self.invite.clear();
+                    self.refresh_invite();
+                    self.relisten();
+                }
+            }
             Event::PortMap(r) => match r {
                 Ok(port) => {
                     self.reach.port_forwarded = true;
@@ -547,7 +747,91 @@ impl Engine {
                 }
             }
             Event::Toast(text, kind) => self.toast(text, kind),
+            Event::Theme(file) => {
+                self.cfg.stoop.theme = file.theme;
+                self.cfg.stoop.accent = file.accent;
+                if !file.custom_accent.is_empty() {
+                    self.cfg.stoop.custom_accent = file.custom_accent;
+                }
+                self.cfg.stoop.font = file.font;
+                self.save();
+                self.toast("Theme loaded", ToastKind::Ok);
+            }
+            Event::Avatar(Ok(avatar)) => {
+                self.cfg.profile.avatar = avatar;
+                self.profile_changed();
+                self.toast("Picture updated", ToastKind::Ok);
+            }
+            Event::Avatar(Err(why)) => self.toast(why, ToastKind::Err),
+            Event::VoiceSent(Ok(())) => {
+                // It is in their history now; the conversation reloads.
+                self.conv = None;
+                self.toast("Voice message sent", ToastKind::Ok);
+            }
+            Event::VoiceSent(Err(why)) => self.toast(why, ToastKind::Err),
+            Event::EmojiPicked(Ok((community, file, image))) => match crate::spaces::add_emoji(&community, &file, image) {
+                Ok(name) => self.toast(format!("Added :{name}:"), ToastKind::Ok),
+                Err(why) => self.toast(why, ToastKind::Err),
+            },
+            Event::EmojiPicked(Err(why)) => self.toast(why, ToastKind::Err),
+            Event::Queue(paths, peer) => {
+                for path in paths {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    self.send_queue.push(QueuedSend { path, name, size, peer: peer.clone() });
+                }
+                self.pump_queue();
+            }
         }
+    }
+
+    // ---------------------------------------------------------------- profile
+
+    /// Our profile card as contacts get it.
+    fn card(&self) -> ProfileCard {
+        let p = &self.cfg.profile;
+        ProfileCard { bio: p.bio.clone(), color: p.color.clone(), avatar: p.avatar.clone() }
+    }
+
+    /// Sends our card to the person on the call, if there is one. Said
+    /// three times a little apart: it is one datagram, and a lost one would
+    /// leave them with our old picture until the next call.
+    fn send_card(&self) {
+        let call = self.state.call.lock().unwrap();
+        let Some(a) = call.as_ref() else { return };
+        let (peer, message) = (a.peer.clone(), ControlMessage::Profile(self.card()).encode());
+        self.state.runtime.spawn(async move {
+            for _ in 0..3 {
+                let _ = peer.send_control(&message).await;
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+        });
+    }
+
+    /// Saves a changed profile and tells the person on the call. The name
+    /// and status ride in `Hello`, which goes out again too.
+    fn profile_changed(&mut self) {
+        self.save();
+        self.send_card();
+        let hello = self.hello();
+        self.with_call(|a| a.send_control(&self.state.runtime, ControlMessage::Hello(hello)));
+    }
+
+    /// Asks for a picture file off the window's thread, and makes it small
+    /// there too (decoding a large photo takes a moment).
+    fn pick_avatar(&self) {
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Choose a profile picture")
+                .add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                .pick_file()
+            else {
+                return;
+            };
+            let made = std::fs::read(&path).map_err(|e| format!("Couldn't open that file: {e}")).and_then(|b| profile::avatar_from_image(&b));
+            Engine::push(&events, Event::Avatar(made));
+        });
     }
 
     // ---------------------------------------------------------------- calls
@@ -560,7 +844,8 @@ impl Engine {
             status_message: self.cfg.profile.status_message.clone(),
             presence: chosen.should_publish().then(|| chosen.to_i32()),
             wants_silent: false,
-            relay: self.cfg.relay_server.trim().to_string(),
+            relay: self.my_relay(),
+            lends_relay: self.lends_relay(),
             routes: delivery::my_record_hex(),
         }
     }
@@ -614,13 +899,46 @@ impl Engine {
 
     /// What to register at our relay while listening, if there is one.
     fn listen_relay(&self) -> Option<(String, state::RelayTokens)> {
-        let relay = self.cfg.relay_server.trim().to_string();
+        let relay = self.my_relay();
         if relay.is_empty() {
             return None;
         }
         let identity = self.state.identity.clone();
         let secret = relay_invite_secret();
         Some((relay, Box::new(move || connection_mode::listening_tokens(&config::load().contacts, &identity, Some(secret), now_secs()))))
+    }
+
+    /// The relay to listen at and tell people about: the one the last check
+    /// chose, or yours unchecked, or none (empty).
+    fn my_relay(&self) -> String {
+        match &self.relay_choice {
+            Some(choice) => choice.relay.clone(),
+            None => self.cfg.relay_server.trim().to_string(),
+        }
+    }
+
+    /// Whether we tell contacts they may listen at our relay: only when we
+    /// said so, and only for a relay that is ours -- a borrowed or fallback
+    /// relay is not ours to lend.
+    fn lends_relay(&self) -> bool {
+        let own = self.cfg.relay_server.trim();
+        self.cfg.lend_relay && !own.is_empty() && self.my_relay() == own
+    }
+
+    /// Works out, in the background, which relay to use: yours, your
+    /// fallbacks, the mesh's, or a contact's lent relay -- and learns the
+    /// mesh from whichever answers.
+    fn choose_relay(&mut self) {
+        let cfg = self.cfg.clone();
+        let events = self.events.clone();
+        self.state.runtime.spawn(async move {
+            let choice = fallback_relay::choose(&cfg).await;
+            let mesh = match &choice {
+                Some(c) => fallback_relay::learn_mesh(&c.relay).await,
+                None => Vec::new(),
+            };
+            Self::push(&events, Event::RelayChosen(choice, mesh));
+        });
     }
 
     /// Opens or closes the door: listen and map a router port, or stop.
@@ -666,6 +984,7 @@ impl Engine {
             let r = state::discover_public_address(0).await.map(|(addr, _)| addr.ip().to_string()).map_err(|e| e.to_string());
             Self::push(&events, Event::Public(r));
         });
+        self.choose_relay();
         if self.door && self.state.port_map.lock().unwrap().is_none() {
             self.map_port();
         }
@@ -676,10 +995,11 @@ impl Engine {
         let port = self.state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()).unwrap_or(self.cfg.stoop.port);
         let address = self.public.as_ref().map(|ip| if ip.contains(':') { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }).unwrap_or_default();
         let mut invite = antiphon_crypto::Invite::new(self.state.identity.public().identity_key, address);
-        let relay = self.cfg.relay_server.trim().to_string();
+        let relay = self.my_relay();
         if !relay.is_empty() {
             invite.relay = relay;
             invite.relay_secret = Some(relay_invite_secret());
+            invite.lends_relay = self.lends_relay();
         }
         let link = invite.to_link();
         if link != self.invite {
@@ -712,6 +1032,11 @@ impl Engine {
         let identity = self.state.identity.clone();
         let lookup = self.cfg.dht_enabled && !contact.identity_key.is_empty();
         let handle = self.state.runtime.spawn(async move {
+            // A phone asleep in a pocket isn't listening; if the dial has
+            // not connected within a moment, knock through its push
+            // service so it wakes and starts listening while we keep
+            // trying. Aborted below once the dial is over either way.
+            let wake = push_wake::wake_later(identity.clone(), &contact.identity_key, &contact.route_record, Vec::new());
             *args.state.relay_addr.lock().unwrap() = None;
             let result = match plan {
                 connection_mode::Plan::Direct { address } if lookup => call_with_lookup(&contact, address, identity, &args).await,
@@ -728,6 +1053,9 @@ impl Engine {
                 }
                 .await,
             };
+            if let Some(wake) = wake {
+                wake.abort();
+            }
             let result = result.map_err(|e| anyhow::anyhow!("Couldn't reach {}: {e}", contact.name));
             args.finish(result, false);
         });
@@ -896,6 +1224,20 @@ impl Engine {
                 }
             }
             A::SendFile => self.send_file(),
+            A::RecordVoice(to) => self.record_voice(to),
+            A::AddEmoji(community) => {
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    let Some(path) = rfd::FileDialog::new().set_title("Choose an emoji picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp"]).pick_file() else {
+                        return;
+                    };
+                    let file = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let made = std::fs::read(&path).map_err(|e| format!("Couldn't open that file: {e}")).and_then(|b| profile::emoji_from_image(&b));
+                    Engine::push(&events, Event::EmojiPicked(made.map(|image| (community, file, image))));
+                });
+            }
+            A::FinishVoice { to, send } => self.finish_voice(&to, send),
+            A::PlayVoice { to, id } => self.play_voice(to, id),
             A::AcceptFile => {
                 if let Some(Some(why)) = self.with_call(|a| a.accept_file_offer(&rt)) {
                     self.toast(why, ToastKind::Warn);
@@ -906,6 +1248,20 @@ impl Engine {
             }
             A::CancelTransfer => {
                 self.with_call(|a| a.cancel_file_transfer(&rt));
+            }
+            A::QueueMove { id, up } => {
+                if up {
+                    self.send_queue.move_up(id);
+                } else {
+                    self.send_queue.move_down(id);
+                }
+            }
+            A::QueueHold { id, held } => {
+                self.send_queue.set_held(id, held);
+                self.pump_queue();
+            }
+            A::QueueRemove(id) => {
+                self.send_queue.remove(id);
             }
             A::AddPerson { name, invite } => self.add_person(name, invite),
             A::Remove(id) => {
@@ -963,11 +1319,24 @@ impl Engine {
             A::Copy(text) => self.out.push(Out::Copy(text)),
             A::SetName(name) => {
                 self.cfg.profile.display_name = name;
-                self.save();
+                self.profile_changed();
             }
             A::SetStatus(status) => {
                 self.cfg.profile.status_message = status;
-                self.save();
+                self.profile_changed();
+            }
+            A::PickAvatar => self.pick_avatar(),
+            A::RemoveAvatar => {
+                self.cfg.profile.avatar.clear();
+                self.profile_changed();
+            }
+            A::SetBio(bio) => {
+                self.cfg.profile.bio = profile::clean_bio(&bio);
+                self.profile_changed();
+            }
+            A::ProfileColor(color) => {
+                self.cfg.profile.color = color;
+                self.profile_changed();
             }
             A::Theme(theme) => {
                 self.cfg.stoop.theme = theme;
@@ -977,6 +1346,19 @@ impl Engine {
                 self.cfg.stoop.accent = accent;
                 self.save();
             }
+            A::CustomAccent(hex) => {
+                self.cfg.stoop.accent = "custom".into();
+                self.cfg.stoop.custom_accent = hex;
+                self.save();
+            }
+            A::Font(font) => {
+                self.cfg.stoop.font = font;
+                self.save();
+            }
+            A::ExportTheme => self.export_theme(),
+            A::ImportTheme => self.import_theme(),
+            // Moving the typing cursor is the window's job; the app does it.
+            A::FocusInput(_) => {}
             A::Input(name) => {
                 let device = (!name.is_empty()).then_some(name);
                 if let Some(Err(e)) = self.with_call(|a| a.swap_input_device(device.as_deref())) {
@@ -1016,6 +1398,11 @@ impl Engine {
                 }
                 self.save();
             }
+            A::LowData(on) => {
+                self.cfg.low_data_calls = on;
+                antiphon_client::link_quality::set_low_data(on);
+                self.save();
+            }
             A::AutoGain(on) => {
                 self.cfg.chain.gain = if on { GainConfig::default() } else { GainConfig::Fixed { enabled: false, gain_db: 0.0 } };
                 self.chain_changed();
@@ -1043,9 +1430,30 @@ impl Engine {
                 self.cfg.stoop.door_on_start = on;
                 self.save();
             }
+            A::Anonymity(on) => {
+                self.cfg.anonymity_mode = on;
+                self.save();
+                if on && self.cfg.anonymity_hops.len() < antiphon_net::onion::MIN_HOPS {
+                    self.toast("Add at least two hops for anonymity mode to take effect", ToastKind::Warn);
+                }
+                self.relisten();
+            }
+            A::AnonymityHops(text) => {
+                self.cfg.anonymity_hops = fallback_relay::parse_list(&text);
+                self.save();
+                self.relisten();
+            }
+            A::LendRelay(on) => {
+                self.cfg.lend_relay = on;
+                self.save();
+                self.invite.clear();
+                self.refresh_invite();
+            }
             A::Relay(relay) => {
                 self.cfg.relay_server = relay;
+                self.relay_choice = None;
                 self.save();
+                self.choose_relay();
                 self.invite.clear();
                 self.refresh_invite();
                 self.relisten();
@@ -1079,15 +1487,47 @@ impl Engine {
             A::ShareScreen(on) => self.set_video(Stream::Screen, on),
             // Only the phone shows the controls that send these.
             A::Speaker(_)
+            | A::FlipCamera
             | A::Talk(_)
             | A::RequestMic
             | A::WifiOnly(_)
             | A::DataSaver(_)
             | A::CellularLimit(_)
             | A::KeepListening(_)
-            | A::ListenOnSaver(_)
-            | A::ShowPhrase(_)
-            | A::Restore(_) => {}
+            | A::ListenOnSaver(_) => {}
+            A::OpenChannel { community, channel } => self.viewing = Some((community, channel)),
+            a @ (A::CreateSpace { .. }
+            | A::AcceptSpaceInvite(_)
+            | A::DeclineSpaceInvite(_)
+            | A::Post { .. }
+            | A::EditPost { .. }
+            | A::DeletePost { .. }
+            | A::InviteToSpace { .. }
+            | A::AddChannel { .. }
+            | A::SpaceNotify { .. }
+            | A::RemoveEmoji { .. }
+            | A::ManageSpace { .. }
+            | A::LeaveSpace(_)) => {
+                let invite = matches!(a, A::InviteToSpace { .. });
+                match self.spaces.act(a) {
+                    Ok(Some(id)) => self.out.push(Out::SpaceCreated(id)),
+                    Ok(None) if invite => self.toast("Invitation sent. They join once they accept it.", ToastKind::Ok),
+                    Ok(None) => {}
+                    Err(why) => self.toast(why, ToastKind::Err),
+                }
+            }
+            a @ (A::ShowPhrase(_)
+            | A::Restore(_)
+            | A::BackupSave { .. }
+            | A::BackupOpen { .. }
+            | A::MoveStart { .. }
+            | A::MoveStop
+            | A::MoveReceive(_)) => {
+                let in_call = self.busy();
+                let ctx = crate::account::Ctx { dir: self.dir.as_deref(), identity: &self.state.identity, key: self.key.as_ref(), in_call };
+                let outcomes = self.account.act(a, ctx);
+                self.account_outcomes(outcomes);
+            }
         }
         let _ = open;
     }
@@ -1190,32 +1630,189 @@ impl Engine {
         }
     }
 
-    /// Asks for a file and offers it to the person on the call.
-    fn send_file(&mut self) {
-        if self.state.call.lock().unwrap().is_none() {
-            self.toast("Files go to the person you're on a call with", ToastKind::Info);
+    // ---------------------------------------------------------------- voice messages
+
+    /// Starts recording a voice message for contact `to`, until
+    /// [`Engine::finish_voice`] or the length cap.
+    fn record_voice(&mut self, to: String) {
+        if self.recording.is_some() {
             return;
         }
-        let state = self.state.clone();
+        let (stop, send) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (t_stop, t_send) = (stop.clone(), send.clone());
+        let (input, chain, rt, events, who) = (self.cfg.input_device.clone(), self.cfg.chain.clone(), self.state.runtime.clone(), self.events.clone(), to.clone());
+        std::thread::spawn(move || {
+            let (rate, mut samples) = match state::record_until(input.as_deref(), t_stop, voice_message::MAX_SECONDS) {
+                Ok(recorded) => recorded,
+                Err(e) => {
+                    Engine::push(&events, Event::VoiceSent(Err(format!("Couldn't record: {e}"))));
+                    return;
+                }
+            };
+            if !t_send.load(Ordering::SeqCst) {
+                return;
+            }
+            // Through the same chain as a call, so it sounds like you do
+            // live, then without the silence before and after.
+            voice_message::process_recording(&mut samples, rate, &chain);
+            let clip = voice_message::trim_silence(&samples, 0.01).to_vec();
+            let sent = voice_message::leave(&rt, &who, &clip, rate).map(|_| ());
+            Engine::push(&events, Event::VoiceSent(sent));
+        });
+        self.recording = Some(Recording { to, stop, send, started: Instant::now() });
+    }
+
+    /// Stops the recording for `to`: sends it, or throws it away.
+    fn finish_voice(&mut self, to: &str, send: bool) {
+        let Some(r) = self.recording.take_if(|r| r.to == to) else { return };
+        r.send.store(send, Ordering::SeqCst);
+        r.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Plays a voice message, or stops it if it is the one playing.
+    fn play_voice(&mut self, to: String, id: u64) {
+        if self.playing.as_ref().is_some_and(|(p, i, ..)| *p == to && *i == id) {
+            self.playing = None;
+            return;
+        }
+        let Some((link, mine)) = self.voice_links.get(&(to.clone(), id)).cloned() else { return };
+        match load_clip(&link, mine) {
+            Some(samples) => self.start_clip(to, id, &samples),
+            None if mine => self.toast("That recording isn't on this device any more", ToastKind::Warn),
+            None => {
+                if self.voice_fetched.insert(link.file_id.clone()) {
+                    voice_message::fetch(&self.state.runtime, &link, &to);
+                }
+                self.voice_waiting = Some((to, id, Instant::now()));
+            }
+        }
+    }
+
+    /// Plays decoded samples through the chosen speakers.
+    fn start_clip(&mut self, to: String, id: u64, samples: &[f32]) {
+        match state::play_clip(self.cfg.output_device.as_deref(), CLIP_RATE, samples) {
+            Ok(handle) => {
+                let ends = Instant::now() + Duration::from_secs_f32(voice_message::duration_secs(samples, CLIP_RATE) + 0.3);
+                self.playing = Some((to, id, handle, ends));
+            }
+            Err(e) => self.toast(format!("Couldn't play it: {e}"), ToastKind::Err),
+        }
+    }
+
+    /// Per-tick upkeep: the length cap on a recording, a clip that finished
+    /// playing, and a clip waited for that may have arrived.
+    fn voice_upkeep(&mut self) {
+        if let Some(r) = &self.recording {
+            if r.started.elapsed() >= Duration::from_secs(voice_message::MAX_SECONDS as u64) {
+                let to = r.to.clone();
+                self.finish_voice(&to, true);
+            }
+        }
+        if self.playing.as_ref().is_some_and(|(.., ends)| Instant::now() >= *ends) {
+            self.playing = None;
+        }
+        // Looked for once a second: decoding is not free.
+        let Some((to, id, last)) = self.voice_waiting.clone() else { return };
+        if last.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        match self.voice_links.get(&(to.clone(), id)).cloned().and_then(|(link, mine)| load_clip(&link, mine)) {
+            Some(samples) => {
+                self.voice_waiting = None;
+                self.start_clip(to, id, &samples);
+            }
+            None => self.voice_waiting = Some((to, id, Instant::now())),
+        }
+    }
+
+    /// Turns the voice messages among `lines` into players: remembers each
+    /// clip's link, starts fetching received ones, and shows a short line
+    /// instead of the link's text.
+    fn find_voice(&mut self, person: &str, lines: &mut [ui::Line]) {
+        for line in lines.iter_mut() {
+            let Some(link) = voice_message::parse_link(&line.text) else { continue };
+            line.text = format!("Voice message ({}:{:02})", link.seconds / 60, link.seconds % 60);
+            line.voice = Some(ui::VoiceClip { seconds: link.seconds, ..Default::default() });
+            // Fetched as it comes on screen, so it is ready by the time
+            // it is pressed.
+            if !line.mine && self.voice_fetched.insert(link.file_id.clone()) {
+                voice_message::fetch(&self.state.runtime, &link, person);
+            }
+            self.voice_links.insert((person.to_string(), line.id), (link, line.mine));
+        }
+    }
+
+    /// Asks for files to send to the person on the call. They join the
+    /// queue, which sends them one at a time.
+    fn send_file(&mut self) {
+        let Some(peer) = self.with_call(|a| delivery::hex(&a.peer_identity().identity_key)) else {
+            self.toast("Files go to the person you're on a call with", ToastKind::Info);
+            return;
+        };
         let events = self.events.clone();
         std::thread::spawn(move || {
-            let Some(path) = rfd::FileDialog::new().set_title("Send a file").pick_file() else { return };
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+            let Some(paths) = rfd::FileDialog::new().set_title("Send files").pick_files() else { return };
+            if !paths.is_empty() {
+                Self::push(&events, Event::Queue(paths, peer));
+            }
+        });
+    }
+
+    /// Starts the next queued file for the person on the call, once
+    /// nothing else is going out. Called whenever the queue or the call
+    /// may have moved on.
+    fn pump_queue(&mut self) {
+        if let Some(flag) = &self.sending {
+            if !flag.load(Ordering::SeqCst) {
+                return;
+            }
+            self.sending = None;
+        }
+        let Some((peer, busy)) = self.with_call(|a| {
+            // A send started by hand (or an older one still finishing)
+            // keeps the link; the queue waits behind it.
+            let ft = a.file_transfer.lock().unwrap();
+            let busy = ft.outgoing.as_ref().is_some_and(|o| !o.done && o.error.is_none());
+            (delivery::hex(&a.peer_identity().identity_key), busy)
+        }) else {
+            return;
+        };
+        if busy {
+            return;
+        }
+        let Some(entry) = self.send_queue.take_next(|q| q.peer == peer) else { return };
+        let flag = Arc::new(AtomicBool::new(false));
+        self.sending = Some(flag.clone());
+        let (state, events) = (self.state.clone(), self.events.clone());
+        // Reading and hashing a large file takes a while: off the window's
+        // thread, and off the call's runtime.
+        std::thread::spawn(move || {
+            let QueuedSend { path, name, peer, .. } = entry.item;
             let (source, sha256) = match file_integrity::open_and_hash(&path) {
                 Ok(opened) => opened,
                 Err(reason) => {
                     Self::push(&events, Event::Toast(reason.explain(&name), ToastKind::Err));
+                    flag.store(true, Ordering::SeqCst);
                     return;
                 }
             };
             let thumbnail = file_preview::generate(&path).map(|png| file_transfer::encode_b64(&png)).unwrap_or_default();
-            let with = {
+            {
                 let call = state.call.lock().unwrap();
-                let Some(active) = call.as_ref() else { return };
-                active.send_file(&state.runtime, name.clone(), source, sha256, thumbnail);
-                delivery::hex(&active.peer_identity().identity_key)
-            };
-            if let Some(link) = sharing::share(&state.runtime, &path, &name, &with) {
+                // The call ended, or is now with someone else, while the
+                // file was read: it waits for next time.
+                let Some(active) = call.as_ref().filter(|a| delivery::hex(&a.peer_identity().identity_key) == peer) else {
+                    flag.store(true, Ordering::SeqCst);
+                    return;
+                };
+                let (link, ft, done) = (active.peer.clone(), active.file_transfer.clone(), flag.clone());
+                let name = name.clone();
+                state.runtime.spawn(async move {
+                    file_transfer::send_file(link, ft, name, Arc::new(source), sha256, thumbnail).await;
+                    done.store(true, Ordering::SeqCst);
+                });
+            }
+            if let Some(link) = sharing::share(&state.runtime, &path, &name, &peer) {
                 if let Some(active) = state.call.lock().unwrap().as_ref() {
                     active.send_control(&state.runtime, link);
                 }
@@ -1245,6 +1842,7 @@ impl Engine {
             if !invite.relay.is_empty() {
                 existing.relay = invite.relay.clone();
                 existing.relay_secret = secret;
+                existing.lends_relay = invite.lends_relay;
             }
             let who = existing.name.clone();
             self.save();
@@ -1260,6 +1858,7 @@ impl Engine {
             first_seen_secs: now_secs(),
             relay: invite.relay.clone(),
             relay_secret: secret,
+            lends_relay: invite.lends_relay,
             ..Default::default()
         });
         self.save();
@@ -1270,7 +1869,15 @@ impl Engine {
     // ---------------------------------------------------------------- model
 
     /// Everything the screens draw, now.
+    /// Tells the engine which channel is on screen, before [`Engine::model`].
+    pub fn set_viewing(&mut self, channel: Option<(&str, u32)>) {
+        self.viewing = channel.map(|(id, ch)| (id.to_string(), ch));
+    }
+
+    /// Everything the screens draw, built from the engine's state.
     pub fn model(&mut self, open: Option<&str>) -> ui::Model {
+        let viewing = self.viewing.clone();
+        let (communities, space_invites, channel) = self.spaces.model(viewing.as_ref().map(|(id, ch)| (id.as_str(), *ch)));
         let me = self.me();
         let people = self.people();
         let mut call = self.call_model();
@@ -1285,9 +1892,28 @@ impl Engine {
             network: self.network(),
             settings: self.settings(),
             notice: None,
-            first_run: self.cfg.profile.display_name.trim().is_empty(),
-            device: ui::Device { phone: false, files: true, ptt_keys: true },
+            // A fresh install's name is the placeholder "You", not empty,
+            // so first run is also anyone never welcomed who still has it.
+            first_run: {
+                let name = self.cfg.profile.display_name.trim();
+                name.is_empty() || (!self.cfg.first_run.welcomed && name == config::ProfileData::default().display_name)
+            },
+            device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true, voice_messages: true },
             phone: None,
+            account: self.account.model(&self.state.identity),
+            communities,
+            space_invites,
+            channel,
+        }
+    }
+
+    /// Carries out what the account section asked for.
+    fn account_outcomes(&mut self, outcomes: Vec<crate::account::Outcome>) {
+        for o in outcomes {
+            match o {
+                crate::account::Outcome::Toast(text, kind) => self.toast(text, kind),
+                crate::account::Outcome::Relaunch => self.out.push(Out::Relaunch),
+            }
         }
     }
 
@@ -1302,11 +1928,17 @@ impl Engine {
             _ => "Up late",
         };
         let name = self.cfg.profile.display_name.clone();
+        let id = connection_mode::encode_hex32(&key);
+        let p = &self.cfg.profile;
+        ui::avatars::set(&id, &p.avatar, &p.color, profile::decode_avatar);
         ui::Me {
             greeting: greeting.to_string(),
             name,
             status: self.cfg.profile.status_message.clone(),
-            id: connection_mode::encode_hex32(&key),
+            bio: self.cfg.profile.bio.clone(),
+            color: self.cfg.profile.color.clone(),
+            has_picture: !self.cfg.profile.avatar.is_empty(),
+            id,
             fingerprint: antiphon_crypto::fingerprint(&key),
             invite: self.invite.clone(),
             qr: self.qr.clone(),
@@ -1329,6 +1961,7 @@ impl Engine {
                     None => (None, None),
                 };
                 let presence = if self.call_with(&id) { ui::Presence::Online } else { ui::Presence::Unknown };
+                ui::avatars::set(&id, &c.avatar, &c.color, profile::decode_avatar);
                 ui::Person {
                     name: c.name.clone(),
                     address: c.address.clone(),
@@ -1353,6 +1986,7 @@ impl Engine {
                     .into(),
                     volume_db: c.volume_db,
                     muted: c.muted,
+                    bio: c.bio.clone(),
                     id,
                 }
             })
@@ -1442,6 +2076,27 @@ impl Engine {
             });
             tiles.extend(tile);
         }
+        // Everyone else in a group call, a tile per picture they send.
+        for (leg, stream, version) in a.video.leg_versions() {
+            let who = a.group.leg_name(leg).unwrap_or_else(|| "Someone".into());
+            let (key, label) = match stream {
+                Stream::Camera => (format!("leg-{leg}-camera"), who),
+                Stream::Screen => (format!("leg-{leg}-screen"), format!("{who}'s screen")),
+            };
+            let tile = self.tile(&key, version, || {
+                let p = a.video.leg_picture(leg, stream)?;
+                Some(ui::VideoTile {
+                    key: key.clone(),
+                    label,
+                    image: iced::widget::image::Handle::from_rgba(p.width, p.height, p.rgba),
+                    width: p.width,
+                    height: p.height,
+                    mine: false,
+                    screen: stream == Stream::Screen,
+                })
+            });
+            tiles.extend(tile);
+        }
         for stream in [Stream::Camera, Stream::Screen] {
             let Some((n, frame)) = a.video.preview(stream) else { continue };
             let (key, label) = match stream {
@@ -1482,7 +2137,11 @@ impl Engine {
     fn transfers(&self) -> ui::Transfers {
         let mut t = ui::Transfers::default();
         let call = self.state.call.lock().unwrap();
-        let Some(a) = call.as_ref() else { return t };
+        let Some(a) = call.as_ref() else {
+            drop(call);
+            t.queued = self.queued_files(None);
+            return t;
+        };
         let ft = a.file_transfer.lock().unwrap();
         if let Some(offer) = ft.pending_offer.as_ref() {
             t.offer = Some((offer.file_name.clone(), human_size(offer.file_size)));
@@ -1506,7 +2165,29 @@ impl Engine {
             };
             t.active.push(ui::Transfer { name: i.file_name.clone(), incoming: true, progress, detail, paused: false });
         }
+        drop(ft);
+        let on_call_with = delivery::hex(&a.peer_identity().identity_key);
+        drop(call);
+        t.queued = self.queued_files(Some(&on_call_with));
         t
+    }
+
+    /// The send queue as the screens show it. Files for someone other
+    /// than `on_call_with` say who they wait for.
+    fn queued_files(&self, on_call_with: Option<&str>) -> Vec<ui::QueuedFile> {
+        self.send_queue
+            .iter()
+            .map(|e| {
+                let q = &e.item;
+                let detail = if Some(q.peer.as_str()) == on_call_with {
+                    human_size(q.size)
+                } else {
+                    let who = find_contact(&self.cfg, &q.peer).map(|c| c.name.clone()).unwrap_or_else(|| "them".into());
+                    format!("{} · for {who}, on your next call", human_size(q.size))
+                };
+                ui::QueuedFile { id: e.id, name: q.name.clone(), detail, held: e.held }
+            })
+            .collect()
     }
 
     /// The reachability checks and network settings.
@@ -1526,7 +2207,25 @@ impl Engine {
                 detail,
             })
             .collect();
-        ui::Network { checks, port: self.cfg.stoop.port, relay: self.cfg.relay_server.clone() }
+        let relay_note = match &self.relay_choice {
+            Some(c) => match (c.source, &c.lender) {
+                (fallback_relay::Source::Own, _) => String::new(),
+                (fallback_relay::Source::Borrowed, Some(who)) => format!("Yours isn't set, so you're reachable through {who}'s relay ({}).", c.relay),
+                (fallback_relay::Source::Mesh, _) => format!("Using {}, a relay your relay peers with.", c.relay),
+                _ => format!("Using the fallback relay {}.", c.relay),
+            },
+            None if self.cfg.relay_server.trim().is_empty() => String::new(),
+            None => "Your relay hasn't answered a check yet.".to_string(),
+        };
+        ui::Network {
+            checks,
+            port: self.cfg.stoop.port,
+            relay: self.cfg.relay_server.clone(),
+            relay_note,
+            lend_relay: self.cfg.lend_relay,
+            anonymity: self.cfg.anonymity_mode,
+            hops: self.cfg.anonymity_hops.join(", "),
+        }
     }
 
     /// The settings screen's values.
@@ -1537,6 +2236,8 @@ impl Engine {
         ui::Settings {
             theme: self.cfg.stoop.theme.clone(),
             accent: self.cfg.stoop.accent.clone(),
+            custom_accent: self.cfg.stoop.custom_accent.clone(),
+            font: self.cfg.stoop.font.clone(),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             input: self.cfg.input_device.clone().unwrap_or_default(),
@@ -1550,6 +2251,7 @@ impl Engine {
             ptt_capturing: self.ptt_capturing,
             noise_suppression: self.cfg.chain.noise_suppress.enabled,
             echo_cancel: self.cfg.echo_cancel,
+            low_data: self.cfg.low_data_calls,
             auto_gain: matches!(self.cfg.chain.gain, GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -1570,7 +2272,8 @@ impl Engine {
         let rev = if live { self.with_call(|a| a.chat_rev.load(Ordering::Relaxed)).unwrap_or(0) } else { 0 };
         let stale = self.conv.as_ref().is_none_or(|c| c.person != id || c.live != live || c.rev != rev);
         if stale {
-            let lines = if live { self.live_lines() } else { self.stored_lines(&contact.identity_key) };
+            let mut lines = if live { self.live_lines() } else { self.stored_lines(&contact.identity_key) };
+            self.find_voice(id, &mut lines);
             if let Some(last) = lines.iter().rev().find(|l| l.file.is_none()) {
                 let text = if last.mine { format!("You: {}", last.text) } else { last.text.clone() };
                 let at = self.previews.get(id).map(|(_, at)| *at).unwrap_or_else(now_secs);
@@ -1578,13 +2281,20 @@ impl Engine {
             }
             self.conv = Some(ConvCache { person: id.to_string(), live, rev, lines });
         }
-        let lines = self.conv.as_ref().map(|c| c.lines.clone()).unwrap_or_default();
+        let mut lines = self.conv.as_ref().map(|c| c.lines.clone()).unwrap_or_default();
+        for line in lines.iter_mut() {
+            if let Some(clip) = line.voice.as_mut() {
+                clip.playing = self.playing.as_ref().is_some_and(|(p, i, ..)| p == id && *i == line.id);
+                clip.fetching = self.voice_waiting.as_ref().is_some_and(|(p, i, _)| p == id && *i == line.id);
+            }
+        }
         Some(ui::Conversation {
             person: id.to_string(),
             lines,
             live,
             queues: !live && !contact.identity_key.is_empty(),
             expiry: contact.expire_after_secs.map(expiry_label),
+            recording: self.recording.as_ref().filter(|r| r.to == id).map(|r| r.started.elapsed().as_secs() as u32),
         })
     }
 
@@ -1667,6 +2377,7 @@ impl Engine {
                 pinned: e.pinned,
                 reactions: counts,
                 file: None,
+                ..ui::Line::default()
             });
             last_day = Some(day);
         }
@@ -1917,6 +2628,7 @@ fn relay_invite_secret() -> [u8; 32] {
 /// Builds the shared state the call engine runs on, as the classic app did.
 pub fn start_state(runtime: tokio::runtime::Handle) -> anyhow::Result<Arc<AppState>> {
     let loaded = config::load();
+    antiphon_client::link_quality::set_low_data(loaded.low_data_calls);
     let ptt_key = Keycode::from_str(&loaded.ptt_key).or_else(|_| Keycode::from_str(caps_lock::default_ptt_key())).unwrap_or(Keycode::Space);
     let mode = transmit_mode(loaded.transmit_mode);
     let transmit = Arc::new(TransmitSettings::new(ptt_key, mode, loaded.va_threshold));

@@ -70,6 +70,9 @@
 
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Stoop uses the microphone for calls. Your voice is encrypted on this phone and goes only to the person you are talking to.</string>
+	<!-- Asked the first time the camera button is pressed on a call. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Stoop uses the camera when you turn on video in a call. The picture is encrypted on this phone and goes only to the person you are talking to.</string>
 	<!-- audio: a call keeps running when the screen locks or another app is
 	     opened. voip: PushKit wakes the app for incoming calls. -->
 	<key>UIBackgroundModes</key>

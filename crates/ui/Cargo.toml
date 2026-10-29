@@ -11,5 +11,10 @@ version.workspace = true
 # then resolves to the pair, so every view here is the type the app draws.
 
 [dependencies]
+# The screen-reader tree: plain data, handed to each platform's adapter by the app.
+accesskit = "0.24.1"
 iced_core = "0.14.0"
 iced_widget = { version = "0.14.0", features = ["svg", "canvas", "qr_code", "image", "wgpu"] }
+# Theme files: plain JSON data, read and written through serde only.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

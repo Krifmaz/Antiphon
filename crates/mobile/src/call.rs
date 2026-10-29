@@ -14,12 +14,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use antiphon_audio::{start_capture, start_playback, AudioChain, ChainConfig, PlaybackSink};
 use antiphon_crypto::{verification_code, IdentityKeyPair, Invite};
+use antiphon_net::voice::{VoiceReceiver, VoiceSender};
 use antiphon_net::{AppSocket, JitterBuffer, PeerConnection, PopResult, Received};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::control::{ControlMessage, Hello};
+use crate::control::{ControlMessage, Hello, ProfileCard};
 use crate::file_transfer::{self, FileTransferState};
+use crate::link_quality::{self, LinkQuality};
 use crate::platform;
 
 /// Same wait as the desktop builds, so both ends conceal at the same point.
@@ -94,11 +96,11 @@ struct Shared {
     finished: Mutex<Vec<CallSummary>>,
     /// The name sent to the other side when a call connects.
     display_name: Mutex<String>,
-    /// Data saver: send each audio frame without the spare copy of the
-    /// previous one. That copy is what lets the other side rebuild a lost
-    /// packet, and it is a fifth of the call's data, so on a metered
-    /// network trading some loss resilience for it is a fair default.
-    data_saver: AtomicBool,
+    /// The status line sent with it.
+    status_message: Mutex<String>,
+    /// The rest of the profile (picture, About, colour), sent when a call
+    /// connects.
+    card: Mutex<ProfileCard>,
 }
 
 impl Shared {
@@ -268,10 +270,18 @@ impl CallEngine {
         *self.shared.display_name.lock().unwrap() = name.trim().to_string();
     }
 
+    /// Sets the status line and profile card sent when the next call
+    /// connects. Sending them to a call already up is the interface's job.
+    pub fn set_profile(&self, status: &str, card: ProfileCard) {
+        *self.shared.status_message.lock().unwrap() = status.trim().to_string();
+        *self.shared.card.lock().unwrap() = card;
+    }
+
     /// Turns the data saver on or off for the running call and the next
-    /// ones: on drops the spare audio copy each packet carries.
+    /// ones: on, calls switch to "Low data" (spec §2 automatic bandwidth:
+    /// 8 kbit/s voice in 60 ms packets, no video), applied within a packet.
     pub fn set_data_saver(&self, on: bool) {
-        self.shared.data_saver.store(on, Ordering::Relaxed);
+        link_quality::set_low_data(on);
     }
 
     /// Whether a call is waiting, dialling or connected, so a new one would
@@ -638,28 +648,37 @@ async fn talk(
     {
         let hello = Hello {
             display_name: shared.display_name.lock().unwrap().clone(),
-            status_message: String::new(),
+            status_message: shared.status_message.lock().unwrap().clone(),
             presence: None,
             wants_silent: false,
             relay: String::new(),
-            routes: String::new(),
+            lends_relay: false,
+            routes: crate::push::published_routes(),
         };
         let bytes = ControlMessage::Hello(hello).encode();
+        // The picture and About line follow in their own message, which
+        // an older peer that does not know it simply ignores.
+        let card = ControlMessage::Profile(shared.card.lock().unwrap().clone()).encode();
         let peer = peer.clone();
         tokio::spawn(async move {
             for _ in 0..3 {
                 let _ = peer.send_control(&bytes).await;
+                let _ = peer.send_control(&card).await;
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
         });
     }
 
+    // Spec §2 automatic bandwidth: the reports both ways and the plan
+    // the encoder and video follow, as on the desktop.
+    let link = Arc::new(LinkQuality::default());
     let send_peer = peer.clone();
     let send_shared = shared.clone();
+    let send_link = link.clone();
     let send_task = tokio::spawn(async move {
         let mut chain = AudioChain::from_config(sample_rate, &chain_rx.borrow_and_update());
-        let mut previous_frame: Option<Vec<f32>> = None;
-        let mut sequence: u32 = 0;
+        // Opus at the tier the link calls for; see `antiphon_net::voice`.
+        let mut voice = VoiceSender::new(sample_rate);
         while let Some(mut samples) = frames.recv().await {
             if chain_rx.has_changed().unwrap_or(false) {
                 chain = AudioChain::from_config(sample_rate, &chain_rx.borrow_and_update());
@@ -667,16 +686,15 @@ async fn talk(
             chain.process(&mut samples);
             if send_shared.transmitting.load(Ordering::Relaxed) {
                 send_shared.level.store(peak(&samples).to_bits(), Ordering::Relaxed);
-                let backup = if send_shared.data_saver.load(Ordering::Relaxed) { None } else { previous_frame.as_deref() };
-                let bytes = antiphon_net::fec::encode(sequence, &samples, backup);
-                previous_frame = Some(samples);
-                sequence = sequence.wrapping_add(1);
-                if let Err(e) = send_peer.send_audio(&bytes).await {
-                    log::warn!("send error: {e}");
+                send_link.tune(&mut voice);
+                for (_, bytes) in voice.push(&samples) {
+                    if let Err(e) = send_peer.send_audio(&bytes).await {
+                        log::warn!("send error: {e}");
+                    }
                 }
             } else {
                 send_shared.level.store(0, Ordering::Relaxed);
-                previous_frame = None;
+                voice.pause();
             }
         }
     });
@@ -685,21 +703,28 @@ async fn talk(
     let recv_jitter = jitter.clone();
     let recv_live = live.clone();
     let recv_wake = wake.clone();
+    let mut recv_voice = VoiceReceiver::new(sample_rate);
+    link.watch(0, recv_voice.loss());
+    let recv_link = link.clone();
     let mut recv_task = tokio::spawn(async move {
         let files = recv_live.files.clone();
         let peer = recv_live.peer.clone();
         peer.clone()
             .recv_loop(move |msg| match msg {
                 Received::Audio { plaintext, .. } => {
-                    if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
+                    if let Some(decoded) = recv_voice.decode(&plaintext) {
                         recv_jitter.lock().unwrap().push_with_backup(decoded.sequence as u64, decoded.primary, decoded.backup);
                     }
                 }
                 Received::Control(bytes) => match ControlMessage::decode(&bytes) {
+                    Some(ControlMessage::LinkReport { loss_pct, sent_ms, echo_ms, held_ms }) => {
+                        recv_link.on_report(0, loss_pct, sent_ms, echo_ms, held_ms)
+                    }
                     // The conversation and its history belong to the
                     // interface, so these wait for it there.
                     Some(
                         message @ (ControlMessage::Hello(_)
+                        | ControlMessage::Profile(_)
                         | ControlMessage::Chat { .. }
                         | ControlMessage::ChatEdit { .. }
                         | ControlMessage::ChatDelete { .. }
@@ -729,11 +754,23 @@ async fn talk(
     let tick_files = live.files.clone();
     let tick_peer = live.peer.clone();
     let tick_wake = wake.clone();
+    let tick_live = live.clone();
     let playback_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         let mut last_wake = std::time::Instant::now();
+        let mut report_ticks = 0u32;
         loop {
             tick.tick().await;
+            report_ticks += 1;
+            if report_ticks >= link_quality::REPORT_EVERY_TICKS {
+                report_ticks = 0;
+                tick_live.video.set_share(link.plan().video_percent);
+                let bytes = link.report(0).encode();
+                let peer = tick_peer.clone();
+                tokio::spawn(async move {
+                    let _ = peer.send_control(&bytes).await;
+                });
+            }
             // Self-throttled inside; riding the audio tick, as the desktop
             // does, saves a timer of its own.
             file_transfer::request_missing_chunks_if_needed(&tick_files, &tick_peer);

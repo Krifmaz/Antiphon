@@ -171,6 +171,9 @@ pub struct ActiveCall {
     /// arrives (spec §1 profile info isn't guaranteed to arrive instantly
     /// or at all -- older peers, or a lost UDP packet, just leave this `None`).
     pub peer_profile: Arc<Mutex<Option<Hello>>>,
+    /// The rest of their profile (picture, About, colour), once their
+    /// `Profile` message arrives; taken by the UI thread to save it.
+    pub peer_card: Arc<Mutex<Option<crate::control::ProfileCard>>>,
     /// Kept around so the UI thread can re-send an updated `Hello` (e.g.
     /// after the user edits their profile mid-call) via `AppState::runtime`
     /// -- see `main::sync_transmit_from_ui`'s sibling for profile pushes.
@@ -1545,6 +1548,7 @@ pub fn start_pipeline(
 
     // Spec §3 group calls: everyone beyond the primary connection.
     let group = Arc::new(crate::group::Group::default());
+    group.device_rate.store(sample_rate, Ordering::Relaxed);
     let send_group = group.clone();
     let send_peer = peer.clone();
     let send_muted = muted.clone();
@@ -1566,11 +1570,11 @@ pub fn start_pipeline(
     let send_echo_cancel = echo_cancel.clone();
     let send_monitor_sink = monitor_sink.clone();
     let send_task = tokio::spawn(async move {
-        // The last frame actually transmitted, carried as a backup copy on
-        // the next one (spec section 2 forward error correction).
-        let mut previous_frame: Option<Vec<f32>> = None;
-        // Application frame sequence, independent of the crypto counter.
-        let mut sequence: u32 = 0;
+        // Spec §2: Opus, its bitrate set by the link's reports, with its
+        // in-band FEC as the backup copy of each packet's predecessor.
+        // It numbers the packets itself (the application sequence,
+        // independent of the crypto counter).
+        let mut voice = antiphon_net::voice::VoiceSender::new(sample_rate);
         while let Some(mut samples) = rx.recv().await {
             // Spec §1 echo cancellation, before the mic chain: the
             // gate and compressor are tuned for a voice, and running them
@@ -1627,44 +1631,44 @@ pub fn start_pipeline(
                         tap.push(crate::captions::OWN_VOICE, sample_rate, &samples);
                     }
                 }
-                // Spec §2, layer one: every frame carries a low-quality
-                // copy of the one before it, so a single lost frame is
-                // repaired with no round trip and no added delay.
-                let bytes = antiphon_net::fec::encode(sequence, &samples, previous_frame.as_deref());
-                previous_frame = Some(samples.clone());
-                // Kept so a resend request can be answered without
-                // re-running the mic chain.
-                {
-                    let mut cache = send_resend_cache.lock().unwrap();
-                    cache.push_back((sequence, bytes.clone()));
-                    while cache.len() > RESEND_CACHE_FRAMES {
-                        cache.pop_front();
+                // Spec §2 automatic bandwidth: the tier and FEC the
+                // link's reports call for, then whatever packets this
+                // block completed (usually one or none).
+                send_group.link.tune(&mut voice);
+                for (sequence, bytes) in voice.push(&samples) {
+                    // Kept so a resend request can be answered without
+                    // re-running the mic chain.
+                    {
+                        let mut cache = send_resend_cache.lock().unwrap();
+                        cache.push_back((sequence, bytes.clone()));
+                        while cache.len() > RESEND_CACHE_FRAMES {
+                            cache.pop_front();
+                        }
                     }
-                }
-                sequence = sequence.wrapping_add(1);
-                if let Some(sfu) = send_group.sfu_call() {
-                    // Spec §3 past the mesh: one SFrame-sealed upload, and
-                    // the SFU forwards it to everyone.
-                    sfu.send_audio(&bytes).await;
-                } else {
-                    // Spec §3 SFrame: in a group call with MLS keys, sealed
-                    // once under this epoch's key for everyone keyed in.
-                    let sealed = send_group.keys.seal_audio(&bytes);
-                    let to_primary =
-                        send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
-                    if let Err(e) = send_peer.send_audio(to_primary).await {
-                        eprintln!("[net] send error: {e}");
+                    if let Some(sfu) = send_group.sfu_call() {
+                        // Spec §3 past the mesh: one SFrame-sealed upload, and
+                        // the SFU forwards it to everyone.
+                        sfu.send_audio(&bytes).await;
+                    } else {
+                        // Spec §3 SFrame: in a group call with MLS keys, sealed
+                        // once under this epoch's key for everyone keyed in.
+                        let sealed = send_group.keys.seal_audio(&bytes);
+                        let to_primary =
+                            send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                        if let Err(e) = send_peer.send_audio(to_primary).await {
+                            eprintln!("[net] send error: {e}");
+                        }
+                        // Spec §3 group mesh: the same frame to everyone else in
+                        // the call, one upload each.
+                        send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
                     }
-                    // Spec §3 group mesh: the same frame to everyone else in
-                    // the call, one upload each.
-                    send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
                 }
             } else {
-                // Cleared while not transmitting, so the first frame after
-                // a pause doesn't offer a backup copy of audio from before
+                // Cleared while not transmitting, so the first packet after
+                // a pause doesn't carry a backup copy of audio from before
                 // the silence -- repairing a gap with unrelated speech is
                 // worse than leaving it.
-                previous_frame = None;
+                voice.pause();
             }
         }
     });
@@ -1699,7 +1703,14 @@ pub fn start_pipeline(
     let recv_friend_pending = pending_friend_request.clone();
     let recv_friend_accepted = friend_accepted.clone();
     let video = Arc::new(crate::video::CallVideo::new());
+    *group.video.lock().unwrap() = Some(video.clone());
+    let peer_card = Arc::new(Mutex::new(None));
+    let recv_card = peer_card.clone();
     let recv_video = video.clone();
+    // The primary connection's voice decoder; its losses go into our
+    // reports back (spec §2 automatic bandwidth), as source 0.
+    let mut recv_voice = antiphon_net::voice::VoiceReceiver::new(sample_rate);
+    group.link.watch(0, recv_voice.loss());
     let recv_task = tokio::spawn(async move {
         let result = recv_peer
             .recv_loop(move |msg| match msg {
@@ -1713,7 +1724,7 @@ pub fn start_pipeline(
                     // Ordered by the *application* sequence inside the
                     // payload, not the crypto counter outside it, so a
                     // resend lands in the slot it belongs to.
-                    if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
+                    if let Some(decoded) = recv_voice.decode(&plaintext) {
                         recv_jitter.lock().unwrap().push_with_backup(
                             decoded.sequence as u64,
                             decoded.primary,
@@ -1738,6 +1749,9 @@ pub fn start_pipeline(
                             recv_silent.store(true, Ordering::Relaxed);
                         }
                         *recv_profile.lock().unwrap() = Some(hello);
+                    }
+                    Some(ControlMessage::LinkReport { loss_pct, sent_ms, echo_ms, held_ms }) => {
+                        recv_group.link.on_report(0, loss_pct, sent_ms, echo_ms, held_ms);
                     }
                     Some(ControlMessage::AudioMissing { sequences }) => {
                         // Best effort: anything already aged out of the
@@ -1868,6 +1882,7 @@ pub fn start_pipeline(
                         *recv_friend_accepted.lock().unwrap() = Some(display_name);
                     }
                     Some(ControlMessage::FriendReject) => {}
+                    Some(ControlMessage::Profile(card)) => *recv_card.lock().unwrap() = Some(card),
                     Some(other) => file_transfer::handle_control_message(other, &recv_ft_state, &recv_ft_peer),
                     None => {}
                 },
@@ -1899,6 +1914,10 @@ pub fn start_pipeline(
     // wall clock so a clip's label matches the audio it contains even if
     // the stream stalled.
     let mut drained_samples: u64 = 0;
+    // Spec §2 "Replay": where each concealed frame's stand-in went in the
+    // replay ring (position from the start of the call, and length), so a
+    // late copy of the real frame can be written back over it.
+    let mut concealed_at: std::collections::BTreeMap<u64, (usize, usize)> = std::collections::BTreeMap::new();
     let stats_jitter = jitter.clone();
     let drain_nack_peer = peer.clone();
     // Current ducking amount in dB, ramped toward its target each frame.
@@ -1910,6 +1929,10 @@ pub fn start_pipeline(
     let drain_ptt = ptt_active.clone();
     let drain_peer_muted = peer_muted.clone();
     let drain_group = group.clone();
+    // Spec §2 automatic bandwidth: reports go out from this loop, and the
+    // video budget follows the plan.
+    let drain_video = video.clone();
+    let mut report_ticks: u32 = 0;
     // Spec §3 group calls and §1 ducking: everyone's audio meets here.
     // The primary connection is source 0; each leg is its id + 1.
     let mut mixer = crate::mixer::Mixer::default();
@@ -1918,6 +1941,22 @@ pub fn start_pipeline(
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         loop {
             tick.tick().await;
+            report_ticks += 1;
+            if report_ticks >= crate::link_quality::REPORT_EVERY_TICKS {
+                report_ticks = 0;
+                drain_video.set_share(drain_group.link.plan().video_percent);
+                // Spec §3 group calls: our video to everyone in the mesh.
+                drain_video.set_group_peers(drain_group.leg_peers());
+                let mut reports = vec![(drain_nack_peer.clone(), drain_group.link.report(0).encode())];
+                for (source, leg) in drain_group.leg_sources() {
+                    reports.push((leg, drain_group.link.report(source).encode()));
+                }
+                tokio::spawn(async move {
+                    for (peer, bytes) in reports {
+                        let _ = peer.send_control(&bytes).await;
+                    }
+                });
+            }
             let caption_tap = crate::captions::tap();
             mixer.set_duck_db(drain_duck_db.load(Ordering::Relaxed) as f32);
             // Cheap no-op most ticks (a single mutex check, internally
@@ -1939,7 +1978,12 @@ pub fn start_pipeline(
                 });
             }
             loop {
-                let popped = jitter.lock().unwrap().pop_ready();
+                let (popped, popped_seq) = {
+                    let mut j = jitter.lock().unwrap();
+                    let popped = j.pop_ready();
+                    (popped, j.last_popped())
+                };
+                let concealed = matches!(popped, PopResult::Concealed(_));
                 let damaged = matches!(popped, PopResult::Recovered(_) | PopResult::Concealed(_));
                 let mut samples = match popped {
                     PopResult::Frame(s) | PopResult::Recovered(s) | PopResult::Concealed(s) => s,
@@ -1960,6 +2004,14 @@ pub fn start_pipeline(
                     // last 30 seconds" means what the peer sent.
                     let mut ring = drain_replay.lock().unwrap();
                     let cap = replay_cap(drain_replay_seconds.load(Ordering::Relaxed));
+                    if let (true, Some(seq)) = (concealed, popped_seq) {
+                        concealed_at.insert(seq, (ring.end(), samples.len()));
+                        // Only the last few seconds matter: anything older
+                        // has rolled out of every clip it could be in.
+                        while concealed_at.len() > 256 {
+                            concealed_at.pop_first();
+                        }
+                    }
                     ring.push(&samples, cap);
 
                     // Spec §2 replay history. Cut here, while the ring is
@@ -2063,6 +2115,21 @@ pub fn start_pipeline(
                 }
             }
 
+            // Spec §2 "Replay": a resend or late packet for a moment that
+            // was already played as a stand-in. Too late to hear live, but
+            // it is the real audio, so it goes back into the replay ring
+            // over the stand-in -- and a clip cut from there replays what
+            // was actually said.
+            let late = jitter.lock().unwrap().take_late();
+            if !late.is_empty() {
+                let mut ring = drain_replay.lock().unwrap();
+                for (seq, real) in late {
+                    if let Some((position, len)) = concealed_at.remove(&seq) {
+                        ring.overwrite(position, &real[..real.len().min(len)]);
+                    }
+                }
+            }
+
             // Spec §3 group calls: everyone else, at the master level and
             // under the same deafen switch, mixed with the primary.
             let legs = drain_group.leg_audio();
@@ -2132,6 +2199,7 @@ pub fn start_pipeline(
         ptt_active,
         mic_level,
         peer_profile,
+        peer_card,
         peer,
         monitor_enabled,
         soundboard_queue,

@@ -26,6 +26,16 @@ pub struct Settings {
     pub chain: ChainConfig,
     /// The name sent to the people you call.
     pub display_name: String,
+    /// The status line sent with it ("Around this evening").
+    pub status_message: String,
+    /// A line or two about you, sent to the people you call.
+    pub bio: String,
+    /// Your avatar colour's id (`antiphon_ui::PROFILE_COLORS`); empty for
+    /// the automatic one.
+    pub color: String,
+    /// Your profile picture: a small JPEG, base64, as
+    /// `profile::avatar_from_image` makes it. Empty for none.
+    pub avatar: String,
     /// Hold file transfers while on mobile data.
     pub wifi_only_transfers: bool,
     /// Megabytes of mobile data file transfers may use per month; 0 for
@@ -45,8 +55,12 @@ pub struct Settings {
     pub cellular_used_bytes: u64,
     /// The interface's theme id (`stoop`, `dark`, `oled`, `light`, `system`).
     pub theme: String,
-    /// The interface's accent id.
+    /// The interface's accent id, or `custom`.
     pub accent: String,
+    /// The custom accent as `#rrggbb`, used when `accent` is `custom`.
+    pub custom_accent: String,
+    /// The reading font's id: `inter` (the default) or `opendyslexic`.
+    pub font: String,
     /// Dialogs and panels appear at once instead of sliding.
     pub reduced_motion: bool,
 }
@@ -60,6 +74,10 @@ impl Default for Settings {
             speaker: false,
             chain: ChainConfig::default_preset(),
             display_name: String::new(),
+            status_message: String::new(),
+            bio: String::new(),
+            color: String::new(),
+            avatar: String::new(),
             // On by default: a large file quietly eating a data plan is
             // the surprise people do not forgive, and the queue says
             // plainly why a file is waiting.
@@ -72,6 +90,8 @@ impl Default for Settings {
             cellular_used_bytes: 0,
             theme: "stoop".into(),
             accent: "logo".into(),
+            custom_accent: String::new(),
+            font: "inter".into(),
             reduced_motion: false,
         }
     }

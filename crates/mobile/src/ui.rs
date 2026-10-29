@@ -9,6 +9,7 @@
 //! messages, file progress, the end of a call -- reaches the screen and
 //! the disk.
 
+mod camera;
 mod stoop;
 
 use std::collections::HashMap;
@@ -24,7 +25,7 @@ use iced_widget::{container, qr_code};
 use crate::call::{self, now_secs, CallEngine, Phase, Waker};
 use crate::call_log::{self, CallRecord};
 use crate::contacts::{hex, Contacts};
-use crate::control::ControlMessage;
+use crate::control::{ControlMessage, Hello, ProfileCard};
 use crate::conversation::Conversation;
 use crate::data_rules::{self, CellularMeter, DataSettings, Link};
 use crate::files::{self, FileManager};
@@ -152,8 +153,9 @@ pub enum Message {
     Expiry(Expiry),
 
     // Files.
-    /// Open the system file picker to send a file to the person on the
-    /// call.
+    /// Open the system file picker to send a file to the person whose
+    /// conversation is open: now if they are on the call, at their next
+    /// call if not.
     PickFile,
     /// Accept the file being offered.
     AcceptOffer,
@@ -176,7 +178,6 @@ pub enum Message {
     #[allow(dead_code)] // see the note on `Message`
     QueueHold(u64, bool),
     /// Take a file out of the queue.
-    #[allow(dead_code)] // see the note on `Message`
     QueueRemove(u64),
 
     // Recent calls.
@@ -298,6 +299,8 @@ pub struct App {
     backup_key: Result<BackupKey, String>,
     /// The address book.
     contacts: Contacts,
+    /// The push key and endpoint, and the wake-ups received lately.
+    push: crate::push::Push,
     /// Past calls, newest first.
     calls: Vec<CallRecord>,
     /// The first press of "Clear call history" has been made.
@@ -323,11 +326,21 @@ pub struct App {
 
     /// The send queue and the transfers running.
     files: FileManager,
+    /// Who the file picker was opened for, hex, kept until the pick comes
+    /// back: the user may move to another conversation, or the call may
+    /// end, while the picker is up, and the file is still for them.
+    pick_for: Option<String>,
     /// Who the connected call is with, hex, as of the last poll: noticing
     /// it change is how a call's start and end are handled once.
     live_peer: Option<String>,
     /// What they call themselves, from their Hello.
     peer_display_name: Option<String>,
+    /// Their picture, About line and colour, from their profile card;
+    /// copied to their contact if they are (or become) one.
+    peer_card: Option<ProfileCard>,
+    /// The file picker is open for a profile picture rather than a file
+    /// to send, so the picked file is read here instead of queued.
+    picking_avatar: bool,
 
     /// Whether the app is on screen; notifications are only for when it
     /// is not.
@@ -350,8 +363,9 @@ pub struct App {
     /// What the interface draws, rebuilt by [`refresh`](Self::refresh)
     /// after every change and before every frame.
     model: antiphon_ui::Model,
-    /// The theme and accent the palette was last built for.
-    look: (String, String),
+    /// What the look was last built from: theme, accent, custom accent
+    /// and reading font.
+    look: (String, String, String, String),
     /// The invite link and its QR code, rebuilt only when the link changes.
     qr: Option<(String, Arc<qr_code::Data>)>,
     /// The last message with each person, hex key to (text, unix seconds),
@@ -362,12 +376,29 @@ pub struct App {
     tiles: HashMap<String, (u64, antiphon_ui::VideoTile)>,
     /// Muted from the call screen: nothing is sent, however the mic is keyed.
     muted: bool,
+    /// The camera button is on: the camera is sending, or will be once the
+    /// permission prompt is answered or the app is back on screen.
+    camera_wanted: bool,
+    /// Which camera to open, front or back, as last switched to.
+    camera_facing: crate::camera::Facing,
+    /// The camera permission prompt is up, waiting for an answer.
+    camera_prompt: Option<camera::PermissionWait>,
     /// The push-to-talk pad is held.
     talking: bool,
     /// When the call on now connected, for its clock.
     connected_at: Option<Instant>,
     /// The window's logical size as last told to the interface.
     size: Size,
+    /// How the call engine wakes the runner; kept so the app can be
+    /// rebuilt from disk after an account restore.
+    wake: Waker,
+    /// Settings > Account & backup: backup files and moving devices.
+    account: crate::account::PhoneAccount,
+}
+
+/// The profile card the saved settings describe, as sent to contacts.
+fn card_of(settings: &Settings) -> ProfileCard {
+    ProfileCard { bio: settings.bio.clone(), color: settings.color.clone(), avatar: settings.avatar.clone() }
 }
 
 /// Loads this phone's identity from `dir`, creating one on first start.
@@ -384,9 +415,10 @@ impl App {
     pub fn new(dir: PathBuf, wake: Waker) -> Result<Self, String> {
         let settings = Settings::load(&dir);
         let identity = load_identity(&dir);
-        let engine = CallEngine::new(settings.chain.clone(), settings.open_mic, settings.speaker, wake)
+        let engine = CallEngine::new(settings.chain.clone(), settings.open_mic, settings.speaker, wake.clone())
             .map_err(|e| format!("could not start the call engine: {e}"))?;
         engine.set_display_name(&settings.display_name);
+        engine.set_profile(&settings.status_message, card_of(&settings));
         // Received files are stored, and partial ones kept for resuming,
         // under the same folder the desktop's modules would use.
         crate::config::set_dir(dir.clone());
@@ -406,11 +438,19 @@ impl App {
                 }
             }
         }
+        let push = crate::push::Push::load(&dir, identity.as_ref().ok());
+        // Ask for an endpoint on every start: the platform answers at once
+        // with the one it holds, or asks the distributor (Android) or
+        // PushKit (iOS) for one, and a phone with neither just goes on
+        // without wake-ups.
+        platform::register_push();
         let mut app = Self {
+            push,
             port_text: settings.listen_port.to_string(),
             limit_text: if settings.cellular_limit_mb == 0 { String::new() } else { settings.cellular_limit_mb.to_string() },
             contacts,
             files: FileManager::new(dir.clone()),
+            pick_for: None,
             dir,
             settings,
             identity,
@@ -433,6 +473,8 @@ impl App {
             unread: 0,
             live_peer: None,
             peer_display_name: None,
+            peer_card: None,
+            picking_avatar: false,
             foreground: true,
             network: platform::network(),
             battery_saver: platform::battery_saver(),
@@ -445,9 +487,14 @@ impl App {
             previews,
             tiles: HashMap::new(),
             muted: false,
+            camera_wanted: false,
+            camera_facing: crate::camera::Facing::default(),
+            camera_prompt: None,
             talking: false,
             connected_at: None,
             size: Size::new(0.0, 0.0),
+            wake,
+            account: Default::default(),
         };
         app.refresh();
         Ok(app)
@@ -460,6 +507,29 @@ impl App {
         self.engine.mic_test_running()
             || matches!(self.engine.phase(), Phase::Connected { .. } | Phase::Dialing { .. })
             || self.stoop.needs_frames()
+            // A backup being sealed or a move offer open: its result is
+            // collected in `poll`, which runs on each frame.
+            || self.account.active()
+    }
+
+    /// Rebuilds the whole app from what is on disk, after a restore wrote
+    /// a different account there. Everything in memory -- identity,
+    /// contacts, history, settings -- belonged to the old account.
+    fn reload_account(&mut self, said: String) {
+        if self.engine.is_busy() {
+            self.engine.stop();
+        }
+        match App::new(self.dir.clone(), self.wake.clone()) {
+            Ok(fresh) => {
+                let (size, foreground) = (self.size, self.foreground);
+                *self = fresh;
+                self.foreground = foreground;
+                self.resized(size);
+                self.stoop.toast(said, antiphon_ui::ToastKind::Ok);
+                self.refresh();
+            }
+            Err(e) => self.notice = Some(format!("{said} Close and reopen Stoop to finish: {e}")),
+        }
     }
 
     /// The activity came back to the front, possibly from the permission
@@ -473,6 +543,7 @@ impl App {
         if self.live_peer.is_some() && self.stoop.open_person() == self.live_peer.as_deref() {
             self.unread = 0;
         }
+        self.camera_resumed();
         self.refresh();
     }
 
@@ -483,6 +554,7 @@ impl App {
     /// something the user started.
     pub fn suspended(&mut self) {
         self.foreground = false;
+        self.camera_suspended();
         self.battery_saver = platform::battery_saver();
         let keep = data_rules::listen_in_background(
             self.settings.keep_listening_in_background,
@@ -506,16 +578,35 @@ impl App {
     pub fn platform_event(&mut self, event: platform::PlatformEvent) {
         use platform::{CallAction, PlatformEvent};
         match event {
-            PlatformEvent::FilePicked(picked) => {
-                let Some(peer) = self.live_peer.clone() else {
-                    self.notice = Some("The call ended before the file was picked. Send it during your next call.".into());
-                    return;
-                };
-                if let Err(e) = self.files.enqueue(peer, picked) {
-                    self.notice = Some(e);
+            PlatformEvent::FilePicked(picked) if self.picking_avatar => {
+                self.picking_avatar = false;
+                let made = platform::read_file(&picked.handle)
+                    .map_err(|e| format!("Couldn't open {}: {e}", picked.name))
+                    .and_then(|bytes| crate::profile::avatar_from_image(&bytes));
+                match made {
+                    Ok(avatar) => {
+                        self.settings.avatar = avatar;
+                        self.profile_changed();
+                        self.stoop.toast("Picture updated", antiphon_ui::ToastKind::Ok);
+                    }
+                    Err(why) => self.stoop.toast(why, antiphon_ui::ToastKind::Err),
                 }
             }
-            PlatformEvent::FilePickCancelled => {}
+            // A backup file chosen in Settings, not a file for the call.
+            PlatformEvent::FilePicked(picked) if self.account.picked(&self.dir, Some(&picked.handle)) => {}
+            PlatformEvent::FilePicked(picked) => {
+                let Some(peer) = self.pick_for.take().or_else(|| self.live_peer.clone()) else { return };
+                if self.live_peer.as_deref() != Some(peer.as_str()) {
+                    let who = self.display_name_for(&peer);
+                    self.stoop.toast(format!("{} goes to {who} on your next call", picked.name), antiphon_ui::ToastKind::Info);
+                }
+                self.files.enqueue(peer, picked);
+            }
+            PlatformEvent::FilePickCancelled => {
+                self.pick_for = None;
+                self.picking_avatar = false;
+                self.account.picked(&self.dir, None);
+            }
             PlatformEvent::NetworkChanged(network) => self.network = network,
             PlatformEvent::CallAction(CallAction::Answer) => platform::ring(None),
             PlatformEvent::CallAction(CallAction::HangUp | CallAction::Decline) => {
@@ -529,7 +620,55 @@ impl App {
                 self.engine.set_ptt(false);
                 self.engine.set_open_mic(!muted && self.settings.open_mic);
             }
-            other => log::info!("platform event: {other:?}"),
+            PlatformEvent::PushRegistered(endpoint) => {
+                if let Ok(identity) = &self.identity {
+                    if let Err(e) = self.push.registered(&endpoint, identity) {
+                        log::warn!("push address not published: {e}");
+                    }
+                }
+            }
+            PlatformEvent::Push(sealed) => self.woken(&sealed),
+        }
+    }
+
+    /// A push wake-up arrived. Anything that does not open, is stale or
+    /// repeated, is from someone not saved as a contact, or is over that
+    /// contact's limit is dropped without a sound.
+    fn woken(&mut self, sealed: &[u8]) {
+        let contacts = &self.contacts;
+        let Some(woken) = self.push.open(sealed, |key| contacts.by_key(key).is_some(), now_secs()) else {
+            log::info!("a push wake-up was dropped");
+            return;
+        };
+        match woken {
+            // Be listening when their call lands; the call arriving is
+            // what rings (see `poll`), and on iOS CallKit is already
+            // showing it. No microphone prompt from the background: a
+            // phone that never allowed the mic could not take the call
+            // anyway, and shows why when opened.
+            crate::push::Woken::Ring { .. } => {
+                if self.engine.is_busy() || !self.mic_permission {
+                    return;
+                }
+                if let Ok(identity) = &self.identity {
+                    let identity = IdentityKeyPair::from_master_seed(identity.master_seed());
+                    self.dialled = None;
+                    self.engine.listen(self.settings.listen_port, identity);
+                }
+            }
+            // This phone keeps no mailbox yet, so there is nothing to
+            // fetch from here; say a message is waiting, which is what
+            // the sender wanted the person holding the phone to know.
+            crate::push::Woken::Mail { from } => {
+                if !self.foreground {
+                    platform::notify(&self.display_name_for(&from), "left you a message. Call them to pick it up.");
+                }
+            }
+            crate::push::Woken::File { from } => {
+                if !self.foreground {
+                    platform::notify(&self.display_name_for(&from), "wants to send you a file.");
+                }
+            }
         }
     }
 
@@ -601,6 +740,17 @@ impl App {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
 
+        for outcome in self.account.poll() {
+            match outcome {
+                crate::account::Outcome::Toast(text, kind) => self.stoop.toast(text, kind),
+                crate::account::Outcome::Reload(said) => {
+                    self.reload_account(said);
+                    return true;
+                }
+            }
+            changed = true;
+        }
+
         for summary in self.engine.take_finished() {
             if let Ok(key) = &self.backup_key {
                 call_log::record(&mut self.calls, CallRecord::from(&summary));
@@ -614,6 +764,7 @@ impl App {
         if live_peer != self.live_peer {
             self.live_peer = live_peer.clone();
             self.peer_display_name = None;
+            self.peer_card = None;
             self.unread = 0;
             self.connected_at = live_peer.as_ref().map(|_| Instant::now());
             self.muted = false;
@@ -652,6 +803,10 @@ impl App {
                     }
                     continue;
                 }
+                if let ControlMessage::Profile(card) = message {
+                    self.receive_card(&peer, card);
+                    continue;
+                }
                 // Their messages always land in their history, even while
                 // another conversation is open on screen.
                 let new_text = match self.chat.as_mut().filter(|c| c.peer_hex == peer) {
@@ -681,6 +836,7 @@ impl App {
         let link = self.link();
         let saver = data_rules::data_saver_active(self.data_settings(), link);
         self.engine.set_data_saver(saver);
+        crate::camera_source::set_low_data(saver);
         crate::config::set_transfer_limits(crate::transfer_limits::TransferLimits {
             upload_kbps: data_rules::upload_cap_kbps(self.data_settings(), link),
             ..Default::default()
@@ -747,6 +903,45 @@ impl App {
     /// Writes the settings file.
     fn save(&self) {
         self.settings.save(&self.dir);
+    }
+
+    /// Saves a changed profile, gives the engine the copy it sends when a
+    /// call connects, and tells the person on the call now.
+    fn profile_changed(&mut self) {
+        self.save();
+        let card = card_of(&self.settings);
+        self.engine.set_profile(&self.settings.status_message, card.clone());
+        if let Some(live) = self.engine.live() {
+            live.send(ControlMessage::Hello(Hello {
+                display_name: self.settings.display_name.clone(),
+                status_message: self.settings.status_message.clone(),
+                presence: None,
+                wants_silent: false,
+                relay: String::new(),
+                // The phone runs no relay of its own to lend.
+                lends_relay: false,
+                routes: String::new(),
+            }));
+            live.send(ControlMessage::Profile(card));
+        }
+    }
+
+    /// Keeps the card the person on the call sent: cleaned, saved to
+    /// their contact if they are one, and shown on their avatar either way.
+    fn receive_card(&mut self, peer_hex: &str, card: ProfileCard) {
+        let card = ProfileCard {
+            avatar: if crate::profile::decode_avatar(&card.avatar).is_some() { card.avatar } else { String::new() },
+            bio: crate::profile::clean_bio(&card.bio),
+            color: if antiphon_ui::avatars::named_color(&card.color).is_some() { card.color } else { String::new() },
+        };
+        antiphon_ui::avatars::set(peer_hex, &card.avatar, &card.color, crate::profile::decode_avatar);
+        if let Some(c) = self.contacts.by_key_mut(peer_hex) {
+            if (&c.avatar, &c.bio, &c.color) != (&card.avatar, &card.bio, &card.color) {
+                (c.avatar, c.bio, c.color) = (card.avatar.clone(), card.bio.clone(), card.color.clone());
+                self.contacts.save(&self.dir);
+            }
+        }
+        self.peer_card = Some(card);
     }
 
     /// Hands the changed chain to the engine, which applies it at once, and
@@ -932,6 +1127,10 @@ impl App {
                     .calls_in_progress_target()
                     .unwrap_or_default();
                 self.contacts.add_from_call(&name, &peer_key, &dialled, now_secs());
+                // What they sent about themselves this call is kept too.
+                if let Some(card) = self.peer_card.clone() {
+                    self.receive_card(&hex(&peer_key), card);
+                }
                 self.contacts.save(&self.dir);
                 self.notice = Some(format!("Saved {name}."));
             }
@@ -983,10 +1182,15 @@ impl App {
             }
 
             Message::PickFile => {
-                if live.is_none() {
-                    self.notice = Some("Files are sent during a call. Call them first.".into());
+                // The open conversation says who it is for; with none open,
+                // the person on the call. A file can be picked for someone
+                // between calls: it waits in the queue, saved across
+                // restarts, and goes at the next call with them.
+                let Some(peer) = self.stoop.open_person().map(str::to_string).or_else(|| self.live_peer.clone()) else {
                     return;
-                }
+                };
+                self.pick_for = Some(peer);
+                self.picking_avatar = false;
                 platform::pick_file();
             }
             Message::AcceptOffer => {
@@ -1008,15 +1212,19 @@ impl App {
             Message::CancelSend => self.files.cancel_active(live.as_deref()),
             Message::QueueUp(id) => {
                 self.files.queue.move_up(id);
+                self.files.save_queue();
             }
             Message::QueueDown(id) => {
                 self.files.queue.move_down(id);
+                self.files.save_queue();
             }
             Message::QueueHold(id, held) => {
                 self.files.queue.set_held(id, held);
+                self.files.save_queue();
             }
             Message::QueueRemove(id) => {
                 self.files.queue.remove(id);
+                self.files.save_queue();
             }
 
             Message::CallBack(index) => {
@@ -1046,7 +1254,7 @@ impl App {
             Message::DisplayName(value) => {
                 self.settings.display_name = value;
                 self.engine.set_display_name(&self.settings.display_name);
-                self.save();
+                self.profile_changed();
             }
             Message::WifiOnly(on) => {
                 self.settings.wifi_only_transfers = on;
@@ -1098,14 +1306,14 @@ impl App {
             self.notice = Some("Hang up before restoring an identity.".into());
             return;
         }
-        let seed = match antiphon_crypto::mnemonic::seed_from_phrase(self.restore_text.trim()) {
-            Ok(seed) => seed,
+        // The phrase, or recovery shares (see `account_backup`).
+        let restored = match crate::account_backup::identity_from_words(&self.restore_text) {
+            Ok(identity) => identity,
             Err(e) => {
-                self.notice = Some(format!("That phrase is not valid: {e}"));
+                self.notice = Some(e);
                 return;
             }
         };
-        let restored = IdentityKeyPair::from_master_seed(seed);
         if let Ok(current) = &self.identity {
             if current.public().identity_key == restored.public().identity_key {
                 self.notice = Some("That phrase already matches this phone's identity. Nothing to do.".into());
@@ -1117,9 +1325,13 @@ impl App {
                 return;
             }
         }
-        let path = antiphon_crypto::store::identity_path(&self.dir);
-        match antiphon_crypto::store::save(&path, &restored) {
-            Ok(()) => {
+        // The old identity is moved aside rather than overwritten, so a
+        // mistaken restore can still be undone by hand.
+        match crate::account_backup::replace_identity(&self.dir, &restored) {
+            Ok(_) => {
+                // The published push record was signed by the old identity;
+                // contacts of the restored one would refuse it.
+                self.push = crate::push::Push::load(&self.dir, Some(&restored));
                 self.identity = Ok(restored);
                 self.notice = Some("Identity restored.".into());
                 self.restore_text.clear();

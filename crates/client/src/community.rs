@@ -18,8 +18,17 @@
 //!   instead of one per channel, one epoch to keep in step over mail that
 //!   arrives out of order, and one place a ban takes effect. The channel
 //!   is a field *inside* each encrypted message, so a mailbox can't even
-//!   tell which channel is busy. The cost is that a private channel -- a
-//!   subset of members -- would need a group of its own; that is not built.
+//!   tell which channel is busy.
+//! - **Private channels** ride the same group: a channel the manifest
+//!   gives a reader list to is *sent* only to those readers -- every
+//!   message, edit and removal in it goes out as a separate [`Out`] to each
+//!   reader, sealed to them as all mail is -- so other members never
+//!   receive a byte of it, and a reader's app drops anything in it from
+//!   someone who isn't one. What everyone can see is that the channel
+//!   exists and who may read it, because that is in the manifest. (A
+//!   member who never receives a sender's private messages skips ahead in
+//!   that sender's MLS key chain on their next public one; MLS allows a
+//!   gap of up to 1000 messages per sender per epoch.)
 //!
 //! # Getting messages there with no server
 //!
@@ -251,6 +260,8 @@ pub enum Post {
     Card(Card),
     /// A new manifest version that changes nobody's membership.
     Manifest { manifest: String },
+    /// Messages reported to the moderators, sent only to them.
+    Report { id: u64, channel: u32, reason: String, excerpts: Vec<Excerpt>, at_secs: u64 },
 }
 
 /// Something to send: `wire` to the member `to`.
@@ -269,6 +280,8 @@ pub enum Event {
     Deleted { id: u64, author: [u8; 32] },
     File { channel: u32, id: u64, sender: [u8; 32], name: String, size: u64, file_id: String, key: String, holders: Vec<String>, at_secs: u64 },
     Joined,
+    /// A member reported messages to us as a moderator.
+    Reported(Report),
     /// We were taken out of the group: nothing new can be read.
     Removed,
     Changed,
@@ -321,6 +334,79 @@ struct Offer {
 }
 
 const MAX_OFFERS: usize = 200;
+/// How long an invitation can be answered: a Join after this is refused
+/// as if it had never been sent. Withdrawing one ends it sooner.
+pub const OFFER_LIFETIME_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// An invitation we sent that hasn't been answered, as the app lists them
+/// for withdrawing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingInvite {
+    /// Who it went to (their main key).
+    pub key: [u8; 32],
+    /// What we call them.
+    pub name: String,
+    /// When it was sent.
+    pub at_secs: u64,
+}
+
+/// One member's recent posts, by the time each says it was written, for
+/// slow mode and the flood cap. Only the newest [`PACE_KEEP`] are kept.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct Pace {
+    key: Key,
+    /// Oldest first.
+    times: Vec<u64>,
+}
+
+/// Post times remembered per member.
+const PACE_KEEP: usize = 32;
+/// The hard flood cap, whatever slow mode says: at most this many posts
+/// from one member within [`FLOOD_WINDOW_SECS`] of each other.
+pub const FLOOD_MAX: usize = 10;
+/// The window the flood cap counts in.
+pub const FLOOD_WINDOW_SECS: u64 = 10;
+/// A post may say it was written at most this far in the future (clocks
+/// drift); later than that and it is dropped.
+const FUTURE_SLACK_SECS: u64 = 300;
+
+/// Something a member reported to the moderators: which messages, as the
+/// reporter read them, and why.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    /// Random, to tell reports apart.
+    pub id: u64,
+    /// Who reported it (their key in the space).
+    pub from: Key,
+    /// The channel the messages are in.
+    pub channel: u32,
+    /// What the reporter said about it.
+    pub reason: String,
+    /// The messages, as the reporter's app decrypted them.
+    pub excerpts: Vec<Excerpt>,
+    /// When it was sent.
+    pub at_secs: u64,
+}
+
+/// One reported message, as the reporter's app read it. The reporter
+/// could have made it up: a moderator who can read the channel compares
+/// it with their own copy (`Store::matches_history`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Excerpt {
+    /// The message's id.
+    pub id: u64,
+    /// Who wrote it.
+    pub author: Key,
+    /// What it said.
+    pub text: String,
+    /// When it says it was written.
+    pub at_secs: u64,
+}
+
+/// Most messages in one report.
+pub const MAX_EXCERPTS: usize = 10;
+/// Most reports a moderator keeps waiting.
+const MAX_REPORTS: usize = 200;
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -341,6 +427,10 @@ struct Saved {
     persona: bool,
     #[serde(default)]
     offers: Vec<Offer>,
+    #[serde(default)]
+    pace: Vec<Pace>,
+    #[serde(default)]
+    reports: Vec<Report>,
 }
 
 pub struct Space {
@@ -358,6 +448,10 @@ pub struct Space {
     /// In it under a separate identity: `me` is that key, not our main one.
     pub persona: bool,
     offers: Vec<Offer>,
+    /// Recent post times per member, for slow mode and the flood cap.
+    pace: Vec<Pace>,
+    /// Reports moderators were sent and haven't dealt with, newest last.
+    reports: Vec<Report>,
 }
 
 /// The identity to act as in a space: `main`, or the separate one derived
@@ -389,6 +483,8 @@ impl Space {
             removed: false,
             persona,
             offers: Vec::new(),
+            pace: Vec::new(),
+            reports: Vec::new(),
         })
     }
 
@@ -431,6 +527,8 @@ impl Space {
             removed: false,
             persona,
             offers: Vec::new(),
+            pace: Vec::new(),
+            reports: Vec::new(),
         };
         space.learn(invite.card.clone());
         let out = Out { to: invite.from.0, wire: Wire::Join { community, key_package: b64(&key_package), card } };
@@ -448,6 +546,8 @@ impl Space {
             removed: self.removed,
             persona: self.persona,
             offers: self.offers.clone(),
+            pace: self.pace.clone(),
+            reports: self.reports.clone(),
         };
         serde_json::to_vec(&saved).expect("a space always serializes")
     }
@@ -479,6 +579,8 @@ impl Space {
             removed: saved.removed,
             persona: saved.persona,
             offers: saved.offers,
+            pace: saved.pace,
+            reports: saved.reports,
         })
     }
 
@@ -581,6 +683,16 @@ impl Space {
     fn send(&mut self, post: &Post) -> Result<Vec<Out>, String> {
         let wire = self.encrypt(post)?;
         Ok(self.to_all(wire, &[]))
+    }
+
+    /// Sends `post`, which belongs to `channel`, only to those who may
+    /// read that channel (everyone, for an open one).
+    fn send_in(&mut self, channel: Option<u32>, post: &Post) -> Result<Vec<Out>, String> {
+        let wire = self.encrypt(post)?;
+        let Some(channel) = channel else { return Ok(self.to_all(wire, &[])) };
+        let m = self.manifest();
+        let to: Vec<[u8; 32]> = self.others_in_group().into_iter().filter(|k| m.can_read(channel, k)).collect();
+        Ok(to.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
     }
 
     /// A manifest change: tell everyone, then bring the group in line.
@@ -729,29 +841,172 @@ impl Space {
         if !self.manifest().channels.iter().any(|c| c.id == channel) {
             return Err("no such channel".into());
         }
-        let id = random_id();
+        if !self.manifest().can_read(channel, &self.me) {
+            return Err("that channel is private and you're not one of its readers".into());
+        }
         let at_secs = now_secs();
-        let outs = self.send(&Post::Message { id, channel, text: text.to_string(), reply_to, at_secs })?;
+        self.pace_mine(at_secs)?;
+        let id = random_id();
+        let outs = self.send_in(Some(channel), &Post::Message { id, channel, text: text.to_string(), reply_to, at_secs })?;
         Ok((outs, Event::Message { channel, id, sender: self.me, text: text.to_string(), reply_to, at_secs }))
     }
 
-    pub fn edit(&mut self, id: u64, text: &str) -> Result<Vec<Out>, String> {
+    /// Changes our message `id`, which is in `channel` -- so that an edit
+    /// to a private channel's message goes only to its readers. `None`
+    /// sends it to everyone; pass the channel whenever it is known.
+    pub fn edit(&mut self, id: u64, text: &str, channel: Option<u32>) -> Result<Vec<Out>, String> {
         if text.trim().is_empty() {
             return Err("an edit can't be empty; delete it instead".into());
         }
-        self.send(&Post::Edit { id, text: text.trim().to_string() })
+        self.send_in(channel, &Post::Edit { id, text: text.trim().to_string() })
     }
 
     /// Withdraws our own message, or removes someone else's if we may.
-    pub fn delete(&mut self, id: u64, author: [u8; 32]) -> Result<Vec<Out>, String> {
+    /// `channel` as for [`Space::edit`].
+    pub fn delete(&mut self, id: u64, author: [u8; 32], channel: Option<u32>) -> Result<Vec<Out>, String> {
         if author != self.me && !self.manifest().can(&self.me, perm::MANAGE_MESSAGES, Some(&author)) {
             return Err("you can't remove their messages".into());
         }
-        self.send(&Post::Delete { id, author: Key(author) })
+        self.send_in(channel, &Post::Delete { id, author: Key(author) })
     }
 
     pub fn share_file(&mut self, post: Post) -> Result<Vec<Out>, String> {
-        self.send(&post)
+        let channel = match &post {
+            Post::File { channel, .. } => Some(*channel),
+            _ => None,
+        };
+        if channel.is_some_and(|c| !self.manifest().can_read(c, &self.me)) {
+            return Err("that channel is private and you're not one of its readers".into());
+        }
+        self.pace_mine(now_secs())?;
+        self.send_in(channel, &post)
+    }
+
+    // ---- moderation without reading anything ----
+
+    /// The invitations we sent that are still open, oldest first.
+    pub fn pending_invites(&self) -> Vec<PendingInvite> {
+        let now = now_secs();
+        self.offers
+            .iter()
+            .filter(|o| now.saturating_sub(o.at_secs) <= OFFER_LIFETIME_SECS && !self.manifest().is_member(&o.key.0))
+            .map(|o| PendingInvite { key: o.key.0, name: o.name.clone(), at_secs: o.at_secs })
+            .collect()
+    }
+
+    /// Withdraws our invitation to `who`: their Join is refused from now
+    /// on, as from anyone never invited. Only the inviter can, since only
+    /// the inviter's app answers that Join. Returns whether there was one.
+    pub fn withdraw_invite(&mut self, who: [u8; 32]) -> bool {
+        let before = self.offers.len();
+        self.offers.retain(|o| o.key.0 != who);
+        self.offers.len() != before
+    }
+
+    /// Reports messages to the moderators: the excerpts, as we read them,
+    /// go sealed only to members who can act on them (remove messages,
+    /// remove or ban people) and the owners. Nothing goes anywhere else;
+    /// there is no one else to send it to.
+    pub fn report(&mut self, channel: u32, reason: &str, excerpts: Vec<Excerpt>) -> Result<Vec<Out>, String> {
+        if excerpts.is_empty() {
+            return Err("pick at least one message to report".into());
+        }
+        let m = self.manifest();
+        let to: Vec<[u8; 32]> = self.others_in_group().into_iter().filter(|k| is_moderator(m, k) && m.can_read(channel, k)).collect();
+        if to.is_empty() {
+            return Err("nobody else here can act on a report".into());
+        }
+        let excerpts = excerpts.into_iter().take(MAX_EXCERPTS).map(|e| Excerpt { text: e.text.chars().take(4000).collect(), ..e }).collect();
+        let post = Post::Report { id: random_id(), channel, reason: reason.trim().chars().take(500).collect(), excerpts, at_secs: now_secs() };
+        let wire = self.encrypt(&post)?;
+        Ok(to.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
+    }
+
+    /// The reports waiting for us as a moderator, oldest first.
+    pub fn reports(&self) -> &[Report] {
+        &self.reports
+    }
+
+    /// Takes a report off the list, once it has been dealt with.
+    pub fn dismiss_report(&mut self, id: u64) -> bool {
+        let before = self.reports.len();
+        self.reports.retain(|r| r.id != id);
+        self.reports.len() != before
+    }
+
+    /// Slow mode and the flood cap, for a post of ours written at `at`:
+    /// refused (with when we may post again) rather than sent and then
+    /// dropped by everyone.
+    fn pace_mine(&mut self, at: u64) -> Result<(), String> {
+        let me = self.me;
+        match self.pace_check(&me, at) {
+            Ok(()) => {
+                self.pace_note(me, at);
+                Ok(())
+            }
+            Err(wait) => Err(format!("Slow mode is on here: you can post again in {}", wait_words(wait))),
+        }
+    }
+
+    /// Whether a post from `who` written at `at` keeps to slow mode and
+    /// the flood cap; if not, how many seconds too soon it is. Times are
+    /// the ones posts carry, so mail that arrives in a batch hours later
+    /// is judged by when it was written. Each check is against posts on
+    /// both sides of `at`, so posts arriving out of order are fine.
+    fn pace_check(&self, who: &[u8; 32], at: u64) -> Result<(), u64> {
+        let m = self.manifest();
+        let times = self.pace.iter().find(|p| p.key.0 == *who).map(|p| p.times.as_slice()).unwrap_or(&[]);
+        // Someone who may remove messages is how a flood gets cleaned up,
+        // so slow mode doesn't hold them; the flood cap still does.
+        let slow = if m.can(who, perm::MANAGE_MESSAGES, None) { 0 } else { m.slow_mode_secs as u64 };
+        if slow > 0 {
+            if let Some(near) = times.iter().find(|&&t| t.abs_diff(at) < slow) {
+                return Err(slow - near.abs_diff(at));
+            }
+        }
+        let close = times.iter().filter(|&&t| t.abs_diff(at) < FLOOD_WINDOW_SECS).count();
+        if close >= FLOOD_MAX {
+            return Err(FLOOD_WINDOW_SECS);
+        }
+        // Older than everything remembered: too far back to judge, and
+        // backdating is how a flood would slip past the checks above.
+        if times.len() >= PACE_KEEP && times.first().is_some_and(|&t| at < t) {
+            return Err(slow.max(FLOOD_WINDOW_SECS));
+        }
+        Ok(())
+    }
+
+    /// Remembers a post from `who` written at `at`.
+    fn pace_note(&mut self, who: [u8; 32], at: u64) {
+        let i = match self.pace.iter().position(|p| p.key.0 == who) {
+            Some(i) => i,
+            None => {
+                self.pace.push(Pace { key: Key(who), times: Vec::new() });
+                self.pace.len() - 1
+            }
+        };
+        let times = &mut self.pace[i].times;
+        let at_index = times.partition_point(|&t| t <= at);
+        times.insert(at_index, at);
+        if times.len() > PACE_KEEP {
+            times.remove(0);
+        }
+        // Former members' times aren't needed.
+        let m = self.chain.last().map(|(_, m)| m.clone());
+        if let Some(m) = m {
+            self.pace.retain(|p| m.is_member(&p.key.0));
+        }
+    }
+
+    /// Whether a post from `sender` written at `at` is let through: not
+    /// too far in the future, and within slow mode and the flood cap. One
+    /// that is let through is remembered.
+    fn pace_incoming(&mut self, sender: [u8; 32], at: u64) -> bool {
+        if at > now_secs() + FUTURE_SLACK_SECS || self.pace_check(&sender, at).is_err() {
+            return false;
+        }
+        self.pace_note(sender, at);
+        true
     }
 
     /// Sends our card again -- after our route list changed.
@@ -833,6 +1088,8 @@ impl Space {
                 // card is who they join as -- themselves, or a separate
                 // identity, which only an outstanding offer allows.
                 let listed = self.manifest().is_member(&from) && card.key.0 == from;
+                let now = now_secs();
+                self.offers.retain(|o| now.saturating_sub(o.at_secs) <= OFFER_LIFETIME_SECS);
                 let offered = self.offers.iter().any(|o| o.key.0 == from);
                 if !(listed || offered) || !card.valid() {
                     return Err("a join from someone not invited".into());
@@ -1082,16 +1339,26 @@ impl Space {
 
     fn on_post(&mut self, identity: &IdentityKeyPair, sender: [u8; 32], data: &[u8], h: &mut Handled) -> Result<(), String> {
         let post: Post = serde_json::from_slice(data).map_err(|_| "an unreadable post".to_string())?;
-        let m = self.manifest();
+        // A copy: pacing below changes what is remembered about the sender.
+        let m = &self.manifest().clone();
         // A manifest that removes its own signer is still theirs to send.
         if !m.is_member(&sender) && !matches!(post, Post::Manifest { .. }) {
             return Ok(());
         }
         match post {
             Post::Message { id, channel, text, reply_to, at_secs } => {
+                // In a private channel, only from a reader, and only if we
+                // are one -- a message there from anyone else is dropped.
+                let private = m.channel(channel).is_some_and(|c| c.readers.is_some());
+                if private && !(m.can_read(channel, &sender) && m.can_read(channel, &self.me)) {
+                    return Ok(());
+                }
                 if m.can(&sender, perm::POST, None) {
                     let channel = if m.channels.iter().any(|c| c.id == channel) { channel } else { m.channels[0].id };
                     let text: String = text.chars().take(4000).collect();
+                    if !self.pace_incoming(sender, at_secs) {
+                        return Ok(());
+                    }
                     h.events.push(Event::Message { channel, id, sender, text, reply_to, at_secs });
                 }
             }
@@ -1102,7 +1369,14 @@ impl Space {
                 }
             }
             Post::File { id, channel, name, size, file_id, key, holders, at_secs } => {
+                let private = m.channel(channel).is_some_and(|c| c.readers.is_some());
+                if private && !(m.can_read(channel, &sender) && m.can_read(channel, &self.me)) {
+                    return Ok(());
+                }
                 if m.can(&sender, perm::POST, None) {
+                    if !self.pace_incoming(sender, at_secs) {
+                        return Ok(());
+                    }
                     h.events.push(Event::File { channel, id, sender, name, size, file_id, key, holders, at_secs });
                 }
             }
@@ -1115,9 +1389,42 @@ impl Space {
                 self.take_manifest(identity, sender, &manifest, h)?;
                 h.outs.extend(self.converge(false));
             }
+            Post::Report { id, channel, reason, excerpts, at_secs } => {
+                // Only a moderator keeps it; and a flood of reports is still
+                // a flood.
+                if !is_moderator(m, &self.me) || self.reports.iter().any(|r| r.id == id) || !self.pace_incoming(sender, at_secs) {
+                    return Ok(());
+                }
+                let excerpts: Vec<Excerpt> =
+                    excerpts.into_iter().take(MAX_EXCERPTS).map(|e| Excerpt { text: e.text.chars().take(4000).collect(), ..e }).collect();
+                let report = Report { id, from: Key(sender), channel, reason: reason.chars().take(500).collect(), excerpts, at_secs };
+                if self.reports.len() >= MAX_REPORTS {
+                    self.reports.remove(0);
+                }
+                self.reports.push(report.clone());
+                h.events.push(Event::Reported(report));
+            }
         }
         Ok(())
     }
+}
+
+/// Whether `key` can act on a report: an owner, or a member who may
+/// remove messages or remove or ban people.
+pub fn is_moderator(m: &Manifest, key: &[u8; 32]) -> bool {
+    m.is_member(key) && (m.is_owner(key) || m.perms(key) & (perm::MANAGE_MESSAGES | perm::KICK | perm::BAN) != 0)
+}
+
+/// "12 seconds", "3 minutes", "2 hours": how long to wait, plainly.
+fn wait_words(secs: u64) -> String {
+    let (n, unit) = if secs < 90 {
+        (secs.max(1), "second")
+    } else if secs < 90 * 60 {
+        (secs.div_ceil(60), "minute")
+    } else {
+        (secs.div_ceil(3600), "hour")
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 fn random_id() -> u64 {
@@ -1231,6 +1538,32 @@ pub struct Invite {
     pub at_secs: u64,
 }
 
+/// Which messages in a space or channel notify you. Unread counts go up
+/// either way: this is about being interrupted, not about what you see.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Notify {
+    /// Every message from someone else.
+    #[default]
+    All,
+    /// Only messages that name you (`@` and the name you go by there).
+    Mentions,
+    /// None.
+    Nothing,
+}
+
+/// Whether `text` names `name` the way people mention someone: `@name`,
+/// in any case, not followed by more letters (so `@sam` doesn't match
+/// `@samantha`).
+pub fn mentions(text: &str, name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let needle = format!("@{name}");
+    text.match_indices(&needle).any(|(at, _)| !text[at + needle.len()..].chars().next().is_some_and(char::is_alphanumeric))
+}
+
 /// One fragment waiting to leave.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Queued {
@@ -1279,6 +1612,13 @@ struct Hub {
     /// How you appear in each, by id hex. Yours alone, like `ring`.
     #[serde(default)]
     appear: HashMap<String, Appearance>,
+    /// Which messages notify you (spec §13 "per-community and per-channel
+    /// notification settings"): by id hex for a whole space, and by
+    /// `"<id hex>/<channel>"` for one channel, overriding its space's.
+    /// Absent means the default ([`Notify::All`], or the space's for a
+    /// channel). Yours alone, like `ring`.
+    #[serde(default)]
+    notify: HashMap<String, Notify>,
 }
 
 const MAX_OUTBOX: usize = 20_000;
@@ -1298,6 +1638,31 @@ fn bump() {
 
 fn dir(config_dir: &Path) -> PathBuf {
     config_dir.join("communities")
+}
+
+/// Where a space's (or one channel's) notification setting is kept in
+/// the hub.
+fn notify_key(id: &Key, channel: Option<u32>) -> String {
+    match channel {
+        Some(c) => format!("{}/{c}", hex(&id.0)),
+        None => hex(&id.0),
+    }
+}
+
+/// Which messages in this channel notify you: its own setting, else its
+/// space's. A space muted with the older ring rule "Never" (before these
+/// settings existed) stays quiet.
+fn notify_level(hub: &Hub, id: &Key, channel: u32) -> Notify {
+    if let Some(l) = hub.notify.get(&notify_key(id, Some(channel))) {
+        return *l;
+    }
+    if let Some(l) = hub.notify.get(&notify_key(id, None)) {
+        return *l;
+    }
+    if hub.ring.get(&hex(&id.0)).copied() == Some(crate::notify::RingRule::Never.to_i32()) {
+        return Notify::Nothing;
+    }
+    Notify::All
 }
 
 fn space_path(config_dir: &Path, id: &Key) -> PathBuf {
@@ -1451,8 +1816,15 @@ impl Store {
                     let _ = crate::history::save(&self.dir, &log, &self.key, &all);
                     if *sender != me {
                         *hub.unread.entry(hex(&id.0)).or_default() += 1;
-                        // Never is a mute: counted, but no notice.
-                        if hub.ring.get(&hex(&id.0)).copied() != Some(crate::notify::RingRule::Never.to_i32()) {
+                        // Counted either way; whether it interrupts is the
+                        // channel's setting, or the space's.
+                        let level = notify_level(hub, &id, *channel);
+                        let wanted = match level {
+                            Notify::All => true,
+                            Notify::Mentions => mentions(text, &space.name_of(&me)),
+                            Notify::Nothing => false,
+                        };
+                        if wanted {
                             crate::delivery::notice(format!("New message in {} from {}.", space.manifest().name, space.name_of(sender)));
                         }
                     }
@@ -1484,6 +1856,7 @@ impl Store {
                 Event::Removed => crate::delivery::notice(format!("You're no longer in {}.", space.manifest().name)),
                 Event::Notice(n) => crate::delivery::notice(format!("{}: {n}", space.manifest().name)),
                 Event::Joined => crate::delivery::notice(format!("You joined {}.", space.manifest().name)),
+                Event::Reported(_) => crate::delivery::notice(format!("Messages in {} were reported to you. Open its Moderation to see them.", space.manifest().name)),
                 Event::Changed => {}
             }
         }
@@ -1595,6 +1968,29 @@ impl Store {
         bump();
     }
 
+    /// Whether a reported excerpt is what our own copy of the channel says
+    /// (`Some(true)`), says something else or isn't by that author
+    /// (`Some(false)`), or we don't have it (`None`: a channel we can't
+    /// read, or from before we joined).
+    pub fn matches_history(&self, id: &Key, channel: u32, excerpt: &Excerpt) -> Option<bool> {
+        let log = crate::history::load(&self.dir, &channel_log(id, channel), &self.key);
+        // A message taken down since can't be compared.
+        let mine = log.iter().find(|m| m.id == excerpt.id && !m.deleted)?;
+        Some(mine.sender.as_deref() == Some(hex(&excerpt.author.0).as_str()) && mine.text == excerpt.text)
+    }
+
+    /// Which channel of space `id` holds message `message`, from the saved
+    /// history -- so an edit or removal can go only where the message went.
+    pub fn channel_of(&self, id: &Key, message: u64) -> Option<u32> {
+        let space = self.load(id)?;
+        space
+            .manifest()
+            .channels
+            .iter()
+            .map(|c| c.id)
+            .find(|&c| crate::history::load(&self.dir, &channel_log(id, c), &self.key).iter().any(|m| m.id == message))
+    }
+
     pub fn mark_read(&self, id: &Key) {
         let _guard = LOCK.lock().unwrap();
         let mut hub = self.hub();
@@ -1629,6 +2025,24 @@ impl Store {
             .filter(|(_, id)| self.load(id).is_some_and(|s| !s.removed && s.manifest().is_member(key)))
             .map(|(r, _)| crate::notify::RingRule::from_i32(r))
             .collect()
+    }
+
+    /// Your notification setting for a space (`channel` `None`) or one of
+    /// its channels, as set; `None` means the default.
+    pub fn notify_setting(&self, id: &Key, channel: Option<u32>) -> Option<Notify> {
+        self.hub().notify.get(&notify_key(id, channel)).copied()
+    }
+
+    /// Changes it; `None` goes back to the default.
+    pub fn set_notify(&self, id: &Key, channel: Option<u32>, level: Option<Notify>) {
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        match level {
+            Some(l) => hub.notify.insert(notify_key(id, channel), l),
+            None => hub.notify.remove(&notify_key(id, channel)),
+        };
+        self.save_hub(&hub);
+        bump();
     }
 
     pub fn unread(&self, id: &Key) -> u32 {
@@ -1880,6 +2294,30 @@ pub fn is_member(community: &[u8; 32], key: &[u8; 32]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_mention_is_the_whole_name_after_an_at() {
+        assert!(mentions("hey @Sam, you in?", "sam"));
+        assert!(mentions("@sam", "Sam"));
+        assert!(!mentions("hey @samantha", "Sam"), "a longer name isn't a mention");
+        assert!(!mentions("hey sam", "Sam"), "no at, no mention");
+        assert!(!mentions("@", ""));
+        assert!(mentions("@Robin Okafor are you coming", "Robin Okafor"));
+    }
+
+    #[test]
+    fn a_channel_setting_beats_its_space_and_the_old_mute_is_kept() {
+        let id = Key([7; 32]);
+        let mut hub = Hub::default();
+        assert_eq!(notify_level(&hub, &id, 0), Notify::All);
+        hub.ring.insert(hex(&id.0), crate::notify::RingRule::Never.to_i32());
+        assert_eq!(notify_level(&hub, &id, 0), Notify::Nothing, "a space muted before still is");
+        hub.notify.insert(notify_key(&id, None), Notify::Mentions);
+        assert_eq!(notify_level(&hub, &id, 0), Notify::Mentions);
+        hub.notify.insert(notify_key(&id, Some(2)), Notify::All);
+        assert_eq!(notify_level(&hub, &id, 2), Notify::All);
+        assert_eq!(notify_level(&hub, &id, 0), Notify::Mentions, "other channels follow the space");
+    }
+
     struct Person {
         id: IdentityKeyPair,
         space: Option<Space>,
@@ -1913,7 +2351,7 @@ mod tests {
             Card::mine(&self.id, String::new(), self.name)
         }
         fn card_as(&self, identity: &IdentityKeyPair) -> Card {
-            let profile = crate::config::ProfileData { display_name: self.name.into(), status_message: "Online".into() };
+            let profile = crate::config::ProfileData { display_name: self.name.into(), status_message: "Online".into(), ..Default::default() };
             card_as(identity, String::new(), &profile, &self.look)
         }
         fn space(&mut self) -> &mut Space {
@@ -2014,6 +2452,126 @@ mod tests {
         let (outs, _) = carol.space().post(0, "a reply", Some(root)).unwrap();
         let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
         assert!(ev[1].iter().any(|e| matches!(e, Event::Message { reply_to: Some(r), .. } if *r == root)));
+    }
+
+    #[test]
+    fn a_private_channel_reaches_only_its_readers() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let bob_key = Key(bob.key());
+        let outs = alice
+            .space()
+            .update(&alice_id, |m| {
+                m.channels.push(antiphon_crypto::community::Channel { id: 1, name: "staff".into(), readers: Some(vec![bob_key]), ..Default::default() });
+            })
+            .unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        let carol_key = carol.key();
+        assert!(!carol.space().manifest().can_read(1, &carol_key));
+
+        // Bob's post goes to Alice (an owner) and not to Carol.
+        let (outs, _) = bob.space().post(1, "staff only", None).unwrap();
+        assert!(outs.iter().all(|o| o.to != carol.key()), "not even sent to her");
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert_eq!(texts(&ev[0]), ["staff only"]);
+        assert!(texts(&ev[2]).is_empty());
+        // Carol can't post there.
+        assert!(carol.space().post(1, "let me in", None).is_err());
+        // And what Bob says in the open channel next still reaches her.
+        let (outs, _) = bob.space().post(0, "hi all", None).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert_eq!(texts(&ev[2]), ["hi all"]);
+    }
+
+    #[test]
+    fn slow_mode_holds_posts_back_on_both_sides() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice.space().update(&alice_id, |m| m.slow_mode_secs = 60).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        let (outs, _) = bob.space().post(0, "one", None).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        let refused = bob.space().post(0, "two", None).unwrap_err();
+        assert!(refused.contains("Slow mode"), "{refused}");
+        // A client that ignores it is dropped by everyone else.
+        let bob_key = bob.key();
+        let now = now_secs();
+        let post = bob.space().encrypt(&Post::Message { id: 9, channel: 0, text: "sneaky".into(), reply_to: None, at_secs: now }).unwrap();
+        let carol_key = carol.key();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], vec![(1, Out { to: carol_key, wire: post })]);
+        assert!(texts(&ev[2]).is_empty(), "too soon after the last");
+        // Written a minute later, it gets through, even if it arrives late.
+        let post = bob.space().encrypt(&Post::Message { id: 10, channel: 0, text: "later".into(), reply_to: None, at_secs: now + 61 }).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], vec![(1, Out { to: carol_key, wire: post })]);
+        assert_eq!(texts(&ev[2]), ["later"]);
+        // The owner may remove messages, so isn't held to it.
+        for _ in 0..3 {
+            let (outs, _) = alice.space().post(0, "announcement", None).unwrap();
+            run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        }
+        assert!(carol.space().pace.iter().any(|p| p.key.0 == bob_key));
+    }
+
+    #[test]
+    fn a_flood_is_capped_without_slow_mode() {
+        let (mut alice, mut bob, mut carol) = three();
+        let carol_key = carol.key();
+        let now = now_secs();
+        let mut heard = 0;
+        for i in 0..(FLOOD_MAX as u64 + 5) {
+            let post = bob.space().encrypt(&Post::Message { id: 100 + i, channel: 0, text: "spam".into(), reply_to: None, at_secs: now }).unwrap();
+            let ev = run(&mut [&mut alice, &mut bob, &mut carol], vec![(1, Out { to: carol_key, wire: post })]);
+            heard += texts(&ev[2]).len();
+        }
+        assert_eq!(heard, FLOOD_MAX);
+        // From the far future: dropped.
+        let post = bob.space().encrypt(&Post::Message { id: 1, channel: 0, text: "hi".into(), reply_to: None, at_secs: now + 3600 }).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], vec![(1, Out { to: carol_key, wire: post })]);
+        assert!(texts(&ev[2]).is_empty());
+    }
+
+    #[test]
+    fn a_withdrawn_invite_is_refused() {
+        let (mut alice, mut bob, mut carol) = three();
+        let mut dave = person("Dave");
+        let id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice.space().invite(&id, dave.key(), "Dave").unwrap();
+        assert_eq!(alice.space().pending_invites().len(), 1);
+        // Dave's Join is held back until Alice withdraws the invite.
+        let (_, joins) = run_holding(&mut [&mut alice, &mut bob, &mut carol, &mut dave], outs.into_iter().map(|o| (0, o)).collect(), &|o| matches!(o.wire, Wire::Join { .. }));
+        assert!(alice.space().withdraw_invite(dave.key()));
+        assert!(alice.space().pending_invites().is_empty());
+        run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], joins);
+        assert!(!alice.space().manifest().is_member(&dave.key()), "not let in");
+        // So is one answered after it ran out.
+        let outs = alice.space().invite(&id, dave.key(), "Dave").unwrap();
+        let (_, joins) = run_holding(&mut [&mut alice, &mut bob, &mut carol, &mut dave], outs.into_iter().map(|o| (0, o)).collect(), &|o| matches!(o.wire, Wire::Join { .. }));
+        alice.space().offers[0].at_secs = now_secs() - OFFER_LIFETIME_SECS - 1;
+        run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], joins);
+        assert!(!alice.space().manifest().is_member(&dave.key()));
+    }
+
+    #[test]
+    fn a_report_reaches_only_the_moderators() {
+        let (mut alice, mut bob, mut carol) = three();
+        let (outs, mine) = bob.space().post(0, "something nasty", None).unwrap();
+        let Event::Message { id, .. } = mine else { panic!() };
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        let excerpt = Excerpt { id, author: Key(bob.key()), text: "something nasty".into(), at_secs: now_secs() };
+        let outs = carol.space().report(0, "rude", vec![excerpt.clone()]).unwrap();
+        let alice_key = alice.key();
+        assert!(outs.iter().all(|o| o.to == alice_key), "only to the owner");
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
+        assert!(ev[0].iter().any(|e| matches!(e, Event::Reported(r) if r.reason == "rude" && r.excerpts == vec![excerpt.clone()])));
+        assert_eq!(alice.space().reports().len(), 1);
+        let rid = alice.space().reports()[0].id;
+        assert!(alice.space().dismiss_report(rid));
+        assert!(alice.space().reports().is_empty());
+        // A plain member handed one directly doesn't keep it.
+        let post = carol.space().encrypt(&Post::Report { id: 5, channel: 0, reason: "x".into(), excerpts: vec![excerpt], at_secs: now_secs() }).unwrap();
+        let bob_key = bob.key();
+        run(&mut [&mut alice, &mut bob, &mut carol], vec![(2, Out { to: bob_key, wire: post })]);
+        assert!(bob.space().reports().is_empty());
     }
 
     #[test]
@@ -2395,7 +2953,7 @@ mod tests {
         tokio::spawn(antiphon_relay::run_node(sock, Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default()))), Some(mb), None));
         let mut routes = crate::delivery::default_routes();
         routes[2].nodes = vec![node.clone()];
-        let profile = |n: &str| crate::config::ProfileData { display_name: n.into(), status_message: String::new() };
+        let profile = |n: &str| crate::config::ProfileData { display_name: n.into(), status_message: String::new(), ..Default::default() };
         let card_of = |id: &IdentityKeyPair, n: &str| {
             let record = crate::delivery::my_record(id, &routes, false, 1);
             card_as(id, crate::delivery::encode_record(&record), &profile(n), &Appearance::default())

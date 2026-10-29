@@ -15,9 +15,12 @@
 //! window, and one screen at a time with a tab bar on a narrow one
 //! ([`theme::NARROW`]), which is what a phone gets.
 
+pub mod a11y;
+pub mod avatars;
 pub mod icons;
 pub mod model;
 pub mod theme;
+pub mod theme_file;
 pub mod widgets;
 
 mod screens;
@@ -28,6 +31,7 @@ use std::time::{Duration, Instant};
 use iced_core::animation::{Animation, Easing};
 use iced_core::{Point, Size};
 
+pub use avatars::PROFILE_COLORS;
 pub use model::*;
 
 /// An element of this interface: the default theme, and whichever renderer
@@ -39,6 +43,12 @@ pub const COMPOSER: &str = "stoop-composer";
 /// The people search box's widget id, for a find shortcut.
 pub const SEARCH: &str = "stoop-search";
 
+/// The shortest passphrase a backup accepts. The same number as
+/// `antiphon_crypto::account_seal::MIN_PASSPHRASE_CHARS`, which the apps
+/// check at compile time; repeated here so the interface can say so
+/// without depending on the crypto crate.
+pub const MIN_PASSPHRASE_CHARS: usize = 8;
+
 /// A screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -48,6 +58,10 @@ pub enum Route {
     Person(String),
     /// A part of Settings.
     Settings(Section),
+    /// Group chats and communities: the list, invitations, and making one.
+    Spaces,
+    /// One channel of a group chat or community: (its id, the channel).
+    Community(String, u32),
 }
 
 /// A part of Settings.
@@ -55,6 +69,8 @@ pub enum Route {
 pub enum Section {
     /// Your name and status.
     Profile,
+    /// Keeping the account: recovery phrase, backup file, moving devices.
+    Account,
     /// Theme, accent and motion.
     Appearance,
     /// Devices, how your voice is sent, and processing.
@@ -63,18 +79,19 @@ pub enum Section {
     Network,
     /// Version and where data is kept.
     About,
-    /// Battery, mobile data and the recovery phrase; phones only.
+    /// Battery and mobile data; phones only.
     Phone,
 }
 
 impl Section {
     /// Every section, in the order the navigation lists them.
-    pub const ALL: [Section; 6] = [Section::Profile, Section::Appearance, Section::Voice, Section::Network, Section::Phone, Section::About];
+    pub const ALL: [Section; 7] = [Section::Profile, Section::Account, Section::Appearance, Section::Voice, Section::Network, Section::Phone, Section::About];
 
     /// The section's name as the navigation shows it.
     pub fn label(self) -> &'static str {
         match self {
             Section::Profile => "Profile",
+            Section::Account => "Account & backup",
             Section::Appearance => "Appearance",
             Section::Voice => "Voice & audio",
             Section::Network => "Network",
@@ -87,6 +104,7 @@ impl Section {
     pub fn icon(self) -> icons::Icon {
         match self {
             Section::Profile => icons::Icon::Users,
+            Section::Account => icons::Icon::Lock,
             Section::Appearance => icons::Icon::Palette,
             Section::Voice => icons::Icon::Sliders,
             Section::Network => icons::Icon::Globe,
@@ -110,6 +128,35 @@ pub enum Dialog {
     /// Are you sure: replace this device's identity with the one the
     /// recovery phrase in the box restores.
     ConfirmRestore,
+    /// Are you sure: replace this device's account with a backup file
+    /// (opened with the passphrase in the box).
+    ConfirmImport,
+    /// Are you sure: replace this device's account with the one the move
+    /// link in the box offers.
+    ConfirmReceive,
+    /// Start a group chat or community.
+    NewSpace,
+    /// Invite one of your people into this group chat or community (by id).
+    InviteToSpace(String),
+    /// Add a channel to this community (by id).
+    AddChannel(String),
+    /// Who can read this channel of this community (by id).
+    ChannelSettings(String, u32),
+    /// This community's roles and who holds which (by id).
+    Roles(String),
+    /// Slow mode, reports and open invitations in this community (by id).
+    Moderation(String),
+    /// Report a message (community id, channel, message id) and any others
+    /// picked with it.
+    Report(String, u32, u64),
+    /// Are you sure: leave this group chat or community (by id).
+    ConfirmLeave(String),
+    /// Which messages notify you in this group chat or community (by id).
+    SpaceNotify(String),
+    /// Pick one of this community's emoji to put in the message (by id).
+    EmojiPicker(String),
+    /// This community's custom emoji: see, add and remove them (by id).
+    SpaceEmoji(String),
 }
 
 /// How a toast is coloured.
@@ -215,12 +262,44 @@ pub enum Action {
     },
     /// Choose a file and offer it to the person on the call.
     SendFile,
+    /// Start recording a voice message for this contact.
+    RecordVoice(String),
+    /// Stop recording: send it (true) or throw it away.
+    FinishVoice {
+        /// The contact it is for.
+        to: String,
+        /// Send it rather than drop it.
+        send: bool,
+    },
+    /// Play a voice message in a conversation, or stop it if it is playing.
+    PlayVoice {
+        /// The contact the conversation is with.
+        to: String,
+        /// Which message.
+        id: u64,
+    },
     /// Take the file the person on the call offered.
     AcceptFile,
     /// Turn the offered file down.
     DeclineFile,
     /// Stop the file on its way, in either direction.
     CancelTransfer,
+    /// Move a waiting file one place earlier (true) or later.
+    QueueMove {
+        /// Which file ([`QueuedFile::id`]).
+        id: u64,
+        /// Earlier rather than later.
+        up: bool,
+    },
+    /// Hold a waiting file back (true), or let it go again.
+    QueueHold {
+        /// Which file.
+        id: u64,
+        /// Hold it.
+        held: bool,
+    },
+    /// Take a file out of the queue without sending it.
+    QueueRemove(u64),
     /// Add a contact from an invite link (or `host:port`).
     AddPerson {
         /// What to call them.
@@ -246,10 +325,30 @@ pub enum Action {
     SetName(String),
     /// My status line, sent at the start of every call.
     SetStatus(String),
+    /// Choose a new profile picture (the app opens a file picker).
+    PickAvatar,
+    /// Go back to the initial-letter avatar.
+    RemoveAvatar,
+    /// Save my About line.
+    SetBio(String),
+    /// Pick my avatar colour, by id from [`PROFILE_COLORS`]; empty for
+    /// the automatic one.
+    ProfileColor(String),
     /// Pick a theme by its id (see [`theme::THEMES`]).
     Theme(String),
     /// Pick an accent by its id (see [`theme::ACCENTS`]).
     Accent(String),
+    /// Use this colour (`#rrggbb`) as a custom accent.
+    CustomAccent(String),
+    /// Pick the reading font by its id (see [`theme::FONTS`]).
+    Font(String),
+    /// Save the theme, accent and reading font to a theme file.
+    ExportTheme,
+    /// Load a theme file and use what it says.
+    ImportTheme,
+    /// Put the typing cursor in the text box with this widget id, or take
+    /// it out of every box (`None`): keyboard focus moved.
+    FocusInput(Option<&'static str>),
     /// Use this microphone; empty is the system default.
     Input(String),
     /// Use these speakers or headphones; empty is the system default.
@@ -262,6 +361,8 @@ pub enum Action {
     NoiseSuppression(bool),
     /// Echo cancellation on or off.
     EchoCancel(bool),
+    /// "Low data" calls on or off.
+    LowData(bool),
     /// Automatic level on or off.
     AutoGain(bool),
     /// Use a voice preset by name.
@@ -278,6 +379,12 @@ pub enum Action {
     OpenOnStart(bool),
     /// The relay to be reachable through; empty for none.
     Relay(String),
+    /// Let contacts with no relay of their own listen at yours.
+    LendRelay(bool),
+    /// Route calls through anonymity-mode hops, or stop.
+    Anonymity(bool),
+    /// The hops for anonymity mode, comma-separated `host:port[#key]`.
+    AnonymityHops(String),
     /// The port the door listens on.
     Port(u16),
     /// Re-run the reachability check.
@@ -290,6 +397,9 @@ pub enum Action {
     Speaker(bool),
     /// Turn my camera on (true) or off.
     Camera(bool),
+    /// Switch to the other camera, front or back. Only a phone shows the
+    /// button: a desktop's webcam has no other side.
+    FlipCamera,
     /// Start (true) or stop sharing my screen.
     ShareScreen(bool),
     /// The push-to-talk pad was pressed (true) or let go.
@@ -308,8 +418,187 @@ pub enum Action {
     ListenOnSaver(bool),
     /// Show (true) or hide the recovery phrase.
     ShowPhrase(bool),
-    /// Restore the identity this recovery phrase makes, replacing this one.
+    /// Restore the identity this recovery phrase (or these Shamir shares,
+    /// one per line) makes, replacing this one. Contacts and settings stay.
     Restore(String),
+    /// Seal the whole account under this passphrase and save it as a file.
+    BackupSave {
+        /// What the file opens with.
+        passphrase: String,
+        /// Include message history.
+        history: bool,
+    },
+    /// Choose a backup file, open it with this passphrase, and make it
+    /// this device's account (the dialog already asked).
+    BackupOpen {
+        /// What the file opens with.
+        passphrase: String,
+    },
+    /// Offer this account to another device on the same network: show a
+    /// link and QR code.
+    MoveStart {
+        /// Include message history.
+        history: bool,
+    },
+    /// Close the offer.
+    MoveStop,
+    /// Fetch the account this move link offers and make it this device's
+    /// (the dialog already asked).
+    MoveReceive(String),
+    /// A channel is on screen: load its messages and mark it read.
+    OpenChannel {
+        /// The group chat or community's id.
+        community: String,
+        /// The channel.
+        channel: u32,
+    },
+    /// Start a group chat or community.
+    CreateSpace {
+        /// What to call it.
+        name: String,
+        /// A group chat rather than a community.
+        group: bool,
+    },
+    /// Accept the invitation at this index in [`Model::space_invites`].
+    AcceptSpaceInvite(usize),
+    /// Turn down the invitation at this index.
+    DeclineSpaceInvite(usize),
+    /// Post a message to a channel.
+    Post {
+        /// The group chat or community's id.
+        community: String,
+        /// The channel.
+        channel: u32,
+        /// What it says.
+        text: String,
+    },
+    /// Change the words of a message I posted.
+    EditPost {
+        /// The group chat or community's id.
+        community: String,
+        /// Which message.
+        id: u64,
+        /// The new words.
+        text: String,
+    },
+    /// Take a message down: my own, or someone's I'm allowed to remove.
+    DeletePost {
+        /// The group chat or community's id.
+        community: String,
+        /// Which message.
+        id: u64,
+        /// Who wrote it (their key there, hex).
+        author: String,
+    },
+    /// Invite one of my people into a group chat or community.
+    InviteToSpace {
+        /// The group chat or community's id.
+        community: String,
+        /// The contact's id.
+        person: String,
+    },
+    /// Add a channel to a community.
+    AddChannel {
+        /// The community's id.
+        community: String,
+        /// Its name, without the hash.
+        name: String,
+    },
+    /// Leave a group chat or community (the dialog already asked).
+    LeaveSpace(String),
+    /// Choose a picture to add as one of this community's emoji (by id);
+    /// its name comes from the file's.
+    AddEmoji(String),
+    /// Take one of a community's emoji away.
+    RemoveEmoji {
+        /// The community's id.
+        community: String,
+        /// The emoji's name.
+        name: String,
+    },
+    /// Choose which messages notify me in a space or one of its channels.
+    SpaceNotify {
+        /// The group chat or community's id.
+        community: String,
+        /// One channel, or `None` for the whole space.
+        channel: Option<u32>,
+        /// The setting; `None` for a channel follows the space's.
+        level: Option<Notify>,
+    },
+    /// Change how a community is set up: its channels' readers, its
+    /// roles, who holds which.
+    ManageSpace {
+        /// The community's id.
+        community: String,
+        /// What to change.
+        change: SpaceChange,
+    },
+}
+
+/// One change to how a community is set up, signed into its manifest by
+/// whoever makes it (and refused by everyone else if they aren't allowed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpaceChange {
+    /// Make a channel private (only its readers and the owners get it) or
+    /// open to every member again.
+    ChannelPrivate {
+        /// The channel.
+        channel: u32,
+        /// Private rather than open.
+        private: bool,
+    },
+    /// Let a member read a private channel, or stop them.
+    ChannelReader {
+        /// The channel.
+        channel: u32,
+        /// The member's id (hex).
+        member: String,
+        /// Let them rather than stop them.
+        on: bool,
+    },
+    /// Add a role, just above the one newcomers get.
+    AddRole(String),
+    /// Remove the role at this place; whoever held it gets the newcomers'.
+    RemoveRole(usize),
+    /// Allow or disallow one thing (a place in [`Role::perms`]) for the
+    /// role at a place.
+    RolePerm {
+        /// The role's place.
+        role: usize,
+        /// The thing's place in its list.
+        perm: usize,
+        /// Allow rather than disallow.
+        on: bool,
+    },
+    /// Give a member the role at a place.
+    MemberRole {
+        /// The member's id (hex).
+        member: String,
+        /// The role's place.
+        role: usize,
+    },
+    /// Set slow mode: the fewest seconds between one member's posts, 0 off.
+    SlowMode(u32),
+    /// Withdraw the invitation you sent to someone (their id, hex).
+    WithdrawInvite(String),
+    /// Take a report off the list.
+    DismissReport(u64),
+    /// Remove a member (their id, hex), and with `ban` keep them out.
+    RemoveMember {
+        /// The member's id (hex).
+        member: String,
+        /// Ban rather than only remove.
+        ban: bool,
+    },
+    /// Report messages in a channel to the moderators.
+    Report {
+        /// The channel.
+        channel: u32,
+        /// The messages picked.
+        messages: Vec<u64>,
+        /// Why.
+        reason: String,
+    },
 }
 
 /// Everything that can happen in the interface.
@@ -360,10 +649,18 @@ pub enum Msg {
     StatusEdit(String),
     /// Save my status.
     StatusSave,
+    /// My About line is being edited in Settings.
+    BioEdit(String),
+    /// Save my About line.
+    BioSave,
     /// The relay box is being edited.
     RelayEdit(String),
     /// Save the relay.
     RelaySave,
+    /// The anonymity hop box is being edited.
+    HopsEdit(String),
+    /// Save the anonymity hops.
+    HopsSave,
     /// The port box is being edited (digits only are kept).
     PortEdit(String),
     /// Save the port.
@@ -374,6 +671,18 @@ pub enum Msg {
     NoteSave,
     /// The recovery phrase box changed.
     RestoreEdit(String),
+    /// The backup passphrase box changed.
+    BackupPass(String),
+    /// The "type it again" box changed.
+    BackupPass2(String),
+    /// Include message history in a backup or move.
+    IncludeHistory(bool),
+    /// Save a backup with the passphrase typed (if both boxes agree).
+    BackupSave,
+    /// The passphrase box for opening a backup changed.
+    ImportPass(String),
+    /// The move link box changed.
+    ReceiveLink(String),
     /// The mobile data limit box changed (digits only are kept).
     LimitEdit(String),
     /// Save the mobile data limit box.
@@ -382,6 +691,30 @@ pub enum Msg {
     FirstName(String),
     /// Finish first run with the name typed.
     FirstDone,
+    /// The new group chat or community's name box changed.
+    SpaceName(String),
+    /// Make it a group chat (true) or a community.
+    SpaceGroup(bool),
+    /// Start the group chat or community named in the box.
+    SpaceCreate,
+    /// The new channel's name box changed.
+    ChannelName(String),
+    /// Add the channel named in the box to this community (by id).
+    ChannelCreate(String),
+    /// Show or hide the files waiting to be sent.
+    ToggleQueue,
+    /// Put `:name:` (a custom emoji) at the end of the composer's text.
+    InsertEmoji(String),
+    /// Pick or unpick a message to report with the others.
+    ReportPick(u64),
+    /// The report's reason box changed.
+    ReportReason(String),
+    /// Send the report being written (community id, channel).
+    ReportSend(String, u32),
+    /// The new role's name box changed.
+    RoleName(String),
+    /// Add the role named in the box to this community (by id).
+    RoleCreate(String),
     /// Close a toast by its id.
     DismissToast(u64),
     /// Where the pointer is, so a right-click menu opens under it.
@@ -390,6 +723,22 @@ pub enum Msg {
     Menu(Option<String>),
     /// Copy text and say so.
     Copy(String, &'static str),
+    /// The custom accent box changed.
+    AccentEdit(String),
+    /// Use the colour in the custom accent box.
+    AccentSave,
+    /// Tab (1) or Shift+Tab (-1): move keyboard focus to the next or
+    /// previous control.
+    Focus(i32),
+    /// Enter or Space: press the control with keyboard focus.
+    Activate,
+    /// An arrow key: step the focused slider or choice up (1) or down (-1).
+    Adjust(i32),
+    /// Shift+F10 or the menu key: open the focused control's right-click menu.
+    ContextMenu,
+    /// A screen reader asked for this to be done to the node with this
+    /// AccessKit id.
+    Reader(u64, a11y::ReaderAction),
     /// An action with nothing for the interface itself to do.
     Do(Action),
 }
@@ -410,7 +759,8 @@ pub struct Ui {
     panel_anim: Animation<bool>,
     /// What is typed in the people search box.
     search: String,
-    /// Unsent composer text, per contact id, kept when switching conversations.
+    /// Unsent composer text, per conversation ([`Ui::draft_key`]), kept
+    /// when switching conversations.
     drafts: HashMap<String, String>,
     /// The message being edited: (id, text so far).
     editing: Option<(u64, String)>,
@@ -424,18 +774,50 @@ pub struct Ui {
     name_edit: Option<String>,
     /// My status while it is being edited.
     status_edit: Option<String>,
+    /// My About line while it is being edited.
+    bio_edit: Option<String>,
     /// The relay while it is being edited.
     relay_edit: Option<String>,
+    /// The anonymity hop list while it is being edited.
+    hops_edit: Option<String>,
     /// The port while it is being edited.
     port_edit: Option<String>,
     /// The open person's note while it is being edited: (id, text).
     note_edit: Option<(String, String)>,
     /// The first-run name box.
     first_name: String,
-    /// The recovery phrase box, for restoring an identity on a phone.
+    /// The recovery phrase box, for restoring an identity.
     restore_edit: String,
+    /// The passphrase a new backup is sealed with.
+    backup_pass: String,
+    /// The same passphrase typed again, to catch a typo before it locks
+    /// the file for good.
+    backup_pass2: String,
+    /// Why the passphrase cannot be used yet, once Save was pressed.
+    backup_error: String,
+    /// Whether backups and moves bring message history.
+    include_history: bool,
+    /// The passphrase a backup file is opened with.
+    import_pass: String,
+    /// The move link pasted from another device.
+    receive_link: String,
     /// The mobile data limit box while it is being edited.
     limit_edit: Option<String>,
+    /// The new group chat or community's name box.
+    space_name: String,
+    /// The new one is a group chat rather than a community.
+    space_group: bool,
+    /// The new channel's name box.
+    channel_name: String,
+    /// The list of files waiting to be sent is open (it starts folded,
+    /// so a long queue never pushes the messages off screen).
+    queue_open: bool,
+    /// The new role's name box.
+    role_name: String,
+    /// The messages picked to report.
+    report_pick: Vec<u64>,
+    /// Why they are being reported.
+    report_reason: String,
     /// Toasts on screen, oldest first.
     toasts: Vec<Toast>,
     /// The id the next toast gets.
@@ -460,6 +842,11 @@ pub struct Ui {
     /// The call picture chosen to be shown large, by its tile key. `None`
     /// lets the stage choose: their screen, then their camera, then mine.
     video_focus: Option<String>,
+    /// The custom accent box while it is being edited.
+    accent_edit: Option<String>,
+    /// The key of the control with keyboard focus (see [`a11y`]); `None`
+    /// until Tab is first pressed.
+    focus: Option<String>,
 }
 
 impl Default for Ui {
@@ -487,12 +874,27 @@ impl Ui {
             add_error: String::new(),
             name_edit: None,
             status_edit: None,
+            bio_edit: None,
             relay_edit: None,
+            hops_edit: None,
             port_edit: None,
             note_edit: None,
             first_name: String::new(),
             restore_edit: String::new(),
+            backup_pass: String::new(),
+            backup_pass2: String::new(),
+            backup_error: String::new(),
+            include_history: true,
+            import_pass: String::new(),
+            receive_link: String::new(),
             limit_edit: None,
+            space_name: String::new(),
+            space_group: false,
+            channel_name: String::new(),
+            queue_open: false,
+            role_name: String::new(),
+            report_pick: Vec::new(),
+            report_reason: String::new(),
             toasts: Vec::new(),
             next_toast: 1,
             cursor: Point::ORIGIN,
@@ -503,6 +905,8 @@ impl Ui {
             reduced_motion: false,
             video_focus: None,
             insets: (0.0, 0.0),
+            accent_edit: None,
+            focus: None,
         }
     }
 
@@ -517,6 +921,32 @@ impl Ui {
             Route::Person(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// The group chat or community channel on screen, as (id, channel).
+    pub fn open_channel(&self) -> Option<(&str, u32)> {
+        match &self.route {
+            Route::Community(id, channel) => Some((id, *channel)),
+            _ => None,
+        }
+    }
+
+    /// Where the composer's text is kept for the screen on view: a
+    /// contact's id, or the channel's own key. `None` off a conversation.
+    fn draft_key(&self) -> Option<String> {
+        match &self.route {
+            Route::Person(id) => Some(id.clone()),
+            // A hash can't start a contact id (hex), so the two never meet.
+            Route::Community(id, channel) => Some(format!("#{id}/{channel}")),
+            _ => None,
+        }
+    }
+
+    /// Closes the new group chat dialog after the app made one, and opens it.
+    pub fn space_created(&mut self, id: String) -> Vec<Action> {
+        self.space_name.clear();
+        self.set_dialog(None);
+        self.go(Route::Community(id, 0))
     }
 
     /// The system's insets for this frame, in logical pixels: what the
@@ -596,6 +1026,7 @@ impl Ui {
         self.menu = None;
         let open = match &route {
             Route::Person(id) => vec![Action::Open(id.clone())],
+            Route::Community(id, channel) => vec![Action::OpenChannel { community: id.clone(), channel: *channel }],
             _ => Vec::new(),
         };
         self.route = route;
@@ -626,6 +1057,9 @@ impl Ui {
                     self.set_dialog(None);
                 } else if self.editing.is_some() {
                     self.editing = None;
+                } else if matches!(self.route, Route::Community(..)) {
+                    // Out of a channel is back to the list it was opened from.
+                    self.route = Route::Spaces;
                 } else if self.route != Route::Home {
                     self.route = Route::Home;
                 }
@@ -639,6 +1073,10 @@ impl Ui {
                 if d == Some(Dialog::AddPerson) {
                     self.add_error.clear();
                 }
+                if let Some(Dialog::Report(_, _, id)) = &d {
+                    self.report_pick = vec![*id];
+                    self.report_reason.clear();
+                }
                 self.set_dialog(d);
                 Vec::new()
             }
@@ -650,19 +1088,22 @@ impl Ui {
                 Vec::new()
             }
             Msg::Draft(s) => {
-                if let Some(id) = self.open_person() {
-                    self.drafts.insert(id.to_string(), s);
+                if let Some(key) = self.draft_key() {
+                    self.drafts.insert(key, s);
                 }
                 Vec::new()
             }
             Msg::Send => {
-                let Some(id) = self.open_person().map(str::to_string) else { return Vec::new() };
-                let text = self.drafts.remove(&id).unwrap_or_default();
+                let Some(key) = self.draft_key() else { return Vec::new() };
+                let text = self.drafts.remove(&key).unwrap_or_default();
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     return Vec::new();
                 }
-                vec![Action::Send { to: id, text }]
+                match &self.route {
+                    Route::Community(id, channel) => vec![Action::Post { community: id.clone(), channel: *channel, text }],
+                    _ => vec![Action::Send { to: key, text }],
+                }
             }
             Msg::EditStart(id, text) => {
                 self.editing = Some((id, text));
@@ -675,9 +1116,13 @@ impl Ui {
                 Vec::new()
             }
             Msg::EditSave => {
-                let Some(to) = self.open_person().map(str::to_string) else { return Vec::new() };
-                match self.editing.take() {
-                    Some((id, text)) if !text.trim().is_empty() => vec![Action::Edit { to, id, text: text.trim().to_string() }],
+                let edit = match self.editing.take() {
+                    Some((id, text)) if !text.trim().is_empty() => (id, text.trim().to_string()),
+                    _ => return Vec::new(),
+                };
+                match &self.route {
+                    Route::Person(to) => vec![Action::Edit { to: to.clone(), id: edit.0, text: edit.1 }],
+                    Route::Community(community, _) => vec![Action::EditPost { community: community.clone(), id: edit.0, text: edit.1 }],
                     _ => Vec::new(),
                 }
             }
@@ -727,10 +1172,26 @@ impl Ui {
                 Some(s) if s.trim() != model.me.status => vec![Action::SetStatus(s.trim().to_string())],
                 _ => Vec::new(),
             },
+            Msg::BioEdit(s) => {
+                self.bio_edit = Some(s);
+                Vec::new()
+            }
+            Msg::BioSave => match self.bio_edit.take() {
+                Some(s) if s.trim() != model.me.bio => vec![Action::SetBio(s.trim().to_string())],
+                _ => Vec::new(),
+            },
             Msg::RelayEdit(s) => {
                 self.relay_edit = Some(s);
                 Vec::new()
             }
+            Msg::HopsEdit(s) => {
+                self.hops_edit = Some(s);
+                Vec::new()
+            }
+            Msg::HopsSave => match self.hops_edit.take() {
+                Some(s) if s.trim() != model.network.hops => vec![Action::AnonymityHops(s.trim().to_string())],
+                _ => Vec::new(),
+            },
             Msg::RelaySave => match self.relay_edit.take() {
                 Some(s) if s.trim() != model.network.relay => vec![Action::Relay(s.trim().to_string())],
                 _ => Vec::new(),
@@ -755,6 +1216,44 @@ impl Ui {
             },
             Msg::RestoreEdit(s) => {
                 self.restore_edit = s;
+                Vec::new()
+            }
+            Msg::BackupPass(s) => {
+                self.backup_pass = s;
+                self.backup_error.clear();
+                Vec::new()
+            }
+            Msg::BackupPass2(s) => {
+                self.backup_pass2 = s;
+                self.backup_error.clear();
+                Vec::new()
+            }
+            Msg::IncludeHistory(on) => {
+                self.include_history = on;
+                Vec::new()
+            }
+            Msg::BackupSave => {
+                // Checked here, not only in the engine, so a typo is caught
+                // while the person is still looking at the boxes.
+                let min = MIN_PASSPHRASE_CHARS;
+                if self.backup_pass.chars().count() < min {
+                    self.backup_error = format!("Use at least {min} characters. A short sentence is easy to remember and hard to guess.");
+                    return Vec::new();
+                }
+                if self.backup_pass != self.backup_pass2 {
+                    self.backup_error = "The two passphrases don't match.".into();
+                    return Vec::new();
+                }
+                let passphrase = std::mem::take(&mut self.backup_pass);
+                self.backup_pass2.clear();
+                vec![Action::BackupSave { passphrase, history: self.include_history }]
+            }
+            Msg::ImportPass(s) => {
+                self.import_pass = s;
+                Vec::new()
+            }
+            Msg::ReceiveLink(s) => {
+                self.receive_link = s;
                 Vec::new()
             }
             Msg::LimitEdit(s) => {
@@ -790,6 +1289,85 @@ impl Ui {
                 self.menu = who.map(|id| (id, self.cursor));
                 Vec::new()
             }
+            Msg::SpaceName(s) => {
+                self.space_name = s;
+                Vec::new()
+            }
+            Msg::SpaceGroup(on) => {
+                self.space_group = on;
+                Vec::new()
+            }
+            Msg::SpaceCreate => {
+                let name = self.space_name.trim().to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::CreateSpace { name, group: self.space_group }]
+            }
+            Msg::ChannelName(s) => {
+                // Channel names read like words joined by dashes, as people
+                // expect from other apps: no spaces, no hash, short.
+                self.channel_name = s.to_lowercase().replace(' ', "-").chars().filter(|c| *c != '#').take(32).collect();
+                Vec::new()
+            }
+            Msg::ChannelCreate(community) => {
+                let name = self.channel_name.trim_matches('-').to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                self.channel_name.clear();
+                self.set_dialog(None);
+                vec![Action::AddChannel { community, name }]
+            }
+            Msg::InsertEmoji(name) => {
+                if let Some(key) = self.draft_key() {
+                    let draft = self.drafts.entry(key).or_default();
+                    if !draft.is_empty() && !draft.ends_with(' ') {
+                        draft.push(' ');
+                    }
+                    draft.push_str(&format!(":{name}: "));
+                }
+                self.set_dialog(None);
+                Vec::new()
+            }
+            Msg::ToggleQueue => {
+                self.queue_open = !self.queue_open;
+                Vec::new()
+            }
+            Msg::ReportPick(id) => {
+                if let Some(at) = self.report_pick.iter().position(|x| *x == id) {
+                    self.report_pick.remove(at);
+                } else if self.report_pick.len() < 10 {
+                    self.report_pick.push(id);
+                }
+                Vec::new()
+            }
+            Msg::ReportReason(s) => {
+                self.report_reason = s.chars().take(500).collect();
+                Vec::new()
+            }
+            Msg::ReportSend(community, channel) => {
+                if self.report_pick.is_empty() {
+                    return Vec::new();
+                }
+                let messages = std::mem::take(&mut self.report_pick);
+                let reason = std::mem::take(&mut self.report_reason).trim().to_string();
+                self.set_dialog(None);
+                self.toast("Reported to the moderators", ToastKind::Ok);
+                vec![Action::ManageSpace { community, change: SpaceChange::Report { channel, messages, reason } }]
+            }
+            Msg::RoleName(s) => {
+                self.role_name = s.chars().take(40).collect();
+                Vec::new()
+            }
+            Msg::RoleCreate(community) => {
+                let name = self.role_name.trim().to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                self.role_name.clear();
+                vec![Action::ManageSpace { community, change: SpaceChange::AddRole(name) }]
+            }
             Msg::DismissToast(id) => {
                 self.toasts.retain(|t| t.id != id);
                 Vec::new()
@@ -797,6 +1375,55 @@ impl Ui {
             Msg::Copy(text, what) => {
                 self.toast(format!("{what} copied"), ToastKind::Ok);
                 vec![Action::Copy(text)]
+            }
+            Msg::AccentEdit(s) => {
+                self.accent_edit = Some(s);
+                vec![]
+            }
+            Msg::AccentSave => match self.accent_edit.take() {
+                Some(s) if theme::parse_hex(&s).is_some() => vec![Action::CustomAccent(theme::to_hex(theme::hex(&s)))],
+                Some(_) => {
+                    self.toast("A colour looks like #8b5cf6", ToastKind::Warn);
+                    vec![]
+                }
+                None => vec![],
+            },
+            Msg::Focus(step) => {
+                let nodes = a11y::nodes();
+                self.focus = a11y::next_stop(&nodes, self.focus.as_deref(), step);
+                let input = self.focus.as_deref().and_then(|k| nodes.iter().find(|n| n.key == k)).and_then(|n| n.input);
+                vec![Action::FocusInput(input)]
+            }
+            Msg::Activate => match self.focused().and_then(|n| n.activate) {
+                Some(msg) => self.update(msg, model),
+                None => vec![],
+            },
+            Msg::Adjust(step) => match self.focused().and_then(|n| if step > 0 { n.increase } else { n.decrease }) {
+                Some(msg) => self.update(msg, model),
+                None => vec![],
+            },
+            Msg::ContextMenu => match self.focused().and_then(|n| n.menu) {
+                Some(msg) => self.update(msg, model),
+                None => vec![],
+            },
+            Msg::Reader(id, act) => {
+                let Some(node) = a11y::nodes().into_iter().find(|n| n.id().0 == id) else { return vec![] };
+                let mut actions = Vec::new();
+                if node.role.focusable() {
+                    self.focus = Some(node.key.clone());
+                    actions.push(Action::FocusInput(node.input));
+                }
+                let msg = match act {
+                    a11y::ReaderAction::Focus => None,
+                    a11y::ReaderAction::Click => node.activate,
+                    a11y::ReaderAction::Increase => node.increase,
+                    a11y::ReaderAction::Decrease => node.decrease,
+                    a11y::ReaderAction::Menu => node.menu,
+                };
+                if let Some(msg) = msg {
+                    actions.extend(self.update(msg, model));
+                }
+                actions
             }
             Msg::Do(action) => {
                 match &action {
@@ -810,6 +1437,19 @@ impl Ui {
                         self.set_dialog(None);
                         self.restore_edit.clear();
                     }
+                    Action::BackupOpen { .. } => {
+                        self.set_dialog(None);
+                        self.import_pass.clear();
+                    }
+                    Action::MoveReceive(_) => {
+                        self.set_dialog(None);
+                        self.receive_link.clear();
+                    }
+                    Action::LeaveSpace(_) => {
+                        self.set_dialog(None);
+                        self.route = Route::Spaces;
+                    }
+                    Action::InviteToSpace { .. } => self.set_dialog(None),
                     _ => {}
                 }
                 vec![action]
@@ -819,7 +1459,20 @@ impl Ui {
 
     /// Draws the interface for `model`.
     pub fn view<'a>(&'a self, model: &'a Model) -> El<'a, Msg> {
+        // The controls register themselves as the view is built; see `a11y`.
+        a11y::begin(self.focus.as_deref());
         screens::view(self, model)
+    }
+
+    /// The control with keyboard focus, as the last frame drew it.
+    fn focused(&self) -> Option<a11y::Node> {
+        let key = self.focus.as_deref()?;
+        a11y::nodes().into_iter().find(|n| n.key == key)
+    }
+
+    /// The key of the control with keyboard focus, if any.
+    pub fn focus_key(&self) -> Option<&str> {
+        self.focus.as_deref()
     }
 
     /// How far open the dialog is, 0..1.
@@ -923,6 +1576,78 @@ mod tests {
         assert_eq!(ui.menu, Some(("ab".into(), Point::new(40.0, 300.0))));
         ui.update(Msg::Back, &m);
         assert!(ui.menu.is_none(), "Escape closes the menu first");
+    }
+
+    #[test]
+    fn a_channel_has_its_own_draft_and_posts_there() {
+        let mut ui = Ui::new();
+        let m = Model::default();
+        let actions = ui.update(Msg::Nav(Route::Community("c1".into(), 2)), &m);
+        assert_eq!(actions, vec![Action::OpenChannel { community: "c1".into(), channel: 2 }]);
+        ui.update(Msg::Draft("hello all".into()), &m);
+        ui.update(Msg::Nav(Route::Person("ab".into())), &m);
+        assert!(ui.update(Msg::Send, &m).is_empty(), "the channel's draft stays with the channel");
+        ui.update(Msg::Nav(Route::Community("c1".into(), 2)), &m);
+        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Post { community: "c1".into(), channel: 2, text: "hello all".into() }]);
+        ui.update(Msg::EditStart(9, "hello all".into()), &m);
+        ui.update(Msg::EditDraft("hello everyone".into()), &m);
+        assert_eq!(ui.update(Msg::EditSave, &m), vec![Action::EditPost { community: "c1".into(), id: 9, text: "hello everyone".into() }]);
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.route(), &Route::Spaces, "back from a channel is the list");
+    }
+
+    #[test]
+    fn channel_names_read_like_words_with_dashes() {
+        let mut ui = Ui::new();
+        let m = Model::default();
+        ui.update(Msg::ChannelName("#Band Practice".into()), &m);
+        assert_eq!(ui.update(Msg::ChannelCreate("c1".into()), &m), vec![Action::AddChannel { community: "c1".into(), name: "band-practice".into() }]);
+        assert!(ui.update(Msg::ChannelCreate("c1".into()), &m).is_empty(), "the box is cleared once used");
+        ui.update(Msg::RoleName("  Helper ".into()), &m);
+        let add = Action::ManageSpace { community: "c1".into(), change: SpaceChange::AddRole("Helper".into()) };
+        assert_eq!(ui.update(Msg::RoleCreate("c1".into()), &m), vec![add]);
+        assert!(ui.update(Msg::RoleCreate("c1".into()), &m).is_empty(), "the role box is cleared once used");
+    }
+
+    #[test]
+    fn the_keyboard_alone_opens_a_dialog_and_stays_inside_it() {
+        // Reduced motion, so the dialog is fully up the moment it opens.
+        let mut m = Model::default();
+        m.settings.reduced_motion = true;
+        let mut ui = Ui::new();
+        let _ = ui.view(&m);
+        // Tab to the invite button in the people list, press it.
+        let stops = a11y::nodes();
+        let invite = a11y::tab_stops(&stops).iter().position(|n| n.label == "Your invite").expect("the invite button is reachable");
+        for _ in 0..=invite {
+            ui.update(Msg::Focus(1), &m);
+        }
+        assert!(ui.focus_key().is_some_and(|k| k.contains("Your invite")));
+        ui.update(Msg::Activate, &m);
+        assert_eq!(ui.dialog, Some(Dialog::Invite));
+        // Now Tab only walks the dialog, and Escape closes it.
+        let _ = ui.view(&m);
+        let behind = ui.focus_key().map(str::to_string);
+        ui.update(Msg::Focus(1), &m);
+        let _ = ui.view(&m);
+        let layer = a11y::nodes().iter().find(|n| Some(n.key.as_str()) == ui.focus_key()).map(|n| n.layer);
+        assert_eq!(layer, Some(1), "focus moved into the dialog, away from {behind:?}");
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.dialog, None);
+    }
+
+    #[test]
+    fn arrows_step_the_focused_switch_and_slider_messages() {
+        let m = Model::default();
+        let mut ui = Ui::new();
+        ui.update(Msg::Nav(Route::Settings(Section::Appearance)), &m);
+        let _ = ui.view(&m);
+        let stops = a11y::nodes();
+        let motion = a11y::tab_stops(&stops).iter().position(|n| n.label == "Reduce motion").expect("the switch is reachable");
+        for _ in 0..=motion {
+            ui.update(Msg::Focus(1), &m);
+        }
+        assert_eq!(ui.update(Msg::Activate, &m), vec![Action::ReducedMotion(true)]);
     }
 
     #[test]

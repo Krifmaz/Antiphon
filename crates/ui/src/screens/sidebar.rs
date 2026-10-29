@@ -3,9 +3,10 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, row, scrollable, text_input};
+use iced_widget::{button, column, container, row, scrollable, space};
 
-use super::{clip, clock, fill, presence_color};
+use super::{clip, clock, community, fill, presence_color};
+use crate::a11y::{Role, Spec};
 use crate::icons::{icon, logo, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
@@ -25,15 +26,18 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     .align_y(Alignment::Center);
 
     let home_on = ui.route == Route::Home;
-    let home = button(
+    let home = pressable(
         row![icon(Icon::DoorOpen, 18.0, if home_on { p.text } else { p.muted }), t("Front step").size(14).font(theme::semibold())]
             .spacing(12)
             .align_y(Alignment::Center),
+        Role::Tab,
+        "Front step",
+        home_on,
+        if home_on { Btn::RowOn } else { Btn::Row },
+        Msg::Nav(Route::Home),
     )
     .width(Length::Fill)
-    .padding([9, 12])
-    .style(theme::btn(if home_on { Btn::RowOn } else { Btn::Row }))
-    .on_press(Msg::Nav(Route::Home));
+    .padding([9, 12]);
 
     let query = ui.search.trim().to_lowercase();
     let shown: Vec<&Person> = m.people.iter().filter(|x| query.is_empty() || x.name.to_lowercase().contains(&query)).collect();
@@ -43,6 +47,44 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         .align_y(Alignment::Center);
 
     let mut list = column![].spacing(2);
+    // Group chats and communities sit above people, in the same scroll.
+    if m.device.communities {
+        let spaces_on = ui.route == Route::Spaces;
+        let mut head = row![
+            button(row![label("Spaces"), faint(m.communities.len().to_string()).size(11)].spacing(8).align_y(Alignment::Center))
+                .padding(0)
+                .style(focus_style(move |_, _| button::Style::default(), Spec::new(Role::Tab, "Spaces").selected(spaces_on).on(Some(&Msg::Nav(Route::Spaces))).add()))
+                .on_press(Msg::Nav(Route::Spaces)),
+            fill(),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        head = head.push(icon_btn(Icon::Plus, "Start a group chat or community", Some(Msg::Dialog(Some(Dialog::NewSpace)))));
+        list = list.push(container(head).padding(pad(2.0, 0.0, 2.0, 10.0)));
+        if !m.space_invites.is_empty() {
+            let n = m.space_invites.len();
+            let words = if n == 1 { "1 invitation".to_string() } else { format!("{n} invitations") };
+            list = list.push(
+                pressable(
+                    row![icon(Icon::Sparkle, 15.0, p.accent2), t(words.clone()).size(13.5).font(theme::semibold())].spacing(10).align_y(Alignment::Center),
+                    Role::Button,
+                    &words,
+                    false,
+                    if spaces_on { Btn::RowOn } else { Btn::Row },
+                    Msg::Nav(Route::Spaces),
+                )
+                .width(Length::Fill)
+                .padding([7, 12]),
+            );
+        }
+        for c in &m.communities {
+            list = list.push(community::space_row(ui, c, false));
+        }
+        if m.communities.is_empty() && m.space_invites.is_empty() {
+            list = list.push(container(faint("Start one for a few friends, or a community with channels.").size(12.5)).padding([4, 12]));
+        }
+        list = list.push(container(head_people(m, &shown)).padding(pad(14.0, 0.0, 2.0, 10.0)));
+    }
     for person in &shown {
         list = list.push(person_row(ui, m, person));
     }
@@ -56,14 +98,29 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         container(brand).padding(pad(16.0, 12.0, 10.0, 16.0)),
         container(search(ui)).padding([0, 12]),
         container(home).padding(pad(10.0, 8.0, 4.0, 8.0)),
-        container(head).padding(pad(10.0, 8.0, 2.0, 18.0)),
-        scrollable(container(list).padding([0, 8])).height(Length::Fill).style(theme::scroll),
     ];
+    // With spaces, the people heading scrolls with the list under them.
+    if !m.device.communities {
+        col = col.push(container(head).padding(pad(10.0, 8.0, 2.0, 18.0)));
+    } else {
+        col = col.push(space().height(8));
+    }
+    let mut col = col.push(scrollable(container(list).padding([0, 8])).height(Length::Fill).style(theme::scroll));
     if m.call.active() && !on_call_screen(ui, m) {
         col = col.push(container(call_strip(m)).padding([6, 8]));
     }
     col = col.push(me_bar(ui, m));
     container(col).width(theme::SIDEBAR).height(Length::Fill).style(theme::sidebar).into()
+}
+
+/// The people heading inside the scrolling list (when spaces sit above
+/// it): the count, and adding someone.
+fn head_people<'a>(m: &'a Model, shown: &[&'a Person]) -> El<'a, Msg> {
+    let count = if shown.len() == m.people.len() { format!("{}", m.people.len()) } else { format!("{} of {}", shown.len(), m.people.len()) };
+    row![label("People"), faint(count).size(11), fill(), icon_btn(Icon::Plus, "Add someone", Some(Msg::Dialog(Some(Dialog::AddPerson))))]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// The search box, with its magnifier.
@@ -72,7 +129,7 @@ pub fn search<'a>(ui: &'a Ui) -> El<'a, Msg> {
     container(
         row![
             icon(Icon::Search, 15.0, p.faint),
-            text_input("Find someone", &ui.search).id(crate::SEARCH).on_input(Msg::Search).size(13.5).padding([7, 0]).style(theme::input_bare),
+            input("Find someone", crate::SEARCH, "Find someone", &ui.search).on_input(Msg::Search).size(13.5).padding([7, 0]).style(theme::input_bare),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -122,11 +179,21 @@ pub fn person_row<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Ms
     ]
     .spacing(11)
     .align_y(Alignment::Center);
+    let mut name = person.name.clone();
+    if person.unread > 0 {
+        name.push_str(&format!(", {} unread", person.unread));
+    }
+    if on_call {
+        name.push_str(", on a call");
+    }
+    let open = Msg::Nav(Route::Person(person.id.clone()));
+    let menu = Msg::Menu(Some(person.id.clone()));
+    let focused = Spec::new(Role::Tab, name).selected(selected).on(Some(&open)).menu(Some(&menu)).add();
     let row = button(container(body).clip(true))
         .width(Length::Fill)
         .padding([7, 10])
-        .style(theme::btn(if selected { Btn::RowOn } else { Btn::Row }))
-        .on_press(Msg::Nav(Route::Person(person.id.clone())));
+        .style(focus_style(theme::btn(if selected { Btn::RowOn } else { Btn::Row }), focused))
+        .on_press(open);
     iced_widget::mouse_area(row).on_right_press(Msg::Menu(Some(person.id.clone()))).into()
 }
 
@@ -158,7 +225,7 @@ pub fn call_strip<'a>(m: &'a Model) -> El<'a, Msg> {
     )
     .padding(0)
     .width(Length::Fill)
-    .style(|_, _| button::Style::default())
+    .style(focus_style(|_, _| button::Style::default(), reg_button(Role::Button, &format!("Go to the call with {}", c.peer_name), Some(&Msg::Nav(target.clone())))))
     .on_press(Msg::Nav(target));
     container(
         row![
@@ -192,7 +259,10 @@ fn me_bar<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         .align_y(Alignment::Center),
     )
     .padding(0)
-    .style(|_, _| button::Style::default())
+    .style(focus_style(
+        |_, _| button::Style::default(),
+        Spec::new(Role::Toggle, "Door open").checked(open).on(Some(&Msg::Do(Action::Door(!open)))).add(),
+    ))
     .on_press(Msg::Do(Action::Door(!open)));
     let door = with_tip(door, if open { "People can call you. Click to close your door." } else { "Click to open your door and take calls." }, iced_widget::tooltip::Position::Top);
     let settings_on = matches!(ui.route, Route::Settings(_));

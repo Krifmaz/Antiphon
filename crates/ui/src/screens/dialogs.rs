@@ -2,7 +2,7 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Color, Length};
-use iced_widget::{column, container, qr_code, row, text_input};
+use iced_widget::{column, container, qr_code, row};
 
 use super::clip;
 use crate::icons::{icon, Icon};
@@ -51,6 +51,62 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
                 muted("This device becomes the identity the phrase restores. The one it has now is gone unless you saved its phrase, and people who verified it will see a new key.").size(14),
                 Some(footer.into()),
                 460.0,
+                close,
+                rise,
+            )
+        }
+        Dialog::ConfirmImport => {
+            let open = Action::BackupOpen { passphrase: ui.import_pass.clone() };
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Choose file and replace", Btn::DangerSolid, Some(Msg::Do(open)))].spacing(8);
+            modal(
+                "Replace this account?",
+                muted("This device becomes the account in the backup: its identity, contacts, profile and settings. What is here now is moved into a \"replaced\" folder beside the app's data, not deleted. Stoop restarts when it's done.").size(14),
+                Some(footer.into()),
+                480.0,
+                close,
+                rise,
+            )
+        }
+        Dialog::NewSpace => {
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Start it", Btn::Primary, (!ui.space_name.trim().is_empty()).then_some(Msg::SpaceCreate))].spacing(8);
+            modal(if ui.space_group { "Start a group chat" } else { "Start a community" }, super::community::new_space(ui), Some(footer.into()), 480.0, close, rise)
+        }
+        Dialog::EmojiPicker(id) => modal("Emoji", super::community::emoji_picker(m, id), None, 420.0, close, rise),
+        Dialog::SpaceEmoji(id) => modal("Custom emoji", super::community::emoji_manager(m, id), None, 460.0, close, rise),
+        Dialog::SpaceNotify(id) => modal("Notifications", super::community::notify(m, id), None, 520.0, close, rise),
+        Dialog::InviteToSpace(id) => modal("Invite someone", super::community::invite(m, id), None, 460.0, close, rise),
+        Dialog::AddChannel(id) => {
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Add channel", Btn::Primary, Some(Msg::ChannelCreate(id.clone())))].spacing(8);
+            modal("Add a channel", super::community::add_channel(ui, id), Some(footer.into()), 440.0, close, rise)
+        }
+        Dialog::ChannelSettings(id, channel) => modal("Who can read it", super::community::channel_settings(m, id, *channel), None, 480.0, close, rise),
+        Dialog::Roles(id) => modal("Roles", super::community::roles(ui, m, id), None, 560.0, close, rise),
+        Dialog::Moderation(id) => modal("Moderation", super::community::moderation(m, id), None, 600.0, close, rise),
+        Dialog::Report(id, channel, _) => {
+            let send = (!ui.report_pick.is_empty()).then(|| Msg::ReportSend(id.clone(), *channel));
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Report", Btn::DangerSolid, send)].spacing(8);
+            modal("Report to the moderators", super::community::report(ui, m, id, *channel), Some(footer.into()), 520.0, close, rise)
+        }
+        Dialog::ConfirmLeave(id) => {
+            let name = m.communities.iter().find(|c| &c.id == id).map(|c| c.name.as_str()).unwrap_or("it");
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Leave", Btn::DangerSolid, Some(Msg::Do(Action::LeaveSpace(id.clone()))))].spacing(8);
+            modal(
+                "Leave?",
+                muted(format!("You stop getting {name}'s messages, and its history leaves this device. Someone in it can invite you back.")).size(14),
+                Some(footer.into()),
+                460.0,
+                close,
+                rise,
+            )
+        }
+        Dialog::ConfirmReceive => {
+            let receive = Action::MoveReceive(ui.receive_link.trim().to_string());
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Receive and replace", Btn::DangerSolid, Some(Msg::Do(receive)))].spacing(8);
+            modal(
+                "Bring your account here?",
+                muted("This device becomes the account your other device is sending: its identity, contacts, profile and settings. What is here now is moved into a \"replaced\" folder, not deleted. Stoop restarts when it's done.").size(14),
+                Some(footer.into()),
+                480.0,
                 close,
                 rise,
             )
@@ -109,9 +165,9 @@ fn add<'a>(ui: &'a Ui) -> El<'a, Msg> {
         muted("Paste the invite link they sent you. Their name comes with it, or give them one of your own.").size(13.5),
         field(
             "Invite link",
-            text_input("stoop://… or antiphon://…", &ui.add_invite).on_input(Msg::AddInvite).on_submit(Msg::AddSubmit).padding([10, 12]).size(14).style(theme::input)
+            input("Invite link", "stoop-add-invite", "stoop://… or antiphon://…", &ui.add_invite).on_input(Msg::AddInvite).on_submit(Msg::AddSubmit).padding([10, 12]).size(14)
         ),
-        field("Name (optional)", text_input("What you call them", &ui.add_name).on_input(Msg::AddName).on_submit(Msg::AddSubmit).padding([10, 12]).size(14).style(theme::input)),
+        field("Name (optional)", input("Name (optional)", "stoop-add-name", "What you call them", &ui.add_name).on_input(Msg::AddName).on_submit(Msg::AddSubmit).padding([10, 12]).size(14)),
     ]
     .spacing(14);
     if !ui.add_error.is_empty() {

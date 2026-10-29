@@ -2,8 +2,8 @@
 //! them, the messages, files on their way, and the composer.
 
 use iced_core::text::Wrapping;
-use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, hover, progress_bar, row, scrollable, space, text_input};
+use iced_core::{Alignment, ContentFit, Length};
+use iced_widget::{button, column, container, hover, image, progress_bar, row, scrollable, space};
 
 use super::{call, fill};
 use crate::icons::{icon, Icon};
@@ -24,7 +24,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
         col = col.push(call::stage(ui, m, false));
     }
     col = col.push(container(messages(ui, m, person, false)).height(Length::Fill));
-    col = col.push(transfers(m));
+    col = col.push(transfers(ui, m));
     col = col.push(container(composer(ui, m, person)).padding(pad(4.0, 20.0, 18.0, 20.0)));
     col.height(Length::Fill).into()
 }
@@ -121,16 +121,45 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, first: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
+    // Read out as "who: what", in the order the conversation runs.
+    let who = if line.mine {
+        "You"
+    } else if line.author.is_empty() {
+        person.name.as_str()
+    } else {
+        line.author.as_str()
+    };
+    let said = match line.file.as_ref() {
+        Some((name, size)) => format!("{who} sent a file: {name}, {size}"),
+        None => format!("{who}: {}", line.text),
+    };
+    let _ = crate::a11y::Spec::new(crate::a11y::Role::Text, said).add();
 
     let content: El<'a, Msg> = if let Some((_, draft)) = editing {
         column![
-            text_input("", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14).style(theme::input),
+            input("Edit message", "stoop-edit", "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
             row![faint("Enter to save · Esc to cancel").size(11), fill(), btn_sm("Cancel", Btn::Ghost, Some(Msg::EditCancel)), btn_sm("Save", Btn::Primary, Some(Msg::EditSave))]
                 .spacing(6)
                 .align_y(Alignment::Center),
         ]
         .spacing(6)
         .width(Length::Fixed(420.0))
+        .into()
+    } else if let Some(clip) = line.voice {
+        let play = round_btn(
+            if clip.playing { Icon::Stop } else { Icon::Play },
+            if clip.playing { "Stop" } else { "Play" },
+            if clip.playing { Btn::RoundOn } else { Btn::Round },
+            Some(Msg::Do(Action::PlayVoice { to: person.id.clone(), id: line.id })),
+            34.0,
+        );
+        let length = format!("{}:{:02}", clip.seconds / 60, clip.seconds % 60);
+        let sub = if clip.fetching { format!("{length} · getting it") } else { length };
+        container(
+            row![play, column![t("Voice message").size(13.5).font(theme::semibold()), faint(sub).size(11.5)].spacing(2)].spacing(10).align_y(Alignment::Center),
+        )
+        .padding([8, 12])
+        .style(if line.mine { theme::bubble_mine } else { theme::card_raised })
         .into()
     } else if let Some((name, size)) = line.file.as_ref() {
         container(
@@ -175,10 +204,15 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         let mut rr = row![].spacing(4);
         for (emoji, n) in &line.reactions {
             rr = rr.push(
-                button(row![t(emoji.as_str()).size(13), t(n.to_string()).size(11.5).color(p.muted)].spacing(4).align_y(Alignment::Center))
-                    .padding([2, 8])
-                    .style(theme::btn(Btn::Default))
-                    .on_press(Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: emoji.clone() })),
+                pressable(
+                    row![t(emoji.as_str()).size(13), t(n.to_string()).size(11.5).color(p.muted)].spacing(4).align_y(Alignment::Center),
+                    crate::a11y::Role::Button,
+                    &format!("{emoji} {n}"),
+                    false,
+                    Btn::Default,
+                    Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: emoji.clone() }),
+                )
+                .padding([2, 8]),
             );
         }
         stack_col = stack_col.push(rr);
@@ -201,10 +235,13 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         row![lead, stack_col, space().width(Length::Fill)].spacing(10).align_y(Alignment::Start).width(Length::Fill).into()
     };
 
-    if editing.is_some() || line.file.is_some() {
+    if editing.is_some() || line.file.is_some() || line.voice.is_some() {
         return container(body).padding([2, 0]).into();
     }
-    // The actions float over the far side of the row while the pointer is on it.
+    // The actions float over the far side of the row while the pointer is
+    // on it. They are built for every message, so they stay out of the
+    // keyboard's list: Tab would otherwise stop seven times per message.
+    crate::a11y::pause(true);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
     for e in QUICK {
         tools = tools.push(
@@ -220,20 +257,27 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         tools = tools.push(icon_btn(Icon::Trash, "Delete", Some(Msg::Do(Action::Delete { to: person.id.clone(), id: line.id }))));
     }
     tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
+    crate::a11y::pause(false);
     let bar = container(tools).padding(3).style(theme::menu_pop);
     let overlay = container(bar).width(Length::Fill).align_x(if line.mine { Alignment::Start } else { Alignment::End }).padding([0, 6]);
     hover(container(body).padding([2, 0]).width(Length::Fill), overlay)
 }
 
-/// A file they offered, and files on their way.
-fn transfers<'a>(m: &'a Model) -> El<'a, Msg> {
+/// A file they offered, files on their way, and those waiting their turn.
+pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut col = column![].spacing(8).padding([0, 20]);
     if let Some((name, size)) = m.transfers.offer.as_ref() {
+        // The sender's own preview of a picture, when they sent one, in
+        // place of the generic download mark.
+        let mark: El<'a, Msg> = match &m.transfers.offer_thumbnail {
+            Some(picture) => image(picture.clone()).width(56).height(56).content_fit(ContentFit::Cover).border_radius(6).into(),
+            None => container(icon(Icon::Download, 18.0, p.accent2)).center(38).style(theme::inset).into(),
+        };
         col = col.push(
             container(
                 row![
-                    container(icon(Icon::Download, 18.0, p.accent2)).center(38).style(theme::inset),
+                    mark,
                     column![t(format!("{} wants to send you a file", m.call.peer_name)).size(13.5).font(theme::semibold()), faint(format!("{name} · {size}")).size(12)].spacing(2).width(Length::Fill),
                     btn_sm("Decline", Btn::Ghost, Some(Msg::Do(Action::DeclineFile))),
                     btn_sm("Accept", Btn::Primary, Some(Msg::Do(Action::AcceptFile))),
@@ -265,6 +309,51 @@ fn transfers<'a>(m: &'a Model) -> El<'a, Msg> {
             .style(theme::card_raised),
         );
     }
+    if !m.transfers.queued.is_empty() {
+        let n = m.transfers.queued.len();
+        let head = button(
+            row![
+                label("Up next"),
+                faint(n.to_string()).size(11),
+                fill(),
+                faint(if ui.queue_open { "Hide" } else { "Show" }).size(11.5),
+                icon(if ui.queue_open { Icon::Up } else { Icon::Down }, 13.0, p.faint),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(0)
+        .style(focus_style(
+            |_, _| iced_widget::button::Style::default(),
+            crate::a11y::Spec::new(crate::a11y::Role::Toggle, format!("Up next, {n} files")).checked(ui.queue_open).on(Some(&Msg::ToggleQueue)).add(),
+        ))
+        .on_press(Msg::ToggleQueue);
+        let mut rows = column![head].spacing(4);
+        let last = n - 1;
+        for (i, q) in m.transfers.queued.iter().enumerate().filter(|_| ui.queue_open) {
+            let name = t(q.name.as_str()).size(13).font(theme::semibold()).color(if q.held { p.faint } else { p.text }).wrapping(Wrapping::None);
+            let detail = if q.held { format!("{} · held", q.detail) } else { q.detail.clone() };
+            rows = rows.push(
+                row![
+                    icon(Icon::File, 14.0, p.muted),
+                    column![name, faint(detail).size(11.5).wrapping(Wrapping::None)].spacing(1).width(Length::Fill),
+                    icon_btn(Icon::Up, "Sooner", (i > 0).then_some(Msg::Do(Action::QueueMove { id: q.id, up: true }))),
+                    icon_btn(Icon::Down, "Later", (i < last).then_some(Msg::Do(Action::QueueMove { id: q.id, up: false }))),
+                    icon_btn_kind(
+                        Icon::Clock,
+                        if q.held { "Let it go" } else { "Hold it back" },
+                        if q.held { Btn::IconOn } else { Btn::Icon },
+                        Some(Msg::Do(Action::QueueHold { id: q.id, held: !q.held }))
+                    ),
+                    icon_btn(Icon::X, "Remove", Some(Msg::Do(Action::QueueRemove(q.id)))),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(container(rows).padding([8, 14]).style(theme::card_raised));
+    }
     col.into()
 }
 
@@ -283,15 +372,43 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     };
     let draft = ui.drafts.get(&person.id).map(String::as_str).unwrap_or("");
     let can_send = live || queues;
-    let mut input = text_input(&placeholder, draft).id(crate::COMPOSER).size(14).padding([11, 4]).style(theme::input_bare);
+    // While a voice message records, the composer is its controls.
+    if let Some(secs) = conv.and_then(|c| c.recording) {
+        let max = 120;
+        let bar = row![
+            container(space()).width(10).height(10).style(theme::avatar(p.err)),
+            t(format!("Recording {}:{:02}", secs / 60, secs % 60)).size(14).font(theme::semibold()),
+            faint(format!("· up to {}:{:02}", max / 60, max % 60)).size(12),
+            fill(),
+            btn_sm("Cancel", Btn::Ghost, Some(Msg::Do(Action::FinishVoice { to: person.id.clone(), send: false }))),
+            btn_icon(Icon::Send, "Send", Btn::Primary, Some(Msg::Do(Action::FinishVoice { to: person.id.clone(), send: true }))),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        return column![container(bar).padding([8, 12]).style(theme::composer)].into();
+    }
+    let mut input = input("Message", crate::COMPOSER, &placeholder, draft).size(14).padding([11, 4]).style(theme::input_bare);
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }
-    let file_ok = live && m.device.files && m.call.with(&person.id);
+    // With a queue that outlives the call, a file can be chosen for anyone
+    // at any time and goes at the next call with them.
+    let on_call = live && m.call.with(&person.id);
+    let file_ok = m.device.files && (on_call || m.transfers.pick_anytime);
+    let file_tip = match (file_ok, on_call) {
+        (true, true) => "Send a file",
+        (true, false) => "Send a file on your next call",
+        (false, _) => "Files go during a call",
+    };
     let bar = row![
-        icon_btn(Icon::Paperclip, if file_ok { "Send a file" } else { "Files go during a call" }, file_ok.then_some(Msg::Do(Action::SendFile))),
+        icon_btn(Icon::Paperclip, file_tip, file_ok.then_some(Msg::Do(Action::SendFile))),
         input,
-        icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send)),
+        // With nothing typed, the button records a voice message instead.
+        if draft.trim().is_empty() && can_send && m.device.voice_messages {
+            icon_btn(Icon::Mic, "Record a voice message", Some(Msg::Do(Action::RecordVoice(person.id.clone()))))
+        } else {
+            icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send))
+        },
     ]
     .spacing(6)
     .align_y(Alignment::Center);

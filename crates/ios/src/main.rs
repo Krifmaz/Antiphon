@@ -20,6 +20,8 @@ mod background;
 #[cfg(target_os = "ios")]
 mod callkit;
 #[cfg(target_os = "ios")]
+mod camera;
+#[cfg(target_os = "ios")]
 mod files;
 #[cfg(target_os = "ios")]
 mod logger;

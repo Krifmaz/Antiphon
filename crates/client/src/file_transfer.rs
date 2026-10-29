@@ -448,6 +448,7 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
         | ControlMessage::EscalateCall
         | ControlMessage::SilentCall
         | ControlMessage::AudioMissing { .. }
+        | ControlMessage::LinkReport { .. }
         | ControlMessage::FriendRequest { .. }
         | ControlMessage::FriendAccept { .. }
         | ControlMessage::FriendReject
@@ -458,6 +459,7 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
         | ControlMessage::GroupLeave
         | ControlMessage::GroupSfu { .. }
         | ControlMessage::Community { .. }
+        | ControlMessage::Profile(_)
         | ControlMessage::MlsKeyPackage(_)
         | ControlMessage::MlsWelcome(_)
         | ControlMessage::MlsCommit(_)

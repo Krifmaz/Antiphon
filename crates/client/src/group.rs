@@ -111,6 +111,15 @@ pub struct Group {
     pub sfu: Mutex<Option<Arc<crate::sfu_call::SfuCall>>>,
     /// Spec §3 MLS and SFrame: the call's group keys.
     pub keys: crate::group_keys::GroupKeys,
+    /// Automatic bandwidth for the call (spec §2): every link's reports,
+    /// and the plan the voice and video senders follow.
+    pub link: crate::link_quality::LinkQuality,
+    /// The sound card's sample rate, which decoded voice is produced at;
+    /// 0 until the call sets it, read as 48 kHz.
+    pub device_rate: std::sync::atomic::AtomicU32,
+    /// The call's video, so each leg's pictures reach it (spec §3 group
+    /// calls); set once the call is up.
+    pub video: Mutex<Option<Arc<crate::video::CallVideo>>>,
 }
 
 impl Group {
@@ -155,9 +164,29 @@ impl Group {
             .collect()
     }
 
-    /// One person's name by leg id, for labelling their captions (spec §7).
+    /// One person's name by leg id, for labelling their captions (spec §7)
+    /// and their video tiles. Ids from [`crate::sfu_call::SOURCE_BASE`] up
+    /// are people in the group relay's room.
     pub fn leg_name(&self, id: u64) -> Option<String> {
+        if id >= crate::sfu_call::SOURCE_BASE {
+            return self.sfu_call()?.name_of(id);
+        }
         self.legs.lock().unwrap().iter().find(|l| l.id == id).map(Leg::name)
+    }
+
+    /// The rate decoded voice comes out at: the sound card's.
+    pub fn device_rate(&self) -> u32 {
+        match self.device_rate.load(Ordering::Relaxed) {
+            0 => 48_000,
+            rate => rate,
+        }
+    }
+
+    /// Each leg with the source number its link reports go under (spec
+    /// §2 automatic bandwidth): its id + 1, as in the mixer, since the
+    /// primary connection is 0.
+    pub fn leg_sources(&self) -> Vec<(u64, Arc<PeerConnection>)> {
+        self.legs.lock().unwrap().iter().map(|l| (l.id + 1, l.peer.clone())).collect()
     }
 
     pub fn leg_peers(&self) -> Vec<Arc<PeerConnection>> {
@@ -224,6 +253,9 @@ impl Group {
         let gone: Vec<(u64, String)> =
             legs.iter().filter(|l| l.left.load(Ordering::Relaxed)).map(|l| (l.id, l.name())).collect();
         legs.retain(|l| !l.left.load(Ordering::Relaxed));
+        for (id, _) in &gone {
+            self.link.forget(id + 1);
+        }
         gone
     }
 
@@ -239,6 +271,10 @@ impl Group {
         let profile = Arc::new(Mutex::new(None));
         let left = Arc::new(AtomicBool::new(false));
 
+        // Their voice is decoded as it arrives, and its losses counted
+        // for our reports back to them (spec §2 automatic bandwidth).
+        let mut voice = antiphon_net::voice::VoiceReceiver::new(self.device_rate());
+        self.link.watch(id + 1, voice.loss());
         let recv_task = {
             let (jitter, profile, left, group) = (jitter.clone(), profile.clone(), left.clone(), self.clone());
             let recv_peer = peer.clone();
@@ -247,7 +283,7 @@ impl Group {
                     .recv_loop(move |message| match message {
                         Received::Audio { plaintext, .. } => {
                             let Some(plaintext) = group.keys.open_audio(&key, &plaintext) else { return };
-                            if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
+                            if let Some(decoded) = voice.decode(&plaintext) {
                                 jitter.lock().unwrap().push_with_backup(
                                     decoded.sequence as u64,
                                     decoded.primary,
@@ -258,11 +294,19 @@ impl Group {
                         Received::Control(bytes) => match ControlMessage::decode(&bytes) {
                             Some(ControlMessage::Hello(h)) => *profile.lock().unwrap() = Some(h),
                             Some(ControlMessage::GroupLeave) => left.store(true, Ordering::Relaxed),
+                            Some(ControlMessage::LinkReport { loss_pct, sent_ms, echo_ms, held_ms }) => {
+                                group.link.on_report(id + 1, loss_pct, sent_ms, echo_ms, held_ms)
+                            }
                             Some(m) if is_group_message(&m) => group.inbox.lock().unwrap().push((Link::Leg(id), m)),
                             _ => {}
                         },
+                        Received::Video(bytes) => {
+                            if let Some(video) = group.video.lock().unwrap().as_ref() {
+                                video.receive_from(id, &bytes);
+                            }
+                        }
                         // Files and chat stay on the primary connection.
-                        Received::File(_) | Received::Video(_) => {}
+                        Received::File(_) => {}
                     })
                     .await;
             })
@@ -533,7 +577,13 @@ impl Context {
                 }
                 let result = async {
                     let relay_addr = crate::state::resolve(&relay).await.map_err(|e| e.to_string())?;
-                    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, 0).await.map_err(|e| e.to_string())?);
+                    // Spec §3 anonymity mode: a leg goes through a circuit
+                    // like a 1:1 relayed call, so the relay (and through
+                    // it, the other member) sees only the last hop.
+                    let (socket, relay_addr) = match crate::anonymity::configured_hops() {
+                        Some(hops) => crate::anonymity::route_to(&hops, relay_addr).await.map_err(|e| e.to_string())?,
+                        None => (Arc::new(crate::vpn::bind(TrafficKind::Voice, 0).await.map_err(|e| e.to_string())?), relay_addr),
+                    };
                     let peer = if dial {
                         dial_with_retry(&socket, relay_addr, token).await?;
                         tokio::time::timeout(CONNECT_TIMEOUT, PeerConnection::connect(socket, relay_addr, &self.identity))
@@ -566,6 +616,13 @@ impl Context {
             }
             ControlMessage::GroupPunch { pair, peer_key: _ } => {
                 if self.group.is_full() {
+                    return;
+                }
+                // A punched leg is a direct connection: it would hand this
+                // machine's address to the other member. Anonymity mode
+                // refuses it rather than quietly connecting in the open.
+                if crate::anonymity::requested() {
+                    self.say("Anonymity mode is on, so nobody joins this call directly. The person adding them needs a relay in Settings > Call.");
                     return;
                 }
                 match crate::state::discover_public_address(0).await {
@@ -655,6 +712,7 @@ mod tests {
             presence: None,
             wants_silent: false,
             relay: String::new(),
+            lends_relay: false,
             routes: String::new(),
         }
     }

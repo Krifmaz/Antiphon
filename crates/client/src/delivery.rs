@@ -189,6 +189,9 @@ pub fn mailboxes_in(record: &SignedRouteRecord) -> Vec<(String, Label)> {
         .routes
         .iter()
         .filter(|r| r.kind != RouteKind::Direct.wire())
+        // A phone's push targets live in the same record; they are where
+        // to wake it, never where to leave mail.
+        .filter(|r| !antiphon_push::Target::is_push_route(r))
         .filter_map(|r| {
             let (node, label) = r.address.rsplit_once('#')?;
             Some((node.to_string(), unhex32(label)?))
@@ -266,6 +269,10 @@ pub async fn send(
         }
     }
     if deposited > 0 {
+        // A phone that publishes a push target is told mail is waiting, so
+        // it fetches now instead of whenever it next polls. Rate-limited
+        // per recipient inside, so a burst of queued messages wakes once.
+        crate::push_wake::send(identity, their_identity, their_record, antiphon_crypto::push::WakeKind::Message, &[]);
         Sent::Deposited(deposited)
     } else {
         Sent::Failed(last_error)

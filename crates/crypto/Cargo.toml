@@ -34,6 +34,10 @@ serde_json = "1.0.151"
 thiserror = "2.0.20"
 x25519-dalek = { version = "3.0.0", features = ["getrandom", "static_secrets"] }
 zeroize = "1.9.0"
+# Argon2id stretches the passphrase on an account backup file
+# (`account_seal.rs`). Only the raw key derivation, not the PHC
+# password-hash string format.
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc"] }
 
 [target.'cfg(not(windows))'.dependencies]
 # Keychain on macOS, the Secret Service (GNOME Keyring, KWallet) on Linux,

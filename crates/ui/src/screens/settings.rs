@@ -2,11 +2,12 @@
 //! the right. On a phone the sections stack in one scroll.
 
 use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, pick_list, progress_bar, row, scrollable, text_input};
+use iced_widget::{button, column, container, progress_bar, row, scrollable};
 
 use super::fill;
 use crate::icons::{icon, logo, Icon};
-use crate::theme::{self, Btn, ACCENTS, THEMES};
+use crate::a11y::Role;
+use crate::theme::{self, Btn, ACCENTS, FONTS, THEMES};
 use crate::widgets::*;
 use crate::{Action, CheckState, Dialog, El, Model, Msg, Route, Section, Transmit, Ui};
 
@@ -17,11 +18,16 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     for s in Section::ALL.into_iter().filter(|s| shown(m, *s)) {
         let on = s == section;
         nav = nav.push(
-            button(row![icon(s.icon(), 16.0, if on { p.text } else { p.muted }), t(s.label()).size(14).font(theme::semibold())].spacing(10).align_y(Alignment::Center))
-                .width(Length::Fill)
-                .padding([8, 10])
-                .style(theme::btn(if on { Btn::RowOn } else { Btn::Row }))
-                .on_press(Msg::Nav(Route::Settings(s))),
+            pressable(
+                row![icon(s.icon(), 16.0, if on { p.text } else { p.muted }), t(s.label()).size(14).font(theme::semibold())].spacing(10).align_y(Alignment::Center),
+                Role::Tab,
+                s.label(),
+                on,
+                if on { Btn::RowOn } else { Btn::Row },
+                Msg::Nav(Route::Settings(s)),
+            )
+            .width(Length::Fill)
+            .padding([8, 10]),
         );
     }
     let body = scrollable(container(section_view(ui, m, section)).padding([30, 36]).max_width(760)).height(Length::Fill).style(theme::scroll);
@@ -46,7 +52,8 @@ fn shown(m: &Model, s: Section) -> bool {
 fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     let body = match section {
         Section::Profile => profile(ui, m),
-        Section::Appearance => appearance(m),
+        Section::Account => super::account::view(ui, m),
+        Section::Appearance => appearance(ui, m),
         Section::Voice => voice(m),
         Section::Network => network(ui, m),
         Section::About => about(m),
@@ -55,11 +62,12 @@ fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     column![h1(section.label()), body].spacing(18).into()
 }
 
-/// An input that saves on Enter, with a Save button while it differs.
-fn edit_box<'a>(placeholder: &'a str, edited: &'a Option<String>, saved: &'a str, on_input: fn(String) -> Msg, save: Msg) -> El<'a, Msg> {
+/// An input named `name` (widget id `id`) that saves on Enter, with a Save
+/// button while it differs.
+fn edit_box<'a>(name: &str, id: &'static str, placeholder: &'a str, edited: &'a Option<String>, saved: &'a str, on_input: fn(String) -> Msg, save: Msg) -> El<'a, Msg> {
     let value = edited.as_deref().unwrap_or(saved);
     let dirty = edited.as_deref().is_some_and(|e| e != saved);
-    let mut r = row![text_input(placeholder, value).on_input(on_input).on_submit(save.clone()).padding([9, 12]).size(14).style(theme::input)].spacing(8).align_y(Alignment::Center);
+    let mut r = row![input(name, id, placeholder, value).on_input(on_input).on_submit(save.clone()).padding([9, 12]).size(14)].spacing(8).align_y(Alignment::Center);
     if dirty {
         r = r.push(btn("Save", Btn::Primary, Some(save)));
     }
@@ -69,15 +77,41 @@ fn edit_box<'a>(placeholder: &'a str, edited: &'a Option<String>, saved: &'a str
 /// Your name, status, and the key that proves who you are.
 fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
+    let mut picture_buttons = row![btn_icon(Icon::Edit, if m.me.has_picture { "Change picture" } else { "Add a picture" }, Btn::Default, Some(Msg::Do(Action::PickAvatar)))].spacing(8);
+    if m.me.has_picture {
+        picture_buttons = picture_buttons.push(btn_icon(Icon::Trash, "Remove", Btn::Ghost, Some(Msg::Do(Action::RemoveAvatar))));
+    }
     let me = row![
-        avatar(&m.me.name, &m.me.id, 64.0),
-        column![t(m.me.name.as_str()).size(18).font(theme::bold()), faint(if m.me.status.is_empty() { "No status" } else { m.me.status.as_str() }).size(13)].spacing(3),
+        avatar(&m.me.name, &m.me.id, 72.0),
+        column![
+            t(m.me.name.as_str()).size(18).font(theme::bold()),
+            faint(if m.me.status.is_empty() { "No status" } else { m.me.status.as_str() }).size(13),
+            picture_buttons,
+        ]
+        .spacing(6),
     ]
     .spacing(16)
     .align_y(Alignment::Center);
+    // The colour behind your initial when there is no picture, here and
+    // on your contacts' screens: automatic, or one of the set.
+    // The automatic swatch carries a sparkle, so it does not read as one
+    // more fixed colour when the key's colour happens to match one.
+    let auto = theme::avatar_color(&m.me.id);
+    let automatic = iced_widget::stack![
+        swatch(auto, auto, m.me.color.is_empty(), "Automatic", Msg::Do(Action::ProfileColor(String::new()))),
+        container(icon(Icon::Sparkle, 14.0, theme::hex("#16161f"))).center(34),
+    ];
+    let mut colors = row![automatic].spacing(8);
+    for (id, name, hex) in crate::PROFILE_COLORS {
+        let c = theme::hex(hex);
+        colors = colors.push(swatch(c, c, m.me.color == id, name, Msg::Do(Action::ProfileColor(id.to_string()))));
+    }
     let fields = column![
-        field("Name", edit_box("What people see", &ui.name_edit, &m.me.name, Msg::NameEdit, Msg::NameSave)),
-        field("Status", edit_box("Around after six", &ui.status_edit, &m.me.status, Msg::StatusEdit, Msg::StatusSave)),
+        field("Name", edit_box("Name", "stoop-name", "What people see", &ui.name_edit, &m.me.name, Msg::NameEdit, Msg::NameSave)),
+        field("Status", edit_box("Status", "stoop-status", "Around after six", &ui.status_edit, &m.me.status, Msg::StatusEdit, Msg::StatusSave)),
+        field("About you", edit_box("About you", "stoop-bio", "A line or two people see in your details", &ui.bio_edit, &m.me.bio, Msg::BioEdit, Msg::BioSave)),
+        field("Colour", colors),
+        faint("Your picture, About line and colour go to the people you call. They stay on your devices and theirs.").size(12),
     ]
     .spacing(14);
     let identity = column![
@@ -92,7 +126,7 @@ fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let notify = setting(
         "Message notifications",
         Some("Show a notification when a message arrives and Stoop is in the background."),
-        switch(m.settings.notify_messages, |on| Msg::Do(Action::NotifyMessages(on))),
+        switch("Message notifications", m.settings.notify_messages, |on| Msg::Do(Action::NotifyMessages(on))),
     );
     column![
         card(column![me, fields].spacing(20)),
@@ -103,13 +137,14 @@ fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     .into()
 }
 
-/// Theme, accent colour and motion.
-fn appearance<'a>(m: &'a Model) -> El<'a, Msg> {
+/// Theme, accent colour, reading font, motion, and theme files.
+fn appearance<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut themes = row![].spacing(10);
     for (id, name) in THEMES {
         let on = m.settings.theme == id;
-        let look = theme::palette(id, &m.settings.accent, "", true);
+        let look = theme::palette(id, &m.settings.accent, &m.settings.custom_accent, true);
+        let focused = crate::a11y::Spec::new(Role::Tab, format!("{name} theme")).selected(on).on(Some(&Msg::Do(Action::Theme(id.to_string())))).add();
         let preview = row![
             container(iced_widget::space()).width(14).height(40).style(move |_| flat(look.bg2, 6.0)),
             column![
@@ -139,6 +174,10 @@ fn appearance<'a>(m: &'a Model) -> El<'a, Msg> {
             if on {
                 s.border = iced_core::Border { color: p.accent2, width: 1.5, radius: 12.0.into() };
             }
+            if focused {
+                // The keyboard focus ring: thicker than the selected line.
+                s.border = iced_core::Border { color: p.accent2, width: 2.5, radius: 12.0.into() };
+            }
             s
         })
         .on_press(Msg::Do(Action::Theme(id.to_string())));
@@ -148,11 +187,52 @@ fn appearance<'a>(m: &'a Model) -> El<'a, Msg> {
     for (id, name, a, b) in ACCENTS {
         accents = accents.push(swatch(theme::hex(a), theme::hex(b), m.settings.accent == id, name, Msg::Do(Action::Accent(id.to_string()))));
     }
-    let motion = setting("Reduce motion", Some("Dialogs and panels appear at once instead of sliding."), switch(m.settings.reduced_motion, |on| Msg::Do(Action::ReducedMotion(on))));
+    // Your own colour: typed as #rrggbb, its partner worked out as Encore does.
+    let custom = theme::parse_hex(&m.settings.custom_accent);
+    if let Some(c) = custom {
+        accents = accents.push(swatch(c, theme::partner(c), m.settings.accent == "custom", "Custom", Msg::Do(Action::CustomAccent(m.settings.custom_accent.clone()))));
+    }
+    let custom_value = ui.accent_edit.as_deref().unwrap_or(&m.settings.custom_accent);
+    let mut custom_row = row![input("Custom accent colour", "stoop-accent", "#8b5cf6", custom_value).on_input(Msg::AccentEdit).on_submit(Msg::AccentSave).width(130).padding([8, 12]).size(14)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if ui.accent_edit.as_deref().is_some_and(|e| e != m.settings.custom_accent) {
+        custom_row = custom_row.push(btn("Use colour", Btn::Primary, Some(Msg::AccentSave)));
+    }
+    let accent_body = column![accents.wrap(), setting("Your own colour", Some("Any colour as #rrggbb."), custom_row)].spacing(14);
+
+    let mut fonts = row![].spacing(10);
+    for (id, name) in FONTS {
+        let on = m.settings.font == id || (m.settings.font.is_empty() && id == FONTS[0].0);
+        let sample = column![
+            t("Aa Bb Qq 123").size(18).font(theme::font_for(id)),
+            t(name).size(12.5).font(theme::weighted(theme::font_for(id), iced_core::font::Weight::Semibold)),
+        ]
+        .spacing(6)
+        .align_x(Alignment::Center);
+        fonts = fonts.push(
+            pressable(sample, Role::Tab, &format!("{name} font"), on, if on { Btn::RowOn } else { Btn::Row }, Msg::Do(Action::Font(id.to_string())))
+                .width(Length::Fill)
+                .padding([12, 8]),
+        );
+    }
+
+    let motion = setting("Reduce motion", Some("Dialogs and panels appear at once instead of sliding."), switch("Reduce motion", m.settings.reduced_motion, |on| Msg::Do(Action::ReducedMotion(on))));
+    let files = row![
+        btn_icon(Icon::Download, "Export theme…", Btn::Default, Some(Msg::Do(Action::ExportTheme))),
+        btn_icon(Icon::Palette, "Import theme…", Btn::Ghost, Some(Msg::Do(Action::ImportTheme))),
+    ]
+    .spacing(8);
     column![
         titled_card("Theme", None, themes),
-        titled_card("Accent", Some("Buttons, highlights and the glow behind a call."), accents.wrap()),
+        titled_card("Accent", Some("Buttons, highlights and the glow behind a call."), accent_body),
+        titled_card("Reading font", Some("OpenDyslexic's heavier letter bottoms help some people with dyslexia keep letters in place."), fonts),
         card(motion),
+        titled_card(
+            "Theme files",
+            Some("Save your theme, accent and reading font to a file to share or keep, or load one. A theme file is plain settings: it can't run anything."),
+            files
+        ),
     ]
     .spacing(14)
     .into()
@@ -172,22 +252,13 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     let s = &m.settings;
     let device = |label: &'a str, list: &'a [String], chosen: &'a str, f: fn(String) -> Action| -> El<'a, Msg> {
         let selected = if chosen.is_empty() { None } else { Some(chosen.to_string()) };
-        field(
-            label,
-            pick_list(list, selected, move |v| Msg::Do(f(v)))
-                .placeholder("System default")
-                .width(Length::Fill)
-                .padding([9, 12])
-                .text_size(14)
-                .style(theme::pick)
-                .menu_style(theme::pick_menu),
-        )
+        field(label, choice(label, list, selected, "System default", move |v| Msg::Do(f(v))).width(Length::Fill).padding([9, 12]).text_size(14))
     };
     let devices = column![
         row![device("Microphone", &s.inputs, &s.input, Action::Input), device("Speakers or headphones", &s.outputs, &s.output, Action::Output)].spacing(14),
         field(
             "Output volume",
-            volume_slider(s.output_db, Length::Fill, |db| Msg::Do(Action::OutputVolume(db)))
+            volume_slider("Output volume", s.output_db, Length::Fill, |db| Msg::Do(Action::OutputVolume(db)))
         ),
     ]
     .spacing(16);
@@ -210,10 +281,7 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     for mode in Transmit::ALL {
         let on = s.transmit == mode;
         seg = seg.push(
-            button(t(mode.label()).size(13).font(theme::semibold()))
-                .padding([7, 14])
-                .style(theme::btn(if on { Btn::TabOn } else { Btn::Tab }))
-                .on_press(Msg::Do(Action::Transmit(mode))),
+            pressable(t(mode.label()).size(13).font(theme::semibold()), Role::Tab, mode.label(), on, if on { Btn::TabOn } else { Btn::Tab }, Msg::Do(Action::Transmit(mode))).padding([7, 14]),
         );
     }
     let mut talk = column![container(seg).padding(4).style(theme::tabs_frame)].spacing(14);
@@ -227,11 +295,17 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     }
 
     let mut processing = column![
-        setting("Noise suppression", Some("Takes out fans, keyboards and traffic."), switch(s.noise_suppression, |on| Msg::Do(Action::NoiseSuppression(on)))),
+        setting("Noise suppression", Some("Takes out fans, keyboards and traffic."), switch("Noise suppression", s.noise_suppression, |on| Msg::Do(Action::NoiseSuppression(on)))),
         divider(),
-        setting("Echo cancellation", Some("Stops them hearing themselves when you use speakers."), switch(s.echo_cancel, |on| Msg::Do(Action::EchoCancel(on)))),
+        setting("Echo cancellation", Some("Stops them hearing themselves when you use speakers."), switch("Echo cancellation", s.echo_cancel, |on| Msg::Do(Action::EchoCancel(on)))),
         divider(),
-        setting("Automatic level", Some("Keeps your voice at an even loudness."), switch(s.auto_gain, |on| Msg::Do(Action::AutoGain(on)))),
+        setting("Automatic level", Some("Keeps your voice at an even loudness."), switch("Automatic level", s.auto_gain, |on| Msg::Do(Action::AutoGain(on)))),
+        divider(),
+        setting(
+            "Low data calls",
+            Some("Voice only, at the least data that stays clear. Calls already lower their quality by themselves when the connection is poor."),
+            switch("Low data calls", s.low_data, |on| Msg::Do(Action::LowData(on))),
+        ),
     ]
     .spacing(12);
     if !s.presets.is_empty() {
@@ -239,12 +313,7 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         processing = processing.push(setting(
             "Voice preset",
             Some("A starting point for the whole chain."),
-            pick_list(s.presets.as_slice(), (!s.preset.is_empty()).then(|| s.preset.clone()), |v| Msg::Do(Action::Preset(v)))
-                .placeholder("Custom")
-                .padding([8, 12])
-                .text_size(13.5)
-                .style(theme::pick)
-                .menu_style(theme::pick_menu),
+            choice("Voice preset", s.presets.as_slice(), (!s.preset.is_empty()).then(|| s.preset.clone()), "Custom", |v| Msg::Do(Action::Preset(v))).padding([8, 12]).text_size(13.5),
         ));
     }
 
@@ -291,21 +360,41 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let port_text = m.network.port.to_string();
     let port = ui.port_edit.as_deref().unwrap_or(&port_text);
     let port_dirty = ui.port_edit.as_deref().is_some_and(|e| e != port_text);
-    let mut port_row = row![text_input("7000", port).on_input(Msg::PortEdit).on_submit(Msg::PortSave).width(110).padding([9, 12]).size(14).style(theme::input)].spacing(8);
+    let mut port_row = row![input("Port", "stoop-port", "7000", port).on_input(Msg::PortEdit).on_submit(Msg::PortSave).width(110).padding([9, 12]).size(14)].spacing(8);
     if port_dirty {
         port_row = port_row.push(btn("Save", Btn::Primary, Some(Msg::PortSave)));
     }
     let listen = column![
         setting("Port", Some("Where your door listens. Change it if another app uses this one."), port_row),
         divider(),
-        setting("Open my door when Stoop starts", None, switch(m.settings.open_on_start, |on| Msg::Do(Action::OpenOnStart(on)))),
+        setting("Open my door when Stoop starts", None, switch("Open my door when Stoop starts", m.settings.open_on_start, |on| Msg::Do(Action::OpenOnStart(on)))),
     ]
     .spacing(12);
-    let relay = field("Relay", edit_box("relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave));
+    let mut relay = column![field("Relay", edit_box("Relay", "stoop-relay", "relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave))].spacing(12);
+    if !m.network.relay_note.is_empty() {
+        relay = relay.push(faint(m.network.relay_note.as_str()).size(12.5));
+    }
+    relay = relay.push(divider()).push(setting(
+        "Let contacts use my relay",
+        Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
+        switch("Let contacts use my relay", m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
+    ));
+    let anonymity = column![
+        setting(
+            "Anonymity mode",
+            Some("Calls go through two or three relays, each knowing only the step before and after it. The strongest privacy, with noticeable delay. Needs at least two hops."),
+            switch("Anonymity mode", m.network.anonymity, |on| Msg::Do(Action::Anonymity(on))),
+        ),
+        divider(),
+        field("Hops", edit_box("Hops", "stoop-hops", "hop1.example:3479, hop2.example:3479#key", &ui.hops_edit, &m.network.hops, Msg::HopsEdit, Msg::HopsSave)),
+        faint("Add #key after an address to pin the hop's key (shown when its operator starts it). Without one, the first key a hop gives is remembered and a different one is refused.").size(12.5),
+    ]
+    .spacing(12);
     column![
         card(check_card),
         titled_card("Your door", None, listen),
         titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay),
+        titled_card("Anonymity", None, anonymity),
     ]
     .spacing(14)
     .into()
@@ -340,9 +429,8 @@ fn about<'a>(m: &'a Model) -> El<'a, Msg> {
 }
 
 /// The phone's own settings: the microphone permission, listening in the
-/// background, mobile data, and the recovery phrase.
+/// background and mobile data. (The recovery phrase is under Account.)
 fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let p = theme::look();
     let Some(ph) = m.phone.as_ref() else { return column![].into() };
     let mut cards = column![].spacing(14);
     if !ph.mic_allowed {
@@ -356,59 +444,34 @@ fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         setting(
             "Take calls in the background",
             Some("Keeps your door open when Stoop is not on screen. Uses a little battery."),
-            switch(ph.keep_listening, |on| Msg::Do(Action::KeepListening(on)))
+            switch("Take calls in the background", ph.keep_listening, |on| Msg::Do(Action::KeepListening(on)))
         ),
         divider(),
         setting(
             "Even on battery saver",
             Some("Otherwise the door closes in the background while battery saver is on."),
-            switch(ph.listen_on_saver, |on| Msg::Do(Action::ListenOnSaver(on)))
+            switch("Even on battery saver", ph.listen_on_saver, |on| Msg::Do(Action::ListenOnSaver(on)))
         ),
     ]
     .spacing(12);
     let limit_text = if ph.cellular_limit_mb == 0 { String::new() } else { ph.cellular_limit_mb.to_string() };
     let limit_value = ui.limit_edit.as_deref().unwrap_or(&limit_text);
-    let mut limit = row![text_input("No limit", limit_value).on_input(Msg::LimitEdit).on_submit(Msg::LimitSave).width(110).padding([9, 12]).size(14).style(theme::input), faint("MB").size(13)]
+    let mut limit = row![input("Monthly limit for files", "stoop-limit", "No limit", limit_value).on_input(Msg::LimitEdit).on_submit(Msg::LimitSave).width(110).padding([9, 12]).size(14), faint("MB").size(13)]
         .spacing(8)
         .align_y(Alignment::Center);
     if ui.limit_edit.as_deref().is_some_and(|e| e != limit_text) {
         limit = limit.push(btn("Save", Btn::Primary, Some(Msg::LimitSave)));
     }
     let data = column![
-        setting("Files only on Wi-Fi", Some("Files wait for Wi-Fi instead of using mobile data."), switch(ph.wifi_only, |on| Msg::Do(Action::WifiOnly(on)))),
+        setting("Files only on Wi-Fi", Some("Files wait for Wi-Fi instead of using mobile data."), switch("Files only on Wi-Fi", ph.wifi_only, |on| Msg::Do(Action::WifiOnly(on)))),
         divider(),
-        setting("Data saver", Some("Smaller pictures and fewer checks on mobile data."), switch(ph.data_saver, |on| Msg::Do(Action::DataSaver(on)))),
+        setting("Data saver", Some("Smaller pictures and fewer checks on mobile data."), switch("Data saver", ph.data_saver, |on| Msg::Do(Action::DataSaver(on)))),
         divider(),
         setting("Monthly limit for files", Some(ph.cellular_used.as_str()), limit),
     ]
     .spacing(12);
-    let phrase: El<'a, Msg> = match ph.phrase.as_deref() {
-        Some(words) => column![
-            container(t(words).size(13.5).font(theme::mono()).color(p.text)).padding([10, 12]).width(Length::Fill).style(theme::inset),
-            row![
-                btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Msg::Copy(words.to_string(), "Recovery phrase"))),
-                btn("Hide", Btn::Ghost, Some(Msg::Do(Action::ShowPhrase(false)))),
-            ]
-            .spacing(8),
-        ]
-        .spacing(10)
-        .into(),
-        None => row![btn_icon(Icon::Lock, "Show my recovery phrase", Btn::Default, Some(Msg::Do(Action::ShowPhrase(true))))].into(),
-    };
-    let ready = !ui.restore_edit.trim().is_empty();
-    let restore = column![
-        text_input("The 24 words, in order", &ui.restore_edit).on_input(Msg::RestoreEdit).padding([10, 12]).size(14).style(theme::input),
-        row![btn("Restore", Btn::Danger, ready.then_some(Msg::Dialog(Some(Dialog::ConfirmRestore))))],
-    ]
-    .spacing(10);
     cards
         .push(titled_card("In the background", None, background))
         .push(titled_card("Mobile data", None, data))
-        .push(titled_card(
-            "Recovery phrase",
-            Some("These words bring your identity back on a new phone. Anyone who has them can be you, so keep them somewhere only you can reach."),
-            phrase,
-        ))
-        .push(titled_card("Restore from a phrase", Some("Moving from another device? Type its phrase here."), restore))
         .into()
 }

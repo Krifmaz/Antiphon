@@ -21,9 +21,12 @@ use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use antiphon_mobile::camera::CameraRequest;
 use antiphon_mobile::platform::{BackgroundWork, Network, Platform};
 use jni::objects::{JClass, JObject, JValue};
 use jni::{JNIEnv, JavaVM};
+
+use crate::camera;
 
 /// Android's half of [`Platform`]. It holds nothing: the activity and the
 /// JavaVM are fetched from `ndk-context` on every call, so it is free to
@@ -75,6 +78,14 @@ impl Platform for Android {
         read_file(handle)
     }
 
+    fn file_size(&self, handle: &str) -> io::Result<u64> {
+        file_size(handle)
+    }
+
+    fn read_file_range(&self, handle: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        read_file_range(handle, offset, len)
+    }
+
     fn downloads_dir(&self) -> Option<PathBuf> {
         static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
         DIR.get_or_init(downloads_dir).clone()
@@ -95,10 +106,39 @@ impl Platform for Android {
     fn request_battery_exemption(&self) {
         call_activity("asking for a battery exemption", "requestBatteryExemption");
     }
+
+    /// Every Android phone this app runs on has at least one camera
+    /// service; a phone without a camera fails when it is started.
+    fn has_camera(&self) -> bool {
+        true
+    }
+
+    fn has_camera_permission(&self) -> bool {
+        has_permission(CAMERA)
+    }
+
+    fn request_camera_permission(&self) {
+        request_permission(CAMERA, CAMERA_REQUEST);
+    }
+
+    fn start_camera(&self, request: CameraRequest) -> Result<(), String> {
+        camera::start(request)
+    }
+
+    fn stop_camera(&self) {
+        camera::stop();
+    }
 }
 
 /// `Manifest.permission.RECORD_AUDIO`, the run-time microphone permission.
 const RECORD_AUDIO: &str = "android.permission.RECORD_AUDIO";
+/// `Manifest.permission.CAMERA`, the run-time camera permission.
+const CAMERA: &str = "android.permission.CAMERA";
+/// The request code for the microphone prompt.
+const MIC_REQUEST: i32 = 1;
+/// The request code for the camera prompt. `AntiphonActivity` uses 2 for
+/// the file picker and 3 for notifications, so this takes the next.
+const CAMERA_REQUEST: i32 = 4;
 /// `PackageManager.PERMISSION_GRANTED`.
 const PERMISSION_GRANTED: i32 = 0;
 /// `AudioManager.MODE_NORMAL`: no call, audio plays as media.
@@ -153,8 +193,21 @@ fn with_activity<T>(what: &str, f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::er
 /// Whether the user has granted microphone access. Android asks at run
 /// time, not at install, so this can change while the app is open.
 fn has_mic_permission() -> bool {
-    with_activity("checking microphone permission", |env, activity| {
-        let name = env.new_string(RECORD_AUDIO)?;
+    has_permission(RECORD_AUDIO)
+}
+
+/// Shows the system's microphone permission prompt. The answer is not
+/// reported back to native code, so callers check [`has_mic_permission`]
+/// again when the activity resumes.
+fn request_mic_permission() {
+    request_permission(RECORD_AUDIO, MIC_REQUEST);
+}
+
+/// Whether the user has granted the run-time permission `permission`
+/// (a `Manifest.permission` name).
+fn has_permission(permission: &str) -> bool {
+    with_activity("checking a permission", |env, activity| {
+        let name = env.new_string(permission)?;
         let result = env
             .call_method(activity, "checkSelfPermission", "(Ljava/lang/String;)I", &[JValue::Object(&name)])?
             .i()?;
@@ -163,14 +216,14 @@ fn has_mic_permission() -> bool {
     .unwrap_or(false)
 }
 
-/// Shows the system's microphone permission prompt. The answer is not
-/// reported back to native code, so callers check [`has_mic_permission`]
-/// again when the activity resumes.
-fn request_mic_permission() {
-    with_activity("requesting microphone permission", |env, activity| {
-        let name = env.new_string(RECORD_AUDIO)?;
+/// Shows the system's prompt for `permission`. `code` only tells the
+/// answers apart in `onRequestPermissionsResult`, which the shared code
+/// does not use: it checks [`has_permission`] again instead.
+fn request_permission(permission: &str, code: i32) {
+    with_activity("requesting a permission", |env, activity| {
+        let name = env.new_string(permission)?;
         let array = env.new_object_array(1, "java/lang/String", &name)?;
-        env.call_method(activity, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&array), JValue::Int(1)])?;
+        env.call_method(activity, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&array), JValue::Int(code)])?;
         Ok(())
     });
 }
@@ -494,12 +547,59 @@ fn register_push() {
     }
 }
 
-/// Reads a picked document by its content URI. The content resolver opens
-/// a file descriptor and the bytes are read from that, rather than copied
-/// across JNI one Java array at a time. A plain path is read directly.
+/// Reads a picked document by its content URI, whole. Used only when the
+/// provider serves something that cannot be read in ranges; see
+/// [`file_size`].
 fn read_file(handle: &str) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_picked(handle)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// A picked document's size, from the descriptor the provider serves.
+///
+/// Most providers serve the file itself, which can be measured and read at
+/// any offset. Some (cloud drives fetching on demand, apps generating the
+/// content) serve a pipe instead, which has no size and cannot seek; that
+/// is reported as `Unsupported`, which tells the shared code to take the
+/// file whole through [`read_file`] instead.
+fn file_size(handle: &str) -> io::Result<u64> {
+    let meta = open_picked(handle)?.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "the provider serves a stream, not a file"));
+    }
+    Ok(meta.len())
+}
+
+/// Up to `len` bytes of a picked document from `offset`, fewer only at
+/// its end. The descriptor is opened afresh for each range: the shared
+/// code asks for a megabyte at a time, so the cost of opening is small
+/// beside the read, and nothing is left open between transfers.
+fn read_file_range(handle: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let file = open_picked(handle)?;
+    let mut buf = vec![0u8; len];
+    let mut filled = 0;
+    while filled < len {
+        // pread, so there is no seek position to keep in step.
+        match file.read_at(&mut buf[filled..], offset + filled as u64) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
+/// Opens a picked document by its content URI. The content resolver opens
+/// a file descriptor (`ContentResolver.openFileDescriptor`) and the bytes
+/// are read from that, rather than copied across JNI one Java array at a
+/// time. A plain path is opened directly.
+fn open_picked(handle: &str) -> io::Result<File> {
     if handle.starts_with('/') {
-        return std::fs::read(handle);
+        return File::open(handle);
     }
     let fd = with_activity("opening a picked file", |env, activity| {
         let resolver = env
@@ -528,10 +628,7 @@ fn read_file(handle: &str) -> io::Result<Vec<u8>> {
             // SAFETY: detachFd hands over sole ownership of an open
             // descriptor; nothing on the Java side will close it, and File
             // closes it when dropped.
-            let mut file = unsafe { File::from_raw_fd(fd) };
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            Ok(bytes)
+            Ok(unsafe { File::from_raw_fd(fd) })
         }
         // Usually the file was deleted, or its grant revoked, since it was
         // picked; with_activity has logged the exception.

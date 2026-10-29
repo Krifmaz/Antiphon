@@ -1,7 +1,7 @@
 //! The first screen: a name, and a word on what Stoop is.
 
 use iced_core::{Alignment, Length};
-use iced_widget::{column, container, row, text_input};
+use iced_widget::{column, container, row};
 
 use crate::icons::{icon, logo, Icon};
 use crate::theme::{self, Btn};
@@ -28,12 +28,12 @@ pub fn view<'a>(ui: &'a Ui, _m: &'a Model) -> El<'a, Msg> {
             column![
                 point(Icon::Lock, "No accounts, no middleman", "Your identity is a key made on this device."),
                 point(Icon::DoorOpen, "Your door, your rules", "Open it to take calls; close it and nobody rings."),
-                point(Icon::ShieldCheck, "Know it's them", "Compare three words on your first call."),
+                point(Icon::ShieldCheck, "Know it's them", "Compare a short code on your first call."),
             ]
             .spacing(12),
             field(
                 "What should people call you?",
-                text_input("Your name", &ui.first_name).on_input(Msg::FirstName).on_submit(Msg::FirstDone).padding([11, 12]).size(15).style(theme::input)
+                input("What should people call you?", "stoop-first-name", "Your name", &ui.first_name).on_input(Msg::FirstName).on_submit(Msg::FirstDone).padding([11, 12]).size(15)
             ),
             btn("Continue", Btn::Primary, ready.then_some(Msg::FirstDone)).width(Length::Fill),
         ]

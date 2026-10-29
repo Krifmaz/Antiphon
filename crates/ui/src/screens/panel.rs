@@ -3,7 +3,7 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Length};
-use iced_widget::{column, container, row, scrollable, space, stack, text_input};
+use iced_widget::{column, container, row, scrollable, space, stack};
 
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Badge, Btn};
@@ -30,7 +30,10 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
     if person.verified {
         name_row = name_row.push(badge_icon(Icon::ShieldCheck, "Verified", Badge::Ok));
     }
-    let who = column![name_row, faint(if person.address.is_empty() { "No address yet" } else { person.address.as_str() }).size(12).font(theme::mono())].spacing(4);
+    let mut who = column![name_row, faint(if person.address.is_empty() { "No address yet" } else { person.address.as_str() }).size(12).font(theme::mono())].spacing(4);
+    if !person.bio.is_empty() {
+        who = who.push(container(t(person.bio.as_str()).size(13).color(p.muted)).padding([6, 0]));
+    }
 
     let mut col = column![head, container(who).padding([4, 18])].spacing(10);
 
@@ -54,7 +57,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
     let verify = setting(
         "Verified",
         Some("You compared the words on a call and they matched."),
-        switch(person.verified, {
+        switch("Verified", person.verified, {
             let id = person.id.clone();
             move |on| Msg::Do(Action::Verify(id.clone(), on))
         }),
@@ -65,11 +68,11 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
         Some((id, n)) if id == &person.id => n.as_str(),
         _ => person.note.as_str(),
     };
-    let note = text_input("Only you can see this", note_value).on_input(Msg::NoteEdit).on_submit(Msg::NoteSave).size(13).padding([8, 10]).style(theme::input);
+    let note = input("Note", "stoop-note", "Only you can see this", note_value).on_input(Msg::NoteEdit).on_submit(Msg::NoteSave).size(13).padding([8, 10]);
     let volume = column![
         row![
             icon(if person.muted { Icon::VolumeOff } else { Icon::Volume }, 15.0, p.muted),
-            volume_slider(person.volume_db, Length::Fill, {
+            volume_slider(&format!("Volume for {}", person.name), person.volume_db, Length::Fill, {
                 let id = person.id.clone();
                 move |db| Msg::Do(Action::Volume(id.clone(), db))
             }),
@@ -83,7 +86,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
             ]
             .spacing(2)
             .width(Length::Fill),
-            switch(!person.muted, {
+            switch(&format!("Hear {}", person.name), !person.muted, {
                 let id = person.id.clone();
                 move |on| Msg::Do(Action::MuteFor(id.clone(), !on))
             }),

@@ -11,7 +11,8 @@ use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
 use antiphon_net::dht::{self, DhtNode, ListingEntry, NodeKey};
 use antiphon_relay::onion::{load_or_create_hop_key, HopLimits, HopNode};
 use antiphon_relay::sfu::{Sfu, SfuLimits};
-use antiphon_relay::{run_node_full, Limits, Relay, COMMITMENT};
+use antiphon_relay::federation::{self, FedLimits, Federation};
+use antiphon_relay::{run_node_with_federation, Limits, Relay, COMMITMENT};
 use clap::Parser;
 use tokio::net::UdpSocket;
 
@@ -53,6 +54,39 @@ struct Args {
     /// code. Without it, anyone may register.
     #[arg(long)]
     mailbox_code: Option<String>,
+    /// Wake phones by push: post a wake-up when mail arrives for an inbox
+    /// whose owner registered a push endpoint, and pass on senders' own
+    /// sealed wake-ups. Makes outgoing HTTPS requests to the endpoints
+    /// people register (public addresses only). Off by default.
+    #[arg(long, requires = "mailbox")]
+    mailbox_push: bool,
+    /// Where the key this node signs its own wake-ups with is kept, so
+    /// phones that registered keep recognising it after a restart.
+    #[arg(long, default_value = "antiphon-push.key")]
+    mailbox_push_key: std::path::PathBuf,
+    /// APNs: the `.p8` key file from an Apple developer account. With the
+    /// other three `--apns-*` options, lets this node wake iOS phones. Only
+    /// someone with the app's Apple account can have one; see
+    /// docs/mobile-push.md. Also readable from `ANTIPHON_APNS_KEY`.
+    #[cfg(feature = "apns")]
+    #[arg(long, env = "ANTIPHON_APNS_KEY", requires = "mailbox_push", requires = "apns_key_id", requires = "apns_team_id", requires = "apns_topic")]
+    apns_key: Option<std::path::PathBuf>,
+    /// APNs: the key's 10-character id.
+    #[cfg(feature = "apns")]
+    #[arg(long, env = "ANTIPHON_APNS_KEY_ID")]
+    apns_key_id: Option<String>,
+    /// APNs: the developer account's team id.
+    #[cfg(feature = "apns")]
+    #[arg(long, env = "ANTIPHON_APNS_TEAM_ID")]
+    apns_team_id: Option<String>,
+    /// APNs: the app's bundle id (VoIP pushes go to `<topic>.voip`).
+    #[cfg(feature = "apns")]
+    #[arg(long, env = "ANTIPHON_APNS_TOPIC")]
+    apns_topic: Option<String>,
+    /// APNs: use Apple's sandbox, for development builds of the app.
+    #[cfg(feature = "apns")]
+    #[arg(long, env = "ANTIPHON_APNS_SANDBOX")]
+    apns_sandbox: bool,
     /// Host sealed files: serve what is pinned here, and accept uploads
     /// (spec §5 "Server-hosted mode"). Off by default.
     #[arg(long)]
@@ -134,6 +168,119 @@ struct Args {
     /// community; never lists people.
     #[arg(long, requires = "dht")]
     directory: Option<std::path::PathBuf>,
+    /// Peer with other relays, so someone registered at any of them can be
+    /// rung through this one, and apps can fall back across the mesh. Off
+    /// by default. Peers learn hashes of tokens, never tokens, and never a
+    /// key to any call.
+    #[arg(long)]
+    federate: bool,
+    /// A relay to peer with: `host:port`, or `host:port#key` to pin its
+    /// peer key (printed at its start-up). Repeat for several. Others are
+    /// learned from these, each proving its key before it is used.
+    #[arg(long = "peer", requires = "federate")]
+    peers: Vec<String>,
+    /// Keep the peer key in this file (created if missing), so relays that
+    /// learned it keep recognising this one after a restart.
+    #[arg(long, default_value = "antiphon-peer.key")]
+    peer_key: std::path::PathBuf,
+    /// Most relays peered with at once.
+    #[arg(long, default_value_t = FedLimits::default().max_peers)]
+    federate_max_peers: usize,
+    /// Most calls bridged to peer relays at once.
+    #[arg(long, default_value_t = FedLimits::default().max_bridges)]
+    federate_max_bridges: usize,
+    /// Peer with relays at private and loopback addresses (a LAN-only mesh).
+    #[arg(long)]
+    federate_allow_private: bool,
+}
+
+/// Loads the key the node signs its wake-ups with, or makes and saves one.
+/// A plain 32-byte seed, like the DHT key: it names the node to the phones
+/// that registered with it and nothing else, so it is not worth a keystore.
+fn load_push_identity(path: &std::path::Path) -> anyhow::Result<antiphon_crypto::IdentityKeyPair> {
+    if let Ok(bytes) = std::fs::read(path) {
+        let seed: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("{} is not a push key; move it aside to make a new one", path.display()))?;
+        return Ok(antiphon_crypto::IdentityKeyPair::from_master_seed(seed));
+    }
+    let identity = antiphon_crypto::IdentityKeyPair::generate();
+    std::fs::write(path, identity.master_seed())?;
+    Ok(identity)
+}
+
+/// The push sender the options ask for: UnifiedPush always, APNs when a
+/// key was given (and this build has the `apns` feature).
+fn push_sender(args: &Args) -> anyhow::Result<antiphon_push::send::Sender> {
+    let sender = antiphon_push::send::Sender::new();
+    #[cfg(feature = "apns")]
+    if let Some(path) = &args.apns_key {
+        let config = antiphon_push::send::apns::ApnsConfig {
+            key_p8: std::fs::read_to_string(path)?,
+            key_id: args.apns_key_id.clone().unwrap_or_default(),
+            team_id: args.apns_team_id.clone().unwrap_or_default(),
+            topic: args.apns_topic.clone().unwrap_or_default(),
+            sandbox: args.apns_sandbox,
+        };
+        return sender.with_apns(config).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()));
+    }
+    let _ = args;
+    Ok(sender)
+}
+
+/// Drains the mailbox's owed wake-ups a few times a second and posts each
+/// one on its own task, so a slow push service never holds up the packet
+/// loop or the next wake-up. Failures are counted, never logged with the
+/// endpoint: the operator's view stays aggregate.
+fn spawn_push_loop(mailbox: Arc<Mutex<Mailbox>>, identity: antiphon_crypto::IdentityKeyPair, sender: antiphon_push::send::Sender) {
+    use antiphon_crypto::push::WakeKind;
+    use antiphon_relay::mailbox::WakeJob;
+    let identity = Arc::new(identity);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tick.tick().await;
+            let jobs = mailbox.lock().unwrap().take_wakes();
+            for job in jobs {
+                let (sender, identity) = (sender.clone(), identity.clone());
+                tokio::spawn(async move {
+                    let (transport, sealed, kind) = match job {
+                        WakeJob::Seal(target) => {
+                            // The node's own wake-ups are only ever "mail is
+                            // waiting"; it never rings anyone.
+                            let Ok(sealed) = antiphon_push::seal_wake(&identity, &target, WakeKind::Message, &[], antiphon_push::now_secs()) else { return };
+                            (target.transport, sealed, WakeKind::Message)
+                        }
+                        WakeJob::Forward { transport, sealed } => {
+                            let Ok(sealed) = <[u8; antiphon_crypto::push::SEALED_LEN]>::try_from(sealed.as_slice()) else { return };
+                            // The node can't see inside, so it goes as the
+                            // endpoint says: a VoIP token only ever carries
+                            // calls, anything else carries anything.
+                            let kind = if matches!(transport, antiphon_push::Transport::ApnsVoip(_)) { WakeKind::Call } else { WakeKind::Message };
+                            (transport, sealed, kind)
+                        }
+                    };
+                    if let Err(e) = sender.send(kind, &transport, &sealed).await {
+                        eprintln!("push wake-up not delivered: {}", short_reason(&e));
+                    }
+                });
+            }
+        }
+    });
+}
+
+/// A push failure without the endpoint in it, for the operator's log.
+fn short_reason(e: &antiphon_push::send::SendError) -> &'static str {
+    use antiphon_push::send::SendError;
+    match e {
+        SendError::Refused(_) => "endpoint refused (not public HTTPS)",
+        SendError::WrongTransport => "wrong transport for the kind",
+        SendError::NoApns => "no APNs key",
+        SendError::Gone => "endpoint gone",
+        SendError::Status(..) => "push service error",
+        SendError::Network(_) => "push service unreachable",
+    }
 }
 
 /// Loads the node's DHT key, or makes and saves one.
@@ -194,10 +341,19 @@ async fn main() -> anyhow::Result<()> {
             inbox_cap: args.mailbox_inbox_kb * 1024,
             deposits_per_minute: args.mailbox_rate,
             mail_expiry: Duration::from_secs(args.mailbox_expiry_days * 86_400),
-            member_code: args.mailbox_code.map(String::into_bytes),
+            member_code: args.mailbox_code.clone().map(String::into_bytes),
             ..MailboxLimits::default()
         })))
     });
+    if let (Some(m), true) = (&mailbox, args.mailbox_push) {
+        let identity = load_push_identity(&args.mailbox_push_key)?;
+        let sender = push_sender(&args)?;
+        m.lock().unwrap().enable_push(identity.public().identity_key, sender.has_apns());
+        let key: String = identity.public().identity_key.iter().map(|b| format!("{b:02x}")).collect();
+        let apple = if sender.has_apns() { "UnifiedPush and APNs" } else { "UnifiedPush" };
+        println!("\nPush wake-ups on ({apple}). Node push key {key}");
+        spawn_push_loop(m.clone(), identity, sender);
+    }
     let sfu = args.sfu.then(|| {
         Arc::new(Mutex::new(Sfu::new(SfuLimits {
             max_rooms: args.sfu_max_rooms,
@@ -264,7 +420,32 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let federation = if args.federate {
+        let key = antiphon_crypto::federation::PeerKey::from_bytes(load_or_create_hop_key(&args.peer_key)?.to_bytes());
+        let mut named = Vec::new();
+        for p in &args.peers {
+            let Some((host, pin)) = federation::parse_peer(p) else { anyhow::bail!("--peer {p}: expected host:port or host:port#key") };
+            let found = tokio::net::lookup_host(host.as_str()).await?.next();
+            match found {
+                Some(a) => named.push((a, pin)),
+                None => anyhow::bail!("{host} did not resolve"),
+            }
+        }
+        let limits = FedLimits {
+            max_peers: args.federate_max_peers,
+            max_bridges: args.federate_max_bridges,
+            allow_private: args.federate_allow_private,
+            ..FedLimits::default()
+        };
+        Some(Arc::new(Mutex::new(Federation::new(key, limits, &named, std::time::Instant::now()))))
+    } else {
+        None
+    };
     println!("antiphon-relay listening on {}\n\n{COMMITMENT}", socket.local_addr()?);
+    if let Some(f) = &federation {
+        let key = federation::encode_hex(&f.lock().unwrap().public());
+        println!("\nFederating with other relays. Peer key {key}\nOther relays can pin it with --peer <this address>#{key}");
+    }
     if let Some(h) = &hops {
         let key: String = h.lock().unwrap().public_key().iter().map(|b| format!("{b:02x}")).collect();
         println!("\nHops on: carrying anonymity circuits. Hop key {key}");
@@ -329,6 +510,7 @@ async fn main() -> anyhow::Result<()> {
         let sfu = sfu.clone();
         let hops = hops.clone();
         let dht_node = dht_node.clone();
+        let federation = federation.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(secs.max(1)));
             loop {
@@ -362,12 +544,16 @@ async fn main() -> anyhow::Result<()> {
                     let s = h.lock().unwrap().stats();
                     println!("hops circuits={} exits={} cells={} refused={}", s.circuits, s.exits, s.cells, s.refused);
                 }
+                if let Some(f) = &federation {
+                    let s = f.lock().unwrap().stats();
+                    println!("federation peers={} candidates={} bridges={} bad_proofs={}", s.peers, s.candidates, s.bridges, s.bad_proofs);
+                }
             }
         });
     }
 
     tokio::select! {
-        result = run_node_full(socket, relay, mailbox, files.clone(), sfu, hops, dht_node) => result?,
+        result = run_node_with_federation(socket, relay, mailbox, files.clone(), sfu, hops, dht_node, federation) => result?,
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())

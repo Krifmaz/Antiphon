@@ -405,6 +405,10 @@ dependencies = [
 name = "antiphon"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "accesskit_macos",
+ "accesskit_unix",
+ "accesskit_windows",
  "antiphon-audio",
  "antiphon-client",
  "antiphon-crypto",
@@ -430,7 +434,9 @@ dependencies = [
  "antiphon-mobile",
  "jni 0.21.1",
  "log",
+ "ndk",
  "ndk-context",
+ "ndk-sys",
  "winit",
 ]
 
@@ -440,6 +446,10 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "cpal",
+ "jni 0.21.1",
+ "libc",
+ "ndk-context",
+ "ndk-sys",
  "nnnoiseless",
  "ringbuf",
  "serde",
@@ -513,6 +523,7 @@ dependencies = [
  "antiphon-captions",
  "antiphon-crypto",
  "antiphon-net",
+ "antiphon-push",
  "antiphon-relay",
  "antiphon-video",
  "anyhow",
@@ -537,6 +548,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "apple-native-keyring-store",
+ "argon2",
  "bip39",
  "chacha20poly1305 0.11.0",
  "curve25519-dalek 5.0.0",
@@ -565,13 +577,16 @@ name = "antiphon-ios"
 version = "0.1.0"
 dependencies = [
  "antiphon-mobile",
- "base64",
+ "base64 0.22.1",
  "block2 0.6.2",
  "dispatch2",
  "log",
  "objc2 0.6.4",
+ "objc2-av-foundation",
  "objc2-avf-audio",
  "objc2-call-kit",
+ "objc2-core-media",
+ "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-push-kit",
  "objc2-ui-kit 0.3.2",
@@ -587,6 +602,7 @@ dependencies = [
  "antiphon-audio",
  "antiphon-crypto",
  "antiphon-net",
+ "antiphon-push",
  "antiphon-ui",
  "antiphon-video",
  "anyhow",
@@ -602,6 +618,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "winit",
+ "zeroize",
 ]
 
 [[package]]
@@ -610,12 +627,13 @@ version = "0.1.0"
 dependencies = [
  "antiphon-crypto",
  "antiphon-protocol",
- "base64",
+ "base64 0.22.1",
  "blake2",
  "chacha20poly1305 0.11.0",
  "ed25519-dalek 3.0.0",
  "getrandom 0.4.3",
  "hkdf 0.13.0",
+ "mousiki",
  "sha2 0.11.0",
  "socket2",
  "thiserror 2.0.20",
@@ -633,12 +651,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "antiphon-push"
+version = "0.1.0"
+dependencies = [
+ "antiphon-crypto",
+ "base64 0.22.1",
+ "bytes",
+ "h2",
+ "http",
+ "p256",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "ureq",
+ "webpki-roots",
+]
+
+[[package]]
 name = "antiphon-relay"
 version = "0.1.0"
 dependencies = [
  "antiphon-crypto",
  "antiphon-net",
  "antiphon-protocol",
+ "antiphon-push",
  "anyhow",
  "clap",
  "getrandom 0.4.3",
@@ -652,8 +689,11 @@ dependencies = [
 name = "antiphon-ui"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "iced_core",
  "iced_widget",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -714,6 +754,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "argon2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.3.0",
+ "password-hash",
 ]
 
 [[package]]
@@ -1004,6 +1056,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -1975,6 +2033,7 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "pipewire",
  "web-sys",
  "windows 0.62.2",
  "windows-core 0.62.2",
@@ -3616,6 +3675,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3887,6 +3965,22 @@ name = "htmlparser"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48ce8546b993eaf241d69ded33b1be6d205dd9857ec879d9d18bd05d3676e144"
+
+[[package]]
+name = "http"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
+dependencies = [
+ "bytes",
+ "itoa",
+]
+
+[[package]]
+name = "httparse"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hybrid-array"
@@ -5665,6 +5759,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mousiki"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "025feef2fc01604ee1fac4ae254b33480574b16210945d0096d665009ba9c666"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if 1.0.4",
+ "libm",
+ "log",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6144,6 +6250,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-image 0.3.2",
+ "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-image-io",
@@ -6856,6 +6963,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
+dependencies = [
+ "phc",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6893,6 +7009,16 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "phc"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
+dependencies = [
+ "base64ct",
+ "ctutils",
+]
 
 [[package]]
 name = "phf"
@@ -7791,6 +7917,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ring"
+version = "0.17.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+dependencies = [
+ "cc",
+ "cfg-if 1.0.4",
+ "getrandom 0.2.17",
+ "libc",
+ "untrusted",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "ringbuf"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7900,6 +8040,41 @@ dependencies = [
  "libc",
  "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rustls"
+version = "0.23.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
+dependencies = [
+ "log",
+ "once_cell",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "rustls-pki-types"
+version = "1.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "rustls-webpki"
+version = "0.103.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "untrusted",
 ]
 
 [[package]]
@@ -9026,6 +9201,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",
@@ -9044,6 +9220,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "tokio-rustls"
+version = "0.26.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
+dependencies = [
+ "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "libc",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -9296,10 +9496,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "untrusted"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+
+[[package]]
 name = "unty"
 version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
+name = "ureq"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cde93ff05758a36a851a398a772b0b79a82fbe3c186a46f2696baaeaf84c966b"
+dependencies = [
+ "base64 0.23.1",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841583fc36089d7d59419568ae157f43a5a03a2e5a81ba87c77d1596ef46e922"
+dependencies = [
+ "base64 0.23.1",
+ "http",
+ "httparse",
+ "log",
+]
 
 [[package]]
 name = "url"
@@ -9319,7 +9553,7 @@ version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80be9b06fbae3b8b303400ab20778c80bbaf338f563afe567cf3c9eea17b47ef"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "data-url",
  "flate2",
  "fontdb",
@@ -9346,7 +9580,7 @@ version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d46cf96c5f498d36b7a9693bc6a7075c0bb9303189d61b2249b0dc3d309c07de"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "data-url",
  "flate2",
  "fontdb",
@@ -9367,6 +9601,12 @@ dependencies = [
  "unicode-vo",
  "xmlwriter",
 ]
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"
@@ -9736,6 +9976,15 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "url",
  "web-sys",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

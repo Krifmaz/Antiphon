@@ -4,7 +4,7 @@
 //! and two transfers would only make both slower while the voice suffers
 //! -- so everything else waits here, in an order the user can change.
 //! Generic over what is queued so the ordering rules are testable without
-//! a phone, a peer or a file.
+//! a phone, a peer or a file. The desktop and the phone both use it.
 
 /// A queued item and the id the interface names it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +40,18 @@ impl<T> Default for TransferQueue<T> {
 }
 
 impl<T> TransferQueue<T> {
+    /// A queue rebuilt from what was saved, front first, each with whether
+    /// it was held. Ids are handed out afresh: they name rows on screen and
+    /// are never saved, so nothing outside this run can hold an old one.
+    pub fn restore(saved: impl IntoIterator<Item = (T, bool)>) -> Self {
+        let mut queue = Self::default();
+        for (item, held) in saved {
+            let id = queue.push(item);
+            queue.set_held(id, held);
+        }
+        queue
+    }
+
     /// Adds to the back and returns the new entry's id.
     pub fn push(&mut self, item: T) -> u64 {
         let id = self.next_id;
@@ -180,6 +192,17 @@ mod tests {
         let next = queue.take_next(|item| item.ends_with("bob"));
         assert_eq!(next.map(|e| e.item), Some("for-bob"));
         assert_eq!(names(&queue), ["for-alice"]);
+    }
+
+    #[test]
+    fn a_restored_queue_keeps_order_and_holds() {
+        let mut queue = TransferQueue::restore([("a", false), ("b", true), ("c", false)]);
+        assert_eq!(names(&queue), ["a", "b", "c"]);
+        assert_eq!(queue.iter().map(|e| e.held).collect::<Vec<_>>(), [false, true, false]);
+        assert_eq!(queue.take_next(|_| true).map(|e| e.item), Some("a"));
+        assert_eq!(queue.take_next(|_| true).map(|e| e.item), Some("c"), "the held one is skipped");
+        let fresh = queue.push("d");
+        assert!(queue.iter().filter(|e| e.id == fresh).count() == 1, "new ids do not collide");
     }
 
     #[test]

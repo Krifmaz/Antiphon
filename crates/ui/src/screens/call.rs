@@ -7,7 +7,7 @@
 //! (below it on a phone) that can be clicked to swap in.
 
 use iced_core::{Alignment, ContentFit, Length};
-use iced_widget::{button, column, container, image, mouse_area, row, space, stack};
+use iced_widget::{column, container, image, mouse_area, row, space, stack};
 
 use super::{clock, fill};
 use crate::icons::{icon, Icon};
@@ -151,6 +151,11 @@ fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
             size,
         ));
     }
+    // A phone has a camera on each side. The switch shows only while the
+    // camera is on, so it does not crowd the row on a voice call.
+    if c.camera_on && m.phone.is_some() {
+        r = r.push(round_btn(Icon::Refresh, "Switch camera", Btn::Round, Some(Msg::Do(Action::FlipCamera)), size));
+    }
     if c.can_share {
         r = r.push(round_btn(
             if c.sharing { Icon::ScreenOff } else { Icon::Screen },
@@ -173,7 +178,7 @@ fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
         r = r.push(round_btn(Icon::Paperclip, "Send a file", Btn::Round, Some(Msg::Do(Action::SendFile)), size));
     }
     if !compact {
-        let vol = row![icon(Icon::Volume, 16.0, p.muted), volume_slider(c.peer_volume_db, Length::Fixed(110.0), {
+        let vol = row![icon(Icon::Volume, 16.0, p.muted), volume_slider(&format!("Volume for {}", c.peer_name), c.peer_volume_db, Length::Fixed(110.0), {
             let peer = c.peer.clone();
             move |db| Msg::Do(match &peer {
                 Some(id) => Action::Volume(id.clone(), db),
@@ -232,10 +237,8 @@ fn video_area<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> Option<El<'a, Msg>
         .filter(|t| t.key != main.key)
         .map(|t| {
             let (w, h) = if compact { (112.0, 63.0) } else { (176.0, 99.0) };
-            button(picture(t, Length::Fixed(w), Length::Fixed(h), 8.0))
+            pressable(picture(t, Length::Fixed(w), Length::Fixed(h), 8.0), crate::a11y::Role::Button, &format!("Show {} large", t.label), false, Btn::Ghost, Msg::FocusVideo(t.key.clone()))
                 .padding(0)
-                .style(theme::btn(Btn::Ghost))
-                .on_press(Msg::FocusVideo(t.key.clone()))
                 .into()
         })
         .collect();

@@ -11,7 +11,8 @@
 //! received by a Java class; each hands what it gets to [`native`].
 //!
 //! Audio needs nothing here: cpal's Android backend is AAudio, through the
-//! `ndk` crate, with no C++ runtime to ship.
+//! `ndk` crate, with no C++ runtime to ship. The camera, for video calls,
+//! is the NDK's own camera API too ([`camera`]), so it needs no Java.
 //!
 //! Everything is `cfg(target_os = "android")`: on a desktop this crate is
 //! empty, so `cargo build --workspace` is unaffected.
@@ -19,6 +20,7 @@
 #![cfg(target_os = "android")]
 #![warn(missing_docs, clippy::missing_docs_in_private_items)]
 
+mod camera;
 mod native;
 mod platform;
 

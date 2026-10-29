@@ -8,22 +8,27 @@ use iced_core::{Alignment, Background, Border, Color, Length, Padding};
 use iced_widget::text::IntoFragment;
 use iced_widget::{button, column, container, mouse_area, opaque, row, space, stack, text, tooltip, Text};
 
+use crate::a11y::{self, Role, Spec};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Badge, Btn};
 use crate::El;
 
 /// Text with advanced shaping, so names in any script render right.
 pub fn t<'a>(s: impl IntoFragment<'a>) -> Text<'a, iced_core::Theme, iced_widget::Renderer> {
-    text(s).shaping(Shaping::Advanced).font(theme::FONT).size(14)
+    text(s).shaping(Shaping::Advanced).font(theme::font()).size(14)
 }
 
 /// A screen title: 24 px bold.
 pub fn h1<'a>(s: impl IntoFragment<'a>) -> Text<'a, iced_core::Theme, iced_widget::Renderer> {
+    let s = s.into_fragment();
+    let _ = Spec::new(Role::Heading, s.as_ref()).level(1).add();
     t(s).size(24).font(theme::bold())
 }
 
 /// A section title: 17 px bold.
 pub fn h2<'a>(s: impl IntoFragment<'a>) -> Text<'a, iced_core::Theme, iced_widget::Renderer> {
+    let s = s.into_fragment();
+    let _ = Spec::new(Role::Heading, s.as_ref()).level(2).add();
     t(s).size(17).font(theme::bold())
 }
 
@@ -47,57 +52,95 @@ pub fn label<'a>(s: &str) -> Text<'a, iced_core::Theme, iced_widget::Renderer> {
     t(s.to_uppercase()).size(11).font(theme::bold()).color(theme::look().faint)
 }
 
+/// Registers a button that reads as `label` and presses `on` (see
+/// [`a11y`]); a disabled one (`on` None) is skipped by Tab and readers.
+/// True when it has keyboard focus.
+pub fn reg_button<M: Clone + 'static>(role: Role, label: &str, on: Option<&M>) -> bool {
+    on.is_some() && Spec::new(role, label).on(on).add()
+}
+
+/// `style` with the keyboard focus ring drawn as the button's border when
+/// `focused`, so a focused button shows it without changing size.
+pub fn focus_style(
+    style: impl Fn(&iced_core::Theme, button::Status) -> button::Style,
+    focused: bool,
+) -> impl Fn(&iced_core::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut s = style(theme, status);
+        if focused {
+            s.border.color = theme::look().accent2;
+            s.border.width = 2.0;
+        }
+        s
+    }
+}
+
 /// A button with a text label. `on` None draws it disabled.
-pub fn btn<'a, M: Clone + 'a>(label: impl IntoFragment<'a>, kind: Btn, on: Option<M>) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
+pub fn btn<'a, M: Clone + 'static>(label: impl IntoFragment<'a>, kind: Btn, on: Option<M>) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
+    let label = label.into_fragment();
+    let focused = reg_button(Role::Button, &label, on.as_ref());
     button(t(label).size(14).font(theme::semibold()))
         .padding([9, 16])
-        .style(theme::btn(kind))
+        .style(focus_style(theme::btn(kind), focused))
         .on_press_maybe(on)
 }
 
 /// A smaller button.
-pub fn btn_sm<'a, M: Clone + 'a>(label: impl IntoFragment<'a>, kind: Btn, on: Option<M>) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
+pub fn btn_sm<'a, M: Clone + 'static>(label: impl IntoFragment<'a>, kind: Btn, on: Option<M>) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
+    let label = label.into_fragment();
+    let focused = reg_button(Role::Button, &label, on.as_ref());
     button(t(label).size(13).font(theme::semibold()))
         .padding([6, 12])
-        .style(theme::btn(kind))
+        .style(focus_style(theme::btn(kind), focused))
         .on_press_maybe(on)
 }
 
 /// A button with an icon before its label.
-pub fn btn_icon<'a, M: Clone + 'a>(
+pub fn btn_icon<'a, M: Clone + 'static>(
     i: Icon,
     label: impl IntoFragment<'a>,
     kind: Btn,
     on: Option<M>,
 ) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
+    let label = label.into_fragment();
+    let focused = reg_button(Role::Button, &label, on.as_ref());
     let color = theme::btn_fg(kind, false);
     let color = if on.is_some() { color } else { color.scale_alpha(0.45) };
     button(row![icon(i, 16.0, color), t(label).size(14).font(theme::semibold())].spacing(8).align_y(Alignment::Center))
         .padding([9, 14])
-        .style(theme::btn(kind))
+        .style(focus_style(theme::btn(kind), focused))
         .on_press_maybe(on)
 }
 
-/// A square icon button with a tooltip. `on` None draws it disabled.
-pub fn icon_btn<'a, M: Clone + 'a>(i: Icon, tip: &'a str, on: Option<M>) -> El<'a, M> {
+/// A square icon button with a tooltip. `on` None draws it disabled. The
+/// tooltip is also its name for the keyboard and screen readers.
+pub fn icon_btn<'a, M: Clone + 'static>(i: Icon, tip: &'a str, on: Option<M>) -> El<'a, M> {
     icon_btn_kind(i, tip, Btn::Icon, on)
 }
 
 /// [`icon_btn`] in a chosen kind (`IconOn` for a switched-on control).
-pub fn icon_btn_kind<'a, M: Clone + 'a>(i: Icon, tip: &'a str, kind: Btn, on: Option<M>) -> El<'a, M> {
+pub fn icon_btn_kind<'a, M: Clone + 'static>(i: Icon, tip: &'a str, kind: Btn, on: Option<M>) -> El<'a, M> {
+    icon_btn_named(i, tip, tip, kind, on)
+}
+
+/// [`icon_btn_kind`] with a name for the keyboard and screen readers that
+/// differs from the tooltip (an empty tooltip shows none).
+pub fn icon_btn_named<'a, M: Clone + 'static>(i: Icon, name: &str, tip: &'a str, kind: Btn, on: Option<M>) -> El<'a, M> {
     let p = theme::look();
     let color = match kind {
         Btn::IconOn => p.err,
         _ if on.is_some() => p.muted,
         _ => p.faint.scale_alpha(0.6),
     };
-    let b = button(icon(i, 18.0, color)).padding(7).style(theme::btn(kind)).on_press_maybe(on);
+    let focused = reg_button(Role::Button, name, on.as_ref());
+    let b = button(icon(i, 18.0, color)).padding(7).style(focus_style(theme::btn(kind), focused)).on_press_maybe(on);
     with_tip(b, tip, tooltip::Position::Top)
 }
 
 /// A round call control: a big icon in a circle.
-pub fn round_btn<'a, M: Clone + 'a>(i: Icon, tip: &'a str, kind: Btn, on: Option<M>, size: f32) -> El<'a, M> {
+pub fn round_btn<'a, M: Clone + 'static>(i: Icon, tip: &'a str, kind: Btn, on: Option<M>, size: f32) -> El<'a, M> {
     let p = theme::look();
+    let focused = reg_button(Role::Button, tip, on.as_ref());
     let color = match kind {
         Btn::RoundOn => p.bg,
         Btn::DangerSolid | Btn::Ok => theme::hex("#16161f"),
@@ -107,10 +150,7 @@ pub fn round_btn<'a, M: Clone + 'a>(i: Icon, tip: &'a str, kind: Btn, on: Option
         .width(size)
         .height(size)
         .padding(0)
-        .style(theme::btn(match kind {
-            Btn::DangerSolid | Btn::Ok => kind,
-            _ => kind,
-        }))
+        .style(focus_style(theme::btn(kind), focused))
         .on_press_maybe(on);
     let b: El<'a, M> = if matches!(kind, Btn::DangerSolid | Btn::Ok) {
         // A filled control is round too.
@@ -199,7 +239,12 @@ pub fn initial(name: &str) -> String {
 
 /// A round letter avatar in the person's own colour.
 pub fn avatar<'a, M: 'a>(name: &str, seed: &str, size: f32) -> El<'a, M> {
-    let color = theme::avatar_color(seed);
+    // Their picture when they have one, in a circle; otherwise their
+    // initial on their chosen colour (or one picked from their key).
+    if let Some(picture) = crate::avatars::picture(seed) {
+        return iced_widget::image(picture).width(size).height(size).border_radius(size / 2.0).into();
+    }
+    let color = crate::avatars::color(seed).unwrap_or_else(|| theme::avatar_color(seed));
     container(t(initial(name)).size(size * 0.42).font(theme::bold()).color(theme::hex("#16161f")))
         .width(size)
         .height(size)
@@ -248,17 +293,68 @@ pub fn setting<'a, M: 'a>(name: &'a str, about: Option<&'a str>, control: impl I
     row![words, control.into()].spacing(16).align_y(Alignment::Center).width(Length::Fill).into()
 }
 
-/// A switch.
-pub fn switch<'a, M: Clone + 'a>(on: bool, msg: impl Fn(bool) -> M + 'a) -> El<'a, M> {
-    iced_widget::toggler(on).on_toggle(msg).size(20).style(theme::switch).into()
+/// A switch named `name` for the keyboard and screen readers (the words
+/// beside it are drawn by the caller, usually [`setting`]).
+pub fn switch<'a, M: Clone + 'static>(name: &str, on: bool, msg: impl Fn(bool) -> M + 'a) -> El<'a, M> {
+    let flip = msg(!on);
+    let focused = Spec::new(Role::Toggle, name).checked(on).on(Some(&flip)).add();
+    a11y::ring(iced_widget::toggler(on).on_toggle(msg).size(20).style(theme::switch), focused, 99.0)
+}
+
+/// A text box named `name` for the keyboard and screen readers, with the
+/// widget id `id` so keyboard focus can put the typing cursor in it.
+pub fn input<'a, M: Clone + 'static>(name: &str, id: &'static str, placeholder: &str, value: &str) -> iced_widget::TextInput<'a, M, iced_core::Theme, iced_widget::Renderer> {
+    let _ = Spec::new(Role::Input, name).value(value).input(id).add();
+    iced_widget::text_input(placeholder, value).id(id).font(theme::font()).style(theme::input)
+}
+
+/// A password box named `name`: like [`input`], but what is typed is
+/// hidden and never handed to a screen reader as the box's value.
+pub fn secret_input<'a, M: Clone + 'static>(name: &str, id: &'static str, placeholder: &str, value: &str) -> iced_widget::TextInput<'a, M, iced_core::Theme, iced_widget::Renderer> {
+    let _ = Spec::new(Role::Input, name).input(id).add();
+    iced_widget::text_input(placeholder, value).id(id).secure(true).font(theme::font()).style(theme::input)
+}
+
+/// A drop-down named `name`: pick one of `options`. The arrow keys step
+/// to the next or previous option without opening it.
+pub fn choice<'a, M: Clone + 'static>(
+    name: &str,
+    options: &'a [String],
+    selected: Option<String>,
+    placeholder: &'a str,
+    on: impl Fn(String) -> M + 'a,
+) -> iced_widget::PickList<'a, String, &'a [String], String, M, iced_core::Theme, iced_widget::Renderer> {
+    let at = selected.as_ref().and_then(|s| options.iter().position(|o| o == s));
+    let pick = |i: Option<usize>| i.and_then(|i| options.get(i)).map(|o| on(o.clone()));
+    let next = pick(Some(at.map_or(0, |i| i + 1)));
+    let prev = pick(at.and_then(|i| i.checked_sub(1)));
+    let value = selected.clone().unwrap_or_else(|| placeholder.to_string());
+    let focused = Spec::new(Role::Choice, name).value(value).steps(next.as_ref(), prev.as_ref()).add();
+    let style = move |th: &iced_core::Theme, st| {
+        let mut s = theme::pick(th, st);
+        if focused {
+            s.border.color = theme::look().accent2;
+            s.border.width = 2.0;
+        }
+        s
+    };
+    iced_widget::pick_list(options, selected, on).placeholder(placeholder).font(theme::font()).style(style).menu_style(theme::pick_menu)
+}
+
+/// A button around any content, named `name` for the keyboard and screen
+/// readers, in the style of `kind`. For rows, tiles and navigation.
+pub fn pressable<'a, M: Clone + 'static>(content: impl Into<El<'a, M>>, role: Role, name: &str, selected: bool, kind: Btn, on: M) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
+    let focused = Spec::new(role, name).selected(selected).on(Some(&on)).add();
+    button(content).style(focus_style(theme::btn(kind), focused)).on_press(on)
 }
 
 /// A row of tabs; `on` is the index of the selected one.
-pub fn tabs<'a, M: Clone + 'a>(items: Vec<(&'a str, M)>, on: usize) -> El<'a, M> {
+pub fn tabs<'a, M: Clone + 'static>(items: Vec<(&'a str, M)>, on: usize) -> El<'a, M> {
     let mut r = row![].spacing(4);
     for (i, (label, msg)) in items.into_iter().enumerate() {
         let kind = if i == on { Btn::TabOn } else { Btn::Tab };
-        r = r.push(button(t(label).size(13).font(theme::semibold())).padding([6, 14]).style(theme::btn(kind)).on_press(msg));
+        let focused = Spec::new(Role::Tab, label).selected(i == on).on(Some(&msg)).add();
+        r = r.push(button(t(label).size(13).font(theme::semibold())).padding([6, 14]).style(focus_style(theme::btn(kind), focused)).on_press(msg));
     }
     container(r).padding(4).style(theme::tabs_frame).into()
 }
@@ -266,7 +362,7 @@ pub fn tabs<'a, M: Clone + 'a>(items: Vec<(&'a str, M)>, on: usize) -> El<'a, M>
 /// A dialog over a dimmed backdrop. `on_close` comes from the X and from
 /// a click on the backdrop. `rise` (0..1) slides the card up into place
 /// and fades the backdrop in as it opens.
-pub fn modal<'a, M: Clone + 'a>(
+pub fn modal<'a, M: Clone + 'static>(
     title: &'a str,
     body: impl Into<El<'a, M>>,
     footer: Option<El<'a, M>>,
@@ -274,7 +370,7 @@ pub fn modal<'a, M: Clone + 'a>(
     on_close: M,
     rise: f32,
 ) -> El<'a, M> {
-    let head = row![h2(title).width(Length::Fill), icon_btn(Icon::X, "", Some(on_close.clone()))].align_y(Alignment::Center).spacing(10);
+    let head = row![h2(title).width(Length::Fill), icon_btn_named(Icon::X, "Close", "", Btn::Icon, Some(on_close.clone()))].align_y(Alignment::Center).spacing(10);
     let mut inner = column![container(head).padding(pad(18.0, 18.0, 6.0, 24.0)), container(body).padding(pad(10.0, 24.0, 22.0, 24.0))];
     if let Some(f) = footer {
         inner = inner.push(divider());
@@ -301,8 +397,9 @@ pub fn modal<'a, M: Clone + 'a>(
 }
 
 /// A square of colour, for the accent picker.
-pub fn swatch<'a, M: Clone + 'a>(a: Color, b: Color, selected: bool, tip: &'a str, on: M) -> El<'a, M> {
+pub fn swatch<'a, M: Clone + 'static>(a: Color, b: Color, selected: bool, tip: &'a str, on: M) -> El<'a, M> {
     let p = theme::look();
+    let focused = Spec::new(Role::Tab, tip).selected(selected).on(Some(&on)).add();
     let fill = container(space()).width(28).height(28).style(move |_| container::Style {
         background: Some(Background::Gradient(iced_core::Gradient::Linear(
             iced_core::gradient::Linear::new(iced_core::Radians(2.356)).add_stop(0.0, a).add_stop(1.0, b),
@@ -311,6 +408,7 @@ pub fn swatch<'a, M: Clone + 'a>(a: Color, b: Color, selected: bool, tip: &'a st
         ..container::Style::default()
     });
     let ring = if selected { p.text } else { Color::TRANSPARENT };
+    let ring = if focused { p.accent2 } else { ring };
     let b = button(container(fill).padding(3).style(theme::ring(ring, 2.0))).padding(0).style(theme::btn(Btn::Ghost)).on_press(on);
     with_tip(b, tip, tooltip::Position::Top)
 }
@@ -346,10 +444,15 @@ pub fn percent_to_db(percent: f32) -> f32 {
 }
 
 /// A volume slider on the percentage scale, with its value beside it.
-pub fn volume_slider<'a, M: Clone + 'a>(db: f32, width: iced_core::Length, on: impl Fn(f32) -> M + 'a) -> El<'a, M> {
+/// Named `name` for the keyboard and screen readers; the arrow keys step it
+/// by 5%.
+pub fn volume_slider<'a, M: Clone + 'static>(name: &str, db: f32, width: iced_core::Length, on: impl Fn(f32) -> M + 'a) -> El<'a, M> {
     let pct = db_to_percent(db).round();
+    let up = on(percent_to_db((pct + 5.0).min(200.0)));
+    let down = on(percent_to_db((pct - 5.0).max(0.0)));
+    let focused = Spec::new(Role::Slider, name).value(format!("{pct:.0}%")).steps(Some(&up), Some(&down)).add();
     iced_widget::row![
-        iced_widget::slider(0.0..=200.0, pct, move |v| on(percent_to_db(v))).step(5.0_f32).width(width).style(theme::slider_style),
+        a11y::ring(iced_widget::slider(0.0..=200.0, pct, move |v| on(percent_to_db(v))).step(5.0_f32).width(width).style(theme::slider_style), focused, 8.0),
         faint(format!("{pct:.0}%")).size(12).width(40),
     ]
     .spacing(10)

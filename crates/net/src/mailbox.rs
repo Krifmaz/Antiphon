@@ -43,6 +43,8 @@ const OP_DEPOSIT: u8 = 0x02;
 const OP_FETCH: u8 = 0x03;
 const OP_ACK: u8 = 0x04;
 const OP_STATUS: u8 = 0x05;
+const OP_REGISTER_PUSH: u8 = 0x06;
+const OP_WAKE: u8 = 0x07;
 const OP_REGISTERED: u8 = 0x81;
 const OP_DEPOSITED: u8 = 0x82;
 const OP_MAIL: u8 = 0x83;
@@ -50,6 +52,19 @@ const OP_FETCH_DONE: u8 = 0x84;
 const OP_ACKED: u8 = 0x85;
 const OP_REFUSED: u8 = 0x86;
 const OP_STATUS_REPLY: u8 = 0x87;
+const OP_PUSH_REGISTERED: u8 = 0x88;
+const OP_WOKEN: u8 = 0x89;
+
+/// The size of a sealed push wake-up ([`antiphon_crypto::push::SEALED_LEN`]),
+/// repeated here because this crate does not otherwise need the crypto
+/// crate's push module. The relay's tests check the two agree.
+pub const WAKE_LEN: usize = 368;
+/// The longest push endpoint a node takes, the same limit a route record
+/// puts on one address.
+pub const MAX_ENDPOINT: usize = 256;
+/// The longest members code a [`Message::Wake`] may carry, as for
+/// [`Message::Register`].
+const MAX_CODE: usize = 64;
 
 /// Why a node said no. Specific, because each one asks the user for a
 /// different next step.
@@ -68,6 +83,9 @@ pub enum Refusal {
     WrongSecret,
     /// The operator hasn't switched mailbox service on.
     Disabled,
+    /// This node does not send push wake-ups (no push sender configured,
+    /// or none for that kind of endpoint), or refused this one.
+    NoPush,
 }
 
 impl Refusal {
@@ -80,6 +98,7 @@ impl Refusal {
             Refusal::TooBig => 5,
             Refusal::WrongSecret => 6,
             Refusal::Disabled => 7,
+            Refusal::NoPush => 8,
         }
     }
 
@@ -92,6 +111,7 @@ impl Refusal {
             5 => Refusal::TooBig,
             6 => Refusal::WrongSecret,
             7 => Refusal::Disabled,
+            8 => Refusal::NoPush,
             _ => return None,
         })
     }
@@ -105,6 +125,7 @@ impl Refusal {
             Refusal::TooBig => "the message is too long for a mailbox",
             Refusal::WrongSecret => "this inbox belongs to someone else",
             Refusal::Disabled => "this node doesn't hold mail",
+            Refusal::NoPush => "this node doesn't send that push wake-up",
         }
     }
 }
@@ -134,6 +155,23 @@ pub enum Message {
     Acked { id: MailId },
     Refused(Refusal),
     StatusReply(InboxStatus),
+    /// The inbox owner asks the node to wake their phone when mail
+    /// arrives: post a `Message` wake-up, sealed to `push_key`, to
+    /// `endpoint` (a push endpoint's text form). An empty endpoint removes
+    /// it. Authorised by the fetch secret, like [`Message::Status`].
+    RegisterPush { label: Label, secret: [u8; 32], push_key: [u8; 32], endpoint: String },
+    /// Pass an already sealed wake-up on to `endpoint`. For a sender that
+    /// cannot post it itself (an APNs target needs the operator's Apple
+    /// key) or would rather the push service saw the node's address than
+    /// its own. `code` is the members code on a community node, empty on
+    /// an open one.
+    Wake { code: Vec<u8>, endpoint: String, sealed: Vec<u8> },
+    /// The node will wake this inbox's owner. `node_key` is the identity
+    /// key the node signs those wake-ups with, so the phone can tell them
+    /// from a stranger's and accept them as mail notices only.
+    PushRegistered { node_key: [u8; 32] },
+    /// The node passed a [`Message::Wake`] on to the push service.
+    Woken,
 }
 
 impl Message {
@@ -193,6 +231,25 @@ impl Message {
                 out.push(OP_REFUSED);
                 out.push(r.code());
             }
+            Message::RegisterPush { label, secret, push_key, endpoint } => {
+                out.push(OP_REGISTER_PUSH);
+                out.extend_from_slice(label);
+                out.extend_from_slice(secret);
+                out.extend_from_slice(push_key);
+                out.extend_from_slice(endpoint.as_bytes());
+            }
+            Message::Wake { code, endpoint, sealed } => {
+                out.push(OP_WAKE);
+                out.push(code.len() as u8);
+                out.extend_from_slice(code);
+                out.extend_from_slice(sealed);
+                out.extend_from_slice(endpoint.as_bytes());
+            }
+            Message::PushRegistered { node_key } => {
+                out.push(OP_PUSH_REGISTERED);
+                out.extend_from_slice(node_key);
+            }
+            Message::Woken => out.push(OP_WOKEN),
             Message::StatusReply(s) => {
                 out.push(OP_STATUS_REPLY);
                 out.extend_from_slice(&s.held.to_be_bytes());
@@ -234,6 +291,26 @@ impl Message {
             OP_FETCH_DONE => Message::FetchDone { count: u16::from_be_bytes(b.try_into().ok()?) },
             OP_ACKED => Message::Acked { id: arr16(b)? },
             OP_REFUSED if b.len() == 1 => Message::Refused(Refusal::from_code(b[0])?),
+            OP_REGISTER_PUSH if b.len() >= 96 && b.len() - 96 <= MAX_ENDPOINT => Message::RegisterPush {
+                label: arr32(&b[..32])?,
+                secret: arr32(&b[32..64])?,
+                push_key: arr32(&b[64..96])?,
+                endpoint: String::from_utf8(b[96..].to_vec()).ok()?,
+            },
+            OP_WAKE if !b.is_empty() => {
+                let code_len = b[0] as usize;
+                let rest = &b[1..];
+                if code_len > MAX_CODE || rest.len() < code_len + WAKE_LEN || rest.len() - code_len - WAKE_LEN > MAX_ENDPOINT {
+                    return None;
+                }
+                Message::Wake {
+                    code: rest[..code_len].to_vec(),
+                    sealed: rest[code_len..code_len + WAKE_LEN].to_vec(),
+                    endpoint: String::from_utf8(rest[code_len + WAKE_LEN..].to_vec()).ok()?,
+                }
+            }
+            OP_PUSH_REGISTERED => Message::PushRegistered { node_key: arr32(b)? },
+            OP_WOKEN if b.is_empty() => Message::Woken,
             OP_STATUS_REPLY if b.len() == 20 => Message::StatusReply(InboxStatus {
                 held: u32::from_be_bytes(b[..4].try_into().ok()?),
                 held_bytes: u64::from_be_bytes(b[4..12].try_into().ok()?),
@@ -376,6 +453,53 @@ pub async fn status(
     .await
 }
 
+/// Asks a node to wake this inbox's owner when mail arrives, or with an
+/// empty `endpoint` to stop. Returns the key the node will sign its
+/// wake-ups with.
+pub async fn register_push(
+    socket: &impl Datagram,
+    node: SocketAddr,
+    label: Label,
+    secret: [u8; 32],
+    push_key: [u8; 32],
+    endpoint: &str,
+    timeout: Duration,
+) -> Result<[u8; 32], NetError> {
+    if endpoint.len() > MAX_ENDPOINT {
+        return Err(NetError::MailboxRefused(Refusal::TooBig));
+    }
+    let request = Message::RegisterPush { label, secret, push_key, endpoint: endpoint.to_string() };
+    exchange(socket, node, &request, timeout, |m| match m {
+        Message::PushRegistered { node_key } => Some(Ok(node_key)),
+        Message::Refused(r) => Some(Err(NetError::MailboxRefused(r))),
+        _ => None,
+    })
+    .await
+}
+
+/// Asks a node to pass a sealed wake-up on to `endpoint`. Resent until the
+/// node answers, like everything else here; a wake-up delivered twice is
+/// harmless, since the phone drops a repeated id.
+pub async fn forward_wake(
+    socket: &impl Datagram,
+    node: SocketAddr,
+    code: &[u8],
+    endpoint: &str,
+    sealed: &[u8],
+    timeout: Duration,
+) -> Result<(), NetError> {
+    if sealed.len() != WAKE_LEN || endpoint.len() > MAX_ENDPOINT || code.len() > MAX_CODE {
+        return Err(NetError::MailboxRefused(Refusal::TooBig));
+    }
+    let request = Message::Wake { code: code.to_vec(), endpoint: endpoint.to_string(), sealed: sealed.to_vec() };
+    exchange(socket, node, &request, timeout, |m| match m {
+        Message::Woken => Some(Ok(())),
+        Message::Refused(r) => Some(Err(NetError::MailboxRefused(r))),
+        _ => None,
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +520,13 @@ mod tests {
             Message::Acked { id: [9; 16] },
             Message::Refused(Refusal::UnknownLabel),
             Message::StatusReply(InboxStatus { held: 2, held_bytes: 300, cap_bytes: 1 << 20 }),
+            Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: "https://ntfy.sh/upX".into() },
+            Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: String::new() },
+            Message::Wake { code: b"club".to_vec(), endpoint: "apns-voip:abcd".into(), sealed: vec![7; WAKE_LEN] },
+            Message::Wake { code: vec![], endpoint: "https://h/x".into(), sealed: vec![7; WAKE_LEN] },
+            Message::PushRegistered { node_key: [4; 32] },
+            Message::Woken,
+            Message::Refused(Refusal::NoPush),
         ] {
             assert_eq!(Message::decode(&m.encode()), Some(m));
         }

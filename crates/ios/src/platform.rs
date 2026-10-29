@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use antiphon_mobile::camera::CameraRequest;
 use antiphon_mobile::platform::{BackgroundWork, Network, Platform};
 use block2::RcBlock;
 use dispatch2::{run_on_main, DispatchQueue};
@@ -22,7 +23,7 @@ use objc2_user_notifications::{
     UNUserNotificationCenter,
 };
 
-use crate::{audio, background, callkit, files, network, screen};
+use crate::{audio, background, callkit, camera, files, network, screen};
 
 /// Runs `f` on the main thread: now if this is it, later otherwise.
 fn on_main(f: impl FnOnce(MainThreadMarker) + Send + 'static) {
@@ -109,6 +110,14 @@ impl Platform for Ios {
         files::read(handle)
     }
 
+    fn file_size(&self, handle: &str) -> std::io::Result<u64> {
+        files::size(handle)
+    }
+
+    fn read_file_range(&self, handle: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        files::read_range(handle, offset, len)
+    }
+
     /// The app's Documents folder. With `UIFileSharingEnabled` and
     /// `LSSupportsOpeningDocumentsInPlace` in Info.plist, the Files app
     /// shows it under "On My iPhone > Antiphon", which is as close as iOS
@@ -153,5 +162,27 @@ impl Platform for Ios {
 
     fn call_connected(&self) {
         on_main(callkit::call_connected);
+    }
+
+    /// Every iPhone has a camera; one that is busy or refused fails when
+    /// it is started.
+    fn has_camera(&self) -> bool {
+        true
+    }
+
+    fn has_camera_permission(&self) -> bool {
+        camera::has_permission()
+    }
+
+    fn request_camera_permission(&self) {
+        camera::request_permission();
+    }
+
+    fn start_camera(&self, request: CameraRequest) -> Result<(), String> {
+        camera::start(request)
+    }
+
+    fn stop_camera(&self) {
+        camera::stop();
     }
 }

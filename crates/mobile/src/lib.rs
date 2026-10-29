@@ -25,22 +25,32 @@
 //!
 //! Everything that touches the phone is `cfg`'d to Android and iOS, so
 //! `cargo build --workspace` on a desktop does not build a second GUI
-//! toolkit. The two rule modules, [`queue`] and [`data_rules`], are plain
-//! std and compile everywhere, so their tests run on the host.
+//! toolkit. The rule modules, [`queue`], [`data_rules`] and [`stream`], and
+//! the camera picture conversion in [`camera`] are plain std and compile
+//! everywhere, so their tests run on the host.
 
 // Every item this crate owns is documented, and these keep it that way.
 // The modules compiled in by `#[path]` below belong to the desktop crate
 // and carry their own `allow`, so its documentation is not enforced twice.
 #![warn(missing_docs, clippy::missing_docs_in_private_items)]
 
+pub mod camera;
 pub mod data_rules;
 pub mod fling;
+// The desktop's own send queue, shared by path so both order files the
+// same way.
+#[path = "../../client/src/transfer_queue.rs"]
 pub mod queue;
+pub mod stream;
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod account;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod call;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod call_log;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod camera_source;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod contacts;
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -52,6 +62,8 @@ mod files;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod platform;
 #[cfg(any(target_os = "android", target_os = "ios"))]
+mod push;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod runner;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod settings;
@@ -61,6 +73,10 @@ mod ui;
 // The desktop's wire-level modules, shared by path. Each is used only in
 // part here (the desktop has screens for things a phone does not offer
 // yet), hence `dead_code`; none of them is edited for the phone's sake.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/account_backup.rs"]
+mod account_backup;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/content_store.rs"]
@@ -87,12 +103,20 @@ mod file_transfer;
 mod history;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/link_quality.rs"]
+mod link_quality;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/outbox.rs"]
 mod outbox;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/pacer.rs"]
 mod pacer;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/profile.rs"]
+mod profile;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/reactions.rs"]

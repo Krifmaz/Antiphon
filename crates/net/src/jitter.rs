@@ -15,10 +15,11 @@ pub enum PopResult {
     Recovered(Vec<f32>),
     /// The next frame in sequence never arrived (or arrived too late) --
     /// this is the last good frame played again, standing in for it, so
-    /// playback gets a repeat instead of a hole (spec §2 "Replay": "the
-    /// missing piece can be recovered and played back to you"; this is the
-    /// simple version of that -- not real error-correction recovery, a
-    /// last-good-frame repeat).
+    /// playback gets a repeat instead of a hole. If the real frame turns up
+    /// afterwards it is kept for [`JitterBuffer::take_late`], so the
+    /// replay history can play back what was actually said (spec §2
+    /// "Replay": "the missing piece can be recovered and played back to
+    /// you").
     Concealed(Vec<f32>),
     /// Nothing to hand over yet -- caller should wait and try again.
     Empty,
@@ -76,7 +77,18 @@ pub struct JitterBuffer {
     /// can repair. Bounded by `pending`, since a backup is only kept while
     /// the frame carrying it is still buffered.
     backups: BTreeMap<u64, Vec<f32>>,
+    /// The most recent counters that were concealed, oldest first, so a
+    /// frame that turns up for one of them afterwards is kept rather than
+    /// dropped (spec §2 "Replay": the lost piece recovered).
+    concealed_recently: std::collections::VecDeque<u64>,
+    /// Frames that arrived after their slot was concealed -- a resend or a
+    /// very late packet -- waiting for [`JitterBuffer::take_late`].
+    late: Vec<(u64, Vec<f32>)>,
 }
+
+/// How many concealed counters are remembered for late arrivals: a few
+/// seconds of frames, longer than any resend takes.
+const LATE_WINDOW: usize = 256;
 
 impl JitterBuffer {
     /// `max_wait` is the ceiling, and also where the buffer starts: it
@@ -97,6 +109,8 @@ impl JitterBuffer {
             recovered: 0,
             requested: BTreeSet::new(),
             backups: BTreeMap::new(),
+            concealed_recently: std::collections::VecDeque::new(),
+            late: Vec::new(),
         }
     }
 
@@ -118,6 +132,20 @@ impl JitterBuffer {
     /// concealed -- spec section 2's first layer doing its job.
     pub fn recovered(&self) -> u64 {
         self.recovered
+    }
+
+    /// The counter of the frame [`JitterBuffer::pop_ready`] last handed
+    /// back (delivered, recovered or concealed), so the caller can note
+    /// where a concealed one went.
+    pub fn last_popped(&self) -> Option<u64> {
+        (self.initialized && self.next_wanted > 0).then(|| self.next_wanted - 1)
+    }
+
+    /// Frames that arrived after their slot had been concealed, with
+    /// their counters, and forgets them. The real audio of a moment that
+    /// was heard as a repeat: for the replay history to splice back in.
+    pub fn take_late(&mut self) -> Vec<(u64, Vec<f32>)> {
+        std::mem::take(&mut self.late)
     }
 
     /// Frames sitting in the buffer waiting to be played.
@@ -192,7 +220,14 @@ impl JitterBuffer {
             self.next_wanted = counter;
         }
         if counter < self.next_wanted {
-            return; // arrived too late, already delivered or conceal-skipped past it
+            // Too late to play. Kept only if its slot was concealed: then
+            // it is the real audio of a moment the listener heard as a
+            // stand-in, and the replay history can put it back.
+            if let Some(i) = self.concealed_recently.iter().position(|c| *c == counter) {
+                self.concealed_recently.remove(i);
+                self.late.push((counter, samples));
+            }
+            return;
         }
         self.pending.insert(counter, samples);
     }
@@ -254,6 +289,10 @@ impl JitterBuffer {
 
         self.current_wait = (self.current_wait * 2).min(self.max_wait);
         self.clean_streak = 0;
+        self.concealed_recently.push_back(self.next_wanted);
+        if self.concealed_recently.len() > LATE_WINDOW {
+            self.concealed_recently.pop_front();
+        }
         self.next_wanted += 1;
         self.waiting_since = None;
         self.concealed += 1;
@@ -267,6 +306,28 @@ impl JitterBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_that_arrives_after_being_concealed_is_kept_for_replay() {
+        let mut jb = JitterBuffer::new(Duration::from_millis(1));
+        jb.push(0, vec![1.0]);
+        assert_eq!(jb.pop_ready(), PopResult::Frame(vec![1.0]));
+        jb.push(2, vec![3.0]);
+        // The first look starts the wait for 1; once it runs out, 1 is
+        // given up on.
+        assert_eq!(jb.pop_ready(), PopResult::Empty);
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(jb.pop_ready(), PopResult::Concealed(vec![1.0]));
+        assert_eq!(jb.last_popped(), Some(1));
+        // The resend arrives after its slot was played as a repeat.
+        jb.push(1, vec![2.0]);
+        assert_eq!(jb.take_late(), vec![(1, vec![2.0])]);
+        assert!(jb.take_late().is_empty());
+        // A duplicate of a frame that played normally is just dropped.
+        jb.push(0, vec![1.0]);
+        jb.push(1, vec![2.0]);
+        assert!(jb.take_late().is_empty());
+    }
 
     #[test]
     fn a_gap_is_requested_once_not_on_every_tick() {

@@ -11,7 +11,7 @@
 use iced_core::{Alignment, Background, Border, Color, Length, Padding};
 use iced_widget::{button, column, container, row, scrollable, space};
 
-use super::{call, conversation, fill, home, settings, sidebar};
+use super::{call, community, conversation, fill, home, settings, sidebar};
 use crate::icons::{icon, logo, Icon};
 use crate::theme;
 use crate::widgets::*;
@@ -27,12 +27,15 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
                     col = col.push(call::stage(ui, m, true));
                 }
                 col = col.push(container(conversation::messages(ui, m, person, true)).height(Length::Fill));
+                col = col.push(conversation::transfers(ui, m));
                 col = col.push(container(conversation::composer(ui, m, person)).padding(pad(4.0, 10.0, 12.0, 10.0)));
                 col.into()
             }
             None => people(ui, m),
         },
         Route::Settings(_) => column![top_bar("Settings", true), divider(), settings::stacked(ui, m)].into(),
+        Route::Spaces => community::list(ui, m, true),
+        Route::Community(id, channel) => community::phone(ui, m, id, *channel),
         Route::Home => people(ui, m),
     };
     let (top, bottom) = ui.insets;
@@ -46,12 +49,12 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         col = col.push(container(sidebar::call_strip(m)).padding([8, 10]));
     }
     col = col.push(container(screen).height(Length::Fill).style(theme::stage_flat));
-    if matches!(ui.route, Route::Person(_)) {
+    if matches!(ui.route, Route::Person(_) | Route::Community(..)) {
         // No tabs in a conversation: the composer sits just above the
         // gesture bar (or the keyboard).
         col = col.push(container(space()).height(bottom).width(Length::Fill).style(theme::stage_flat));
     } else {
-        col = col.push(tab_bar(ui, bottom));
+        col = col.push(tab_bar(ui, m, bottom));
     }
     col.height(Length::Fill).into()
 }
@@ -90,10 +93,11 @@ fn top_bar<'a>(title: &'a str, back: bool) -> El<'a, Msg> {
     container(r).height(56).padding([0, 10]).align_y(Alignment::Center).into()
 }
 
-/// People, invite, add, settings: four equal tabs along the bottom,
-/// sitting above the gesture bar with their colour running on under it.
-/// `bottom` is the gesture bar's (or keyboard's) height.
-fn tab_bar<'a>(ui: &'a Ui, bottom: f32) -> El<'a, Msg> {
+/// People, spaces (where the device has them), invite, add, settings:
+/// equal tabs along the bottom, sitting above the gesture bar with their
+/// colour running on under it. `bottom` is the gesture bar's (or
+/// keyboard's) height.
+fn tab_bar<'a>(ui: &'a Ui, m: &'a Model, bottom: f32) -> El<'a, Msg> {
     let p = theme::look();
     let tab = |i: Icon, label: &'a str, on: bool, msg: Msg| -> El<'a, Msg> {
         let color = if on { p.text } else { p.muted };
@@ -106,19 +110,21 @@ fn tab_bar<'a>(ui: &'a Ui, bottom: f32) -> El<'a, Msg> {
             ..container::Style::default()
         });
         let face = column![pill, t(label).size(11.5).font(theme::semibold()).color(color)].spacing(4).align_x(Alignment::Center);
+        let focused = crate::a11y::Spec::new(crate::a11y::Role::Tab, label).selected(on).on(Some(&msg)).add();
         button(container(face).center_x(Length::Fill))
             .width(Length::Fill)
             .padding([8, 0])
-            .style(|_, _| button::Style { background: Some(Background::Color(Color::TRANSPARENT)), ..button::Style::default() })
+            .style(focus_style(|_, _| button::Style { background: Some(Background::Color(Color::TRANSPARENT)), ..button::Style::default() }, focused))
             .on_press(msg)
             .into()
     };
-    let r = row![
-        tab(Icon::Users, "People", ui.route == Route::Home, Msg::Nav(Route::Home)),
-        tab(Icon::Qr, "Invite", ui.dialog == Some(Dialog::Invite), Msg::Dialog(Some(Dialog::Invite))),
-        tab(Icon::UserPlus, "Add", ui.dialog == Some(Dialog::AddPerson), Msg::Dialog(Some(Dialog::AddPerson))),
-        tab(Icon::Gear, "Settings", matches!(ui.route, Route::Settings(_)), Msg::Nav(Route::Settings(Section::Profile))),
-    ]
-    .align_y(Alignment::Center);
+    let mut r = row![tab(Icon::Users, "People", ui.route == Route::Home, Msg::Nav(Route::Home))].align_y(Alignment::Center);
+    if m.device.communities {
+        r = r.push(tab(Icon::Spaces, "Spaces", ui.route == Route::Spaces, Msg::Nav(Route::Spaces)));
+    }
+    let r = r
+        .push(tab(Icon::Qr, "Invite", ui.dialog == Some(Dialog::Invite), Msg::Dialog(Some(Dialog::Invite))))
+        .push(tab(Icon::UserPlus, "Add", ui.dialog == Some(Dialog::AddPerson), Msg::Dialog(Some(Dialog::AddPerson))))
+        .push(tab(Icon::Gear, "Settings", matches!(ui.route, Route::Settings(_)), Msg::Nav(Route::Settings(Section::Profile))));
     column![divider(), container(r).padding(Padding { top: 2.0, right: 6.0, bottom: 4.0 + bottom, left: 6.0 }).width(Length::Fill).style(theme::sidebar)].into()
 }

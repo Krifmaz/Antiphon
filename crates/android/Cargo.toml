@@ -19,6 +19,12 @@ android_logger = "0.15"
 log = "0.4"
 jni = "0.21"
 ndk-context = "0.1.1"
+# The phone's camera, through the NDK's own camera API (libcamera2ndk) and
+# an AImageReader, so frames reach Rust without a Java Camera2 helper. The
+# `ndk` crate wraps the image reader; the camera calls themselves are only
+# in `ndk-sys`. Both are already in the build through winit and cpal.
+ndk = { version = "0.9.0", default-features = false, features = ["media", "api-level-26"] }
+ndk-sys = "0.6.0"
 # Only for its Android backend; the window and everything drawn in it is
 # antiphon-mobile's.
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "android-native-activity"] }
