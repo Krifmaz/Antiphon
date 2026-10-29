@@ -54,13 +54,15 @@ on:
 permissions:
   contents: write
 
-# releases queue one after the other; a hotfix gets its own group, where a newer push cancels the hotfix still
-# on its way; a pull request's check gets one of its own
+# Nothing waits for anything else: each hotfix (one per push) and each release has a group of its own, so a
+# push never cancels the hotfix of the push before it, and a release never waits for an older run whose macOS
+# job is still queued for a runner. Two runs of the same version only meet in publish, which has a group per
+# tag. A pull request's check is the exception: a newer push to the pull request replaces the older check.
 concurrency:
   group: >-
     ${{ github.event_name == 'pull_request' && format('release-check-{0}', github.ref)
-    || github.event_name == 'push' && 'release-hotfix' || 'release' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+    || format('release-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -316,6 +318,10 @@ jobs:
 
   publish:
     needs: [version, build, android]
+    # two runs of one version publish one after the other, never at once
+    concurrency:
+      group: publish-${{ needs.version.outputs.tag }}
+      cancel-in-progress: false
     # also when the macOS build did not run or failed (the checks below decide), but not for a cancelled run
     if: ${{ !cancelled() && needs.version.result == 'success' }}
     runs-on: ubuntu-latest
@@ -394,7 +400,14 @@ jobs:
           TITLE="Stoop $V"; [ "$CHANNEL" = hotfix ] && TITLE="Stoop $V (hotfix)"
           # the tag stays: the version job made it at this commit (see "Tag" there)
           gh release delete "$TAG" --yes 2>/dev/null || true
-          gh release create "$TAG" out/* --title "$TITLE" --notes-file notes.md --verify-tag --latest
+          # Latest only when no newer release is out: hotfixes now run side by side, so an older push can
+          # finish after a newer one, and a hotfix of 0.1.0 can finish after 0.2.0. Hotfix 0.1.0.57 sorts
+          # after 0.1.0 and before 0.1.1.
+          OTHERS=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^v\([0-9.]*\)$/\1/p; s/^hotfix-\([0-9.]*\)$/\1/p')
+          TOP=$(printf '%s\n' $OTHERS "$V" | sort -V | tail -1)
+          LATEST=--latest=false; [ "$TOP" = "$V" ] && LATEST=--latest
+          echo "newest release: $TOP ($LATEST)"
+          gh release create "$TAG" out/* --title "$TITLE" --notes-file notes.md --verify-tag "$LATEST"
       - name: Keep only the newest three hotfixes
         if: env.CHANNEL == 'hotfix'
         # a failed clean-up never fails the hotfix: the next one tries again
@@ -402,11 +415,18 @@ jobs:
         run: |
           OLD=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^hotfix-\([0-9.]*\)$/\1/p' | sort -rV | tail -n +4)
           for v in $OLD; do echo "deleting hotfix-$v"; gh release delete "hotfix-$v" --yes --cleanup-tag || true; done
-          # and the tags of hotfix runs that were cancelled (a newer push) or failed before they published
+          # and the tags of hotfix runs that were cancelled or failed before they published. Hotfixes run side
+          # by side, so a tag without a release may belong to a run still building: only a tag whose commit is
+          # more than six hours old is left over.
           KEEP=$(gh release list --limit 200 --json tagName -q '.[].tagName')
-          for t in $(git ls-remote --tags origin 'hotfix-*' | sed -n 's|.*refs/tags/\(hotfix-[0-9.]*\)$|\1|p'); do
-            grep -qx "$t" <<< "$KEEP" || { echo "deleting tag $t"; gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$t" || true; }
-          done
+          CUTOFF=$(( $(date +%s) - 6 * 3600 ))
+          git ls-remote --tags origin 'hotfix-*' | sed -n 's|^\([0-9a-f]*\)\trefs/tags/\(hotfix-[0-9.]*\)$|\1 \2|p' |
+            while read -r sha t; do
+              grep -qx "$t" <<< "$KEEP" && continue
+              when=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" -q .commit.committer.date) || continue
+              [ "$(date -d "$when" +%s)" -lt "$CUTOFF" ] || continue
+              echo "deleting tag $t"; gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$t" || true
+            done
       - name: Not published
         if: env.CHANNEL == 'check' || (env.CHANNEL == 'stable' && !inputs.publish)
         run: echo "Not published (a pull request check, or publish unticked); the files are this run's Stoop-* artifacts" | tee -a "$GITHUB_STEP_SUMMARY"
