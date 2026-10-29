@@ -178,6 +178,22 @@ public class CallService extends Service {
         super.onDestroy();
     }
 
+    /**
+     * The user swiped the app away from Recents while this service was
+     * running. The activity, and the Rust app's event loop with it, are
+     * gone and cannot be started again in this process, so the process
+     * ends here rather than lingering in a state no new activity can use.
+     * A call in progress ends with it, as swiping the app away has always
+     * ended one (the call lives on the activity's thread).
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        Log.i(TAG, "task removed; ending the process");
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     /** Not a bound service: started and stopped only. */
     @Override
     public IBinder onBind(Intent intent) {

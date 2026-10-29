@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
+import android.os.Process;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.util.Log;
@@ -49,6 +50,16 @@ public class AntiphonActivity extends NativeActivity {
      */
     static volatile boolean inFront;
 
+    /**
+     * Whether an activity has already started the Rust app in this
+     * process. winit builds its event loop once per process and refuses a
+     * second, so a second NativeActivity in a process that outlived the
+     * first -- kept alive by CallService, or simply cached by Android after
+     * the task was swiped away -- would close the moment it opened, every
+     * time, until the process was force-stopped. Main thread only.
+     */
+    private static boolean nativeStarted;
+
     /** The network watcher, kept so it can be unregistered; null when none. */
     private ConnectivityManager.NetworkCallback networkCallback;
 
@@ -73,6 +84,14 @@ public class AntiphonActivity extends NativeActivity {
      */
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        if (nativeStarted) {
+            // Never reaches super.onCreate: that would start a second Rust
+            // app that cannot get an event loop. A fresh process can.
+            Log.w(TAG, "the Rust app already ran in this process; restarting the process");
+            RestartActivity.restart(this, getIntent());
+            return;
+        }
+        nativeStarted = true;
         super.onCreate(savedInstanceState);
         CallService.createChannels(this);
         watchNetwork();
@@ -91,7 +110,17 @@ public class AntiphonActivity extends NativeActivity {
             }
             networkCallback = null;
         }
+        boolean finishing = isFinishing();
         super.onDestroy();
+        // The activity is going for good (back, or the task swiped away),
+        // and with it the Rust app's window and event loop, which cannot
+        // be started again in this process. Ending the process now means
+        // the next launch starts clean instead of going through
+        // RestartActivity.
+        if (finishing) {
+            Log.i(TAG, "activity finished; ending the process");
+            Process.killProcess(Process.myPid());
+        }
     }
 
     /**

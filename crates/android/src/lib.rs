@@ -46,8 +46,13 @@ fn android_main(app: AndroidApp) {
     let event_loop = match EventLoop::<Wake>::with_user_event().with_android_app(app.clone()).build() {
         Ok(event_loop) => event_loop,
         Err(e) => {
-            log::error!("could not create the event loop: {e}");
-            return;
+            // winit allows one event loop per process. AntiphonActivity
+            // restarts the process before a second activity gets here, so
+            // this is a backstop: ending the process means the next launch
+            // works, where returning would leave every later launch
+            // closing at once until the app was force-stopped.
+            log::error!("could not create the event loop: {e}; ending the process");
+            std::process::exit(0);
         }
     };
     let data_dir = app.internal_data_path().unwrap_or_else(std::env::temp_dir);
