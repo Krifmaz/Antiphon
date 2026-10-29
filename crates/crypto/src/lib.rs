@@ -70,6 +70,7 @@ pub mod file_seal;
 pub mod mail;
 pub mod memory_seal;
 pub mod mnemonic;
+pub mod onion;
 pub mod persona;
 pub mod push;
 mod ratchet;

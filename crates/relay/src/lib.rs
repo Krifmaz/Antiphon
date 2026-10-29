@@ -19,13 +19,21 @@
 //!   aggregate counters, and only when asked to.
 //!
 //! The same node can also hold sealed mail for people who are offline
-//! ([`mailbox`]). That is off unless the operator switches it on.
+//! ([`mailbox`]), host sealed files ([`files`]), and forward group calls
+//! as a selective forwarding unit ([`sfu`]): one copy of each member's
+//! sealed audio in, a copy out to every other member of the room. It can also be a hop on anonymity-mode circuits ([`onion`]).
+//! Each is off unless the operator switches it on. The SFU holds the same kind of
+//! thing the relay does -- a blinded, daily-rotating room token, a random
+//! per-call member tag and an address per member, for as long as the call
+//! is live -- and forwards payloads it cannot read.
 //!
 //! The core is a plain state machine ([`Relay::handle`]) so it can be
 //! tested without sockets; [`run`] is the thin loop around it.
 
 pub mod files;
 pub mod mailbox;
+pub mod sfu;
+pub mod onion;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -247,7 +255,7 @@ pub async fn run_node(
     mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
 ) -> std::io::Result<()> {
-    run_node_with_dht(socket, relay, mailbox, files, None).await
+    run_node_full(socket, relay, mailbox, files, None, None, None).await
 }
 
 /// [`run_node`], also serving as a DHT node (spec §4) when `dht` is given.
@@ -261,15 +269,101 @@ pub async fn run_node_with_dht(
     files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
     dht: Option<Arc<std::sync::Mutex<antiphon_net::dht::DhtNode>>>,
 ) -> std::io::Result<()> {
+    run_node_full(socket, relay, mailbox, files, None, None, dht).await
+}
+
+/// [`run_node`], plus group-call forwarding if `sfu` is given. SFU
+/// datagrams are told apart by their own magic like the other services;
+/// without an SFU, a JOIN is answered "disabled" so a client can say why.
+pub async fn run_node_with_sfu(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
+    sfu: Option<Arc<std::sync::Mutex<sfu::Sfu>>>,
+) -> std::io::Result<()> {
+    run_node_full(socket, relay, mailbox, files, sfu, None, None).await
+}
+
+/// [`run_node`], and if `hops` is given, this node as a hop on anonymity
+/// circuits ([`onion`]).
+pub async fn run_node_with_hops(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
+    hops: Option<Arc<std::sync::Mutex<onion::HopNode>>>,
+) -> std::io::Result<()> {
+    run_node_full(socket, relay, mailbox, files, None, hops, None).await
+}
+
+/// Every service on one socket: relay, and each optional one if given.
+/// Onion cells have their own magic and are told apart the same way; each
+/// circuit that exits here gets a socket of its own, read by a small task
+/// that feeds replies back into this loop.
+pub async fn run_node_full(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
+    sfu: Option<Arc<std::sync::Mutex<sfu::Sfu>>>,
+    hops: Option<Arc<std::sync::Mutex<onion::HopNode>>>,
+    dht: Option<Arc<std::sync::Mutex<antiphon_net::dht::DhtNode>>>,
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65_536];
     let mut last_sweep = Instant::now();
+    let mut exits = Exits::new(&socket)?;
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
-        let (n, from) = socket.recv_from(&mut buf).await?;
+        let (n, from) = tokio::select! {
+            r = socket.recv_from(&mut buf) => r?,
+            Some((id, from, bytes)) = exits.incoming.recv() => {
+                if let Some(h) = &hops {
+                    let actions = h.lock().unwrap().handle_exit(id, from, &bytes, Instant::now());
+                    exits.perform(&socket, hops.as_ref(), actions).await;
+                }
+                continue;
+            }
+            _ = tick.tick() => {
+                // Idle circuits go on a clock, not only on traffic, so a
+                // quiet node still closes the exit sockets it promised to.
+                if let Some(h) = &hops {
+                    let actions = h.lock().unwrap().sweep(Instant::now());
+                    exits.perform(&socket, hops.as_ref(), actions).await;
+                }
+                continue;
+            }
+        };
         let now = Instant::now();
+        if antiphon_net::onion::Cell::is_onion_datagram(&buf[..n]) {
+            match &hops {
+                Some(h) => {
+                    let actions = h.lock().unwrap().handle(from, &buf[..n], now);
+                    exits.perform(&socket, hops.as_ref(), actions).await;
+                }
+                None => {
+                    if let Some(reply) = onion::refusal_when_disabled(&buf[..n]) {
+                        let _ = socket.send_to(&reply, from).await;
+                    }
+                }
+            }
+            continue;
+        }
         let out = if antiphon_net::dht::Message::is_dht_datagram(&buf[..n]) {
             match &dht {
                 Some(d) => d.lock().unwrap().handle(from, &buf[..n], now),
                 None => vec![],
+            }
+        } else if antiphon_net::sfu::Message::is_sfu_datagram(&buf[..n]) {
+            match &sfu {
+                Some(s) => s.lock().unwrap().handle(from, &buf[..n], now),
+                None => match antiphon_net::sfu::Message::decode(&buf[..n]) {
+                    Some(antiphon_net::sfu::Message::Join { .. }) => vec![(
+                        from,
+                        antiphon_net::sfu::Message::Refused(antiphon_net::sfu::Refusal::Disabled).encode(),
+                    )],
+                    _ => vec![],
+                },
             }
         } else if antiphon_net::blob::Message::is_blob_datagram(&buf[..n]) {
             match &files {
@@ -310,6 +404,90 @@ pub async fn run_node_with_dht(
     }
 }
 
+/// The exit sockets of circuits that end at this node, and the channel
+/// their reader tasks feed.
+struct Exits {
+    /// Each circuit's own exit socket and the task reading from it. One socket
+    /// per circuit, so the target relay sees separate ordinary clients.
+    sockets: HashMap<onion::CircuitId, (Arc<UdpSocket>, tokio::task::JoinHandle<()>)>,
+    /// Handed to each reader task to report what arrived.
+    tx: tokio::sync::mpsc::Sender<(onion::CircuitId, SocketAddr, Vec<u8>)>,
+    /// Replies from targets, tagged with the circuit they came in on.
+    incoming: tokio::sync::mpsc::Receiver<(onion::CircuitId, SocketAddr, Vec<u8>)>,
+    /// Where exit sockets bind: the node's own IP, any port.
+    bind: SocketAddr,
+}
+
+impl Exits {
+    /// An empty set of exits that bind on the same IP as `node`.
+    fn new(node: &UdpSocket) -> std::io::Result<Self> {
+        // Bounded, so a flood at one exit socket queues a little and then
+        // drops rather than growing without limit.
+        let (tx, incoming) = tokio::sync::mpsc::channel(4096);
+        let bind = match node.local_addr()? {
+            SocketAddr::V4(a) => SocketAddr::from((*a.ip(), 0)),
+            SocketAddr::V6(a) => SocketAddr::from((*a.ip(), 0)),
+        };
+        Ok(Self { sockets: HashMap::new(), tx, incoming, bind })
+    }
+
+    /// Carries out a hop node's actions: sends, opens and closes exit sockets.
+    /// A socket that fails to open is reported back to the hop node, and the
+    /// actions that produces are carried out too.
+    async fn perform(
+        &mut self,
+        node: &UdpSocket,
+        hops: Option<&Arc<std::sync::Mutex<onion::HopNode>>>,
+        actions: Vec<onion::Action>,
+    ) {
+        let mut queue = std::collections::VecDeque::from(actions);
+        while let Some(action) = queue.pop_front() {
+            match action {
+                onion::Action::Send(to, bytes) => {
+                    let _ = node.send_to(&bytes, to).await;
+                }
+                onion::Action::OpenExit(id) => match UdpSocket::bind(self.bind).await {
+                    Ok(s) => {
+                        let s = Arc::new(s);
+                        let (reader, tx) = (s.clone(), self.tx.clone());
+                        let task = tokio::spawn(async move {
+                            let mut buf = vec![0u8; 65_536];
+                            loop {
+                                match reader.recv_from(&mut buf).await {
+                                    Ok((n, from)) => {
+                                        let _ = tx.try_send((id, from, buf[..n].to_vec()));
+                                    }
+                                    // Windows reports an ICMP "port
+                                    // unreachable" from an earlier send this
+                                    // way; it is not a broken socket.
+                                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                        self.sockets.insert(id, (s, task));
+                    }
+                    Err(_) => {
+                        if let Some(h) = hops {
+                            queue.extend(h.lock().unwrap().exit_failed(id));
+                        }
+                    }
+                },
+                onion::Action::ExitSend(id, to, bytes) => {
+                    if let Some((s, _)) = self.sockets.get(&id) {
+                        let _ = s.send_to(&bytes, to).await;
+                    }
+                }
+                onion::Action::CloseExit(id) => {
+                    if let Some((_, task)) = self.sockets.remove(&id) {
+                        task.abort();
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The operator commitment (spec §3), printed at start-up and in `--help`
 /// so it is stated plainly rather than buried in a policy.
 pub const COMMITMENT: &str = "\
@@ -318,6 +496,11 @@ It sees rotating blinded tokens, never who you are. It keeps addresses only
 while a call or registration is live, and writes no connection logs.
 If it holds mail, the mail is sealed end to end: it sees an inbox label it
 cannot link to anyone, and never a sender, a recipient or a word.
+If it forwards group calls, it sees a room token that changes daily and a
+random tag per member per call, never a group, a name or a word: the audio
+is sealed by the members and forwarded as it came.
+If it offers hops for anonymity mode, its hop key only peels routing layers:
+it never decrypts a call, and learns only the hop before and the hop after.
 If it is a DHT node, it stores records filed under keys that change daily,
 sealed so it can read neither whose they are nor the address inside.";
 
