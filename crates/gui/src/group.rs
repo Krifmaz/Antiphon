@@ -154,6 +154,11 @@ impl Group {
             .collect()
     }
 
+    /// One person's name by leg id, for labelling their captions (spec §7).
+    pub fn leg_name(&self, id: u64) -> Option<String> {
+        self.legs.lock().unwrap().iter().find(|l| l.id == id).map(Leg::name)
+    }
+
     pub fn leg_peers(&self) -> Vec<Arc<PeerConnection>> {
         self.legs.lock().unwrap().iter().map(|l| l.peer.clone()).collect()
     }

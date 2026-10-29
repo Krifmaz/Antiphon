@@ -606,6 +606,19 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
         notice(format!("{strangers} message(s) from people not in your contacts were discarded."));
     }
 
+    // Communities you're in under a separate identity (spec §7): that
+    // identity has inboxes of its own at the same nodes, under labels
+    // nobody can match with yours. Only community traffic is taken there.
+    if let Some(c) = &community {
+        for persona in c.personas() {
+            let _ = collect(&persona, &config.routes, config.strict_mode, false, |r| match &r.body.group {
+                Some(fragment) => c.receive_persona_fragment(r.from, fragment),
+                None => true,
+            })
+            .await;
+        }
+    }
+
     // Group chats and communities: over live calls, and -- unless strict
     // mode keeps everything off mailboxes -- to members' mailboxes.
     if let Some(c) = &community {

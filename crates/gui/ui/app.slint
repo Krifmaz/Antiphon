@@ -73,6 +73,12 @@ export struct VpnConfigEntry {
     active: bool,
 }
 
+/// One line of live captions (spec §7).
+export struct CaptionLine {
+    who: string,
+    text: string,
+}
+
 /// A file that stays fetchable after the call (spec §5).
 export struct SharedFileEntry {
     name: string,
@@ -122,6 +128,11 @@ export struct SpaceMessage {
 export struct SpaceMember {
     key: string,
     name: string,
+    /// Their status line in this space (spec §7 per-community identity).
+    status: string,
+    /// The picture they chose for this space, if any.
+    avatar: image,
+    has-avatar: bool,
     role: string,
     role-index: int,
     me: bool,
@@ -1535,6 +1546,7 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-notifications: true;
     in-out property <bool> sec-transferlimits: true;
     in-out property <bool> sec-sharedfiles: true;
+    in-out property <bool> sec-captions: true;
     in-out property <bool> sec-discovery: true;
     in-out property <bool> sec-outbox: true;
     in-out property <bool> sec-calladvanced: true;
@@ -1611,6 +1623,25 @@ export component MainWindow inherits Window {
     callback route-code-edited(int, string);
     callback delivery-settings-changed();
     callback find-nodes();
+    // Spec §7 on-device live captions. Off by default.
+    in-out property <bool> captions-enabled: false;
+    in-out property <bool> captions-own-voice: false;
+    in property <bool> captions-model-installed: false;
+    in property <bool> captions-download-allowed: false;
+    in property <bool> captions-downloading: false;
+    in property <float> captions-download-fraction: 0;
+    in property <string> captions-size-text;
+    in property <string> captions-model-message;
+    in property <bool> captions-live: false;
+    in property <string> captions-status;
+    in property <[CaptionLine]> caption-lines;
+    in property <bool> captions-have-transcript: false;
+    callback captions-settings-changed();
+    callback captions-download();
+    callback captions-cancel-download();
+    callback captions-import();
+    callback captions-remove-model();
+    callback captions-save-transcript();
     // Spec §5 seeding and pinning.
     in-out property <bool> seeding: false;
     in-out property <int> seed-scope: 0;
@@ -1659,7 +1690,7 @@ export component MainWindow inherits Window {
     callback refresh-space();
     callback create-space(string, bool);
     callback select-space(string);
-    callback accept-space-invite(int);
+    callback accept-space-invite(int, bool);
     callback decline-space-invite(int);
     callback select-space-channel(int);
     callback space-send(string);
@@ -1678,6 +1709,18 @@ export component MainWindow inherits Window {
     callback space-share-file();
     callback space-leave();
     callback space-forget();
+    // Spec §7 "per-community identity": how you appear in the selected
+    // space, and whether you joined it under a separate identity.
+    in-out property <bool> space-new-separate: false;
+    in-out property <bool> space-separate: false;
+    in-out property <string> space-look-name: "";
+    in-out property <string> space-look-status: "";
+    in-out property <string> space-look-avatar-data: "";
+    in-out property <image> space-look-avatar;
+    in-out property <string> space-look-defaults: "";
+    callback space-save-look();
+    callback space-pick-look-avatar();
+    callback space-clear-look-avatar();
     callback sharing-settings-changed();
     // Spec §6: bring your own VPN.
     in-out property <bool> sec-vpn: true;
@@ -3222,8 +3265,45 @@ export component MainWindow inherits Window {
                                         MenuItem { title: "Contacts & servers"; checkable: true; checked <=> call-panel-visible-contacts; activated => { settings-changed(); } }
                                         MenuItem { title: "My invite (QR)"; checkable: true; checked <=> call-panel-visible-invite; activated => { settings-changed(); } }
                                     }
+                                    MenuItem { title: "Live captions"; checkable: true; checked <=> captions-enabled; activated => { captions-settings-changed(); } }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Spec §7 live captions, subtitle-style along the bottom
+                // and above every panel, so moving panels around can never
+                // hide them. Shown only while captions are actually
+                // running in a call.
+                if captions-live && (caption-lines.length > 0 || captions-status != "") : Rectangle {
+                    width: min(680px, parent.width - 24px);
+                    height: captions-layout.preferred-height;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height - 12px;
+                    background: #000000c8;
+                    border-radius: 8px;
+
+                    captions-layout := VerticalLayout {
+                        padding: 10px;
+                        spacing: 2px;
+                        for line in caption-lines : Text {
+                            text: line.who + ": " + line.text;
+                            color: #ffffff;
+                            wrap: word-wrap;
+                            font-size: 15px * text-scale;
+                            accessible-role: text;
+                            accessible-label: line.who + " said " + line.text;
+                        }
+                        if captions-status != "" : Text {
+                            text: captions-status;
+                            color: #ffffffb0;
+                            wrap: word-wrap;
+                            font-size: 10px * text-scale;
+                        }
+                        if captions-have-transcript : HorizontalLayout {
+                            alignment: end;
+                            Button { text: "Save transcript..."; clicked => { captions-save-transcript(); } }
                         }
                     }
                 }
@@ -3268,7 +3348,8 @@ export component MainWindow inherits Window {
                             HorizontalBox {
                                 padding: 0px;
                                 spacing: 4px;
-                                Button { text: "Join"; clicked => { accept-space-invite(i); } }
+                                Button { text: "Join"; clicked => { accept-space-invite(i, false); } }
+                                Button { text: "Join as someone new"; clicked => { accept-space-invite(i, true); } }
                                 Button { text: "Decline"; clicked => { decline-space-invite(i); } }
                             }
                         }
@@ -3280,6 +3361,13 @@ export component MainWindow inherits Window {
                     spacing: 4px;
                     Button { text: "New group"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, false); } }
                     Button { text: "New community"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, true); } }
+                }
+                ToggleSwitch {
+                    text: "Under a separate identity";
+                    checked <=> space-new-separate;
+                    reduced-motion: reduced-motion;
+                    text-scale: text-scale;
+                    help: "Off by default. On: you own the new one under a key made just for it, so nobody in it can match you with your contacts or your other communities. \"Join as someone new\" does the same for an invitation.";
                 }
                 Text {
                     text: "A group is one conversation of up to 100 where anyone may invite. A community has channels, and admins and moderators who can remove and ban.";
@@ -3410,7 +3498,21 @@ export component MainWindow inherits Window {
                         HorizontalBox {
                             padding: 0px;
                             spacing: 4px;
-                            Text { text: mem.me ? mem.name + " (you)" : mem.name; wrap: word-wrap; horizontal-stretch: 1; font-size: 11px * text-scale; }
+                            if mem.has-avatar : Image {
+                                source: mem.avatar;
+                                width: 20px;
+                                height: 20px;
+                                image-fit: cover;
+                                accessible-role: image;
+                                accessible-label: mem.name;
+                            }
+                            VerticalBox {
+                                padding: 0px;
+                                spacing: 0px;
+                                horizontal-stretch: 1;
+                                Text { text: mem.me ? mem.name + " (you)" : mem.name; wrap: word-wrap; font-size: 11px * text-scale; }
+                                if mem.status != "" : Text { text: mem.status; wrap: word-wrap; color: Theme.muted-text; font-size: 10px * text-scale; }
+                            }
                             Text { text: mem.role; color: Theme.muted-text; font-size: 10px * text-scale; }
                         }
                         if mem.can-role || mem.can-kick || mem.can-ban : HorizontalBox {
@@ -3477,6 +3579,38 @@ export component MainWindow inherits Window {
                     }
                     if space-is-community && space-can-manage : Button { text: "Save community settings"; clicked => { space-save-settings(); } }
                     if space-is-community && space-mailbox-node != "" : Button { text: "Use its mailbox for my mail"; clicked => { space-use-nodes(); } }
+                    Text { text: "How I appear here"; font-weight: 700; font-size: 11px * text-scale; }
+                    Text {
+                        text: space-separate
+                            ? "You're in this under a separate identity: a key made just for it from your recovery phrase. Members can't match it with your contacts or your other communities -- only whoever invited you knows. Its messages go by mailbox, never over a call. It can't be switched off here; leave and be invited again for that."
+                            : "You're in this as yourself: your contacts here see the key they know. A different name or picture changes how you look, not who you are. For a key of its own, leave and accept an invitation with \"Join as someone new\".";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    LineEdit { text <=> space-look-name; placeholder-text: "Name here (empty: " + space-look-defaults + ")"; }
+                    LineEdit { text <=> space-look-status; placeholder-text: "Status here (empty: your profile's)"; }
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        if space-look-avatar-data != "" : Image {
+                            source: space-look-avatar;
+                            width: 32px;
+                            height: 32px;
+                            image-fit: cover;
+                            accessible-role: image;
+                            accessible-label: "Your picture here";
+                        }
+                        Button { text: space-look-avatar-data != "" ? "Change picture" : "Add a picture"; clicked => { space-pick-look-avatar(); } }
+                        if space-look-avatar-data != "" : Button { text: "No picture"; clicked => { space-clear-look-avatar(); } }
+                    }
+                    Text {
+                        text: "Your profile picture is never sent to anyone; one added here goes to this space's members only, as a small thumbnail.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    Button { text: "Save how I appear here"; clicked => { space-save-look(); } }
                     Text { text: "Calls and notifications"; font-weight: 700; font-size: 11px * text-scale; }
                     Text {
                         text: "For calls from members who aren't your contacts (a contact's own setting wins), and for message notices. If you share several, the quietest applies.";
@@ -5162,6 +5296,83 @@ export component MainWindow inherits Window {
                                         }
                                         Text { text: f.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
                                         if f.status != "" : Text { text: f.status; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+
+                            if section-id == "captions" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Words appear at the bottom of the call screen as people speak. The speech recognition runs on this computer: no audio and no text is sent anywhere, and the words are forgotten when the call ends unless you save them.";
+                                    text-scale: text-scale;
+                                    title: "Live captions"; reduced-motion: reduced-motion; expanded <=> sec-captions;
+                                }
+                                if sec-captions : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Show live captions in calls";
+                                        checked <=> captions-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default. Captions what the other people in the call say -- even while you're deafened, since that may be exactly when you need them. Someone you've muted isn't captioned.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Caption my own voice too";
+                                        checked <=> captions-own-voice;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Adds what you say, as sent, so a saved transcript has both sides.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    if captions-model-installed : HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text { text: "Speech model installed (Whisper tiny, English)."; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; font-size: 11px * text-scale; }
+                                        Button { text: "Remove"; clicked => { captions-remove-model(); } }
+                                    }
+                                    if !captions-model-installed : VerticalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text {
+                                            text: "Captions need a speech model on this computer: Whisper tiny (English), " + captions-size-text + ". It is downloaded once, only if you press Download, and checked against a fingerprint built into the app. After that, captioning works offline.";
+                                            wrap: word-wrap;
+                                            font-size: 11px * text-scale;
+                                        }
+                                        if !captions-download-allowed : Text {
+                                            text: "This build can't download the model (it has no fingerprint to check it against). If you have the files -- config.json, tokenizer.json and model.safetensors from openai/whisper-tiny.en -- choose their folder.";
+                                            color: Theme.muted-text;
+                                            wrap: word-wrap;
+                                            font-size: 10px * text-scale;
+                                        }
+                                        if captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: Theme.muted-text.with-alpha(0.25);
+                                                accessible-role: progress-indicator;
+                                                accessible-value: round(captions-download-fraction * 100) + "%";
+                                                Rectangle {
+                                                    x: 0px;
+                                                    width: parent.width * captions-download-fraction;
+                                                    height: parent.height;
+                                                    border-radius: 4px;
+                                                    background: Theme.accent;
+                                                }
+                                            }
+                                            Text { text: round(captions-download-fraction * 100) + "%"; vertical-alignment: center; font-size: 10px * text-scale; }
+                                            Button { text: "Cancel"; clicked => { captions-cancel-download(); } }
+                                        }
+                                        if !captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            if captions-download-allowed : Button { text: "Download"; clicked => { captions-download(); } }
+                                            Button { text: "Use files I already have..."; clicked => { captions-import(); } }
+                                        }
+                                    }
+                                    if captions-model-message != "" : Text {
+                                        text: captions-model-message;
+                                        wrap: word-wrap;
+                                        font-size: 10px * text-scale;
                                     }
                                 }
                             }
