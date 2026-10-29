@@ -213,6 +213,7 @@ impl App {
             communities: Vec::new(),
             space_invites: Vec::new(),
             channel: None,
+            directory: Default::default(),
         }
     }
 
@@ -561,6 +562,10 @@ impl App {
             | Action::AddEmoji(_)
             | Action::RemoveEmoji { .. }
             | Action::ManageSpace { .. }
+            | Action::AddDirectory(_)
+            | Action::RemoveDirectory(_)
+            | Action::BrowseDirectories
+            | Action::AskToJoin(_)
             | Action::LeaveSpace(_) => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),

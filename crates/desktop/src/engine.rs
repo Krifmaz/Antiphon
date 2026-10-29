@@ -82,6 +82,9 @@ enum Event {
     EmojiPicked(Result<(String, String, String), String>),
     /// A theme file was chosen and read: use what it says.
     Theme(ui::theme_file::ThemeFile),
+    /// The directories were read: what they list, what went wrong, and
+    /// the keys pinned for them.
+    Directory(Vec<discovery::Listed>, Vec<String>, Vec<String>),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -274,6 +277,8 @@ pub struct Engine {
     account: crate::account::AccountState,
     /// The voice channel we are in, if any.
     voice: Option<VoiceRoom>,
+    /// What the community directories listed at the last look.
+    directory: ui::Directory,
 }
 
 /// Being in a community's voice channel.
@@ -337,6 +342,7 @@ impl Engine {
             playing: None,
             account: Default::default(),
             voice: None,
+            directory: ui::Directory::default(),
         };
         engine.load_previews();
         engine.refresh_invite();
@@ -556,6 +562,46 @@ impl Engine {
             keys.extend(sfu.member_keys().iter().map(connection_mode::encode_hex32));
         }
         keys
+    }
+
+    // ---------------------------------------------------------- directories
+
+    /// Reads every directory added, in the background.
+    fn browse_directories(&mut self) {
+        if self.directory.browsing || self.cfg.directories.is_empty() {
+            return;
+        }
+        self.directory.browsing = true;
+        let (dirs, mut pins) = (self.cfg.directories.clone(), self.cfg.directory_pins.clone());
+        let events = self.events.clone();
+        self.state.runtime.spawn(async move {
+            let (listed, problems) = discovery::browse(&dirs, &mut pins).await;
+            Self::push(&events, Event::Directory(listed, problems, pins));
+        });
+    }
+
+    /// Asks `directory` to list a community with `description` (`None`
+    /// takes it off), signed by the key we are in it as, which alone can
+    /// change it later.
+    fn submit_listing(&mut self, community: String, directory: String, description: Option<String>) {
+        let made = self.spaces.listing(&community, description.as_deref());
+        let (entry, identity) = match made {
+            Ok(made) => made,
+            Err(e) => {
+                self.toast(e, ToastKind::Warn);
+                return;
+            }
+        };
+        let events = self.events.clone();
+        let listing = description.is_some();
+        self.state.runtime.spawn(async move {
+            let (text, kind) = match discovery::submit(&directory, entry, &identity).await {
+                Ok(()) if listing => (format!("Listed in {directory}"), ToastKind::Ok),
+                Ok(()) => (format!("Taken off {directory}"), ToastKind::Ok),
+                Err(e) => (e, ToastKind::Warn),
+            };
+            Self::push(&events, Event::Toast(text, kind));
+        });
     }
 
     // -------------------------------------------------------- voice channels
@@ -962,6 +1008,16 @@ impl Engine {
                 }
             }
             Event::Toast(text, kind) => self.toast(text, kind),
+            Event::Directory(listed, problems, pins) => {
+                self.cfg.directory_pins = pins;
+                self.save();
+                self.directory.browsing = false;
+                self.directory.problems = problems;
+                self.directory.listed = listed
+                    .into_iter()
+                    .map(|l| ui::Listing { name: l.entry.name, description: l.entry.description, link: l.entry.invite, directory: l.directory })
+                    .collect();
+            }
             Event::Theme(file) => {
                 self.cfg.stoop.theme = file.theme;
                 self.cfg.stoop.accent = file.accent;
@@ -1734,6 +1790,24 @@ impl Engine {
             | A::ListenOnSaver(_) => {}
             A::OpenChannel { community, channel } => self.viewing = Some((community, channel)),
             A::ManageSpace { community, change: ui::SpaceChange::JoinVoice(channel) } => self.join_voice(community, channel),
+            A::ManageSpace { community, change: ui::SpaceChange::SubmitListing { directory, description } } => self.submit_listing(community, directory, Some(description)),
+            A::ManageSpace { community, change: ui::SpaceChange::WithdrawListing(directory) } => self.submit_listing(community, directory, None),
+            A::AddDirectory(address) => {
+                if !self.cfg.directories.iter().any(|d| d.eq_ignore_ascii_case(&address)) {
+                    self.cfg.directories.push(address);
+                    self.save();
+                }
+            }
+            A::RemoveDirectory(address) => {
+                self.cfg.directories.retain(|d| *d != address);
+                self.directory.listed.retain(|l| l.directory != address);
+                self.save();
+            }
+            A::BrowseDirectories => self.browse_directories(),
+            A::AskToJoin(link) => match antiphon_client::community::Store::app().ok_or_else(|| "Your identity isn't loaded yet".to_string()).and_then(|s| s.knock(&link)) {
+                Ok(()) => self.toast("Asked to join. Its invitation shows up under Invitations once its host's app answers.", ToastKind::Ok),
+                Err(e) => self.toast(e, ToastKind::Warn),
+            },
             A::ManageSpace { change: ui::SpaceChange::LeaveVoice(_), .. } => {
                 if let Some(room) = self.voice.take() {
                     self.leave_voice(&room);
@@ -2148,6 +2222,7 @@ impl Engine {
             communities,
             space_invites,
             channel,
+            directory: ui::Directory { directories: self.cfg.directories.clone(), ..self.directory.clone() },
         }
     }
 

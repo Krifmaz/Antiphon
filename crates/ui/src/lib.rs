@@ -148,6 +148,8 @@ pub enum Dialog {
     Roles(String),
     /// Slow mode, reports and open invitations in this community (by id).
     Moderation(String),
+    /// Find communities in the directories you added.
+    Directory,
     /// Report a message (community id, channel, message id) and any others
     /// picked with it.
     Report(String, u32, u64),
@@ -517,6 +519,14 @@ pub enum Action {
     },
     /// Leave a group chat or community (the dialog already asked).
     LeaveSpace(String),
+    /// Add a community directory (`host:port`) to browse.
+    AddDirectory(String),
+    /// Stop browsing a directory.
+    RemoveDirectory(String),
+    /// Read every directory again.
+    BrowseDirectories,
+    /// Ask to join a community from its listing (its join link).
+    AskToJoin(String),
     /// Choose a picture to add as one of this community's emoji (by id);
     /// its name comes from the file's.
     AddEmoji(String),
@@ -590,6 +600,17 @@ pub enum SpaceChange {
     },
     /// Set slow mode: the fewest seconds between one member's posts, 0 off.
     SlowMode(u32),
+    /// Open it to people asking to join from its join link, or close it.
+    Listed(bool),
+    /// Ask a directory (`host:port`) to list it, with this description.
+    SubmitListing {
+        /// The directory's address.
+        directory: String,
+        /// What it says about itself.
+        description: String,
+    },
+    /// Ask a directory to take it off.
+    WithdrawListing(String),
     /// Withdraw the invitation you sent to someone (their id, hex).
     WithdrawInvite(String),
     /// Take a report off the list.
@@ -723,6 +744,18 @@ pub enum Msg {
     ToggleQueue,
     /// Put `:name:` (a custom emoji) at the end of the composer's text.
     InsertEmoji(String),
+    /// The directory search box changed.
+    DirectoryQuery(String),
+    /// The box for a directory to add changed.
+    DirectoryAddress(String),
+    /// Add the directory typed in the box.
+    DirectoryAdd,
+    /// The directory box in a community's listing settings changed.
+    ListingDirectory(String),
+    /// The description box in a community's listing settings changed.
+    ListingDescription(String),
+    /// Send the listing typed in the boxes (community id).
+    ListingSubmit(String),
     /// Pick or unpick a message to report with the others.
     ReportPick(u64),
     /// The report's reason box changed.
@@ -834,6 +867,14 @@ pub struct Ui {
     queue_open: bool,
     /// The new role's name box.
     role_name: String,
+    /// The directory search box.
+    directory_query: String,
+    /// The box for a directory to add.
+    directory_address: String,
+    /// The directory a community is to be listed in.
+    listing_directory: String,
+    /// What the listing is to say.
+    listing_description: String,
     /// The messages picked to report.
     report_pick: Vec<u64>,
     /// Why they are being reported.
@@ -918,6 +959,10 @@ impl Ui {
             queue_open: false,
             role_name: String::new(),
             report_pick: Vec::new(),
+            directory_query: String::new(),
+            directory_address: String::new(),
+            listing_directory: String::new(),
+            listing_description: String::new(),
             report_reason: String::new(),
             toasts: Vec::new(),
             next_toast: 1,
@@ -1102,7 +1147,12 @@ impl Ui {
                     self.report_pick = vec![*id];
                     self.report_reason.clear();
                 }
+                // Opening the directories reads them again.
+                let browse = d == Some(Dialog::Directory);
                 self.set_dialog(d);
+                if browse {
+                    return vec![Action::BrowseDirectories];
+                }
                 Vec::new()
             }
             Msg::TogglePanel => {
@@ -1365,6 +1415,36 @@ impl Ui {
             Msg::ToggleQueue => {
                 self.queue_open = !self.queue_open;
                 Vec::new()
+            }
+            Msg::DirectoryQuery(s) => {
+                self.directory_query = s;
+                Vec::new()
+            }
+            Msg::DirectoryAddress(s) => {
+                self.directory_address = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::DirectoryAdd => {
+                let address = std::mem::take(&mut self.directory_address);
+                if address.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::AddDirectory(address), Action::BrowseDirectories]
+            }
+            Msg::ListingDirectory(s) => {
+                self.listing_directory = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::ListingDescription(s) => {
+                self.listing_description = s.chars().take(240).collect();
+                Vec::new()
+            }
+            Msg::ListingSubmit(community) => {
+                if self.listing_directory.is_empty() {
+                    return Vec::new();
+                }
+                let change = SpaceChange::SubmitListing { directory: self.listing_directory.clone(), description: self.listing_description.trim().to_string() };
+                vec![Action::ManageSpace { community, change }]
             }
             Msg::ReportPick(id) => {
                 if let Some(at) = self.report_pick.iter().position(|x| *x == id) {

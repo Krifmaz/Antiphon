@@ -74,6 +74,22 @@ impl Spaces {
         store.load(&id).map(|s| s.voice_here(channel)).unwrap_or_default()
     }
 
+    /// A directory entry for `community` saying `description` (`None` for
+    /// one that takes it off), and the key to sign it with: the one we are
+    /// in it as.
+    pub fn listing(&self, community: &str, description: Option<&str>) -> Result<(antiphon_net::dht::ListingEntry, antiphon_crypto::IdentityKeyPair), String> {
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        let id = key(community)?;
+        let space = store.load(&id).ok_or("couldn't open it")?;
+        let name: String = space.manifest().name.chars().take(60).collect();
+        let invite = match description {
+            Some(_) => store.join_link(&id)?,
+            None => String::new(),
+        };
+        let entry = antiphon_net::dht::ListingEntry { name, description: description.unwrap_or("").chars().take(240).collect(), invite };
+        Ok((entry, store.identity_in(&space)))
+    }
+
     /// Reads every space again from disk.
     fn rebuild(&mut self, viewing: Option<(&str, u32)>) {
         let Some(store) = Store::app() else {
@@ -342,6 +358,9 @@ fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyP
                 }
             })
         }
+        C::Listed(on) => space.update(identity, |m| m.listed = on),
+        // The engine's: they go to a directory, not to the members.
+        C::SubmitListing { .. } | C::WithdrawListing(_) => Ok(Vec::new()),
         C::SlowMode(secs) => space.update(identity, |m| m.slow_mode_secs = secs.min(antiphon_crypto::community::MAX_SLOW_MODE_SECS)),
         C::WithdrawInvite(who) => {
             let who = member_key(&who)?;
@@ -529,6 +548,8 @@ fn community_model(store: &Store, s: &community::Space, unread: u32, voice_room:
                     .collect(),
             })
             .collect(),
+        listed: m.listed,
+        join_link: (m.listed && joined && m.can(&me, perm::INVITE, None)).then(|| store.join_link(&s.id()).ok()).flatten(),
         voice_room: voice_room.filter(|(id, _)| *id == delivery::hex(&s.id().0)).map(|(_, ch)| *ch),
         pending_invites: s
             .pending_invites()

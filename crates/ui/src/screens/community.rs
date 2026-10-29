@@ -34,6 +34,7 @@ pub fn list<'a>(ui: &'a Ui, m: &'a Model, phone: bool) -> El<'a, Msg> {
                 column![h1("Group chats & communities"), muted("Talk with several people at once. Nothing sits on a server: each member's app keeps the conversation.").size(13.5)]
                     .spacing(6)
                     .width(Length::Fill),
+                btn_icon(Icon::Search, "Find", Btn::Default, Some(Msg::Dialog(Some(Dialog::Directory)))),
                 btn_icon(Icon::Plus, "New", Btn::Primary, Some(Msg::Dialog(Some(Dialog::NewSpace)))),
             ]
             .spacing(16)
@@ -77,7 +78,12 @@ pub fn list<'a>(ui: &'a Ui, m: &'a Model, phone: bool) -> El<'a, Msg> {
         .height(Length::Fill)
         .style(theme::scroll);
     if phone {
-        let bar = row![t("Spaces").size(18).font(theme::bold()), fill(), icon_btn(Icon::Plus, "Start one", Some(Msg::Dialog(Some(Dialog::NewSpace))))]
+        let bar = row![
+            t("Spaces").size(18).font(theme::bold()),
+            fill(),
+            icon_btn(Icon::Search, "Find communities", Some(Msg::Dialog(Some(Dialog::Directory)))),
+            icon_btn(Icon::Plus, "Start one", Some(Msg::Dialog(Some(Dialog::NewSpace)))),
+        ]
             .spacing(8)
             .align_y(Alignment::Center);
         column![container(bar).height(56).padding([0, 16]).align_y(Alignment::Center), divider(), body].into()
@@ -801,8 +807,9 @@ pub fn report<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a,
     col.into()
 }
 
-/// Slow mode, the reports waiting, and the invitations you sent.
-pub fn moderation<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+/// Slow mode, being listed, the reports waiting, and the invitations you
+/// sent.
+pub fn moderation<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
     let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
     let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
     let mut col = column![].spacing(14);
@@ -817,6 +824,40 @@ pub fn moderation<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         .spacing(8));
     } else if c.slow_mode_secs > 0 {
         col = col.push(faint(format!("Slow mode is on: one post every {} seconds.", c.slow_mode_secs)).size(12.5));
+    }
+    if c.can_set_slow_mode && !c.group {
+        let listed = c.listed;
+        let mut listing = column![setting(
+            "Open to people asking",
+            Some("Anyone with its join link can ask to join, and is invited without anyone having to say yes. A directory can list the link."),
+            switch("Open to people asking", listed, move |on| change(SpaceChange::Listed(on))),
+        )]
+        .spacing(8);
+        if let Some(link) = c.join_link.as_ref().filter(|_| listed) {
+            listing = listing.push(
+                row![faint(clip(link, 48)).size(12).font(theme::mono()).width(Length::Fill), btn_sm("Copy link", Btn::Ghost, Some(Msg::Copy(link.clone(), "Join link")))]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            );
+            listing = listing.push(
+                row![
+                    input("Directory address", "stoop-listing-directory", "directory.example.org:7000", &ui.listing_directory).on_input(Msg::ListingDirectory).padding([8, 10]).size(13).width(Length::FillPortion(2)),
+                    input("What it says about itself", "stoop-listing-description", "What it's about", &ui.listing_description).on_input(Msg::ListingDescription).padding([8, 10]).size(13).width(Length::FillPortion(3)),
+                ]
+                .spacing(8),
+            );
+            let dir = (!ui.listing_directory.is_empty()).then(|| ui.listing_directory.clone());
+            listing = listing.push(
+                row![
+                    faint("A directory that takes submissions lists it straight away; only you can change or withdraw it.").size(12).width(Length::Fill),
+                    btn_sm("Withdraw", Btn::Ghost, dir.clone().map(|d| change(SpaceChange::WithdrawListing(d)))),
+                    btn_sm("List it", Btn::Primary, dir.map(|_| Msg::ListingSubmit(c.id.clone()))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(listing);
     }
     if c.moderator {
         let mut reports = column![label("Reports")].spacing(8);
@@ -875,4 +916,66 @@ pub fn moderation<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         col = col.push(invites);
     }
     scrollable(col).height(Length::Shrink).style(theme::scroll).into()
+}
+
+/// Communities the directories you added list: a search over them, the
+/// way to add a directory, and Ask to join.
+pub fn directory<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    let d = &m.directory;
+    let mut col = column![muted("A directory lists only communities that asked to be listed, never people. Add one someone told you about.").size(13)].spacing(12);
+    let mut dirs = column![].spacing(4);
+    for addr in &d.directories {
+        dirs = dirs.push(
+            row![icon(Icon::Globe, 14.0, theme::look().faint), t(addr.as_str()).size(13).width(Length::Fill), icon_btn(Icon::Trash, "Stop browsing it", Some(Msg::Do(Action::RemoveDirectory(addr.clone()))))]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+    }
+    col = col.push(dirs);
+    col = col.push(
+        row![
+            input("Directory to add", "stoop-directory-add", "directory.example.org:7000", &ui.directory_address).on_input(Msg::DirectoryAddress).on_submit(Msg::DirectoryAdd).padding([8, 10]).size(13),
+            btn_sm("Add", Btn::Ghost, (!ui.directory_address.is_empty()).then_some(Msg::DirectoryAdd)),
+            btn_sm(if d.browsing { "Looking…" } else { "Refresh" }, Btn::Ghost, (!d.browsing && !d.directories.is_empty()).then_some(Msg::Do(Action::BrowseDirectories))),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    for problem in &d.problems {
+        col = col.push(faint(problem.as_str()).size(12));
+    }
+    if !d.listed.is_empty() {
+        col = col.push(input("Search the listings", "stoop-directory-search", "Search by name or what it's about", &ui.directory_query).on_input(Msg::DirectoryQuery).padding([8, 10]).size(13.5));
+    }
+    let words: Vec<String> = ui.directory_query.split_whitespace().map(str::to_lowercase).collect();
+    let mut list = column![].spacing(6);
+    let mut shown = 0;
+    for l in &d.listed {
+        let text = format!("{} {}", l.name, l.description).to_lowercase();
+        if !words.iter().all(|w| text.contains(w.as_str())) {
+            continue;
+        }
+        shown += 1;
+        let join = if l.link.starts_with("stoop://join/") {
+            btn_sm("Ask to join", Btn::Primary, Some(Msg::Do(Action::AskToJoin(l.link.clone()))))
+        } else {
+            btn_sm("Add host", Btn::Ghost, Some(Msg::Do(Action::AddPerson { name: l.name.clone(), invite: l.link.clone() })))
+        };
+        list = list.push(
+            row![
+                avatar(&l.name, &l.link, 30.0),
+                column![t(l.name.as_str()).size(13.5).font(theme::semibold()), faint(format!("{} · {}", if l.description.is_empty() { "No description" } else { l.description.as_str() }, l.directory)).size(12)]
+                    .spacing(1)
+                    .width(Length::Fill),
+                join,
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    if !d.listed.is_empty() && shown == 0 {
+        list = list.push(faint("Nothing listed matches that.").size(12.5));
+    }
+    col = col.push(scrollable(list).height(Length::Fixed(300.0)).style(theme::scroll));
+    col.into()
 }

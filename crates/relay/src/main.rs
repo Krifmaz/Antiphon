@@ -168,6 +168,12 @@ struct Args {
     /// community; never lists people.
     #[arg(long, requires = "dht")]
     directory: Option<std::path::PathBuf>,
+    /// Also take communities' own requests to be listed, up to this many.
+    /// Each is signed by whoever submitted it, who alone can replace or
+    /// withdraw it, and a network can hold five at most. They are kept in
+    /// `<directory file>.submitted`, which you can edit to take one down.
+    #[arg(long, requires = "directory")]
+    directory_submissions: Option<usize>,
     /// Peer with other relays, so someone registered at any of them can be
     /// rung through this one, and apps can fall back across the mesh. Off
     /// by default. Peers learn hashes of tokens, never tokens, and never a
@@ -404,6 +410,9 @@ async fn main() -> anyhow::Result<()> {
             let listing = ListingEntry::parse_file(&std::fs::read_to_string(path)?)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
             node.set_listing(listing);
+            if let Some(max) = args.directory_submissions {
+                node.accept_submissions(max, load_submitted(&submitted_path(path)));
+            }
         }
         let mut bootstrap = Vec::new();
         for b in &args.dht_bootstrap {
@@ -456,15 +465,25 @@ async fn main() -> anyhow::Result<()> {
     }
     if args.directory.is_some() {
         println!("Serving a directory of public communities.");
+        if let Some(max) = args.directory_submissions {
+            println!("Taking communities' own requests to be listed, up to {max}.");
+        }
     }
 
     // The DHT's timers: verification timeouts, record expiry, refresh.
     if let Some(d) = dht_node.clone() {
         let socket = socket.clone();
+        let submitted_file = args.directory.as_deref().filter(|_| args.directory_submissions.is_some()).map(submitted_path);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tick.tick().await;
+                let changed = d.lock().unwrap().take_submitted_changes();
+                if let (Some(entries), Some(path)) = (changed, submitted_file.as_ref()) {
+                    if let Err(e) = save_submitted(path, &entries) {
+                        eprintln!("couldn't save {}: {e}", path.display());
+                    }
+                }
                 let out = d.lock().unwrap().tick(std::time::Instant::now());
                 for (to, bytes) in out {
                     let _ = socket.send_to(&bytes, to).await;
@@ -557,4 +576,36 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())
+}
+
+/// Where a directory's submitted entries are kept: beside its file.
+fn submitted_path(directory: &std::path::Path) -> std::path::PathBuf {
+    let mut name = directory.as_os_str().to_owned();
+    name.push(".submitted");
+    name.into()
+}
+
+/// Reads the submitted entries back: one per line, `key | name |
+/// description | link`. A line that doesn't read is skipped (the operator
+/// may have edited the file).
+fn load_submitted(path: &std::path::Path) -> Vec<([u8; 32], antiphon_net::dht::ListingEntry)> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    text.lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(4, '|').map(str::trim).collect();
+            let [key, name, description, invite] = parts[..] else { return None };
+            let key: [u8; 32] = (0..32).map(|i| u8::from_str_radix(key.get(i * 2..i * 2 + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?.try_into().ok()?;
+            Some((key, antiphon_net::dht::ListingEntry { name: name.into(), description: description.into(), invite: invite.into() }))
+        })
+        .collect()
+}
+
+/// Writes the submitted entries, in the form [`load_submitted`] reads.
+fn save_submitted(path: &std::path::Path, entries: &[([u8; 32], antiphon_net::dht::ListingEntry)]) -> std::io::Result<()> {
+    let clean = |s: &str| s.replace(['|', '\n', '\r'], " ");
+    let text: String = entries
+        .iter()
+        .map(|(k, e)| format!("{} | {} | {} | {}\n", federation::encode_hex(k), clean(&e.name), clean(&e.description), clean(&e.invite)))
+        .collect();
+    std::fs::write(path, text)
 }

@@ -99,6 +99,7 @@ impl Demo {
             communities: communities(),
             space_invites: vec![ui::SpaceInvite { name: "Bass players".into(), detail: "Community · from June Alvarez · Mon".into() }],
             channel: None,
+            directory: ui::Directory::default(),
         };
         // Chosen colours, as the engine registers saved ones.
         ui::avatars::set(&model.me.id, "", &model.me.color, |_| None);

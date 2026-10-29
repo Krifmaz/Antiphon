@@ -220,6 +220,9 @@ pub enum Wire {
     Commit { community: Key, commit: String, manifest: String, #[serde(default)] cards: Vec<Card> },
     /// An MLS application message: a [`Post`].
     App { community: Key, data: String },
+    /// "I'd like to join": a stranger, from a listed community's join
+    /// link, to the member who made it. `card` is how to answer them.
+    Knock { community: Key, card: Card },
     /// "I have version `since`; send me what came after."
     ManifestRequest { community: Key, since: u64 },
     Manifests { community: Key, list: Vec<String> },
@@ -230,6 +233,7 @@ impl Wire {
         match self {
             Wire::Invite { .. } => None,
             Wire::Join { community, .. }
+            | Wire::Knock { community, .. }
             | Wire::Welcome { community, .. }
             | Wire::Commit { community, .. }
             | Wire::App { community, .. }
@@ -334,7 +338,14 @@ struct Offer {
     /// What we call them, for the manifest if they join as themselves.
     name: String,
     at_secs: u64,
+    /// They asked, from the join link, rather than being invited.
+    #[serde(default)]
+    knocked: bool,
 }
+
+/// Most open invitations made in answer to strangers asking, so a flood
+/// of them can't push out the ones members sent.
+const MAX_KNOCKS: usize = 50;
 
 const MAX_OFFERS: usize = 200;
 /// How long an invitation can be answered: a Join after this is refused
@@ -823,7 +834,7 @@ impl Space {
             if self.offers.len() >= MAX_OFFERS {
                 self.offers.remove(0);
             }
-            self.offers.push(Offer { key: Key(who), name: name.chars().take(80).collect(), at_secs: now_secs() });
+            self.offers.push(Offer { key: Key(who), name: name.chars().take(80).collect(), at_secs: now_secs(), knocked: false });
         }
         // Slim: the invitee learns the picture once they are in.
         let card = self.card(&self.me).map(Card::slim).ok_or("no card of your own")?;
@@ -1157,6 +1168,30 @@ impl Space {
         }
         match wire {
             Wire::Invite { .. } => Ok(()),
+            Wire::Knock { card, .. } => {
+                // A stranger from the join link: let in only while the
+                // community is listed, by someone allowed to invite, and
+                // never someone banned. They still accept as anyone does.
+                let m = self.manifest();
+                if !m.listed || !m.can(&self.me, perm::INVITE, None) || m.is_banned(&from) || card.key.0 != from || !card.valid() {
+                    return Ok(());
+                }
+                if self.readers().contains(&from) {
+                    return Ok(());
+                }
+                let knocked = self.offers.iter().filter(|o| o.knocked).count();
+                if knocked >= MAX_KNOCKS && !self.offers.iter().any(|o| o.key.0 == from) {
+                    return Ok(());
+                }
+                let name: String = card.name.chars().take(80).collect();
+                let mut outs = self.invite(identity, from, &name)?;
+                if let Some(o) = self.offers.iter_mut().find(|o| o.key.0 == from) {
+                    o.knocked = true;
+                }
+                h.outs.append(&mut outs);
+                h.events.push(Event::Notice(format!("{name} asked to join from its listing and was invited")));
+                Ok(())
+            }
             Wire::Join { key_package, card, .. } => {
                 // `from` is who we invited, proved by the transport; the
                 // card is who they join as -- themselves, or a separate
@@ -1711,6 +1746,83 @@ struct Hub {
     /// channel). Yours alone, like `ring`.
     #[serde(default)]
     notify: HashMap<String, Notify>,
+    /// Cards of people outside our spaces we need to mail: a stranger who
+    /// asked to join, or the host of a join link we used. Newest last.
+    #[serde(default)]
+    introduced: Vec<Card>,
+    /// Communities we asked to join from a join link, and when: their
+    /// invitation is taken from a stranger for a while.
+    #[serde(default)]
+    knocked: Vec<(Key, u64)>,
+}
+
+/// Keeps a stranger's card, newest last, replacing an older one of theirs.
+fn remember_card(hub: &mut Hub, card: Card) {
+    hub.introduced.retain(|c| c.key != card.key);
+    hub.introduced.push(card);
+    if hub.introduced.len() > MAX_INTRODUCED {
+        hub.introduced.remove(0);
+    }
+}
+
+/// Cards of strangers kept, for answering them.
+const MAX_INTRODUCED: usize = 64;
+/// How long after asking to join an invitation from its host is taken.
+const KNOCK_LIFETIME_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// A listed community's join link, as a directory shows it: which
+/// community, and the card of the member who made it, so a stranger can
+/// mail them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinLink {
+    /// The community.
+    pub community: Key,
+    /// Who answers: their key, identity and route list.
+    pub host: Card,
+}
+
+/// How a join link starts.
+pub const JOIN_PREFIX: &str = "stoop://join/";
+
+impl JoinLink {
+    /// `stoop://join/` and, in URL-safe base64: the community's id, the
+    /// host's encoded identity (length-prefixed), and their route list.
+    pub fn to_link(&self) -> String {
+        let public = unhex(&self.host.public).unwrap_or_default();
+        let routes = unhex(&self.host.routes).unwrap_or_default();
+        let mut raw = self.community.0.to_vec();
+        raw.extend_from_slice(&(public.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&public);
+        raw.extend_from_slice(&routes);
+        format!("{JOIN_PREFIX}{}", crate::file_transfer::encode_b64(&raw).replace('+', "-").replace('/', "_").trim_end_matches('='))
+    }
+
+    /// Reads one back; `None` for anything that isn't a valid join link.
+    pub fn parse(link: &str) -> Option<Self> {
+        let body = link.trim().strip_prefix(JOIN_PREFIX)?;
+        let mut b64 = body.replace('-', "+").replace('_', "/");
+        while b64.len() % 4 != 0 {
+            b64.push('=');
+        }
+        let raw = decode_b64(&b64)?;
+        if raw.len() < 34 {
+            return None;
+        }
+        let community = Key(raw[..32].try_into().ok()?);
+        let n = u16::from_be_bytes(raw[32..34].try_into().ok()?) as usize;
+        let public = raw.get(34..34 + n)?;
+        let routes = &raw[34 + n..];
+        let identity = PublicIdentity::decode(public).ok()?;
+        let host = Card {
+            key: Key(identity.identity_key),
+            public: hex(public),
+            routes: hex(routes),
+            name: String::new(),
+            status: String::new(),
+            avatar: None,
+        };
+        host.valid().then_some(Self { community, host })
+    }
 }
 
 const MAX_OUTBOX: usize = 20_000;
@@ -2188,6 +2300,22 @@ impl Store {
     pub fn receive(&self, from: [u8; 32], wire: Wire) {
         match wire {
             Wire::Invite { manifest, card } => self.receive_invite(from, manifest, card),
+            Wire::Knock { community, card } => {
+                if self.load(&community).is_none() || card.key.0 != from || !card.valid() {
+                    return;
+                }
+                // Kept so the invitation that answers them can be mailed.
+                {
+                    let _guard = LOCK.lock().unwrap();
+                    let mut hub = self.hub();
+                    remember_card(&mut hub, card.clone());
+                    self.save_hub(&hub);
+                }
+                let _ = self.with_space(&community, |space, identity| {
+                    let h = space.handle(identity, from, Wire::Knock { community, card });
+                    Ok(((), h.outs, h.events))
+                });
+            }
             other => {
                 let Some(id) = other.community() else { return };
                 if self.load(&id).is_none() {
@@ -2205,13 +2333,17 @@ impl Store {
     /// contact or someone already in a community with us, so a stranger
     /// can't fill the list.
     fn receive_invite(&self, from: [u8; 32], manifest: String, card: Card) {
-        let known = crate::config::load().contacts.iter().any(|c| c.identity_key.eq_ignore_ascii_case(&hex(&from)))
+        let Some(signed) = unb64(&manifest).ok().and_then(|b| SignedManifest::decode(&b).ok()) else { return };
+        let Ok(m) = cm::accept_first(&signed) else { return };
+        // Or the answer to our asking to join from its listing.
+        let now = now_secs();
+        let asked = self.hub().knocked.iter().any(|(c, at)| *c == m.id && now.saturating_sub(*at) <= KNOCK_LIFETIME_SECS);
+        let known = asked
+            || crate::config::load().contacts.iter().any(|c| c.identity_key.eq_ignore_ascii_case(&hex(&from)))
             || self.ids().iter().filter_map(|id| self.load(id)).any(|s| s.manifest().is_member(&from));
         if !known || card.key.0 != from || !card.valid() {
             return;
         }
-        let Some(signed) = unb64(&manifest).ok().and_then(|b| SignedManifest::decode(&b).ok()) else { return };
-        let Ok(m) = cm::accept_first(&signed) else { return };
         // Listed already (from an older build), or offered by someone
         // allowed to invite: we are written in when we answer.
         if !m.is_member(&self.identity.public().identity_key) && !m.can(&from, perm::INVITE, None) {
@@ -2231,6 +2363,50 @@ impl Store {
         bump();
     }
 
+    /// The join link for a listed community we may invite people to: a
+    /// directory lists it, and a stranger who uses it is invited by us.
+    pub fn join_link(&self, id: &Key) -> Result<String, String> {
+        let space = self.load(id).ok_or("couldn't open it")?;
+        let m = space.manifest();
+        if !m.listed {
+            return Err("It isn't open to people asking to join; turn that on first".into());
+        }
+        if !m.can(&space.me(), perm::INVITE, None) {
+            return Err("You can't invite people there, so you can't answer them".into());
+        }
+        let identity = self.identity_in(&space);
+        let host = self.card_for(id, &identity);
+        Ok(JoinLink { community: *id, host }.to_link())
+    }
+
+    /// Asks to join the community a join link names. Its host's app
+    /// invites us if it is still open, and the invitation shows up with
+    /// the others, to accept or not.
+    pub fn knock(&self, link: &str) -> Result<(), String> {
+        let join = JoinLink::parse(link).ok_or("That isn't a join link")?;
+        if self.load(&join.community).is_some_and(|s| !s.removed) {
+            return Err("You're already in it".into());
+        }
+        let card = self.card_for(&join.community, &self.identity);
+        let to = join.host.key.0;
+        {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            remember_card(&mut hub, join.host);
+            hub.knocked.retain(|(c, _)| *c != join.community);
+            hub.knocked.push((join.community, now_secs()));
+            if hub.knocked.len() > MAX_INTRODUCED {
+                hub.knocked.remove(0);
+            }
+            let me = self.identity.public().identity_key;
+            self.queue(&mut hub, vec![Out { to, wire: Wire::Knock { community: join.community, card } }], me, None);
+            self.save_hub(&hub);
+        }
+        bump();
+        crate::delivery::kick();
+        Ok(())
+    }
+
     /// How to mail a member: a contact's prekey and routes, or their card.
     fn reach(&self, to: &[u8; 32]) -> Option<([u8; 32], SignedRouteRecord)> {
         let config = crate::config::load();
@@ -2247,7 +2423,8 @@ impl Store {
                 }
             }
         }
-        None
+        let card = self.hub().introduced.into_iter().rev().find(|c| c.key.0 == *to)?;
+        Some((card.prekey()?, card.record()?))
     }
 
     /// Sends what is queued: over a live call to that person if there is
@@ -2689,6 +2866,35 @@ mod tests {
         let outs = bob.space().voice_leave(1).unwrap();
         run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
         assert!(alice.space().voice_here(1).is_empty());
+    }
+
+    #[test]
+    fn a_stranger_joins_a_listed_community_by_asking() {
+        let (mut alice, mut bob, mut carol) = three();
+        let mut dave = person("Dave");
+        let community = alice.space().id();
+        let knock = vec![(3, Out { to: alice.key(), wire: Wire::Knock { community, card: dave.card() } })];
+        // Not listed: asking does nothing.
+        run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], knock.clone());
+        assert!(dave.space.is_none());
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice.space().update(&alice_id, |m| m.listed = true).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], outs.into_iter().map(|o| (0, o)).collect());
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], knock);
+        assert!(ev[3].contains(&Event::Joined), "{ev:?}");
+        assert!(bob.space().manifest().is_member(&dave.key()));
+    }
+
+    #[test]
+    fn a_join_link_round_trips() {
+        let alice = person("Alice");
+        let link = JoinLink { community: Key([7; 32]), host: alice.card() };
+        let text = link.to_link();
+        assert!(text.starts_with(JOIN_PREFIX) && text.len() < 600, "{text}");
+        // The name isn't carried: the directory entry gives one.
+        let back = JoinLink::parse(&text).unwrap();
+        assert_eq!((back.community, back.host.key, &back.host.public), (link.community, link.host.key, &link.host.public));
+        assert_eq!(JoinLink::parse("stoop://join/AAAA"), None);
     }
 
     #[test]

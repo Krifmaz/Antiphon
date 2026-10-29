@@ -233,6 +233,11 @@ pub struct Manifest {
     /// remove messages aren't held to it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub slow_mode_secs: u32,
+    /// Open to strangers: anyone with its join link (as a directory lists
+    /// it) can ask to join, and a member who may invite lets them in
+    /// without being asked. Off, only invitations bring people in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listed: bool,
 }
 
 /// The longest slow mode a community can set: six hours.
@@ -357,6 +362,7 @@ impl Manifest {
             server_hosted_files: false,
             emoji: Vec::new(),
             slow_mode_secs: 0,
+            listed: false,
         }
     }
 
@@ -564,6 +570,7 @@ pub fn check_transition(old: &Manifest, old_signed: &SignedManifest, new: &Signe
         || n.nodes != old.nodes
         || n.server_hosted_files != old.server_hosted_files
         || n.slow_mode_secs != old.slow_mode_secs
+        || n.listed != old.listed
     {
         need(perm::MANAGE_COMMUNITY, "change the community's settings")?;
     }

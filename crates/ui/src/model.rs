@@ -46,6 +46,35 @@ pub struct Model {
     /// The channel on screen, once the app has loaded it (after
     /// [`crate::Action::OpenChannel`]).
     pub channel: Option<ChannelView>,
+    /// The community directories you browse, and what they last listed.
+    pub directory: Directory,
+}
+
+/// Community directories (spec §4 "Opt-in directories for public
+/// communities only"): the ones you added, and what they list.
+#[derive(Clone, Debug, Default)]
+pub struct Directory {
+    /// Each directory's address, as added.
+    pub directories: Vec<String>,
+    /// Everything they listed at the last look, in their order.
+    pub listed: Vec<Listing>,
+    /// What went wrong with any of them at the last look.
+    pub problems: Vec<String>,
+    /// A look is under way.
+    pub browsing: bool,
+}
+
+/// One community a directory lists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// Its name.
+    pub name: String,
+    /// What it says about itself.
+    pub description: String,
+    /// Its join link (or, from an older directory, its host's invite).
+    pub link: String,
+    /// The directory that listed it.
+    pub directory: String,
 }
 
 /// Settings > Account: everything about not losing the account.
@@ -601,6 +630,10 @@ pub struct Community {
     pub pending_invites: Vec<PendingInvite>,
     /// The voice channel of this community you are in, if any.
     pub voice_room: Option<u32>,
+    /// Anyone with its join link may ask to join (it can be listed).
+    pub listed: bool,
+    /// Its join link, when it is listed and you may invite people.
+    pub join_link: Option<String>,
     /// Which of its messages notify you.
     pub notify: Notify,
     /// Its custom emoji's names, written `:name:`; their pictures are
