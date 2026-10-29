@@ -528,21 +528,11 @@ impl App {
             // does not run; the setting is the desktop's.
             Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
-            Action::QueueMove { id, up } => {
-                if up {
-                    self.files.queue.move_up(id);
-                } else {
-                    self.files.queue.move_down(id);
-                }
-            }
-            Action::QueueHold { id, held } => {
-                self.files.queue.set_held(id, held);
-            }
-            Action::QueueRemove(id) => {
-                self.files.queue.remove(id);
-            }
-            // A phone lends no relay; it has none of its own to lend.
-            Action::LendRelay(_) => {}
+            // Through the same messages as the phone's own buttons, so the
+            // queue is saved after every change and survives a restart.
+            Action::QueueMove { id, up } => self.update(if up { Message::QueueUp(id) } else { Message::QueueDown(id) }),
+            Action::QueueHold { id, held } => self.update(Message::QueueHold(id, held)),
+            Action::QueueRemove(id) => self.update(Message::QueueRemove(id)),
             // Anonymity mode runs on the desktop's call path; the phone
             // doesn't offer it yet.
             Action::Anonymity(_) | Action::AnonymityHops(_) => {}

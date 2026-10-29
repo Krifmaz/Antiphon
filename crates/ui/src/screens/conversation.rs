@@ -24,7 +24,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
         col = col.push(call::stage(ui, m, false));
     }
     col = col.push(container(messages(ui, m, person, false)).height(Length::Fill));
-    col = col.push(transfers(m, id));
+    col = col.push(transfers(m));
     col = col.push(container(composer(ui, m, person)).padding(pad(4.0, 20.0, 18.0, 20.0)));
     col.height(Length::Fill).into()
 }
