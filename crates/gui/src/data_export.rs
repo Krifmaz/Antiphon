@@ -127,6 +127,13 @@ pub fn export_all(
                 .to_string(),
         );
     }
+    if config_dir.join("vpn-configs").exists() {
+        summary.omitted.push(
+            "vpn-configs -- your WireGuard configs, left out on purpose: each one is a private \
+             key. Import the .conf files again on the new device."
+                .to_string(),
+        );
+    }
     if config_dir.join("partial").exists() {
         summary
             .omitted
@@ -217,6 +224,7 @@ mod tests {
             deleted: false,
             pinned: false,
             expires_at_secs: None,
+            ..Default::default()
         }
     }
 
@@ -235,6 +243,7 @@ mod tests {
             ring_rule: 0,
             eq_bands: Vec::new(),
             note: String::new(),
+            ..Default::default()
         });
         std::fs::write(
             dir.join("config.json"),

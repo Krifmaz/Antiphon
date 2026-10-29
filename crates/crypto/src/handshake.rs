@@ -4,10 +4,15 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::error::CryptoError;
 use crate::identity::{IdentityKeyPair, PublicIdentity};
-use crate::session::Session;
+use crate::session::{RatchetStart, Session};
 
 // Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
-const ROOT_SALT: &[u8] = b"voip-app/handshake/root/v2";
+//
+// v3: the session became a Double Ratchet, whose frames carry a header the
+// v2 session never sent. The salt moved so the two fail closed at the
+// handshake rather than exchanging frames neither can read.
+const ROOT_SALT: &[u8] = b"voip-app/handshake/root/v3";
+const INFO_RATCHET_ROOT: &[u8] = b"antiphon/handshake/ratchet-root/v1";
 const INFO_A2B: &[u8] = b"voip-app/chain/a2b/v1";
 const INFO_B2A: &[u8] = b"voip-app/chain/b2a/v1";
 
@@ -153,10 +158,22 @@ impl HandshakeInit {
         hk.expand(INFO_B2A, &mut b2a)
             .expect("32 bytes is a valid HKDF-SHA256 output length");
 
+        let mut root = [0u8; 32];
+        hk.expand(INFO_RATCHET_ROOT, &mut root)
+            .expect("32 bytes is a valid HKDF-SHA256 output length");
+
         let (send_chain, recv_chain) = if initiator { (a2b, b2a) } else { (b2a, a2b) };
+        // The Double Ratchet's first DH step is the initiator's, against the
+        // responder's handshake ephemeral -- which the responder keeps as
+        // its first ratchet key instead of discarding.
+        let start = if initiator {
+            RatchetStart::Initiator { their_ephemeral: their_message.ephemeral }
+        } else {
+            RatchetStart::Responder { our_ephemeral: self.ephemeral_secret }
+        };
 
         Ok(Handshake {
-            session: Session::new(send_chain, recv_chain),
+            session: Session::new(send_chain, recv_chain, root, start),
             peer: their_message.identity,
         })
     }

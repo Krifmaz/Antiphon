@@ -25,6 +25,15 @@ pub struct Hello {
     /// knocking, which is what a missing field should mean.
     #[serde(default)]
     pub wants_silent: bool,
+    /// The relay this person listens at, `host:port`, or empty (spec §3).
+    /// Sent so a contact can reach you through it next time without
+    /// exchanging another link. Defaulted for peers on older builds.
+    #[serde(default)]
+    pub relay: String,
+    /// This person's signed route list (spec §8), hex: where to leave
+    /// mail for them while they're offline. Defaulted for older builds.
+    #[serde(default)]
+    pub routes: String,
 }
 
 /// Note on trust: none of these messages are authenticated beyond the
@@ -62,6 +71,23 @@ pub enum ControlMessage {
         /// meaningful preview and a transfer must not depend on it.
         #[serde(default)]
         thumbnail_png_b64: String,
+    },
+    /// A file that stays fetchable after the call (spec §5 seeding and
+    /// pinning): its own key, its id, and who holds sealed copies. Only
+    /// ever sent inside the call's encrypted channel -- the key is the
+    /// whole of the access.
+    FileLink {
+        name: String,
+        size: u64,
+        file_id: String,
+        key: String,
+        /// The sender's seeding port on the address the call came from,
+        /// or 0 when they aren't seeding.
+        #[serde(default)]
+        seed_port: u16,
+        /// Pin nodes that took a copy, as `ip:port`.
+        #[serde(default)]
+        holders: Vec<String>,
     },
     /// Receiver agreed; the sender can start blasting `File` frames.
     FileAccept { transfer_id: u64 },
@@ -142,6 +168,58 @@ pub enum ControlMessage {
     /// with the contact rather than only one side.
     FriendAccept { display_name: String },
     FriendReject,
+    /// Group calls (spec §3 "up to ~5 people, direct mesh"): the person
+    /// who added someone asks two members to connect to each other through
+    /// a relay. `dial` says which side dials and which registers and
+    /// listens; `peer_key` is who must answer, checked against the
+    /// handshake so a stranger who learned the token can't slip in.
+    GroupConnect { pair: u64, peer_key: String, relay: String, token: String, dial: bool },
+    /// The same without a relay: find your public address on a fresh
+    /// socket and report it, so the two members can punch through to each
+    /// other directly.
+    GroupPunch { pair: u64, peer_key: String },
+    GroupPunchAddr { pair: u64, addr: String },
+    GroupPunchPeer { pair: u64, peer_key: String, addr: String },
+    /// Leaving the group call. The 1:1 path has no hang-up message; a
+    /// group needs one, or everyone else keeps mixing a silent leg.
+    GroupLeave,
+    /// The call has moved past the mesh to an SFU (spec §3 "Beyond that --
+    /// SFU relay"): join the room at `sfu` named by `secret` and `day`.
+    /// Sent only over the call's own end-to-end sessions, so the SFU never
+    /// learns the secret. See `crate::sfu_call`.
+    GroupSfu {
+        /// The SFU's `host:port`.
+        sfu: String,
+        /// The room secret, hex; the room token is derived from it and
+        /// `day`, so only the token ever reaches the SFU.
+        secret: String,
+        /// The day number the caller picked, so everyone lands in one room
+        /// even across midnight.
+        day: u64,
+    },
+    /// Spec §3 "Groups -- MLS": the group call's key agreement, run over
+    /// each member's existing encrypted link. A member not yet in the MLS
+    /// group offers a KeyPackage; the committer answers with a Welcome and
+    /// tells everyone else with a Commit. See `group.rs`.
+    MlsKeyPackage(MlsPart),
+    MlsWelcome(MlsPart),
+    MlsCommit(MlsPart),
+    /// A piece of a group chat or community message (spec §9) for the
+    /// person at the other end, base64 -- the same fragments that would
+    /// otherwise go to their mailbox. See `crate::community`.
+    Community { data: String },
+}
+
+/// One piece of an MLS message. A Welcome carries the whole ratchet tree
+/// and outgrows one datagram, so every MLS message is split the same way:
+/// `msg` names it, and the receiver reassembles `parts` pieces.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MlsPart {
+    pub msg: u64,
+    pub part: u16,
+    pub parts: u16,
+    /// Base64 of this piece of the MLS wire encoding.
+    pub data: String,
 }
 
 impl ControlMessage {
@@ -165,6 +243,8 @@ mod tests {
             status_message: "Away".to_string(),
             presence: Some(1),
             wants_silent: true,
+            relay: "relay.example:3479".to_string(),
+            routes: String::new(),
         });
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();
         match decoded {

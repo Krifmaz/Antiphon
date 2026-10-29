@@ -1,4 +1,4 @@
-import { Button, LineEdit, ComboBox, VerticalBox, HorizontalBox, GroupBox, ScrollView, Palette } from "std-widgets.slint";
+import { Button, LineEdit, ComboBox, VerticalBox, HorizontalBox, GroupBox, ScrollView, Palette, TextEdit } from "std-widgets.slint";
 
 // Shared theme tokens so custom-drawn elements (everything below that isn't
 // a plain std-widget) actually follow the Appearance tab's choices instead
@@ -65,6 +65,108 @@ export struct ReachabilityRow {
     meaning: string,
 }
 
+/// An imported WireGuard config (spec §6). Never carries the key.
+export struct VpnConfigEntry {
+    id: string,
+    name: string,
+    detail: string,
+    active: bool,
+}
+
+/// One line of live captions (spec §7).
+export struct CaptionLine {
+    who: string,
+    text: string,
+}
+
+/// A file that stays fetchable after the call (spec §5).
+export struct SharedFileEntry {
+    name: string,
+    detail: string,
+    /// Availability, or how a download went.
+    status: string,
+    file-id: string,
+    mine: bool,
+}
+
+/// A group chat or community you're in (spec §9).
+export struct SpaceEntry {
+    id: string,
+    name: string,
+    detail: string,
+    unread: int,
+}
+
+/// An invitation to a group chat or community, waiting for an answer.
+export struct SpaceInviteEntry {
+    name: string,
+    detail: string,
+}
+
+/// One message in a channel or thread (spec §9). Ids are text because
+/// they are 64-bit and Slint's integers are not.
+export struct SpaceMessage {
+    id: string,
+    sender: string,
+    sender-key: string,
+    text: string,
+    time: string,
+    mine: bool,
+    deleted: bool,
+    /// Replies in its thread; only counted in the channel view.
+    replies: int,
+    /// Its author, or a moderator who outranks them.
+    can-delete: bool,
+    /// Yours, a text message (not a shared file), and not deleted.
+    can-edit: bool,
+    /// The text without the "(edited)" marker, to edit from.
+    plain: string,
+}
+
+/// One member, with what *you* may do to them -- worked out from the
+/// signed manifest, the same rules every other member checks.
+export struct SpaceMember {
+    key: string,
+    name: string,
+    /// Their status line in this space (spec §7 per-community identity).
+    status: string,
+    /// The picture they chose for this space, if any.
+    avatar: image,
+    has-avatar: bool,
+    role: string,
+    role-index: int,
+    me: bool,
+    can-kick: bool,
+    can-ban: bool,
+    can-role: bool,
+}
+
+export struct SpaceBan {
+    key: string,
+    detail: string,
+}
+
+/// A community listed in a directory (spec §4).
+export struct DirectoryEntry {
+    name: string,
+    description: string,
+    invite: string,
+    directory: string,
+}
+
+/// One delivery route (spec §8), for the route list.
+export struct RouteEntry {
+    title: string,
+    description: string,
+    enabled: bool,
+    is-direct: bool,
+    /// Node addresses, comma-separated.
+    nodes: string,
+    code: string,
+    /// Live status of each node, one per line.
+    status: string,
+}
+
 export struct ContactEntry {
     name: string,
     address: string,
@@ -77,6 +179,16 @@ export struct ContactEntry {
     key-changed: bool,
     /// 0 always ring, 1 silent only, 2 never. See `notify::RingRule`.
     ring-rule: int,
+    /// The full pinned identity key, hex, or "".
+    key: string,
+    /// Spec §3 per-conversation override: 0 auto, 1 direct, 2 relay.
+    connection-mode: int,
+    /// They have shared a relay, so a relayed call is possible.
+    via-relay: bool,
+    /// Spec §8 per-contact override: 0 their routes, 1 direct only.
+    message-route: int,
+    /// They publish somewhere mail can be left for them.
+    has-mailbox: bool,
 }
 
 // A from-scratch slider, standing in for std-widgets' `Slider`. That one's
@@ -1236,7 +1348,8 @@ export component MainWindow inherits Window {
     /// Spec §4: hand a contact's key to the person on this call.
     callback introduce-contact(int);
     in-out property <string> introduction-message: "";
-    callback call-contact(string);
+    callback call-contact(int);
+    callback set-contact-connection-mode(int, int);
     callback send-friend-request();
     callback accept-friend-request();
     callback reject-friend-request();
@@ -1373,13 +1486,20 @@ export component MainWindow inherits Window {
     in-out property <bool> ptt-held: false;
     in-out property <float> mic-level: 0;
     in-out property <bool> ptt-toggle: false;
+    in-out property <bool> mute-hold: false;
+    in-out property <bool> deafen-hold: false;
     in-out property <float> ptt-release-ms: 0;
     in-out property <bool> loopback-enabled: false;
     in-out property <string> loopback-message: "";
+    // Spec §1 "Mic Test & Record Preview".
+    in-out property <string> mic-test-message: "";
+    in-out property <bool> mic-test-running: false;
+    callback mic-test();
     callback toggle-loopback();
     in-out property <bool> monitor-enabled: false;
     in-out property <int> monitor-latency-ms: 120;
     in-out property <int> current-tab: 0;
+    in-out property <int> spaces-unread: 0;
     in-out property <int> settings-category: 0;
 
     // Settings search (spec §0). Rust owns the filtering and writes the
@@ -1425,9 +1545,27 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-soundboard: true;
     in-out property <bool> sec-notifications: true;
     in-out property <bool> sec-transferlimits: true;
+    in-out property <bool> sec-sharedfiles: true;
+    in-out property <bool> sec-captions: true;
+    in-out property <bool> sec-discovery: true;
     in-out property <bool> sec-outbox: true;
     in-out property <bool> sec-calladvanced: true;
     in-out property <bool> ip-direct-calling: false;
+    // Spec §3: the relay this machine listens at, "" for none.
+    in-out property <string> relay-server: "";
+    callback new-invite-secret();
+    // Spec §3 fallback relays and §6 reachability line. `active-relay` is
+    // the relay actually in use: yours, or the first fallback that answered.
+    in-out property <string> fallback-relays-text: "";
+    in-out property <bool> use-project-relays: true;
+    in-out property <string> active-relay: "";
+    in-out property <string> network-status: "Checking your connection...";
+    in-out property <string> network-status-explanation: "";
+    in-out property <bool> network-status-ok: true;
+    callback recheck-network();
+    // Spec §3 anonymity mode: calls through several relays.
+    in-out property <bool> anonymity-mode: false;
+    in-out property <string> anonymity-hops-text: "";
     /// Ring rules (spec §9 "Receiver settings always win", §13 schedules).
     /// Getting-started prompt (spec §13). Empty title means nothing to
     /// show, so the banner disappears entirely rather than sitting blank.
@@ -1471,8 +1609,156 @@ export component MainWindow inherits Window {
     // Spec §8: how long an undelivered message keeps trying. 0 is never
     // give up, which is the default.
     in-out property <int> outbox-give-up-hours: 0;
+    in-out property <[RouteEntry]> routes: [];
+    in-out property <bool> strict-mode: false;
+    in-out property <bool> route-fan-out: false;
+    in-out property <bool> hold-mail: false;
+    in-out property <int> hold-mail-port: 3480;
+    in-out property <string> found-nodes: "";
+    in-out property <string> delivery-notice: "";
+    in-out property <string> leave-message-text: "";
+    callback route-toggled(int, bool);
+    callback route-move(int, int);
+    callback route-nodes-edited(int, string);
+    callback route-code-edited(int, string);
+    callback delivery-settings-changed();
+    callback find-nodes();
+    // Spec §7 on-device live captions. Off by default.
+    in-out property <bool> captions-enabled: false;
+    in-out property <bool> captions-own-voice: false;
+    in property <bool> captions-model-installed: false;
+    in property <bool> captions-download-allowed: false;
+    in property <bool> captions-downloading: false;
+    in property <float> captions-download-fraction: 0;
+    in property <string> captions-size-text;
+    in property <string> captions-model-message;
+    in property <bool> captions-live: false;
+    in property <string> captions-status;
+    in property <[CaptionLine]> caption-lines;
+    in property <bool> captions-have-transcript: false;
+    callback captions-settings-changed();
+    callback captions-download();
+    callback captions-cancel-download();
+    callback captions-import();
+    callback captions-remove-model();
+    callback captions-save-transcript();
+    // Spec §5 seeding and pinning.
+    in-out property <bool> seeding: false;
+    in-out property <int> seed-scope: 0;
+    in-out property <int> seed-port: 3481;
+    in-out property <string> pin-nodes: "";
+    in-out property <string> pin-code: "";
+    in-out property <[SharedFileEntry]> shared-files: [];
+    // Spec §9: group chats and communities.
+    in-out property <[SpaceEntry]> spaces: [];
+    in-out property <[SpaceInviteEntry]> space-invites: [];
+    in-out property <string> selected-space: "";
+    in-out property <string> space-title: "";
+    in-out property <string> space-subtitle: "";
+    in-out property <bool> space-is-community: false;
+    in-out property <bool> space-removed: false;
+    in-out property <[string]> space-channel-names: [];
+    in-out property <int> space-channel-index: 0;
+    in-out property <string> space-thread-root: "";
+    /// The id of your own message being edited, or "" when composing.
+    in-out property <string> space-editing: "";
+    in-out property <[SpaceMessage]> space-messages: [];
+    in-out property <[SpaceMember]> space-members: [];
+    in-out property <[string]> space-role-names: [];
+    in-out property <[SpaceBan]> space-bans: [];
+    in-out property <[string]> space-contact-names: [];
+    in-out property <int> space-invite-index: 0;
+    in-out property <bool> space-can-post: false;
+    in-out property <bool> space-can-invite: false;
+    in-out property <bool> space-can-ban: false;
+    in-out property <bool> space-can-manage: false;
+    in-out property <bool> space-can-manage-channels: false;
+    in-out property <bool> space-server-hosted: false;
+    /// 0 = your default, then RingRule + 1 (always, silent only, never).
+    in-out property <int> space-ring-rule: 0;
+    in-out property <string> space-mailbox-node: "";
+    in-out property <string> space-mailbox-code: "";
+    in-out property <string> space-files-node: "";
+    in-out property <string> space-files-code: "";
+    in-out property <string> space-dht-node: "";
+    in-out property <string> space-status: "";
+    in-out property <string> space-input: "";
+    in-out property <string> space-new-name: "";
+    in-out property <string> space-new-channel: "";
+    in-out property <string> space-ban-reason: "";
+    callback open-communities();
+    callback refresh-space();
+    callback create-space(string, bool);
+    callback select-space(string);
+    callback accept-space-invite(int, bool);
+    callback decline-space-invite(int);
+    callback select-space-channel(int);
+    callback space-send(string);
+    callback space-edit-message(string, string);
+    callback space-delete-message(string, string);
+    callback space-invite(int);
+    callback space-kick(string);
+    callback space-ban(string, string);
+    callback space-unban(string);
+    callback space-set-role(string, int);
+    callback space-add-channel(string);
+    callback space-remove-channel();
+    callback space-save-settings();
+    callback space-set-ring-rule(int);
+    callback space-use-nodes();
+    callback space-share-file();
+    callback space-leave();
+    callback space-forget();
+    // Spec §7 "per-community identity": how you appear in the selected
+    // space, and whether you joined it under a separate identity.
+    in-out property <bool> space-new-separate: false;
+    in-out property <bool> space-separate: false;
+    in-out property <string> space-look-name: "";
+    in-out property <string> space-look-status: "";
+    in-out property <string> space-look-avatar-data: "";
+    in-out property <image> space-look-avatar;
+    in-out property <string> space-look-defaults: "";
+    callback space-save-look();
+    callback space-pick-look-avatar();
+    callback space-clear-look-avatar();
+    callback sharing-settings-changed();
+    // Spec §6: bring your own VPN.
+    in-out property <bool> sec-vpn: true;
+    in-out property <bool> vpn-enabled: false;
+    in-out property <bool> vpn-route-voice: false;
+    in-out property <bool> vpn-route-files: true;
+    in-out property <bool> vpn-route-messages: true;
+    in-out property <bool> vpn-kill-switch: false;
+    in property <[VpnConfigEntry]> vpn-configs: [];
+    in property <string> vpn-status: "";
+    in property <string> vpn-message: "";
+    callback vpn-settings-changed();
+    callback import-vpn-config();
+    callback select-vpn-config(string);
+    callback delete-vpn-config(string);
+    callback check-shared-files();
+    callback download-shared-file(string);
+    callback forget-shared-file(string);
+    // Spec §4 discovery: the DHT and community directories.
+    in-out property <bool> dht-enabled: false;
+    in-out property <string> dht-bootstrap: "";
+    in-out property <string> dht-status: "";
+    in-out property <string> directories: "";
+    in-out property <string> directory-status: "";
+    in-out property <[DirectoryEntry]> directory-entries: [];
+    callback dht-settings-changed();
+    callback browse-directories();
+    callback join-directory-entry(string, string);
+    callback set-contact-message-route(int, int);
+    callback leave-message(int);
     /// Shown when audio was recovered, if the mode asks for it.
     in-out property <string> replay-notice: "";
+    // Spec §2 "Ask me": a clip is waiting behind a Replay button.
+    in-out property <bool> replay-ask: false;
+    // Spec §3 group calls: everyone in the call, you included, and the
+    // names of everyone beyond the person you're connected to.
+    in-out property <int> group-people: 2;
+    in-out property <string> group-names: "";
     callback replay-settings-changed();
 
     in-out property <int> my-presence: 0;
@@ -1502,6 +1788,10 @@ export component MainWindow inherits Window {
     in-out property <string> recovery-phrase: "";
     in-out property <bool> recovery-phrase-shown: false;
     callback toggle-recovery-phrase();
+    in-out property <int> recovery-split-choice: 0;
+    in-out property <string> recovery-shares: "";
+    in-out property <bool> recovery-shares-shown: false;
+    callback toggle-recovery-shares();
 
     in-out property <string> display-name: "You";
     // Rust-computed (first character of display-name, uppercased) for the
@@ -1600,8 +1890,9 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-callcontrols: true;
     in-out property <bool> sec-aec: true;
     in-out property <bool> sec-denoise: true;
-    in-out property <bool> ns-enabled: false;
-    in-out property <float> ns-strength: 0.4;
+    in-out property <bool> ns-enabled: true;
+    in-out property <float> ns-strength: 1.0;
+    in-out property <bool> ns-neural: true;
     in-out property <bool> sec-gate: true;
     in-out property <bool> sec-hpf: true;
     in-out property <bool> sec-lpf: true;
@@ -1760,6 +2051,37 @@ export component MainWindow inherits Window {
             Image { source: @image-url("tray-icon.png"); width: 24px; height: 24px; }
             Text { text: "Antiphon"; font-size: 17px * text-scale; font-weight: 700; vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
+            // Spec §6: reachability is always visible, never discovered
+            // through a call that failed. Click to check again.
+            Rectangle {
+                border-radius: 10px;
+                background: network-status-ok ? Theme.panel-hover : #6b2a2a;
+                width: net-chip.preferred-width + 16px;
+                height: 22px;
+                accessible-role: button;
+                accessible-label: "Connection: " + network-status;
+                net-chip := Text {
+                    text: network-status;
+                    font-size: 10px * text-scale;
+                    vertical-alignment: center;
+                    color: network-status-ok ? Theme.muted-text : #ffd0d0;
+                }
+                net-touch := TouchArea { clicked => { recheck-network(); } }
+                if net-touch.has-hover && network-status-explanation != "" : Rectangle {
+                    y: parent.height + 4px;
+                    x: parent.width - 320px;
+                    width: 320px;
+                    height: net-tip.preferred-height + 12px;
+                    background: Palette.background; border-width: 1px; border-color: Theme.divider;
+                    border-radius: 6px;
+                    net-tip := Text {
+                        x: 6px; y: 6px; width: parent.width - 12px;
+                        text: network-status-explanation + (active-relay != "" ? "\nRelay in use: " + active-relay : "");
+                        wrap: word-wrap;
+                        font-size: 10px * text-scale;
+                    }
+                }
+            }
             Text { text: status-text; vertical-alignment: center; color: connected ? Theme.accent-text : Theme.muted-text; }
         }
 
@@ -1772,7 +2094,15 @@ export component MainWindow inherits Window {
             // Settings button from the top left since there's one in the
             // profile widget"), so there's nothing to show here on the
             // Call tab itself.
-            if current-tab == 1 : TabButton { label: "Return"; active: false; reduced-motion: reduced-motion; clicked => { current-tab = 0; } }
+            if current-tab != 0 : TabButton { label: "Return"; active: false; reduced-motion: reduced-motion; clicked => { current-tab = 0; } }
+            // Spec §9. Its own page rather than a call-screen widget: a
+            // community is somewhere you go, not something beside a call.
+            if current-tab == 0 : TabButton {
+                label: spaces-unread > 0 ? "Groups & communities (" + spaces-unread + ")" : "Groups & communities";
+                active: false;
+                reduced-motion: reduced-motion;
+                clicked => { current-tab = 2; open-communities(); }
+            }
             Rectangle { horizontal-stretch: 1; }
         }
 
@@ -2263,6 +2593,30 @@ export component MainWindow inherits Window {
                             wrap: word-wrap;
                         }
                     }
+                    // Spec §3 group calls / §9: who else is here.
+                    if connected && group-people > 2 : Text {
+                        text: "Voice active · \{group-people} people -- also with \{group-names}";
+                        font-size: 11px * text-scale;
+                        wrap: word-wrap;
+                    }
+                    // Spec §2 "Ask me (popup button)".
+                    if connected && replay-ask : HorizontalBox {
+                        padding: 0px;
+                        spacing: 6px;
+                        Text {
+                            text: "Their audio dropped out.";
+                            font-size: 11px * text-scale;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "Replay it";
+                            clicked => { replay-ask = false; play-replay-clip(0); }
+                        }
+                        Button {
+                            text: "Dismiss";
+                            clicked => { replay-ask = false; replay-notice = ""; }
+                        }
+                    }
                     if connected && peer-display-name != "" : Text {
                         text: peer-status-message != "" ? "With: \{peer-display-name} -- \{peer-status-message}" : "With: \{peer-display-name}";
                         color: Theme.muted-text;
@@ -2639,6 +2993,15 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    if delivery-notice != "" : Text {
+                        text: delivery-notice;
+                        wrap: word-wrap;
+                        font-size: 11px * text-scale;
+                    }
+                    LineEdit {
+                        text <=> leave-message-text;
+                        placeholder-text: "Write a message, then press Leave message on a contact";
+                    }
                     if contacts.length == 0 : Text {
                         text: "No saved contacts yet. Add one below, or press \"Add current peer\" while on a call.";
                         wrap: word-wrap;
@@ -2675,12 +3038,34 @@ export component MainWindow inherits Window {
                             current-index: c.ring-rule;
                             selected(v) => { set-contact-ring-rule(i, self.current-index); }
                         }
+                        // Spec §3: the connection mode, chosen automatically
+                        // and overridable per conversation.
+                        ComboBox {
+                            model: ["Auto", "Direct", "Relay"];
+                            current-index: c.connection-mode;
+                            selected(v) => { set-contact-connection-mode(i, self.current-index); }
+                        }
+                        // Spec §8 per-contact override for messages.
+                        ComboBox {
+                            model: ["Mail: their routes", "Mail: direct only"];
+                            current-index: c.message-route;
+                            selected(v) => { set-contact-message-route(i, self.current-index); }
+                        }
+                        Button {
+                            text: "Leave message";
+                            enabled: leave-message-text != "" && c.key != "";
+                            clicked => { leave-message(i); }
+                        }
                         Button {
                             text: "Introduce";
                             enabled: connected && c.fingerprint != "";
                             clicked => { introduce-contact(i); }
                         }
-                        Button { text: "Call"; enabled: !connected; clicked => { call-contact(c.address); } }
+                        Button {
+                            text: connected ? "Add" : "Call";
+                            enabled: !connected || group-people < 5;
+                            clicked => { call-contact(i); }
+                        }
                         Button { text: "Forget"; clicked => { forget-history(i); } }
                         Button { text: "X"; clicked => { remove-contact(i); } }
                     }
@@ -2880,10 +3265,367 @@ export component MainWindow inherits Window {
                                         MenuItem { title: "Contacts & servers"; checkable: true; checked <=> call-panel-visible-contacts; activated => { settings-changed(); } }
                                         MenuItem { title: "My invite (QR)"; checkable: true; checked <=> call-panel-visible-invite; activated => { settings-changed(); } }
                                     }
+                                    MenuItem { title: "Live captions"; checkable: true; checked <=> captions-enabled; activated => { captions-settings-changed(); } }
                                 }
                             }
                         }
                     }
+                }
+
+                // Spec §7 live captions, subtitle-style along the bottom
+                // and above every panel, so moving panels around can never
+                // hide them. Shown only while captions are actually
+                // running in a call.
+                if captions-live && (caption-lines.length > 0 || captions-status != "") : Rectangle {
+                    width: min(680px, parent.width - 24px);
+                    height: captions-layout.preferred-height;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height - 12px;
+                    background: #000000c8;
+                    border-radius: 8px;
+
+                    captions-layout := VerticalLayout {
+                        padding: 10px;
+                        spacing: 2px;
+                        for line in caption-lines : Text {
+                            text: line.who + ": " + line.text;
+                            color: #ffffff;
+                            wrap: word-wrap;
+                            font-size: 15px * text-scale;
+                            accessible-role: text;
+                            accessible-label: line.who + " said " + line.text;
+                        }
+                        if captions-status != "" : Text {
+                            text: captions-status;
+                            color: #ffffffb0;
+                            wrap: word-wrap;
+                            font-size: 10px * text-scale;
+                        }
+                        if captions-have-transcript : HorizontalLayout {
+                            alignment: end;
+                            Button { text: "Save transcript..."; clicked => { captions-save-transcript(); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if current-tab == 2 && !server-mode : HorizontalBox {
+            padding: 0px;
+            spacing: 10px;
+
+            // Yours, invitations, and making a new one.
+            VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                width: 230px;
+                horizontal-stretch: 0;
+                Text { text: "Groups & communities"; font-weight: 700; font-size: 13px * text-scale; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 2px;
+                        if spaces.length == 0 && space-invites.length == 0 : Text {
+                            text: "None yet. Name one below to start it, or accept an invitation. Everything is end-to-end encrypted and there is no server: messages go over calls and through each member's own mailboxes.";
+                            wrap: word-wrap;
+                            color: Theme.muted-text;
+                            font-size: 11px * text-scale;
+                        }
+                        for s in spaces : SideNavButton {
+                            label: s.unread > 0 ? s.name + "  (" + s.unread + ")" : s.name;
+                            active: s.id == selected-space;
+                            reduced-motion: reduced-motion;
+                            clicked => { select-space(s.id); }
+                        }
+                        if space-invites.length > 0 : Text { text: "Invitations"; font-weight: 700; font-size: 11px * text-scale; }
+                        for inv[i] in space-invites : VerticalBox {
+                            padding: 0px;
+                            spacing: 2px;
+                            Text { text: inv.name; font-weight: 700; wrap: word-wrap; font-size: 12px * text-scale; }
+                            Text { text: inv.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: 4px;
+                                Button { text: "Join"; clicked => { accept-space-invite(i, false); } }
+                                Button { text: "Join as someone new"; clicked => { accept-space-invite(i, true); } }
+                                Button { text: "Decline"; clicked => { decline-space-invite(i); } }
+                            }
+                        }
+                    }
+                }
+                LineEdit { text <=> space-new-name; placeholder-text: "Name for a new one"; }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 4px;
+                    Button { text: "New group"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, false); } }
+                    Button { text: "New community"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, true); } }
+                }
+                ToggleSwitch {
+                    text: "Under a separate identity";
+                    checked <=> space-new-separate;
+                    reduced-motion: reduced-motion;
+                    text-scale: text-scale;
+                    help: "Off by default. On: you own the new one under a key made just for it, so nobody in it can match you with your contacts or your other communities. \"Join as someone new\" does the same for an invitation.";
+                }
+                Text {
+                    text: "A group is one conversation of up to 100 where anyone may invite. A community has channels, and admins and moderators who can remove and ban.";
+                    wrap: word-wrap;
+                    color: Theme.muted-text;
+                    font-size: 10px * text-scale;
+                }
+            }
+
+            // The channel, or one thread in it.
+            VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                horizontal-stretch: 1;
+                if selected-space == "" : Text { text: "Pick one on the left."; color: Theme.muted-text; }
+                if selected-space != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 6px;
+                    vertical-stretch: 0;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 0px;
+                        Text { text: space-title; font-weight: 700; font-size: 14px * text-scale; }
+                        Text { text: space-subtitle; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if space-is-community && space-thread-root == "" : ComboBox {
+                        model: space-channel-names;
+                        current-index <=> space-channel-index;
+                        selected(v) => { select-space-channel(self.current-index); }
+                    }
+                    if space-thread-root != "" : Button { text: "Back to the channel"; clicked => { space-thread-root = ""; refresh-space(); } }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 6px;
+                        if selected-space != "" && space-messages.length == 0 : Text {
+                            text: space-removed ? "You're no longer in this." : "Nothing here yet.";
+                            color: Theme.muted-text;
+                            font-size: 11px * text-scale;
+                        }
+                        for m in space-messages : VerticalBox {
+                            padding: 0px;
+                            spacing: 1px;
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: 6px;
+                                Text { text: m.sender; font-weight: 700; color: m.mine ? Theme.accent-text : Theme.muted-text; font-size: 10px * text-scale; vertical-alignment: center; }
+                                Text { text: m.time; color: Theme.muted-text; font-size: 9px * text-scale; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                if space-thread-root == "" && !m.deleted : Text {
+                                    text: m.replies == 1 ? "1 reply" : m.replies > 1 ? m.replies + " replies" : "reply";
+                                    color: thread-touch.has-hover ? Theme.accent-text : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    thread-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-thread-root = m.id; refresh-space(); }
+                                    }
+                                }
+                                if m.can-edit && space-can-post : Text {
+                                    text: "edit";
+                                    color: space-edit-touch.has-hover ? Theme.accent-text : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    space-edit-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-editing = m.id; space-input = m.plain; }
+                                    }
+                                }
+                                if m.can-delete && !m.deleted : Text {
+                                    text: m.mine ? "delete" : "remove";
+                                    color: rm-touch.has-hover ? #e05252 : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    rm-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-delete-message(m.id, m.sender-key); }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: m.text;
+                                wrap: word-wrap;
+                                font-size: 12px * text-scale;
+                                font-italic: m.deleted;
+                                color: m.deleted ? Theme.muted-text : Palette.foreground;
+                            }
+                        }
+                    }
+                }
+                if space-status != "" : Text { text: space-status; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                if selected-space != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 6px;
+                    vertical-stretch: 0;
+                    LineEdit {
+                        text <=> space-input;
+                        enabled: space-can-post;
+                        placeholder-text: space-editing != "" ? "Edit your message..." : space-thread-root != "" ? "Reply in this thread..." : "Message...";
+                        accepted(v) => { if space-editing != "" { space-edit-message(space-editing, v); } else { space-send(v); } }
+                    }
+                    if space-editing != "" : Button { text: "Cancel"; clicked => { space-editing = ""; space-input = ""; } }
+                    if space-editing == "" : Button { text: "Share file"; enabled: space-can-post; clicked => { space-share-file(); } }
+                    Button {
+                        text: space-editing != "" ? "Save" : "Send";
+                        enabled: space-can-post && space-input != "";
+                        clicked => { if space-editing != "" { space-edit-message(space-editing, space-input); } else { space-send(space-input); } }
+                    }
+                }
+            }
+
+            // Members, and what you may do about them.
+            if selected-space != "" : ScrollView {
+                width: 290px;
+                horizontal-stretch: 0;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 4px;
+                    Text { text: "Members"; font-weight: 700; font-size: 12px * text-scale; }
+                    for mem in space-members : VerticalBox {
+                        padding: 0px;
+                        spacing: 2px;
+                        HorizontalBox {
+                            padding: 0px;
+                            spacing: 4px;
+                            if mem.has-avatar : Image {
+                                source: mem.avatar;
+                                width: 20px;
+                                height: 20px;
+                                image-fit: cover;
+                                accessible-role: image;
+                                accessible-label: mem.name;
+                            }
+                            VerticalBox {
+                                padding: 0px;
+                                spacing: 0px;
+                                horizontal-stretch: 1;
+                                Text { text: mem.me ? mem.name + " (you)" : mem.name; wrap: word-wrap; font-size: 11px * text-scale; }
+                                if mem.status != "" : Text { text: mem.status; wrap: word-wrap; color: Theme.muted-text; font-size: 10px * text-scale; }
+                            }
+                            Text { text: mem.role; color: Theme.muted-text; font-size: 10px * text-scale; }
+                        }
+                        if mem.can-role || mem.can-kick || mem.can-ban : HorizontalBox {
+                            padding: 0px;
+                            spacing: 4px;
+                            if mem.can-role : ComboBox {
+                                model: space-role-names;
+                                current-index: mem.role-index;
+                                selected(v) => { space-set-role(mem.key, self.current-index); }
+                            }
+                            if mem.can-kick : Button { text: "Remove"; clicked => { space-kick(mem.key); } }
+                            if mem.can-ban : Button { text: "Ban"; clicked => { space-ban(mem.key, space-ban-reason); } }
+                        }
+                    }
+                    if space-can-ban : LineEdit { text <=> space-ban-reason; placeholder-text: "Reason, for the ban list (optional)"; }
+                    if space-can-invite : Text { text: "Invite a contact"; font-weight: 700; font-size: 11px * text-scale; }
+                    if space-can-invite : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        ComboBox { model: space-contact-names; current-index <=> space-invite-index; }
+                        Button { text: "Invite"; enabled: space-contact-names.length > 0; clicked => { space-invite(space-invite-index); } }
+                    }
+                    if space-bans.length > 0 : Text { text: "Banned"; font-weight: 700; font-size: 11px * text-scale; }
+                    for b in space-bans : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        Text { text: b.detail; wrap: word-wrap; horizontal-stretch: 1; font-size: 10px * text-scale; color: Theme.muted-text; }
+                        if space-can-ban : Button { text: "Lift"; clicked => { space-unban(b.key); } }
+                    }
+                    if space-is-community && space-can-manage-channels : Text { text: "Channels"; font-weight: 700; font-size: 11px * text-scale; }
+                    if space-is-community && space-can-manage-channels : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        LineEdit { text <=> space-new-channel; placeholder-text: "new channel"; }
+                        Button { text: "Add"; enabled: space-new-channel != ""; clicked => { space-add-channel(space-new-channel); } }
+                    }
+                    if space-is-community && space-can-manage-channels && space-channel-names.length > 1 : Button {
+                        text: "Remove this channel";
+                        clicked => { space-remove-channel(); }
+                    }
+                    if space-is-community : Text {
+                        text: "Its nodes";
+                        font-weight: 700;
+                        font-size: 11px * text-scale;
+                    }
+                    if space-is-community : Text {
+                        text: "Mailbox, file and DHT nodes the community runs (antiphon-relay with --mailbox-code / --files-code). Signed into its manifest, so every member sees the same ones.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    if space-is-community : LineEdit { text <=> space-mailbox-node; enabled: space-can-manage; placeholder-text: "mailbox node host:port"; }
+                    if space-is-community : LineEdit { text <=> space-mailbox-code; enabled: space-can-manage; placeholder-text: "its members code"; }
+                    if space-is-community : LineEdit { text <=> space-files-node; enabled: space-can-manage; placeholder-text: "file node host:port"; }
+                    if space-is-community : LineEdit { text <=> space-files-code; enabled: space-can-manage; placeholder-text: "its members code"; }
+                    if space-is-community : LineEdit { text <=> space-dht-node; enabled: space-can-manage; placeholder-text: "DHT node host:port"; }
+                    if space-is-community : ToggleSwitch {
+                        text: "Server-hosted files";
+                        enabled: space-can-manage;
+                        checked <=> space-server-hosted;
+                        reduced-motion: reduced-motion;
+                        text-scale: text-scale;
+                        help: "Off by default. When on, a file shared in this community is also uploaded, encrypted, to its file node, so it stays fetchable when the person who shared it is offline. The node holds bytes it cannot read.";
+                    }
+                    if space-is-community && space-can-manage : Button { text: "Save community settings"; clicked => { space-save-settings(); } }
+                    if space-is-community && space-mailbox-node != "" : Button { text: "Use its mailbox for my mail"; clicked => { space-use-nodes(); } }
+                    Text { text: "How I appear here"; font-weight: 700; font-size: 11px * text-scale; }
+                    Text {
+                        text: space-separate
+                            ? "You're in this under a separate identity: a key made just for it from your recovery phrase. Members can't match it with your contacts or your other communities -- only whoever invited you knows. Its messages go by mailbox, never over a call. It can't be switched off here; leave and be invited again for that."
+                            : "You're in this as yourself: your contacts here see the key they know. A different name or picture changes how you look, not who you are. For a key of its own, leave and accept an invitation with \"Join as someone new\".";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    LineEdit { text <=> space-look-name; placeholder-text: "Name here (empty: " + space-look-defaults + ")"; }
+                    LineEdit { text <=> space-look-status; placeholder-text: "Status here (empty: your profile's)"; }
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        if space-look-avatar-data != "" : Image {
+                            source: space-look-avatar;
+                            width: 32px;
+                            height: 32px;
+                            image-fit: cover;
+                            accessible-role: image;
+                            accessible-label: "Your picture here";
+                        }
+                        Button { text: space-look-avatar-data != "" ? "Change picture" : "Add a picture"; clicked => { space-pick-look-avatar(); } }
+                        if space-look-avatar-data != "" : Button { text: "No picture"; clicked => { space-clear-look-avatar(); } }
+                    }
+                    Text {
+                        text: "Your profile picture is never sent to anyone; one added here goes to this space's members only, as a small thumbnail.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    Button { text: "Save how I appear here"; clicked => { space-save-look(); } }
+                    Text { text: "Calls and notifications"; font-weight: 700; font-size: 11px * text-scale; }
+                    Text {
+                        text: "For calls from members who aren't your contacts (a contact's own setting wins), and for message notices. If you share several, the quietest applies.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    ComboBox {
+                        model: ["My default", "Always ring", "Silent only", "Never (mute)"];
+                        current-index <=> space-ring-rule;
+                        selected => { space-set-ring-rule(self.current-index); }
+                    }
+                    Rectangle { height: 1px; background: Theme.divider; }
+                    if !space-removed : Button { text: "Leave"; clicked => { space-leave(); } }
+                    if space-removed : Button { text: "Forget it and its history"; clicked => { space-forget(); } }
                 }
             }
         }
@@ -3515,6 +4257,25 @@ export component MainWindow inherits Window {
                                         color: Theme.muted-text;
                                         font-size: 10px * text-scale;
                                     }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        spacing: 6px;
+                                        Button {
+                                            text: "Mic test (5 s)";
+                                            enabled: !connected && !loopback-enabled && !mic-test-running;
+                                            clicked => { mic-test(); }
+                                        }
+                                        HelpIcon {
+                                            text-scale: text-scale;
+                                            text: "Records five seconds of you, then plays it back through your full processing chain -- exactly what other people hear. Nothing is kept afterwards.";
+                                        }
+                                    }
+                                    if mic-test-message != "" : Text {
+                                        text: mic-test-message;
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
                                 }
                                 VerticalBox {
                                     padding: 0px;
@@ -3698,7 +4459,7 @@ export component MainWindow inherits Window {
                                     }
                                     SettingLabel {
                                         text: "Replay keeps the last \{replay-seconds} seconds";
-                                        help: "How much of what you have heard is kept, so you can save a moment you missed. It is held in plain memory -- rolling, discarded when the call ends, and never written to disk unless you press Save -- but it is NOT encrypted while it is there, so anything that can read this program's memory can read it. That is also why it is capped at a minute.";
+                                        help: "How much of what you have heard is kept, so you can save a moment you missed. It is encrypted in memory under a key made for this call, rolls over as it fills, and is gone the moment the call ends -- never written to disk unless you press Save. This app does not record you. While the call runs, something that can read this program's memory could still read it, which is one reason it is capped at a minute.";
                                         text-scale: text-scale;
                                     }
                                     AccentSlider {
@@ -3706,13 +4467,22 @@ export component MainWindow inherits Window {
                                         value: replay-seconds;
                                         changed(v) => { replay-seconds = round(v); replay-settings-changed(); }
                                     }
+                                    // Spec §2 asks for this to be stated loudly, not
+                                    // tucked into help: otherwise "the app records
+                                    // you" becomes the story.
+                                    Text {
+                                        text: "Not a recording: encrypted in memory, rolling, and gone when the call ends.";
+                                        color: Theme.muted-text;
+                                        font-size: 11px * text-scale;
+                                        wrap: word-wrap;
+                                    }
                                     SettingLabel {
-                                        text: "When audio is recovered";
-                                        help: "A lost moment can sometimes be rebuilt from the backup copy the next packet carries. This decides whether you are told when that happens -- the audio itself is already played either way, seamlessly.";
+                                        text: "When their audio drops out";
+                                        help: "When the network damages a moment badly enough to be worth a second listen, the seconds around it are kept. Auto-play replays that moment straight away; Ask me shows a Replay button on the call screen; Off keeps it quietly in the list below. Small losses are repaired invisibly either way.";
                                         text-scale: text-scale;
                                     }
                                     ComboBox {
-                                        model: ["Don't mention it", "Tell me it happened", "Tell me and count it"];
+                                        model: ["Off", "Ask me", "Auto-play"];
                                         current-index: replay-mode;
                                         selected(v) => { replay-mode = self.current-index; replay-settings-changed(); }
                                     }
@@ -3778,7 +4548,7 @@ export component MainWindow inherits Window {
                                         checked <=> echo-cancel;
                                         reduced-motion: reduced-motion;
                                         text-scale: text-scale;
-                                        help: "Without headphones, what you hear from the other person is picked up by your microphone and sent back, so they hear themselves. This learns how your speakers reach your microphone and subtracts it. Off by default: it has been tested against simulated echo, not against real rooms, and a misbehaving echo canceller damages your own voice -- which is worse than the echo. Turn it on, check the meter below moves, and ask the other person whether it helped.";
+                                        help: "Without headphones, what you hear from the other person is picked up by your microphone and sent back, so they hear themselves. This learns how your speakers reach your microphone and subtracts it. On by default; if you always wear headphones you can turn it off for the lowest possible processing.";
                                         toggled => { settings-changed(); }
                                     }
                                     if echo-cancel : Text {
@@ -3807,16 +4577,24 @@ export component MainWindow inherits Window {
                                 if sec-denoise : VerticalBox {
                                     padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
                                     ToggleSwitch {
-                                        text: "Remove steady background sound";
+                                        text: "Remove background sound";
                                         checked <=> ns-enabled;
                                         reduced-motion: reduced-motion;
                                         text-scale: text-scale;
-                                        help: "Works out which frequencies are constant background and turns those down, so a fan under your voice goes quiet without your voice going with it. The noise gate below only silences the gaps between sentences; this works during them too. Not the machine-learning kind: it will not remove a dog barking or a door closing, only sound that is steadily there.";
+                                        help: "Takes background sound out of your mic while you talk, not just between sentences like the noise gate below.";
+                                        toggled => { settings-changed(); }
+                                    }
+                                    if ns-enabled : ToggleSwitch {
+                                        text: "Use the voice model";
+                                        checked <=> ns-neural;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "On: a trained model (RNNoise) that knows what a voice sounds like, so it also removes keyboards, dogs and doors. Off: classic spectral subtraction, which only removes sound that is steadily there, like a fan or hiss. The model needs your mic at 48 kHz; at other rates the classic method is used.";
                                         toggled => { settings-changed(); }
                                     }
                                     if ns-enabled : SettingLabel {
                                         text: "Strength: " + round(ns-strength * 100) + "%";
-                                        help: "How much of the background to take out. Low settings barely touch anything; high settings remove a lot of it. Speech and background share the same frequencies, so past about 70% you start removing the parts of your voice that live in the same place -- which is what makes it sound thin.";
+                                        help: ns-neural ? "How much of the cleaned sound replaces the original. 100% is the model's output; lower keeps some of the room in." : "How much of the background to take out. Low settings barely touch anything; high settings remove a lot of it. Speech and background share the same frequencies, so past about 70% you start removing the parts of your voice that live in the same place -- which is what makes it sound thin.";
                                         text-scale: text-scale;
                                     }
                                     if ns-enabled : AccentSlider {
@@ -3826,7 +4604,7 @@ export component MainWindow inherits Window {
                                     }
                                     // Spec §1 asks for this warning specifically, and it
                                     // belongs next to the number that causes it.
-                                    if ns-enabled && ns-strength >= 0.7 : Text {
+                                    if ns-enabled && !ns-neural && ns-strength >= 0.7 : Text {
                                         text: "At this strength your voice may start to sound thin -- speech and background share frequencies, so removing more of one removes more of the other.";
                                         color: Theme.muted-text;
                                         font-size: 10px * text-scale;
@@ -4215,7 +4993,7 @@ export component MainWindow inherits Window {
                         Rectangle { height: 6px; }
 
                         KeybindRow {
-                            label: "Push to talk (hold)";
+                            label: ptt-toggle ? "Push to talk (toggle)" : "Push to talk (hold)";
                             id: "ptt";
                             key-name: ptt-key-name;
                             capturing: capturing-binding == "ptt";
@@ -4224,7 +5002,7 @@ export component MainWindow inherits Window {
                             change => { capture-binding("ptt"); }
                         }
                         KeybindRow {
-                            label: "Toggle mute";
+                            label: mute-hold ? "Mute (hold)" : "Toggle mute";
                             id: "mute";
                             key-name: mute-key-name;
                             capturing: capturing-binding == "mute";
@@ -4232,14 +5010,30 @@ export component MainWindow inherits Window {
                             change => { capture-binding("mute"); }
                             clear => { clear-binding("mute"); }
                         }
+                        ToggleSwitch {
+                            text: "Mute only while the key is held";
+                            checked <=> mute-hold;
+                            reduced-motion: reduced-motion;
+                            text-scale: text-scale;
+                            help: "Push-to-mute: you are muted while you hold the key and unmuted the moment you let go, instead of pressing once to mute and again to unmute.";
+                            toggled => { settings-changed(); }
+                        }
                         KeybindRow {
-                            label: "Toggle deafen";
+                            label: deafen-hold ? "Deafen (hold)" : "Toggle deafen";
                             id: "deafen";
                             key-name: deafen-key-name;
                             capturing: capturing-binding == "deafen";
                             text-scale: text-scale;
                             change => { capture-binding("deafen"); }
                             clear => { clear-binding("deafen"); }
+                        }
+                        ToggleSwitch {
+                            text: "Deafen only while the key is held";
+                            checked <=> deafen-hold;
+                            reduced-motion: reduced-motion;
+                            text-scale: text-scale;
+                            help: "You hear nothing while you hold the key, and everything comes back the moment you let go, instead of pressing once to deafen and again to undeafen.";
+                            toggled => { settings-changed(); }
                         }
                         KeybindRow {
                             label: "Hang up";
@@ -4445,6 +5239,289 @@ export component MainWindow inherits Window {
                                 }
                             }
 
+                            if section-id == "sharedfiles" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Files that can still be fetched after the call. Each is encrypted with its own key that only you and the person you sent it to have; whoever holds a copy -- you, them, a pin node -- can't read it.";
+                                    text-scale: text-scale;
+                                    title: "Shared files"; reduced-motion: reduced-motion; expanded <=> sec-sharedfiles;
+                                }
+                                if sec-sharedfiles : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Seed files I share and download";
+                                        checked <=> seeding;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Keeps an encrypted copy of each file and hands it out, so the other person can fetch it after the call, and from several people at once if they seed too. Off by default: it uses disk space and upload. Uses port " + seed-port + ".";
+                                        toggled => { sharing-settings-changed(); }
+                                    }
+                                    if seeding : HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        SettingLabel { text: "Hand them to"; help: "Where it was shared: whoever has the link from that chat -- in a community, only people its signed member list names right now, so a ban stops them. Contacts: those people, only if they're also your contacts (in a community, its members). Anyone: anyone with the file's id -- they still can't read it without the key."; text-scale: text-scale; }
+                                        ComboBox {
+                                            model: ["Where it was shared only", "My contacts", "Anyone"];
+                                            current-index: seed-scope;
+                                            selected(v) => { seed-scope = self.current-index; sharing-settings-changed(); }
+                                        }
+                                    }
+                                    SettingLabel { text: "Pin nodes"; help: "Nodes that keep an encrypted copy of every file you share, for when neither of you is online. A node only does this if its operator turned on file hosting. Comma-separated, press Enter."; text-scale: text-scale; }
+                                    LineEdit {
+                                        text <=> pin-nodes;
+                                        placeholder-text: "node.example.org:3478, ...";
+                                        accepted(t) => { sharing-settings-changed(); }
+                                    }
+                                    LineEdit {
+                                        text <=> pin-code;
+                                        placeholder-text: "community code, if the node asks for one";
+                                        accepted(t) => { sharing-settings-changed(); }
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Button { text: "Check availability"; clicked => { check-shared-files(); } }
+                                    }
+                                    if shared-files.length == 0 : Text {
+                                        text: "Nothing shared yet. Files you send in a call land here when seeding or a pin node is on.";
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    for f in shared-files : VerticalBox {
+                                        padding: 4px; spacing: 2px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Text { text: f.name; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                            if !f.mine : Button { text: "Download"; clicked => { download-shared-file(f.file-id); } }
+                                            Button { text: f.mine ? "Stop sharing" : "Remove"; clicked => { forget-shared-file(f.file-id); } }
+                                        }
+                                        Text { text: f.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                                        if f.status != "" : Text { text: f.status; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+
+                            if section-id == "captions" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Words appear at the bottom of the call screen as people speak. The speech recognition runs on this computer: no audio and no text is sent anywhere, and the words are forgotten when the call ends unless you save them.";
+                                    text-scale: text-scale;
+                                    title: "Live captions"; reduced-motion: reduced-motion; expanded <=> sec-captions;
+                                }
+                                if sec-captions : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Show live captions in calls";
+                                        checked <=> captions-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default. Captions what the other people in the call say -- even while you're deafened, since that may be exactly when you need them. Someone you've muted isn't captioned.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Caption my own voice too";
+                                        checked <=> captions-own-voice;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Adds what you say, as sent, so a saved transcript has both sides.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    if captions-model-installed : HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text { text: "Speech model installed (Whisper tiny, English)."; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; font-size: 11px * text-scale; }
+                                        Button { text: "Remove"; clicked => { captions-remove-model(); } }
+                                    }
+                                    if !captions-model-installed : VerticalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text {
+                                            text: "Captions need a speech model on this computer: Whisper tiny (English), " + captions-size-text + ". It is downloaded once, only if you press Download, and checked against a fingerprint built into the app. After that, captioning works offline.";
+                                            wrap: word-wrap;
+                                            font-size: 11px * text-scale;
+                                        }
+                                        if !captions-download-allowed : Text {
+                                            text: "This build can't download the model (it has no fingerprint to check it against). If you have the files -- config.json, tokenizer.json and model.safetensors from openai/whisper-tiny.en -- choose their folder.";
+                                            color: Theme.muted-text;
+                                            wrap: word-wrap;
+                                            font-size: 10px * text-scale;
+                                        }
+                                        if captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: Theme.muted-text.with-alpha(0.25);
+                                                accessible-role: progress-indicator;
+                                                accessible-value: round(captions-download-fraction * 100) + "%";
+                                                Rectangle {
+                                                    x: 0px;
+                                                    width: parent.width * captions-download-fraction;
+                                                    height: parent.height;
+                                                    border-radius: 4px;
+                                                    background: Theme.accent;
+                                                }
+                                            }
+                                            Text { text: round(captions-download-fraction * 100) + "%"; vertical-alignment: center; font-size: 10px * text-scale; }
+                                            Button { text: "Cancel"; clicked => { captions-cancel-download(); } }
+                                        }
+                                        if !captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            if captions-download-allowed : Button { text: "Download"; clicked => { captions-download(); } }
+                                            Button { text: "Use files I already have..."; clicked => { captions-import(); } }
+                                        }
+                                    }
+                                    if captions-model-message != "" : Text {
+                                        text: captions-model-message;
+                                        wrap: word-wrap;
+                                        font-size: 10px * text-scale;
+                                    }
+                                }
+                            }
+
+                            if section-id == "vpn" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Run your own WireGuard VPN inside this app only -- not a system VPN, so nothing else on this computer changes. Import the .conf file your VPN provider or your own server gives you, then choose what goes through it.";
+                                    text-scale: text-scale;
+                                    title: "VPN"; reduced-motion: reduced-motion; expanded <=> sec-vpn;
+                                }
+                                if sec-vpn : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Use a VPN for this app";
+                                        checked <=> vpn-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default. When on, the traffic you pick below leaves from the VPN server's address instead of yours.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    Text {
+                                        text: vpn-status;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    for c in vpn-configs : VerticalBox {
+                                        padding: 4px; spacing: 2px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Text { text: (c.active ? "● " : "") + c.name; font-weight: c.active ? 700 : 400; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                            if !c.active : Button { text: "Use"; clicked => { select-vpn-config(c.id); } }
+                                            Button { text: "Delete"; clicked => { delete-vpn-config(c.id); } }
+                                        }
+                                        Text { text: c.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Button { text: "Import a WireGuard file..."; clicked => { import-vpn-config(); } }
+                                        HelpIcon {
+                                            text-scale: text-scale;
+                                            text: "A wg-quick .conf file. Its private key is stored encrypted on this device, never in your settings file or a settings export. Script lines (PostUp and the like) are ignored, never run.";
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                    if vpn-message != "" : Text {
+                                        text: vpn-message;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    SettingLabel {
+                                        text: "Send through the VPN";
+                                        help: "Pick per kind of traffic -- for example, files through the VPN while calls stay direct, or the reverse.";
+                                        text-scale: text-scale;
+                                    }
+                                    ToggleSwitch {
+                                        text: "Calls";
+                                        checked <=> vpn-route-voice;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default: a tunnel adds a detour, and voice notices delay first. When on, people can still call you only if your VPN forwards a port to you, or through a relay; you can always call out.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Shared files";
+                                        checked <=> vpn-route-files;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Downloads from holders and uploads to pin nodes. Files sent inside a call travel with the call.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Offline messages";
+                                        checked <=> vpn-route-messages;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Leaving and collecting sealed messages at mailbox nodes.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Kill switch";
+                                        checked <=> vpn-kill-switch;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "If the VPN is down, the traffic picked above stops instead of going out over your real connection. You'll see an error rather than leak your address. Off by default.";
+                                        toggled => { vpn-settings-changed(); }
+                                    }
+                                }
+                            }
+
+                            if section-id == "discovery" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "How contacts find you after your address changes, and how you find public communities. Both are off until you turn them on and name the nodes to use.";
+                                    text-scale: text-scale;
+                                    title: "Finding contacts"; reduced-motion: reduced-motion; expanded <=> sec-discovery;
+                                }
+                                if sec-discovery : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Let contacts find me if my address changes (DHT)";
+                                        checked <=> dht-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Publishes where you can be reached to a distributed table, encrypted so only people who already have your identity key -- your contacts, or anyone you gave your invite link -- can read it. The nodes storing it can't tell whose it is or read the address. When a contact's saved address stops answering, the app looks them up the same way before trying their relay. Off by default.";
+                                        toggled => { dht-settings-changed(); }
+                                    }
+                                    SettingLabel { text: "Bootstrap nodes"; help: "DHT nodes to join through: anyone running antiphon-relay --dht, such as your own or your community's. None are built in. Comma-separated, press Enter."; text-scale: text-scale; }
+                                    LineEdit {
+                                        text <=> dht-bootstrap;
+                                        placeholder-text: "node.example.org:3479, ...";
+                                        accepted(t) => { dht-settings-changed(); }
+                                    }
+                                    if dht-enabled && dht-status != "" : Text {
+                                        text: dht-status;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    SettingLabel { text: "Community directories"; help: "Directories list public communities that asked to be listed, never people. Nothing is searched unless you add a directory here and press Browse."; text-scale: text-scale; }
+                                    LineEdit {
+                                        text <=> directories;
+                                        placeholder-text: "directory.example.org:3479, ...";
+                                        accepted(t) => { dht-settings-changed(); }
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Button { text: "Browse"; clicked => { browse-directories(); } }
+                                    }
+                                    if directory-status != "" : Text {
+                                        text: directory-status;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    for d in directory-entries : VerticalBox {
+                                        padding: 4px; spacing: 2px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Text { text: d.name; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                            Button { text: "Add"; clicked => { join-directory-entry(d.name, d.invite); } }
+                                        }
+                                        Text { text: d.description; font-size: 10px * text-scale; wrap: word-wrap; }
+                                        Text { text: "Listed by " + d.directory; color: Theme.muted-text; font-size: 10px * text-scale; }
+                                    }
+                                }
+                            }
+
                             if section-id == "callparticipants" : VerticalBox {
                                 padding: 0px;
                                 SectionHeader {
@@ -4474,7 +5551,7 @@ export component MainWindow inherits Window {
                                 SectionHeader {
                                     help: "A message you send while the other person is offline stays on this device and sends itself the next time you are both connected. It is stored encrypted, and it leaves the queue only once the connection confirms it went.";
                                     text-scale: text-scale;
-                                    title: "Undelivered messages"; reduced-motion: reduced-motion; expanded <=> sec-outbox;
+                                    title: "Message delivery"; reduced-motion: reduced-motion; expanded <=> sec-outbox;
                                 }
                                 if sec-outbox : VerticalBox {
                                     padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
@@ -4489,6 +5566,98 @@ export component MainWindow inherits Window {
                                         minimum: 0; maximum: 336;
                                         value: outbox-give-up-hours;
                                         changed(v) => { outbox-give-up-hours = round(v); settings-changed(); }
+                                    }
+
+                                    Rectangle { height: 1px; background: Theme.divider; }
+                                    SettingLabel {
+                                        text: "Where your mail waits";
+                                        help: "Your route list is your inbox: it is sent to your contacts, and when they message you while you're offline their app leaves the sealed message at the highest route you've made available. Nobody can leave your mail somewhere you didn't choose. Every node holds only sealed messages it can't read.";
+                                        text-scale: text-scale;
+                                    }
+                                    ToggleSwitch {
+                                        text: "Strict mode";
+                                        checked <=> strict-mode;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Turns off every route except Direct. Messages only ever move when both of you are online at the same moment, and nothing is stored anywhere, ever.";
+                                        toggled => { delivery-settings-changed(); }
+                                    }
+                                    if !strict-mode : ComboBox {
+                                        model: ["First available (least metadata)", "Fan out (most reliable)"];
+                                        current-index: route-fan-out ? 1 : 0;
+                                        selected(v) => { route-fan-out = self.current-index == 1; delivery-settings-changed(); }
+                                    }
+                                    if !strict-mode : Text {
+                                        text: route-fan-out
+                                            ? "The same sealed message is left at several nodes; the first copy to arrive wins and the rest expire. No single operator sees all your traffic, but more nodes know something arrived."
+                                            : "Each message goes to the first route that takes it, so as few nodes as possible know anything arrived.";
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
+                                    for r[ri] in routes : Rectangle {
+                                        border-width: 1px;
+                                        border-color: Theme.divider;
+                                        border-radius: 6px;
+                                        opacity: strict-mode && !r.is-direct ? 0.45 : 1.0;
+                                        VerticalBox {
+                                            padding: 8px;
+                                            spacing: 4px;
+                                            HorizontalBox {
+                                                padding: 0px;
+                                                spacing: 6px;
+                                                Text { text: (ri + 1) + ". " + r.title; font-weight: 600; font-size: 12px * text-scale; vertical-alignment: center; horizontal-stretch: 1; }
+                                                Button { text: "Up"; enabled: ri > 0; clicked => { route-move(ri, -1); } }
+                                                Button { text: "Down"; enabled: ri < routes.length - 1; clicked => { route-move(ri, 1); } }
+                                                ToggleSwitch {
+                                                    text: "";
+                                                    checked: r.enabled;
+                                                    enabled: !strict-mode;
+                                                    reduced-motion: reduced-motion;
+                                                    text-scale: text-scale;
+                                                    toggled => { route-toggled(ri, self.checked); }
+                                                }
+                                            }
+                                            Text { text: r.description; wrap: word-wrap; color: Theme.muted-text; font-size: 10px * text-scale; }
+                                            if !r.is-direct : LineEdit {
+                                                text: r.nodes;
+                                                placeholder-text: "node addresses, e.g. home.example.org:3479";
+                                                enabled: !strict-mode && r.enabled;
+                                                accepted(t) => { route-nodes-edited(ri, t); }
+                                            }
+                                            if !r.is-direct && r.title == "Community node" : LineEdit {
+                                                text: r.code;
+                                                placeholder-text: "community code, if the node asks for one";
+                                                enabled: !strict-mode && r.enabled;
+                                                accepted(t) => { route-code-edited(ri, t); }
+                                            }
+                                            if r.status != "" : Text { text: r.status; wrap: word-wrap; font-size: 10px * text-scale; font-family: "Consolas"; }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Press Enter after editing a node list. Removing a node is safe: senders keep messages until another route takes them.";
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        spacing: 6px;
+                                        Button { text: "Find nodes on my network"; clicked => { find-nodes(); } }
+                                    }
+                                    if found-nodes != "" : Text { text: found-nodes; wrap: word-wrap; font-size: 10px * text-scale; }
+                                    ToggleSwitch {
+                                        text: "Hold mail for my other devices";
+                                        checked <=> hold-mail;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Makes this device a node for your own other devices: while your phone is asleep, this one holds the sealed messages and hands them over when it wakes. Add this device's address under \"My other devices\" on each of your devices. Only your own devices can register here.";
+                                        toggled => { delivery-settings-changed(); }
+                                    }
+                                    if hold-mail : Text {
+                                        text: "Holding mail on port " + hold-mail-port + ".";
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
                                     }
                                 }
                             }
@@ -4509,6 +5678,62 @@ export component MainWindow inherits Window {
                                         toggled => { silent-call-mode = self.checked ? 1 : 0; settings-changed(); }
                                     }
                                     ToggleSwitch { text: "IP direct calling"; checked <=> ip-direct-calling; text-scale: text-scale; help: "Lets you call a raw address like 192.168.1.10:6000, and lets one be called. A direct connection is the fastest and most private option with people you already know, but both sides can see each other's IP address -- the same as any direct connection on the internet. Off by default: with it off, the Connect panel only offers your saved contacts."; toggled => { settings-changed(); } }
+                                    SettingLabel {
+                                        text: "Relay server";
+                                        help: "A relay passes your calls along for people who can't reach you directly, and for anyone not yet a known contact, so neither of you learns the other's IP address. It forwards encrypted data it cannot read and never holds a key. Run your own with antiphon-relay, or use one your community runs. Leave empty for none.";
+                                        text-scale: text-scale;
+                                    }
+                                    LineEdit {
+                                        text <=> relay-server;
+                                        placeholder-text: "relay.example.org:3479";
+                                        edited(t) => { settings-changed(); }
+                                    }
+                                    SettingLabel {
+                                        text: "Fallback relays";
+                                        help: "Tried in order, only when your own relay above is empty or not answering. Each is checked before it is used, so a dead one is skipped instead of found out by a call that never connects. A fallback relay sees what any relay sees -- rotating tokens and the addresses of a live call -- and can't read or hear anything. One per line.";
+                                        text-scale: text-scale;
+                                    }
+                                    TextEdit {
+                                        text <=> fallback-relays-text;
+                                        height: 52px;
+                                        wrap: no-wrap;
+                                        edited(t) => { settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Also try the project's relays";
+                                        checked <=> use-project-relays;
+                                        text-scale: text-scale;
+                                        help: "After yours, fall back on relays the project runs. They hold no more than any other relay. Infrastructure is fallback, not foundation: if they disappear, your contacts keep working.";
+                                        toggled => { settings-changed(); recheck-network(); }
+                                    }
+                                    Text {
+                                        text: active-relay != "" ? "Relay in use: " + active-relay : "No relay is answering.";
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
+                                    ToggleSwitch {
+                                        text: "Anonymity mode";
+                                        checked <=> anonymity-mode;
+                                        text-scale: text-scale;
+                                        help: "Routes your calls through several relays, each one only knowing the step before and after it. The strongest privacy available, at the cost of noticeable delay. Needs at least two relays below that offer hops (antiphon-relay --hops).";
+                                        toggled => { settings-changed(); }
+                                    }
+                                    if anonymity-mode : TextEdit {
+                                        text <=> anonymity-hops-text;
+                                        height: 52px;
+                                        wrap: no-wrap;
+                                        edited(t) => { settings-changed(); }
+                                    }
+                                    Button {
+                                        text: "Make a new invite link";
+                                        clicked => { new-invite-secret(); }
+                                    }
+                                    Text {
+                                        text: "Anyone holding an old invite link can no longer ring you through the relay. Saved contacts are not affected.";
+                                        wrap: word-wrap;
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
                                 }
                             }
                         }
@@ -4626,8 +5851,38 @@ export component MainWindow inherits Window {
                                         color: #e0a052;
                                         font-size: 10px * text-scale;
                                     }
+                                    SettingLabel {
+                                        text: "Split among friends";
+                                        help: "Splits your recovery phrase into shares for people or devices you trust. Any two of three (or three of five) rebuild your identity; fewer reveal nothing about it, so no one person holding a share can become you.";
+                                        text-scale: text-scale;
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        spacing: 8px;
+                                        ComboBox {
+                                            model: ["2 of 3", "3 of 5", "2 of 2"];
+                                            current-index <=> recovery-split-choice;
+                                            enabled: !recovery-shares-shown;
+                                        }
+                                        Button {
+                                            text: recovery-shares-shown ? "Hide shares" : "Make shares";
+                                            clicked => { toggle-recovery-shares(); }
+                                        }
+                                    }
+                                    if recovery-shares-shown : Text {
+                                        text: recovery-shares;
+                                        font-family: "Consolas";
+                                        font-size: 12px * text-scale;
+                                        wrap: word-wrap;
+                                    }
+                                    if recovery-shares-shown : Text {
+                                        text: "Give each share to a different person or device. New shares are made every time, and shares from different times don't mix.";
+                                        wrap: word-wrap;
+                                        color: #e0a052;
+                                        font-size: 10px * text-scale;
+                                    }
                                     Text {
-                                        text: "Restoring: antiphon-cli identity restore \"<your 24 words>\"";
+                                        text: "Restoring: antiphon-cli identity restore \"<your 24 words>\"  or  antiphon-cli identity restore-shares \"<share>\" \"<share>\"";
                                         color: Theme.muted-text;
                                         font-family: "Consolas";
                                         font-size: 10px * text-scale;

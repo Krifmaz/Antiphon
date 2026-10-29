@@ -15,7 +15,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use crate::socket::Datagram;
 
 use crate::error::NetError;
 
@@ -147,7 +147,7 @@ fn parse_address(value: &[u8], txid: &TransactionId, xor: bool) -> Option<Socket
 /// Asks one STUN server what public address it sees `socket` coming from.
 /// Retries a few times, since a lost UDP request is ordinary rather than
 /// exceptional.
-pub async fn discover_public_addr(socket: &UdpSocket, server: SocketAddr) -> Result<SocketAddr, NetError> {
+pub async fn discover_public_addr(socket: &impl Datagram, server: SocketAddr) -> Result<SocketAddr, NetError> {
     let txid = random_transaction_id();
     let request = build_binding_request(&txid);
     let mut buf = vec![0u8; 1024];
@@ -180,7 +180,7 @@ pub async fn discover_public_addr(socket: &UdpSocket, server: SocketAddr) -> Res
 }
 
 /// Tries each of [`DEFAULT_STUN_SERVERS`] until one answers.
-pub async fn discover_public_addr_default(socket: &UdpSocket) -> Result<SocketAddr, NetError> {
+pub async fn discover_public_addr_default(socket: &impl Datagram) -> Result<SocketAddr, NetError> {
     for name in DEFAULT_STUN_SERVERS {
         let Ok(addrs) = tokio::net::lookup_host(name).await else { continue };
         for server in addrs {
@@ -197,9 +197,71 @@ pub async fn discover_public_addr_default(socket: &UdpSocket) -> Result<SocketAd
     Err(NetError::StunFailed)
 }
 
+/// How the NAT in front of a socket maps it to the outside (RFC 4787).
+///
+/// What decides whether hole punching can work at all: an
+/// endpoint-independent mapping shows every destination the same public
+/// port, so the address one STUN server reports is the one a peer can
+/// punch to. An endpoint-*dependent* ("symmetric") mapping hands each
+/// destination a different port, so the address a peer was given is
+/// already wrong by the time they use it, and only a relay gets through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NatMapping {
+    /// No NAT, or one that keeps the same public port for every destination.
+    EndpointIndependent,
+    /// A different public port per destination: direct connections can't
+    /// be punched.
+    EndpointDependent,
+}
+
+/// Compares what two different STUN servers see `socket` as. Two answers
+/// are the minimum that can tell the mappings apart; the same answer from
+/// both means endpoint-independent.
+pub fn classify_mapping(first: SocketAddr, second: SocketAddr) -> NatMapping {
+    if first == second {
+        NatMapping::EndpointIndependent
+    } else {
+        NatMapping::EndpointDependent
+    }
+}
+
+/// Asks two different [`DEFAULT_STUN_SERVERS`] from the same socket and
+/// classifies the mapping. Errors when fewer than two servers answer --
+/// one answer says nothing about the mapping, and guessing would put the
+/// wrong line in front of people.
+pub async fn discover_mapping(socket: &impl crate::Datagram) -> Result<(SocketAddr, NatMapping), NetError> {
+    let mut seen: Vec<(SocketAddr, SocketAddr)> = Vec::new();
+    for name in DEFAULT_STUN_SERVERS {
+        let Ok(addrs) = tokio::net::lookup_host(name).await else { continue };
+        for server in addrs.filter(|a| a.is_ipv4()) {
+            // Two servers on the same IP would share a mapping on some
+            // NATs that are in fact symmetric per destination *address*.
+            if seen.iter().any(|(s, _)| s.ip() == server.ip()) {
+                continue;
+            }
+            if let Ok(public) = discover_public_addr(socket, server).await {
+                seen.push((server, public));
+                break;
+            }
+        }
+        if seen.len() == 2 {
+            return Ok((seen[0].1, classify_mapping(seen[0].1, seen[1].1)));
+        }
+    }
+    Err(NetError::StunFailed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_same_answer_from_two_servers_means_punching_can_work() {
+        let a: SocketAddr = "203.0.113.5:40000".parse().unwrap();
+        let b: SocketAddr = "203.0.113.5:40001".parse().unwrap();
+        assert_eq!(classify_mapping(a, a), NatMapping::EndpointIndependent);
+        assert_eq!(classify_mapping(a, b), NatMapping::EndpointDependent);
+    }
 
     /// Builds a Binding Success response carrying an XOR-MAPPED-ADDRESS,
     /// the way a real STUN server would.
@@ -284,7 +346,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires internet access"]
     async fn discovers_a_public_address_from_a_real_server() {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.expect("bind a local socket");
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.expect("bind a local socket");
         let local = socket.local_addr().unwrap();
         let public = discover_public_addr_default(&socket).await.expect("a STUN server should answer");
         println!("local {local}  ->  public {public}");

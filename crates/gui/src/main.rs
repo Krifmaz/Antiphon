@@ -1,4 +1,10 @@
 mod animated_image;
+mod caps_lock;
+mod connection_mode;
+mod captions;
+mod mixer;
+mod group;
+mod group_keys;
 mod config;
 mod content_store;
 mod crash_report;
@@ -16,8 +22,13 @@ mod outbox;
 mod pacer;
 mod presence;
 mod reachability;
+mod fallback_relay;
+mod network_ui;
+mod anonymity;
+mod sfu_call;
 mod reactions;
 mod replay_history;
+mod sealed_ring;
 mod qr;
 mod search;
 mod soundboard;
@@ -25,6 +36,12 @@ mod voice_message;
 mod theme_presets;
 mod transfer_limits;
 mod control;
+mod community;
+mod delivery;
+mod swarm;
+mod sharing;
+mod vpn;
+mod discovery;
 mod file_transfer;
 mod state;
 mod wav;
@@ -114,7 +131,9 @@ fn main() -> anyhow::Result<()> {
     std::mem::forget(runtime);
 
     let loaded = config::load();
-    let ptt_key = Keycode::from_str(&loaded.ptt_key).unwrap_or(Keycode::Space);
+    let ptt_key = Keycode::from_str(&loaded.ptt_key)
+        .or_else(|_| Keycode::from_str(caps_lock::default_ptt_key()))
+        .unwrap_or(Keycode::Space);
     // Validate rather than cast: a hand-edited config could hold any
     // integer, and an unrecognised mode should mean push-to-talk (the
     // option that transmits least) rather than something arbitrary.
@@ -124,6 +143,7 @@ fn main() -> anyhow::Result<()> {
         _ => MODE_PTT,
     };
     let transmit = Arc::new(TransmitSettings::new(ptt_key, transmit_mode, loaded.va_threshold));
+    caps_lock::set_bound(ptt_key == Keycode::CapsLock && transmit_mode == MODE_PTT);
     let output_gain_db = Arc::new(Mutex::new(loaded.output_gain_db));
 
     // Spec §4: identity is a keypair this machine holds, generated on
@@ -160,7 +180,24 @@ fn main() -> anyhow::Result<()> {
         punch_socket: Mutex::new(None),
         port_map: Mutex::new(None),
         identity,
+        relay_addr: Mutex::new(None),
     });
+
+    // Spec §8: collect mail waiting at your nodes, and leave queued
+    // messages at contacts' nodes, in the background.
+    delivery::set_identity(app_state.identity.clone());
+    {
+        let weak = Arc::downgrade(&app_state);
+        delivery::start(&app_state.runtime, move || {
+            let state = weak.upgrade()?;
+            let call = state.call.lock().unwrap();
+            call.as_ref().map(|a| a.peer_identity().identity_key)
+        });
+    }
+    delivery::set_hosting(&app_state.runtime, loaded.hold_mail_for_devices, loaded.hold_mail_port);
+    sharing::set_seeding(&app_state.runtime, loaded.seeding, loaded.seed_port);
+    apply_vpn(&app_state.runtime, &loaded);
+    discovery::start(&app_state.runtime, app_state.identity.clone());
 
     let main_window = MainWindow::new()?;
     main_window.set_my_share_id(share_id(&app_state.identity.public().identity_key).into());
@@ -229,11 +266,66 @@ fn main() -> anyhow::Result<()> {
     // counter restarts at 0).
     let mut last_chat_rev: u32 = u32::MAX;
     // `u64::MAX` means "not started yet", so the first tick of a call
-    // establishes a baseline instead of announcing every recovery that
-    // happened before anyone was looking.
-    let mut recovered_last: u64 = u64::MAX;
+    // establishes a baseline instead of offering every clip cut before
+    // anyone was looking.
+    let mut clips_cut_last: u64 = u64::MAX;
+    // The relay this call's peer said they listen at, once saved, so it is
+    // written once per call rather than on every tick.
+    let mut peer_relay_saved = String::new();
+    let mut peer_routes_saved = String::new();
+    let mut delivery_round_seen = 0u64;
+    let mut sharing_seen = u64::MAX;
+    let mut spaces_seen = u64::MAX;
+    let mut vpn_seen = u64::MAX;
+    let mut vpn_ticks = 0u32;
+    let mut discovery_seen = 0u64;
     _meter_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let Some(app) = meter_window.upgrade() else { return };
+        // Spec §8: what the courier did since the last tick.
+        let round = delivery::rounds();
+        if round != delivery_round_seen {
+            delivery_round_seen = round;
+            let notices = delivery::take_notices();
+            if !notices.is_empty() {
+                app.set_delivery_notice(notices.join("\n").into());
+            }
+            apply_routes_to_ui(&app, &config::load());
+        }
+        // Spec §6: the VPN list on change, its status line once a second
+        // (a handshake going stale changes it without any event).
+        vpn_ticks = vpn_ticks.wrapping_add(1);
+        let vpn_now = vpn::revision();
+        if vpn_now != vpn_seen {
+            vpn_seen = vpn_now;
+            apply_vpn_to_ui(&app, &config::load());
+        } else if vpn_ticks.is_multiple_of(20) {
+            app.set_vpn_status(vpn::status_line().into());
+        }
+        // Spec §9: a message, an invite, a change to a group or community.
+        let spaces_now = community::revision();
+        if spaces_now != spaces_seen {
+            spaces_seen = spaces_now;
+            apply_spaces_to_ui(&app);
+        }
+        let sharing_now = sharing::revision();
+        if sharing_now != sharing_seen {
+            sharing_seen = sharing_now;
+            apply_shared_files_to_ui(&app, &config::load());
+        }
+        // Spec §4: what the DHT side knows about reaching us, so a new
+        // forwarded port, relay or STUN answer is republished at once.
+        discovery::set_local(discovery::Local {
+            listen_port: app.get_local_port().parse().unwrap_or(0),
+            mapped_port: meter_state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()),
+            stun_public: Some(app.get_public_address().to_string()).filter(|a| !a.is_empty()),
+            relay: app.get_relay_server().trim().to_string(),
+        });
+        let discovery_now = discovery::revision();
+        if discovery_now != discovery_seen {
+            discovery_seen = discovery_now;
+            app.set_dht_status(discovery::status().into());
+            apply_contacts_to_ui(&app, &config::load().contacts);
+        }
 
         // Keyboard shortcuts, raised as flags by the poller thread (which
         // has no handle to the window). Handled here, before the call lock
@@ -282,6 +374,18 @@ fn main() -> anyhow::Result<()> {
                     None => presence::PeerPresence::Unknown,
                 };
                 app.set_peer_presence_label(shown.label().into());
+                // Spec §3: remember where a contact can be reached through
+                // a relay, so the next call to them can use it.
+                if !peer.relay.is_empty() && peer.relay != peer_relay_saved {
+                    peer_relay_saved = peer.relay.clone();
+                    save_peer_relay(&active.peer_identity().identity_key, &peer.relay);
+                }
+                // Spec §8: their route list, so mail can be left for them
+                // while they're offline. Checked against who they are.
+                if !peer.routes.is_empty() && peer.routes != peer_routes_saved {
+                    peer_routes_saved = peer.routes.clone();
+                    save_peer_routes(&active.peer_identity().identity_key, &peer.routes);
+                }
             }
             update_file_transfer_ui(&app, active, &meter_app_state, &meter_window2);
 
@@ -334,24 +438,27 @@ fn main() -> anyhow::Result<()> {
                 app.set_echo_erle_db(aec.erle_db());
             }
 
-            // Spec §2 replay modes. The recovered audio is always played
-            // -- that is the point of FEC, and suppressing it to ask
-            // permission would defeat it. What the mode controls is
-            // whether the user is *told*.
-            if recovered_last != u64::MAX {
-                let mode = app.get_replay_mode();
-                let now = active.jitter.lock().unwrap().recovered();
-                if mode > 0 && now > recovered_last {
-                    app.set_replay_notice(if mode >= 2 {
-                        format!("Recovered {now} lost moment(s) so far on this call.")
-                    } else {
-                        "A lost moment was just recovered.".to_string()
+            // Spec §2 replay modes: Off / Ask me / Auto-play. What is
+            // offered is a *clip* -- the seconds around a moment the
+            // network damaged badly enough to be worth a second listen
+            // (`replay_history.rs`) -- not every frame FEC quietly fixed,
+            // which plays seamlessly with nothing to replay.
+            {
+                let cut = active.replay_clips_cut();
+                if clips_cut_last != u64::MAX && cut > clips_cut_last {
+                    match app.get_replay_mode() {
+                        1 => {
+                            app.set_replay_ask(true);
+                            app.set_replay_notice("Their audio dropped out and was recovered.".into());
+                        }
+                        2 => {
+                            app.set_replay_notice("Their audio dropped out -- replaying it now.".into());
+                            app.invoke_play_replay_clip(0);
+                        }
+                        _ => {}
                     }
-                    .into());
                 }
-                recovered_last = now;
-            } else {
-                recovered_last = active.jitter.lock().unwrap().recovered();
+                clips_cut_last = cut;
             }
 
             // Spec §2 replay history. Rebuilt only when the count moves:
@@ -402,12 +509,42 @@ fn main() -> anyhow::Result<()> {
                 app.set_introduction_message(message.into());
             }
 
+            // Spec §3 group calls: act on introductions, keep the MLS
+            // group keys current, notice who left, and keep the
+            // participant line current.
+            let group_busy = !active.group.inbox.lock().unwrap().is_empty()
+                || ((active.group.people() >= 3 || active.group.keys.in_group()) && active.group.keys.poll_due());
+            if group_busy {
+                group_context(&app, &meter_app_state, active).poll(&meter_app_state.runtime);
+            }
+            for (_, name) in active.group.remove_departed() {
+                *active.group.notice.lock().unwrap() = format!("{name} left the call.");
+            }
+            {
+                let notice = std::mem::take(&mut *active.group.notice.lock().unwrap());
+                if !notice.is_empty() {
+                    app.set_contacts_message(notice.into());
+                }
+                let mut names = active.group.names().join(", ");
+                // Spec §3: say when the group's audio is under an MLS
+                // key, and which epoch, so a rekey on a join or leave is
+                // visible rather than taken on trust.
+                if let Some(epoch) = active.group.keys.epoch().filter(|_| active.group.people() >= 3) {
+                    names.push_str(&format!(" · group key #{epoch} (MLS + SFrame)"));
+                }
+                let people = active.group.people() as i32;
+                if app.get_group_people() != people || app.get_group_names().as_str() != names {
+                    app.set_group_people(people);
+                    app.set_group_names(names.into());
+                }
+            }
+
             let pending = active.pending_friend_request.lock().unwrap().clone();
             app.set_friend_request_from(pending.unwrap_or_default().into());
             // The peer accepted a request we sent -- save them now that
             // there's a name to save them under.
             if let Some((name, address)) = active.take_friend_accepted() {
-                save_contact_if_new(&app, &name, &address);
+                save_contact_if_new(&app, &meter_app_state, active, &name, &address);
             }
 
             let rev = active.chat_rev.load(Ordering::Relaxed);
@@ -467,10 +604,12 @@ fn main() -> anyhow::Result<()> {
             app.set_call_stats("".into());
             app.set_friend_request_from("".into());
             last_chat_rev = u32::MAX;
-            // Reset the baseline so the next call does not announce
-            // recoveries carried over from this one.
-            recovered_last = u64::MAX;
+            // Reset the baseline so the next call does not offer clips
+            // carried over from this one.
+            clips_cut_last = u64::MAX;
+            peer_relay_saved.clear();
             app.set_replay_notice("".into());
+            app.set_replay_ask(false);
         }
     });
 
@@ -479,6 +618,7 @@ fn main() -> anyhow::Result<()> {
     apply_reachability(&main_window, &current_reachability(&main_window));
     main_window.set_call_mode(reachability::Mode::Direct.label().into());
     main_window.set_call_mode_explanation(reachability::Mode::Direct.explain().into());
+    network_ui::install(&main_window, &app_state);
 
     main_window.show()?;
     tray.show()?;
@@ -537,8 +677,24 @@ fn do_start_listen(app: &MainWindow, window_weak: &slint::Weak<MainWindow>, tray
     let tray_weak2 = tray_weak.clone();
     let state2 = state.clone();
     let identity = state.identity.clone();
+    let relay = listen_relay(app, state);
     state.runtime.spawn(async move {
-        let result = state::establish_listen(port, identity).await;
+        // Spec §3: also reachable through our relay, when one is set. A
+        // relay that won't resolve costs the relay path, not the listen.
+        let relay = match relay {
+            Some((address, tokens)) => match state::resolve(&address).await {
+                Ok(addr) => {
+                    *state2.relay_addr.lock().unwrap() = Some(addr);
+                    Some((addr, tokens))
+                }
+                Err(_) => None,
+            },
+            None => {
+                *state2.relay_addr.lock().unwrap() = None;
+                None
+            }
+        };
+        let result = state::establish_listen(port, identity, relay).await;
         finish_connect(window_weak2, tray_weak2, state2, result, config, input, output, hello);
     });
 }
@@ -555,10 +711,206 @@ fn local_hello(app: &MainWindow) -> Hello {
         // the caller before connecting; a listener never knocks, since
         // answering is not something you do quietly.
         wants_silent: app.get_start_call_silently(),
+        relay: network_ui::effective_relay(app),
+        routes: delivery::my_record_hex(),
     }
 }
 
+/// Brings `contact` into the current call (spec §3 group calls), reaching
+/// them the same way a call to them on its own would.
+fn add_to_group_call(app: &MainWindow, state: &Arc<AppState>, contact: config::Contact) {
+    let ctx = {
+        let call = state.call.lock().unwrap();
+        let Some(active) = call.as_ref() else { return };
+        // Past the mesh the call moves to our relay's SFU, so only a
+        // full SFU call, or a full mesh with no relay, turns anyone away.
+        let has_relay = !network_ui::effective_relay(app).is_empty();
+        if active.group.is_full() && (active.group.sfu_call().is_some() || !has_relay) {
+            let most = if active.group.sfu_call().is_some() { sfu_call::MAX_PEOPLE } else { group::MAX_PEOPLE };
+            app.set_contacts_message(format!("A group call holds up to {most} people.").into());
+            return;
+        }
+        group_context(app, state, active)
+    };
+    let plan = match connection_mode::plan(&contact, &state.identity, now_secs()) {
+        Ok(plan) => plan,
+        Err(reason) => {
+            app.set_contacts_message(reason.into());
+            return;
+        }
+    };
+    app.set_contacts_message(format!("Adding {}...", contact.name).into());
+    let identity = state.identity.clone();
+    let window_weak = app.as_weak();
+    let name = contact.name.clone();
+    state.runtime.spawn(async move {
+        let connected = match plan {
+            connection_mode::Plan::Direct { address } => match address.parse() {
+                Ok(addr) => state::establish_call(addr, 0, identity).await.map(|p| (p, false)),
+                Err(_) => Err(anyhow::anyhow!("{address} isn't an address")),
+            },
+            connection_mode::Plan::Relay { relay, token } => async {
+                let addr = state::resolve(&relay).await?;
+                state::establish_relayed_call(addr, token, 0, identity).await
+            }
+            .await
+            .map(|p| (p, true)),
+        };
+        let message = match connected {
+            Ok((peer, relayed)) => match ctx.add_person(peer, relayed).await {
+                Ok(m) => m,
+                Err(e) => e,
+            },
+            Err(e) => format!("Couldn't add {name}: {e}"),
+        };
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = window_weak.upgrade() {
+                app.set_contacts_message(message.into());
+            }
+        })
+        .ok();
+    });
+}
+
+/// What acting on group-call messages needs (spec §3).
+fn group_context(app: &MainWindow, state: &Arc<AppState>, active: &state::ActiveCall) -> group::Context {
+    let relay = network_ui::effective_relay(app);
+    group::Context {
+        group: active.group.clone(),
+        primary: active.peer.clone(),
+        identity: state.identity.clone(),
+        hello: local_hello(app),
+        relay: (!relay.is_empty()).then_some(relay),
+        is_blocked: Arc::new(is_peer_blocked),
+    }
+}
+
+/// Spec §4: a direct call to `contact` that looks them up in the DHT when
+/// their saved address doesn't answer, then falls back to their relay
+/// (only in automatic mode -- a contact set to Direct stays direct).
+async fn call_with_lookup(
+    contact: &config::Contact,
+    saved: String,
+    local_port: u16,
+    identity: Arc<antiphon_crypto::IdentityKeyPair>,
+    state: &Arc<AppState>,
+    window_weak: &slint::Weak<MainWindow>,
+    now: u64,
+) -> anyhow::Result<antiphon_net::PeerConnection> {
+    let attempt = |address: String| {
+        let identity = identity.clone();
+        async move {
+            let remote = state::resolve(&address).await?;
+            match tokio::time::timeout(discovery::DIRECT_TRY, state::establish_call(remote, local_port, identity)).await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!("{address} didn't answer"),
+            }
+        }
+    };
+    let say = |text: String| {
+        let weak = window_weak.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_status_text(text.into());
+            }
+        })
+        .ok();
+    };
+    let mut last = match attempt(saved.clone()).await {
+        Ok(peer) => return Ok(peer),
+        Err(e) => e,
+    };
+    say(format!("{} didn't answer at their saved address. Looking them up...", contact.name));
+    if let Some(fresh) = discovery::find_contact_now(&contact.identity_key, &saved).await {
+        say(format!("Found {} at a new address. Calling...", contact.name));
+        let weak = window_weak.clone();
+        let shown = fresh.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_remote_address(shown.into());
+            }
+        })
+        .ok();
+        match attempt(fresh).await {
+            Ok(peer) => return Ok(peer),
+            Err(e) => last = e,
+        }
+    }
+    // The DHT may have brought a relay along; re-read the contact.
+    let refreshed = config::load().contacts.into_iter().find(|c| c.identity_key == contact.identity_key);
+    let contact = refreshed.as_ref().unwrap_or(contact);
+    if connection_mode::Override::from_i32(contact.connection_mode) == connection_mode::Override::Auto {
+        if let Some(connection_mode::Plan::Relay { relay, token }) = connection_mode::relay_only(contact, &identity, now) {
+            say(format!("Trying {} through their relay...", contact.name));
+            let addr = state::resolve(&relay).await?;
+            *state.relay_addr.lock().unwrap() = Some(addr);
+            return state::establish_relayed_call(addr, token, local_port, identity).await;
+        }
+    }
+    Err(last)
+}
+
+/// Records the relay a saved contact listens at. Strangers are not saved.
+/// Stores a contact's route list if it is theirs and newer than ours.
+fn save_peer_routes(identity_key: &[u8; 32], encoded: &str) {
+    let mut config = config::load();
+    let key = encode_identity_key(identity_key);
+    let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == key) else { return };
+    if contact.route_record == encoded {
+        return;
+    }
+    let Some(record) = delivery::accept_record(encoded, identity_key, contact.route_sequence) else { return };
+    contact.route_record = encoded.to_string();
+    contact.route_sequence = Some(record.record.sequence);
+    config::save(&config);
+}
+
+fn save_peer_relay(identity_key: &[u8; 32], relay: &str) {
+    let mut config = config::load();
+    let key = encode_identity_key(identity_key);
+    if let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == key) {
+        if contact.relay != relay {
+            contact.relay = relay.to_string();
+            config::save(&config);
+        }
+    }
+}
+
+/// The secret behind the relay part of the invite link (spec §3), made on
+/// first use and kept until the user asks for a new link.
+fn relay_invite_secret() -> [u8; 32] {
+    let mut config = config::load();
+    if let Some(secret) = connection_mode::decode_hex32(&config.relay_invite_secret) {
+        return secret;
+    }
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).expect("OS randomness is unavailable");
+    config.relay_invite_secret = connection_mode::encode_hex32(&secret);
+    config::save(&config);
+    secret
+}
+
+/// What to register at our relay while listening, if there is one.
+fn listen_relay(
+    app: &MainWindow,
+    state: &Arc<AppState>,
+) -> Option<(String, state::RelayTokens)> {
+    let relay = network_ui::effective_relay(app);
+    if relay.is_empty() {
+        return None;
+    }
+    let identity = state.identity.clone();
+    let secret = relay_invite_secret();
+    Some((
+        relay,
+        Box::new(move || {
+            connection_mode::listening_tokens(&config::load().contacts, &identity, Some(secret), now_secs())
+        }),
+    ))
+}
+
 fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Arc<AppState>) {
+    wire_mic_test(main_window, app_state);
     {
         let window_weak = main_window.as_weak();
         let tray_weak = tray.as_weak();
@@ -595,6 +947,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let (input, output) = selected_devices(&app);
             let hello = local_hello(&app);
             set_status(&app, &tray_weak, "Calling...");
+            *state.relay_addr.lock().unwrap() = None;
 
             let window_weak2 = window_weak.clone();
             let tray_weak2 = tray_weak.clone();
@@ -624,7 +977,14 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 config::save(&config);
                 apply_onboarding(&app, &config);
             }
+            if let Some(active) = state.call.lock().unwrap().as_ref() {
+                let _guard = state.runtime.enter();
+                active.group.announce_leaving(&active.peer);
+            }
             *state.call.lock().unwrap() = None; // Drop tears the call down.
+            // Spec §8: anything still queued for them can now go to their
+            // mailbox, and mail held back during the call can come in.
+            delivery::kick();
             file_transfer::set_call_active(false);
             app.set_connected(false);
             app.set_muted(false);
@@ -712,14 +1072,25 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             // the whole reason contacts are keyed by key.
             if let Some(existing) = contacts.iter_mut().find(|c| c.identity_key == identity_key) {
                 let name = existing.name.clone();
-                if invite.address.is_empty() || existing.address == invite.address {
+                let new_secret =
+                    invite.relay_secret.as_ref().map(connection_mode::encode_hex32).unwrap_or_default();
+                let address_changed = !invite.address.is_empty() && existing.address != invite.address;
+                let relay_changed = !invite.relay.is_empty()
+                    && (existing.relay != invite.relay || existing.relay_secret != new_secret);
+                if !address_changed && !relay_changed {
                     app.set_contacts_message(format!("{name} is already saved").into());
                     return;
                 }
-                existing.address = invite.address.clone();
+                if address_changed {
+                    existing.address = invite.address.clone();
+                }
+                if relay_changed {
+                    existing.relay = invite.relay.clone();
+                    existing.relay_secret = new_secret;
+                }
                 apply_contacts_to_ui(&app, &contacts);
                 save_current_config(&app);
-                app.set_contacts_message(format!("Updated {name}'s address").into());
+                app.set_contacts_message(format!("Updated {name}'s details").into());
                 app.set_new_contact_invite("".into());
                 return;
             }
@@ -745,6 +1116,12 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 ring_rule: 0,
                 eq_bands: Vec::new(),
                 note: String::new(),
+                // Spec §3: a stranger is reached through their relay, so
+                // the relay part of the link is what makes them callable
+                // without either side exposing an address.
+                relay: invite.relay.clone(),
+                relay_secret: invite.relay_secret.as_ref().map(connection_mode::encode_hex32).unwrap_or_default(),
+                ..Default::default()
             });
             apply_contacts_to_ui(&app, &contacts);
             save_current_config(&app);
@@ -1320,6 +1697,30 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
     }
     {
         let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        // Spec §3 "optional Shamir split". Made fresh on each show, like
+        // the phrase, so the shares exist in the window only while
+        // someone is looking at them.
+        main_window.on_toggle_recovery_shares(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            if app.get_recovery_shares_shown() {
+                app.set_recovery_shares("".into());
+                app.set_recovery_shares_shown(false);
+                return;
+            }
+            let (need, of) = match app.get_recovery_split_choice() {
+                1 => (3, 5),
+                2 => (2, 2),
+                _ => (2, 3),
+            };
+            let Ok(shares) = antiphon_crypto::shamir::split(&state.identity.master_seed(), need, of) else { return };
+            let text = shares.iter().map(|s| s.to_text()).collect::<Vec<_>>().join("\n\n");
+            app.set_recovery_shares(text.into());
+            app.set_recovery_shares_shown(true);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
         main_window.on_copy_share_id(move || {
             let Some(app) = window_weak.upgrade() else { return };
             // Slint has no clipboard API, so the honest fallback is to
@@ -1712,11 +2113,20 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 let thumbnail = file_preview::generate(&path)
                     .map(|png| file_transfer::encode_b64(&png))
                     .unwrap_or_default();
-                let call = state2.call.lock().unwrap();
-                if let Some(active) = call.as_ref() {
-                    active.send_file(&state2.runtime, file_name, source, sha256, thumbnail);
+                let with = {
+                    let call = state2.call.lock().unwrap();
+                    let Some(active) = call.as_ref() else { return };
+                    active.send_file(&state2.runtime, file_name.clone(), source, sha256, thumbnail);
+                    crate::delivery::hex(&active.peer_identity().identity_key)
+                };
+                // Spec §5: also seed and pin it, so it can be fetched
+                // after the call. Sealing a big file takes a while; the
+                // direct transfer is already under way meanwhile.
+                if let Some(link) = sharing::share(&state2.runtime, &path, &file_name, &with) {
+                    if let Some(active) = state2.call.lock().unwrap().as_ref() {
+                        active.send_control(&state2.runtime, link);
+                    }
                 }
-                drop(call);
                 let weak = window_weak2.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
@@ -2331,13 +2741,398 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
     }
     {
         let window_weak = main_window.as_weak();
-        main_window.on_call_contact(move |address| {
+        let tray_weak = tray.as_weak();
+        let state = app_state.clone();
+        main_window.on_call_contact(move |index| {
             let Some(app) = window_weak.upgrade() else { return };
-            // Fills in the address field, then invokes the ordinary dial
-            // callback -- a contact call goes down the exact same path as a
-            // typed one rather than duplicating the connect logic.
-            app.set_remote_address(address);
-            app.invoke_start_call();
+            let contacts = config::load().contacts;
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| contacts.get(i)) else { return };
+            // Spec §3: during a call, the same button adds them to it.
+            if app.get_connected() {
+                add_to_group_call(&app, &state, contact.clone());
+                return;
+            }
+            // Spec §3: direct for known contacts, through a relay for
+            // everyone else, unless this conversation says otherwise.
+            match connection_mode::plan(contact, &state.identity, now_secs()) {
+                Err(reason) => app.set_contacts_message(reason.into()),
+                Ok(connection_mode::Plan::Direct { address }) if config::load().dht_enabled && !contact.identity_key.is_empty() => {
+                    // Spec §4: with the DHT on, a saved address that
+                    // doesn't answer is looked up before giving up, and
+                    // then -- unless this contact is set to Direct -- their
+                    // relay is tried.
+                    *state.relay_addr.lock().unwrap() = None;
+                    app.set_remote_address(address.clone().into());
+                    let local_port: u16 = app.get_local_port().parse().unwrap_or(0);
+                    let config = read_chain_config(&app);
+                    let (input, output) = selected_devices(&app);
+                    let hello = local_hello(&app);
+                    set_status(&app, &tray_weak, &format!("Calling {}...", contact.name));
+                    let (window_weak2, tray_weak2, state2) = (window_weak.clone(), tray_weak.clone(), state.clone());
+                    let identity = state.identity.clone();
+                    let contact = contact.clone();
+                    let now = now_secs();
+                    state.runtime.spawn(async move {
+                        let result = call_with_lookup(&contact, address, local_port, identity, &state2, &window_weak2, now).await;
+                        finish_connect(window_weak2, tray_weak2, state2, result, config, input, output, hello);
+                    });
+                }
+                Ok(connection_mode::Plan::Direct { address }) => {
+                    // A direct contact call goes down the exact same path
+                    // as a typed one rather than duplicating it.
+                    *state.relay_addr.lock().unwrap() = None;
+                    app.set_remote_address(address.into());
+                    app.invoke_start_call();
+                }
+                Ok(connection_mode::Plan::Relay { relay, token }) => {
+                    let local_port: u16 = app.get_local_port().parse().unwrap_or(0);
+                    let config = read_chain_config(&app);
+                    let (input, output) = selected_devices(&app);
+                    let hello = local_hello(&app);
+                    set_status(&app, &tray_weak, &format!("Calling {} through a relay...", contact.name));
+                    let (window_weak2, tray_weak2, state2) = (window_weak.clone(), tray_weak.clone(), state.clone());
+                    let identity = state.identity.clone();
+                    state.runtime.spawn(async move {
+                        let result = async {
+                            let addr = state::resolve(&relay).await?;
+                            *state2.relay_addr.lock().unwrap() = Some(addr);
+                            state::establish_relayed_call(addr, token, local_port, identity).await
+                        }
+                        .await;
+                        finish_connect(window_weak2, tray_weak2, state2, result, config, input, output, hello);
+                    });
+                }
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_set_contact_message_route(move |index, mode| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| config.contacts.get_mut(i)) else { return };
+            contact.message_route = mode.clamp(0, 1);
+            let message = if contact.message_route == 1 {
+                format!("Messages to {} wait until you're both online. Nothing is left anywhere.", contact.name)
+            } else {
+                format!("Messages to {} use the routes they chose.", contact.name)
+            };
+            config::save(&config);
+            apply_contacts_to_ui(&app, &config.contacts);
+            app.set_contacts_message(message.into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_leave_message(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = config::load();
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| config.contacts.get(i)) else { return };
+            let text = app.get_leave_message_text().to_string();
+            // On a call with them: it is just a chat message.
+            let in_call = {
+                let call = state.call.lock().unwrap();
+                match call.as_ref() {
+                    Some(active) if encode_identity_key(&active.peer_identity().identity_key) == contact.identity_key => {
+                        active.send_chat(&state.runtime, text.clone());
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            let result = if in_call { Ok(()) } else { delivery::leave_message(&contact.identity_key, &text, contact.expire_after_secs) };
+            match result {
+                Ok(()) => {
+                    app.set_leave_message_text("".into());
+                    let how = if in_call {
+                        "Sent.".to_string()
+                    } else if contact.message_route == 1 || config.strict_mode {
+                        format!("Waiting for {} to come online.", contact.name)
+                    } else {
+                        format!("Queued for {}; it will be left at their mailbox if they have one, or sent when you're both online.", contact.name)
+                    };
+                    app.set_contacts_message(how.into());
+                }
+                Err(e) => app.set_contacts_message(e.into()),
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_toggled(move |index, on| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(r) = usize::try_from(index).ok().and_then(|i| config.routes.get_mut(i)) else { return };
+            r.enabled = on;
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_move(move |index, by| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Ok(from) = usize::try_from(index) else { return };
+            let Ok(to) = usize::try_from(index + by) else { return };
+            if from >= config.routes.len() || to >= config.routes.len() {
+                return;
+            }
+            config.routes.swap(from, to);
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_nodes_edited(move |index, text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(r) = usize::try_from(index).ok().and_then(|i| config.routes.get_mut(i)) else { return };
+            r.nodes = text.split([',', ' ', '\n']).map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect();
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_route_code_edited(move |index, text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(r) = usize::try_from(index).ok().and_then(|i| config.routes.get_mut(i)) else { return };
+            r.code = text.trim().to_string();
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_delivery_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            delivery::set_hosting(&state.runtime, config.hold_mail_for_devices, config.hold_mail_port);
+            save_routes(&app, config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_sharing_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            sharing::set_seeding(&state.runtime, config.seeding, config.seed_port);
+            config::save(&config);
+        });
+    }
+    {
+        let state = app_state.clone();
+        main_window.on_check_shared_files(move || sharing::check_all(&state.runtime));
+    }
+    wire_communities(main_window, app_state);
+    captions::wire(main_window, app_state);
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_vpn_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            config::save(&config);
+            apply_vpn(&state.runtime, &config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_import_vpn_config(move || {
+            let window_weak = window_weak.clone();
+            let runtime = state.runtime.clone();
+            // The dialog blocks, so not on the UI thread.
+            std::thread::spawn(move || {
+                let Some(path) = rfd::FileDialog::new()
+                    .set_title("Import a WireGuard config")
+                    .add_filter("WireGuard config", &["conf"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                let message = match vpn::import(&path) {
+                    Ok(entry) => {
+                        // The first one imported becomes the active one.
+                        let mut config = config::load();
+                        if config.vpn_active.is_empty() || !vpn::load().iter().any(|c| c.id == config.vpn_active) {
+                            config.vpn_active = entry.id.clone();
+                            config::save(&config);
+                            apply_vpn(&runtime, &config);
+                        }
+                        format!("Imported {}.", entry.name)
+                    }
+                    Err(e) => format!("Couldn't import that file: {e}"),
+                };
+                let _ = window_weak.upgrade_in_event_loop(move |app| app.set_vpn_message(message.into()));
+            });
+        });
+    }
+    {
+        let state = app_state.clone();
+        main_window.on_select_vpn_config(move |id| {
+            let mut config = config::load();
+            config.vpn_active = id.to_string();
+            config::save(&config);
+            apply_vpn(&state.runtime, &config);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_delete_vpn_config(move |id| {
+            let message = match vpn::delete(&id) {
+                Ok(()) => String::new(),
+                Err(e) => format!("Couldn't delete it: {e}"),
+            };
+            let config = config::load();
+            apply_vpn(&state.runtime, &config);
+            if let Some(app) = window_weak.upgrade() {
+                app.set_vpn_message(message.into());
+            }
+        });
+    }
+    {
+        let state = app_state.clone();
+        main_window.on_download_shared_file(move |file_id| {
+            let state = state.clone();
+            let file_id = file_id.to_string();
+            let name = sharing::load().into_iter().find(|f| f.file_id == file_id).map(|f| f.name).unwrap_or_default();
+            std::thread::spawn(move || {
+                let Some(dest) = rfd::FileDialog::new().set_title("Save the shared file").set_file_name(&name).save_file() else {
+                    return;
+                };
+                sharing::download(&state.runtime, &file_id, dest);
+            });
+        });
+    }
+    main_window.on_forget_shared_file(move |file_id| sharing::forget(&file_id));
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_dht_settings_changed(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            config::save(&current_config(&app));
+            if !app.get_dht_enabled() {
+                app.set_dht_status("".into());
+            }
+            discovery::kick();
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_browse_directories(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = current_config(&app);
+            config::save(&config);
+            if config.directories.is_empty() {
+                app.set_directory_status("Add a directory's address first.".into());
+                return;
+            }
+            app.set_directory_status("Asking...".into());
+            let weak = window_weak.clone();
+            state.runtime.spawn(async move {
+                let mut pins = config.directory_pins.clone();
+                let (listed, problems) = discovery::browse(&config.directories, &mut pins).await;
+                let mut saved = config::load();
+                saved.directory_pins = pins;
+                config::save(&saved);
+                slint::invoke_from_event_loop(move || {
+                    let Some(app) = weak.upgrade() else { return };
+                    let rows: Vec<DirectoryEntry> = listed
+                        .into_iter()
+                        .map(|l| DirectoryEntry {
+                            name: l.entry.name.into(),
+                            description: l.entry.description.into(),
+                            invite: l.entry.invite.into(),
+                            directory: l.directory.into(),
+                        })
+                        .collect();
+                    let summary = if rows.is_empty() { "No communities found.".to_string() } else { format!("{} communities.", rows.len()) };
+                    let mut lines = vec![summary];
+                    lines.extend(problems);
+                    app.set_directory_status(lines.join("\n").into());
+                    app.set_directory_entries(ModelRc::new(VecModel::from(rows)));
+                })
+                .ok();
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_join_directory_entry(move |name, invite| {
+            let Some(app) = window_weak.upgrade() else { return };
+            // The same path as pasting the link by hand: it is saved
+            // unverified, like any invite.
+            app.set_new_contact_name(name);
+            app.set_new_contact_invite(invite);
+            app.invoke_add_from_invite();
+            app.set_directory_status(app.get_contacts_message());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_find_nodes(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_found_nodes("Looking on your network...".into());
+            let window_weak = window_weak.clone();
+            state.runtime.spawn(async move {
+                let found = delivery::discover(Duration::from_secs(2)).await;
+                let text = if found.is_empty() {
+                    "No mailbox nodes answered on your network.".to_string()
+                } else {
+                    format!(
+                        "Found: {}. Paste one into a route above.",
+                        found.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+                    )
+                };
+                let _ = window_weak.upgrade_in_event_loop(move |app| app.set_found_nodes(text.into()));
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_set_contact_connection_mode(move |index, mode| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            let Some(contact) = usize::try_from(index).ok().and_then(|i| config.contacts.get_mut(i)) else { return };
+            contact.connection_mode = match connection_mode::Override::from_i32(mode) {
+                connection_mode::Override::Auto => 0,
+                connection_mode::Override::Direct => 1,
+                connection_mode::Override::Relay => 2,
+            };
+            let message = match connection_mode::Override::from_i32(mode) {
+                connection_mode::Override::Auto => format!(
+                    "{} is called {} automatically.",
+                    contact.name,
+                    if connection_mode::is_known(contact) { "direct" } else { "through a relay" }
+                ),
+                connection_mode::Override::Direct => format!(
+                    "{} is always called direct -- fastest, but you see each other's IP address.",
+                    contact.name
+                ),
+                connection_mode::Override::Relay => format!(
+                    "{} is always called through a relay -- neither of you sees the other's IP address.",
+                    contact.name
+                ),
+            };
+            config::save(&config);
+            apply_contacts_to_ui(&app, &config.contacts);
+            app.set_contacts_message(message.into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let state = app_state.clone();
+        main_window.on_new_invite_secret(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let mut config = config::load();
+            config.relay_invite_secret.clear();
+            config::save(&config);
+            refresh_invite(&app, &state);
         });
     }
     {
@@ -2357,13 +3152,15 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         let state = app_state.clone();
         main_window.on_accept_friend_request(move || {
             let Some(app) = window_weak.upgrade() else { return };
-            let accepted = {
-                let call = state.call.lock().unwrap();
-                call.as_ref().and_then(|active| active.accept_friend_request(&state.runtime, app.get_display_name().to_string()))
+            let call = state.call.lock().unwrap();
+            let Some(active) = call.as_ref() else { return };
+            let Some((name, address)) =
+                active.accept_friend_request(&state.runtime, app.get_display_name().to_string())
+            else {
+                return;
             };
-            let Some((name, address)) = accepted else { return };
             app.set_friend_request_from("".into());
-            save_contact_if_new(&app, &name, &address);
+            save_contact_if_new(&app, &state, active, &name, &address);
         });
     }
     {
@@ -2928,6 +3725,54 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
     }
 }
 
+/// Spec §1 mic test: record five seconds, then play it back processed.
+fn wire_mic_test(main_window: &MainWindow, app_state: &Arc<AppState>) {
+    let window_weak = main_window.as_weak();
+    let state = app_state.clone();
+    main_window.on_mic_test(move || {
+        let Some(app) = window_weak.upgrade() else { return };
+        if app.get_connected() || app.get_loopback_enabled() {
+            // One capture stream per device, and something already has it.
+            app.set_mic_test_message("Not while a call or loopback is using your microphone.".into());
+            return;
+        }
+        let (input, output) = selected_devices(&app);
+        let config = read_chain_config(&app);
+        app.set_mic_test_running(true);
+        app.set_mic_test_message(
+            format!("Recording for {} seconds -- say something.", state::MIC_TEST_SECONDS).into(),
+        );
+        let weak = window_weak.clone();
+        state.runtime.spawn_blocking(move || {
+            let result = state::record_mic_test(input.as_deref(), &config, state::MIC_TEST_SECONDS)
+                .and_then(|(rate, samples)| {
+                    let handle = state::play_clip(output.as_deref(), rate, &samples)?;
+                    let weak = weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(app) = weak.upgrade() {
+                            app.set_mic_test_message("Playing it back -- this is what others hear.".into());
+                        }
+                    })
+                    .ok();
+                    // Held until playback finishes; dropping it cuts the
+                    // sound off.
+                    std::thread::sleep(Duration::from_secs_f32(samples.len() as f32 / rate.max(1) as f32 + 0.3));
+                    drop(handle);
+                    Ok(())
+                });
+            slint::invoke_from_event_loop(move || {
+                let Some(app) = weak.upgrade() else { return };
+                app.set_mic_test_running(false);
+                app.set_mic_test_message(match result {
+                    Ok(()) => "".into(),
+                    Err(e) => format!("Mic test failed: {e}").into(),
+                });
+            })
+            .ok();
+        });
+    });
+}
+
 /// Sets the status line without touching the tray tooltip -- for transient,
 /// local-only notices (a mic test failing) that don't reflect call state.
 fn set_status_only(app: &MainWindow, text: &str) {
@@ -3012,7 +3857,16 @@ fn finish_connect(
             // key we saw last time at this address.
             let peer_identity = peer.peer_identity();
             let remote_addr = peer.remote_addr().to_string();
-            let trust = evaluate_peer_trust(&remote_addr, &peer_identity);
+            // Spec §3: a connection that came from our relay's address is
+            // a relayed one, and the address is the relay's, not theirs.
+            let anonymous = anonymity::is_circuit(peer.remote_addr());
+            let relayed = anonymous || *state.relay_addr.lock().unwrap() == Some(peer.remote_addr());
+            let mode = match (anonymous, relayed) {
+                (true, _) => reachability::Mode::Anonymous,
+                (false, true) => reachability::Mode::Relayed,
+                (false, false) => reachability::Mode::Direct,
+            };
+            let trust = evaluate_peer_trust(&remote_addr, &peer_identity, relayed);
             // Spec §1: this person's remembered volume trim and mute, so a
             // quiet microphone stays fixed across calls rather than being
             // re-adjusted every time.
@@ -3073,6 +3927,8 @@ fn finish_connect(
                     slint::invoke_from_event_loop(move || {
                         if let Some(app) = window_weak.upgrade() {
                             app.set_connected(true);
+                            app.set_call_mode(mode.label().into());
+                            app.set_call_mode_explanation(mode.explain().into());
                             // A new call has not knocked yet, whatever the
                             // last one did.
                             app.set_knocked(false);
@@ -3366,16 +4222,28 @@ fn apply_panel_rect(
 /// Adds `(name, address)` to the saved contacts unless that address is
 /// already there -- shared by both sides of the friend-request exchange,
 /// which can otherwise both try to save the same peer.
-fn save_contact_if_new(app: &MainWindow, name: &str, address: &str) {
+/// Saves the person on the current call as a contact, after a friend
+/// request. Keyed by the identity the handshake proved; over a relay the
+/// address is the relay's, so none is stored and the relay is kept instead
+/// (spec §3).
+fn save_contact_if_new(app: &MainWindow, state: &AppState, active: &state::ActiveCall, name: &str, address: &str) {
+    let peer = active.peer_identity();
+    let key = encode_identity_key(&peer.identity_key);
+    let relayed = state.relay_addr.lock().unwrap().is_some_and(|r| r.to_string() == address);
     let mut contacts = contacts_from_ui(app);
-    if contacts.iter().any(|c| c.address == address) {
+    if contacts.iter().any(|c| c.identity_key == key || (!relayed && c.address == address)) {
         app.set_contacts_message(format!("{name} is already saved").into());
         return;
     }
+    let their_relay = active.peer_profile.lock().unwrap().as_ref().map(|h| h.relay.clone()).unwrap_or_default();
     contacts.push(config::Contact {
         name: name.to_string(),
-        address: address.to_string(),
+        address: if relayed { String::new() } else { address.to_string() },
         is_server: false,
+        identity_key: key,
+        first_seen_secs: now_secs(),
+        prekey: connection_mode::encode_hex32(&peer.prekey),
+        relay: their_relay,
         ..Default::default()
     });
     apply_contacts_to_ui(app, &contacts);
@@ -3404,11 +4272,21 @@ struct PeerTrust {
 /// directly rather than the UI model. A contact that isn't saved at all is
 /// not pinned -- there is nothing to warn about and nothing to remember
 /// until the user decides to keep them.
-fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity) -> PeerTrust {
+fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity, relayed: bool) -> PeerTrust {
     let fingerprint = antiphon_crypto::fingerprint(&peer.identity_key);
     let mut config = config::load();
 
-    let Some(index) = config.contacts.iter().position(|c| c.address == remote_addr) else {
+    // By key first: a relayed call arrives from the relay's address, and
+    // a contact who moved arrives from a new one. The address is only a
+    // fallback for a contact saved by address and never called before --
+    // and never for a relayed call, where it is the relay's.
+    let key_hex = encode_identity_key(&peer.identity_key);
+    let index = config.contacts.iter().position(|c| c.identity_key == key_hex).or_else(|| {
+        (!relayed)
+            .then(|| config.contacts.iter().position(|c| c.address == remote_addr))
+            .flatten()
+    });
+    let Some(index) = index else {
         return PeerTrust {
             fingerprint,
             verified: false,
@@ -3416,6 +4294,15 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity
             message: "Not a saved contact. Add them to remember this key.".to_string(),
         };
     };
+
+    // The same key as pinned: keep its prekey on file (spec §3 -- it is
+    // what makes them a known contact). Contacts pinned from an invite
+    // link arrive here on their first call, never through FirstContact.
+    let prekey_hex = connection_mode::encode_hex32(&peer.prekey);
+    if config.contacts[index].identity_key == key_hex && config.contacts[index].prekey != prekey_hex {
+        config.contacts[index].prekey = prekey_hex;
+        config::save(&config);
+    }
 
     let contact = &config.contacts[index];
     let pinned = decode_identity_key(&contact.identity_key).map(|identity_key| {
@@ -3438,6 +4325,9 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity
             let name = contact.name.clone();
             config.contacts[index].identity_key = encode_identity_key(&peer.identity_key);
             config.contacts[index].first_seen_secs = now_secs();
+            // Spec §3: a completed call makes them a known contact, and
+            // their prekey is what a pairwise relay token is derived from.
+            config.contacts[index].prekey = connection_mode::encode_hex32(&peer.prekey);
             config::save(&config);
             PeerTrust {
                 fingerprint,
@@ -3698,6 +4588,7 @@ fn apply_introduction(
             ring_rule: 0,
             eq_bands: Vec::new(),
             note: introduction::provenance_note(introducer),
+            ..Default::default()
         });
         config::save(&config);
     }
@@ -3744,7 +4635,7 @@ fn apply_onboarding(app: &MainWindow, config: &config::AppConfig) {
 /// What an incoming call from this identity is allowed to do (spec §9).
 ///
 /// Reads the receiver's own settings only. A contact's rule overrides the
-/// default; quiet hours can lower the result but never raise it.
+/// per-community rules, which override the default; quiet hours can lower the result but never raise it.
 fn ring_outcome(peer_identity_key: &[u8; 32], caller_wants_silent: bool) -> notify::Outcome {
     let hex = encode_identity_key(peer_identity_key);
     let config = config::load();
@@ -3752,11 +4643,14 @@ fn ring_outcome(peer_identity_key: &[u8; 32], caller_wants_silent: bool) -> noti
         .contacts
         .iter()
         .find(|c| c.identity_key == hex)
-        .map(|c| c.ring_rule)
-        .unwrap_or(config.default_ring_rule);
+        .map(|c| notify::RingRule::from_i32(c.ring_rule))
+        // Not a contact: the rules you set on group chats and communities
+        // you share with them, then your default.
+        .or_else(|| community::Store::app().and_then(|s| notify::shared_rule(s.rules_for(peer_identity_key))))
+        .unwrap_or(notify::RingRule::from_i32(config.default_ring_rule));
 
     notify::decide(
-        notify::RingRule::from_i32(rule),
+        rule,
         config.quiet_hours,
         notify::current_minute_of_day(),
         caller_wants_silent,
@@ -3854,7 +4748,7 @@ fn apply_reachability(app: &MainWindow, state: &reachability::Reachability) {
 /// Kept in the UI properties rather than in `AppState` because every one
 /// of these facts is already displayed there; a second copy is a second
 /// thing to keep in step.
-fn current_reachability(app: &MainWindow) -> reachability::Reachability {
+pub(crate) fn current_reachability(app: &MainWindow) -> reachability::Reachability {
     reachability::Reachability {
         public_address_known: !app.get_public_address().is_empty(),
         port_forwarded: app.get_port_mapped(),
@@ -3933,10 +4827,14 @@ fn refresh_invite(app: &MainWindow, state: &std::sync::Arc<state::AppState>) {
         }
     };
 
-    let invite = antiphon_crypto::Invite {
-        identity_key: state.identity.public().identity_key,
-        address: address.clone(),
-    };
+    let mut invite = antiphon_crypto::Invite::new(state.identity.public().identity_key, address.clone());
+    // Spec §3: with a relay, the link also lets its holder ring you
+    // through it without either of you seeing the other's address.
+    let relay = network_ui::effective_relay(app);
+    if !relay.is_empty() {
+        invite.relay = relay;
+        invite.relay_secret = Some(relay_invite_secret());
+    }
     let link = invite.to_link();
 
     app.set_my_invite_has_address(!address.is_empty());
@@ -3985,9 +4883,143 @@ fn apply_contacts_to_ui(app: &MainWindow, contacts: &[config::Contact]) {
             // that produced it.
             key_changed: false,
             ring_rule: c.ring_rule,
+            key: c.identity_key.clone().into(),
+            connection_mode: c.connection_mode,
+            via_relay: !c.relay.is_empty(),
+            message_route: c.message_route,
+            has_mailbox: delivery::decode_identity(&c.identity_key)
+                .and_then(|k| delivery::accept_record(&c.route_record, &k, None))
+                .is_some_and(|r| !delivery::mailboxes_in(&r).is_empty()),
         })
         .collect();
     app.set_contacts(ModelRc::new(VecModel::from(entries)));
+}
+
+/// Pushes the route list (spec §8) into the UI, with each node's last
+/// known status.
+fn apply_routes_to_ui(app: &MainWindow, config: &config::AppConfig) {
+    let report = delivery::node_report();
+    let entries: Vec<RouteEntry> = config
+        .routes
+        .iter()
+        .map(|r| RouteEntry {
+            title: r.kind.title().into(),
+            description: r.kind.description().into(),
+            enabled: r.enabled,
+            is_direct: r.kind == delivery::RouteKind::Direct,
+            nodes: r.nodes.join(", ").into(),
+            code: r.code.clone().into(),
+            status: r
+                .nodes
+                .iter()
+                .filter_map(|n| report.iter().find(|(node, _)| node == n.trim()).map(|(node, s)| format!("{node}: {s}")))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        })
+        .collect();
+    app.set_routes(ModelRc::new(VecModel::from(entries)));
+    app.set_strict_mode(config.strict_mode);
+    app.set_route_fan_out(config.route_fan_out);
+    app.set_hold_mail(config.hold_mail_for_devices);
+    app.set_hold_mail_port(config.hold_mail_port as i32);
+    app.set_captions_enabled(config.captions_enabled);
+    app.set_captions_own_voice(config.captions_own_voice);
+    app.set_seeding(config.seeding);
+    app.set_seed_scope(config.seed_scope);
+    app.set_seed_port(config.seed_port as i32);
+    app.set_pin_nodes(config.pin_nodes.join(", ").into());
+    app.set_pin_code(config.pin_code.clone().into());
+    app.set_dht_enabled(config.dht_enabled);
+    app.set_dht_bootstrap(config.dht_bootstrap.join(", ").into());
+    app.set_directories(config.directories.join(", ").into());
+}
+
+/// Spec §6: hands the VPN settings to the router, starting or stopping
+/// the tunnel as needed.
+fn apply_vpn(runtime: &tokio::runtime::Handle, config: &config::AppConfig) {
+    let routes = antiphon_net::vpn::Routes {
+        voice: config.vpn_route_voice,
+        files: config.vpn_route_files,
+        messages: config.vpn_route_messages,
+    };
+    vpn::apply(runtime, config.vpn_enabled, &config.vpn_active, routes, config.vpn_kill_switch);
+}
+
+/// Spec §6: the VPN section -- stored configs (never their keys), which
+/// is active, routing, and the status line.
+fn apply_vpn_to_ui(app: &MainWindow, config: &config::AppConfig) {
+    let entries: Vec<VpnConfigEntry> = vpn::load()
+        .iter()
+        .map(|c| VpnConfigEntry {
+            id: c.id.clone().into(),
+            name: c.name.clone().into(),
+            detail: vpn::describe(c).into(),
+            active: c.id == config.vpn_active,
+        })
+        .collect();
+    app.set_vpn_configs(ModelRc::new(VecModel::from(entries)));
+    app.set_vpn_enabled(config.vpn_enabled);
+    app.set_vpn_route_voice(config.vpn_route_voice);
+    app.set_vpn_route_files(config.vpn_route_files);
+    app.set_vpn_route_messages(config.vpn_route_messages);
+    app.set_vpn_kill_switch(config.vpn_kill_switch);
+    app.set_vpn_status(vpn::status_line().into());
+}
+
+/// Spec §5: the shared-files list, with what's known about each.
+fn apply_shared_files_to_ui(app: &MainWindow, config: &config::AppConfig) {
+    let entries: Vec<SharedFileEntry> = sharing::load()
+        .into_iter()
+        .map(|f| {
+            let community = f
+                .with
+                .strip_prefix("community:")
+                .and_then(connection_mode::decode_hex32)
+                .and_then(|id| community::Store::app()?.load(&antiphon_crypto::community::Key(id)))
+                .map(|s| s.manifest().name.clone());
+            let who = config
+                .contacts
+                .iter()
+                .find(|c| c.identity_key.eq_ignore_ascii_case(&f.with))
+                .map(|c| c.name.clone())
+                .or(community)
+                .unwrap_or_else(|| "someone not in your contacts".to_string());
+            let holders = match f.holders.len() {
+                0 => "no one else holds it".to_string(),
+                1 => "1 holder".to_string(),
+                n => format!("{n} holders"),
+            };
+            SharedFileEntry {
+                name: f.name.clone().into(),
+                detail: format!(
+                    "{} · {} {} · {}",
+                    human_size(f.size),
+                    if f.mine { "shared with" } else { "from" },
+                    who,
+                    holders
+                )
+                .into(),
+                status: sharing::status(&f.file_id).into(),
+                file_id: f.file_id.into(),
+                mine: f.mine,
+            }
+        })
+        .collect();
+    app.set_shared_files(ModelRc::new(VecModel::from(entries)));
+}
+
+/// Saves a changed route list: bumps its sequence so contacts take the
+/// new one over the old, and tells the courier.
+fn save_routes(app: &MainWindow, mut config: config::AppConfig) {
+    delivery::normalize(&mut config.routes);
+    config.route_sequence = (config.route_sequence + 1).max(now_secs());
+    config::save(&config);
+    apply_routes_to_ui(app, &config);
+    // Members of your groups who aren't your contacts learn the new list
+    // from your card (spec §9), as contacts do from your next Hello.
+    std::thread::spawn(community::refresh_cards);
+    delivery::kick();
 }
 
 /// A contact's pinned key as a short fingerprint, or "" if nothing is
@@ -4028,7 +5060,14 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
         .iter()
         .map(|c| {
             let address = c.address.to_string();
-            let previous = saved.contacts.iter().find(|s| s.address == address);
+            let key = c.key.to_string();
+            // By key where there is one: two contacts reached only through
+            // a relay both have an empty address.
+            let previous = if key.is_empty() {
+                saved.contacts.iter().find(|s| s.identity_key.is_empty() && s.address == address)
+            } else {
+                saved.contacts.iter().find(|s| s.identity_key == key)
+            };
             config::Contact {
                 name: c.name.to_string(),
                 address,
@@ -4047,9 +5086,22 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 // config rather than rebuilt from a UI that never had it.
                 eq_bands: previous.map(|p| p.eq_bands.clone()).unwrap_or_default(),
                 note: previous.map(|p| p.note.clone()).unwrap_or_default(),
+                prekey: previous.map(|p| p.prekey.clone()).unwrap_or_default(),
+                relay: previous.map(|p| p.relay.clone()).unwrap_or_default(),
+                relay_secret: previous.map(|p| p.relay_secret.clone()).unwrap_or_default(),
+                connection_mode: c.connection_mode,
+                route_record: previous.map(|p| p.route_record.clone()).unwrap_or_default(),
+                route_sequence: previous.and_then(|p| p.route_sequence),
+                message_route: c.message_route,
+                dht_sequence: previous.and_then(|p| p.dht_sequence),
             }
         })
         .collect()
+}
+
+/// A comma- or whitespace-separated list the user typed, as entries.
+fn split_list(text: &str) -> Vec<String> {
+    text.split(|c: char| c == ',' || c.is_whitespace()).map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect()
 }
 
 fn string_vec_to_model(items: Vec<String>) -> ModelRc<SharedString> {
@@ -4393,6 +5445,10 @@ fn apply_section_defaults(app: &MainWindow, expanded: bool) {
     app.set_sec_soundboard(expanded);
     app.set_sec_notifications(expanded);
     app.set_sec_transferlimits(expanded);
+    app.set_sec_sharedfiles(expanded);
+    app.set_sec_captions(expanded);
+    app.set_sec_vpn(expanded);
+    app.set_sec_discovery(expanded);
 }
 
 /// Computes the profile bar's avatar-circle letter from the current
@@ -4530,11 +5586,19 @@ fn apply_config_to_ui(app: &MainWindow, config: &config::AppConfig) {
         config::CALL_SECTION_IDS,
     )));
     app.set_ip_direct_calling(config.ip_direct_calling);
+    app.set_relay_server(config.relay_server.clone().into());
+    app.set_fallback_relays_text(config.fallback_relays.join("\n").into());
+    app.set_use_project_relays(config.use_project_relays);
+    app.set_anonymity_mode(config.anonymity_mode);
+    app.set_anonymity_hops_text(config.anonymity_hops.join("\n").into());
     app.set_ptt_toggle(config.ptt_toggle);
+    app.set_mute_hold(config.mute_hold);
+    app.set_deafen_hold(config.deafen_hold);
     app.set_crash_reporting(config.crash_reporting);
     app.set_replay_seconds(config.replay_seconds as i32);
     app.set_replay_mode(config.replay_mode);
     app.set_outbox_give_up_hours(config.outbox_give_up_hours as i32);
+    apply_routes_to_ui(app, config);
     app.set_silent_call_mode(config.silent_call_mode);
     app.set_start_call_silently(config.start_call_silently);
     app.set_echo_cancel(config.echo_cancel);
@@ -4617,6 +5681,7 @@ fn apply_chain_to_ui(app: &MainWindow, chain: &ChainConfig) {
     let c = chain;
     app.set_ns_enabled(c.noise_suppress.enabled);
     app.set_ns_strength(c.noise_suppress.strength);
+    app.set_ns_neural(c.noise_suppress.neural);
     app.set_gate_enabled(c.noise_gate.enabled);
     app.set_gate_threshold(c.noise_gate.threshold_db);
     app.set_gate_attack(c.noise_gate.attack_ms);
@@ -4807,7 +5872,43 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         // section the search happened to hide.
         call_section_order: previous.call_section_order.clone(),
         ip_direct_calling: app.get_ip_direct_calling(),
+        relay_server: app.get_relay_server().trim().to_string(),
+        relay_invite_secret: previous.relay_invite_secret.clone(),
+        fallback_relays: fallback_relay::parse_list(&app.get_fallback_relays_text()),
+        use_project_relays: app.get_use_project_relays(),
+        anonymity_mode: app.get_anonymity_mode(),
+        anonymity_hops: fallback_relay::parse_list(&app.get_anonymity_hops_text()),
+        routes: previous.routes.clone(),
+        route_sequence: previous.route_sequence,
+        route_fan_out: app.get_route_fan_out(),
+        strict_mode: app.get_strict_mode(),
+        hold_mail_for_devices: app.get_hold_mail(),
+        hold_mail_port: u16::try_from(app.get_hold_mail_port()).unwrap_or(3480),
+        captions_enabled: app.get_captions_enabled(),
+        captions_own_voice: app.get_captions_own_voice(),
+        seeding: app.get_seeding(),
+        seed_scope: app.get_seed_scope().clamp(0, 2),
+        seed_port: previous.seed_port,
+        pin_nodes: app
+            .get_pin_nodes()
+            .split(',')
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect(),
+        pin_code: app.get_pin_code().trim().to_string(),
+        vpn_enabled: app.get_vpn_enabled(),
+        vpn_active: previous.vpn_active.clone(),
+        vpn_route_voice: app.get_vpn_route_voice(),
+        vpn_route_files: app.get_vpn_route_files(),
+        vpn_route_messages: app.get_vpn_route_messages(),
+        vpn_kill_switch: app.get_vpn_kill_switch(),
+        dht_enabled: app.get_dht_enabled(),
+        dht_bootstrap: split_list(&app.get_dht_bootstrap()),
+        directories: split_list(&app.get_directories()),
+        directory_pins: previous.directory_pins.clone(),
         ptt_toggle: app.get_ptt_toggle(),
+        mute_hold: app.get_mute_hold(),
+        deafen_hold: app.get_deafen_hold(),
         ptt_release_ms: app.get_ptt_release_ms(),
         start_with_screen_share: app.get_start_with_screen_share(),
         start_with_camera: app.get_start_with_camera(),
@@ -4919,7 +6020,15 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
 }
 
 fn save_current_config(app: &MainWindow) {
-    config::save(&current_config(app));
+    let before = config::load().profile;
+    let now = current_config(app);
+    let renamed = before.display_name != now.profile.display_name || before.status_message != now.profile.status_message;
+    config::save(&now);
+    // Spaces where you kept your profile's name or status show the new
+    // one (spec §7); refresh_cards skips any where nothing changed.
+    if renamed {
+        std::thread::spawn(community::refresh_cards);
+    }
 }
 
 /// Saves settings, spawns a fresh instance of this same executable, and
@@ -4998,6 +6107,8 @@ fn sync_transmit_from_ui(app: &MainWindow, state: &AppState) {
     state.transmit.transmit_mode.store(mode, Ordering::Relaxed);
     *state.transmit.va_threshold.lock().unwrap() = app.get_va_threshold();
     state.transmit.ptt_toggle.store(app.get_ptt_toggle(), Ordering::Relaxed);
+    state.transmit.mute_hold.store(app.get_mute_hold(), Ordering::Relaxed);
+    state.transmit.deafen_hold.store(app.get_deafen_hold(), Ordering::Relaxed);
     state.transmit.ptt_release_ms.store(app.get_ptt_release_ms() as u32, Ordering::Relaxed);
     state.duck_db.store(app.get_duck_db().max(0) as u32, Ordering::Relaxed);
     // Spec §1: switching echo cancellation on mid-call applies to that
@@ -5019,6 +6130,9 @@ fn sync_transmit_from_ui(app: &MainWindow, state: &AppState) {
     if let Ok(key) = Keycode::from_str(&app.get_ptt_key_name()) {
         *state.transmit.ptt_key.lock().unwrap() = key;
     }
+    caps_lock::set_bound(
+        *state.transmit.ptt_key.lock().unwrap() == Keycode::CapsLock && mode == MODE_PTT,
+    );
     // An unparseable or empty name means "unbound", which is a normal
     // state for every shortcut except push-to-talk.
     let parse = |name: slint::SharedString| Keycode::from_str(&name).ok();
@@ -5049,6 +6163,7 @@ fn read_chain_config(app: &MainWindow) -> ChainConfig {
         noise_suppress: antiphon_audio::NoiseSuppressConfig {
             enabled: app.get_ns_enabled(),
             strength: app.get_ns_strength(),
+            neural: app.get_ns_neural(),
         },
         noise_gate: NoiseGateConfig {
             enabled: app.get_gate_enabled(),
@@ -5093,6 +6208,635 @@ fn read_chain_config(app: &MainWindow) -> ChainConfig {
             damping: app.get_reverb_damping(),
             wet_dry: app.get_reverb_wet(),
         },
+    }
+}
+
+// ---- Spec §9: group chats and communities -----------------------------------
+
+fn selected_space(app: &MainWindow) -> Option<antiphon_crypto::community::Key> {
+    connection_mode::decode_hex32(&app.get_selected_space()).map(antiphon_crypto::community::Key)
+}
+
+/// Contacts who could be invited: saved with a pinned key and a prekey,
+/// so an invite can be sealed to them. The same order every time, so a
+/// combo box index maps back.
+fn invitable_contacts(config: &config::AppConfig) -> Vec<config::Contact> {
+    config
+        .contacts
+        .iter()
+        .filter(|c| connection_mode::decode_hex32(&c.identity_key).is_some() && connection_mode::decode_hex32(&c.prekey).is_some())
+        .cloned()
+        .collect()
+}
+
+fn ago(at_secs: u64) -> String {
+    let d = now_secs().saturating_sub(at_secs);
+    match d {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", d / 60),
+        3600..=86_399 => format!("{} h ago", d / 3600),
+        _ => format!("{} d ago", d / 86_400),
+    }
+}
+
+/// Runs an action on the selected space and shows how it went.
+fn space_action(app: &MainWindow, f: impl FnOnce(&community::Store, &antiphon_crypto::community::Key) -> Result<(), String>) {
+    let (Some(store), Some(id)) = (community::Store::app(), selected_space(app)) else { return };
+    match f(&store, &id) {
+        Ok(()) => app.set_space_status("".into()),
+        Err(e) => app.set_space_status(e.into()),
+    }
+    apply_spaces_to_ui(app);
+}
+
+/// Runs a manifest change on the selected space.
+fn space_update(app: &MainWindow, change: impl FnOnce(&mut antiphon_crypto::community::Manifest)) {
+    space_action(app, |store, id| {
+        store.with_space(id, |space, identity| Ok(((), space.update(identity, change)?, vec![community::Event::Changed])))
+    });
+}
+
+fn apply_spaces_to_ui(app: &MainWindow) {
+    use antiphon_crypto::community::{perm, Kind};
+    let Some(store) = community::Store::app() else { return };
+    let config = config::load();
+    let mut spaces: Vec<community::Space> = store.ids().iter().filter_map(|id| store.load(id)).collect();
+    spaces.sort_by_key(|s| s.manifest().name.to_lowercase());
+    let selected = selected_space(app);
+    let viewing = app.get_current_tab() == 2;
+    let mut total_unread = 0;
+    let mut entries = Vec::new();
+    for s in &spaces {
+        let m = s.manifest();
+        let unread = if viewing && Some(s.id()) == selected {
+            store.mark_read(&s.id());
+            0
+        } else {
+            store.unread(&s.id())
+        };
+        total_unread += unread;
+        let kind = if m.kind == Kind::Group { "Group" } else { "Community" };
+        entries.push(SpaceEntry {
+            id: delivery::hex(&s.id().0).into(),
+            name: m.name.clone().into(),
+            detail: format!("{kind} · {} members", m.members.len()).into(),
+            unread: unread as i32,
+        });
+    }
+    app.set_spaces(ModelRc::new(VecModel::from(entries)));
+    app.set_spaces_unread(total_unread as i32);
+    let invites: Vec<SpaceInviteEntry> = store
+        .invites()
+        .into_iter()
+        .map(|i| {
+            let from = config
+                .contacts
+                .iter()
+                .find(|c| c.identity_key.eq_ignore_ascii_case(&delivery::hex(&i.from.0)))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| format!("{} (not a contact; a member of something you're in)", i.card.name));
+            let kind = if i.kind == Kind::Group { "Group chat" } else { "Community" };
+            SpaceInviteEntry { name: i.name.into(), detail: format!("{kind} · invited by {from} · {}", ago(i.at_secs)).into() }
+        })
+        .collect();
+    app.set_space_invites(ModelRc::new(VecModel::from(invites)));
+
+    let Some(space) = selected.and_then(|id| spaces.iter().find(|s| s.id() == id)) else {
+        app.set_selected_space("".into());
+        app.set_space_messages(ModelRc::default());
+        app.set_space_members(ModelRc::default());
+        return;
+    };
+    let m = space.manifest();
+    let community = m.kind == Kind::Community;
+    let me = space.me();
+    let joined = space.joining.is_none() && !space.removed;
+    app.set_space_title(m.name.clone().into());
+    let subtitle = if space.joining.is_some() {
+        "Waiting to be let in: whoever invited you adds you when their app next collects mail or you're next on a call.".to_string()
+    } else if space.removed {
+        "You're no longer in this.".to_string()
+    } else {
+        format!(
+            "{} · {} members · group key {} · {} waiting to send",
+            if community { "Community" } else { "Group chat" },
+            m.members.len(),
+            space.epoch().unwrap_or(0),
+            store.queued()
+        )
+    };
+    app.set_space_subtitle(subtitle.into());
+    app.set_space_is_community(community);
+    app.set_space_separate(space.persona);
+    app.set_space_look_defaults(config.profile.display_name.clone().into());
+    app.set_space_removed(space.removed);
+    let channel_index = (app.get_space_channel_index().max(0) as usize).min(m.channels.len() - 1);
+    app.set_space_channel_names(ModelRc::new(VecModel::from(
+        m.channels.iter().map(|c| SharedString::from(format!("#{}", c.name))).collect::<Vec<_>>(),
+    )));
+    app.set_space_channel_index(channel_index as i32);
+    let channel = m.channels[channel_index].id;
+
+    let log = history::load(&store.dir, &community::channel_log(&space.id(), channel), &store.key);
+    let root: Option<u64> = app.get_space_thread_root().parse().ok();
+    let to_entry = |msg: &history::StoredMessage, replies: i32| {
+        let sender = msg.sender.as_deref().and_then(connection_mode::decode_hex32).unwrap_or(me);
+        SpaceMessage {
+            id: msg.id.to_string().into(),
+            sender: if sender == me { "You".into() } else { space.name_of(&sender).into() },
+            sender_key: delivery::hex(&sender).into(),
+            text: msg.display_text().into(),
+            time: ago(msg.at_secs).into(),
+            mine: sender == me,
+            deleted: msg.deleted,
+            replies,
+            can_delete: joined && (sender == me || m.can(&me, perm::MANAGE_MESSAGES, Some(&sender))),
+            can_edit: joined && sender == me && !msg.deleted && !msg.text.starts_with("[file] "),
+            plain: msg.text.clone().into(),
+        }
+    };
+    let shown: Vec<SpaceMessage> = match root {
+        Some(r) => log.iter().filter(|x| x.id == r || x.reply_to == Some(r)).map(|x| to_entry(x, 0)).collect(),
+        None => log
+            .iter()
+            // A reply whose root isn't here (expired, or from before we
+            // joined) is shown in the channel rather than lost.
+            .filter(|x| x.reply_to.is_none_or(|r| !log.iter().any(|y| y.id == r)))
+            .map(|x| to_entry(x, log.iter().filter(|y| y.reply_to == Some(x.id)).count() as i32))
+            .collect(),
+    };
+    app.set_space_messages(ModelRc::new(VecModel::from(shown)));
+
+    let members: Vec<SpaceMember> = m
+        .members
+        .iter()
+        .map(|x| {
+            let k = x.key.0;
+            let owner = m.is_owner(&k);
+            let card = space.card(&k);
+            let avatar = card.and_then(|c| c.avatar.as_deref()).and_then(avatar_image);
+            SpaceMember {
+                key: delivery::hex(&k).into(),
+                name: space.name_of(&k).into(),
+                status: card.map(|c| c.status.clone()).unwrap_or_default().into(),
+                has_avatar: avatar.is_some(),
+                avatar: avatar.unwrap_or_default(),
+                role: if owner { "Owner".into() } else { m.roles.get(x.role as usize).map(|r| r.name.clone()).unwrap_or_default().into() },
+                role_index: x.role as i32,
+                me: k == me,
+                can_kick: joined && k != me && m.can(&me, perm::KICK, Some(&k)),
+                can_ban: joined && k != me && m.can(&me, perm::BAN, Some(&k)),
+                can_role: joined && community && k != me && !owner && m.can(&me, perm::MANAGE_ROLES, Some(&k)),
+            }
+        })
+        .collect();
+    app.set_space_members(ModelRc::new(VecModel::from(members)));
+    app.set_space_role_names(ModelRc::new(VecModel::from(m.roles.iter().map(|r| SharedString::from(r.name.as_str())).collect::<Vec<_>>())));
+    let bans: Vec<SpaceBan> = m
+        .bans
+        .iter()
+        .map(|b| SpaceBan {
+            key: delivery::hex(&b.key.0).into(),
+            detail: format!(
+                "{}{} -- by {}",
+                space.name_of(&b.key.0),
+                if b.reason.is_empty() { String::new() } else { format!(": {}", b.reason) },
+                space.name_of(&b.by.0)
+            )
+            .into(),
+        })
+        .collect();
+    app.set_space_bans(ModelRc::new(VecModel::from(bans)));
+    let names: Vec<SharedString> =
+        invitable_contacts(&config).iter().filter(|c| !m.is_member(&connection_mode::decode_hex32(&c.identity_key).unwrap_or_default())).map(|c| c.name.as_str().into()).collect();
+    app.set_space_contact_names(ModelRc::new(VecModel::from(names)));
+    app.set_space_can_post(joined && m.can(&me, perm::POST, None));
+    app.set_space_can_invite(joined && m.can(&me, perm::INVITE, None));
+    app.set_space_can_ban(joined && m.can(&me, perm::BAN, None));
+    app.set_space_can_manage(joined && m.can(&me, perm::MANAGE_COMMUNITY, None));
+    app.set_space_can_manage_channels(joined && m.can(&me, perm::MANAGE_CHANNELS, None));
+    app.set_space_server_hosted(m.server_hosted_files);
+    app.set_space_ring_rule(store.ring_rule(&space.id()).map_or(0, |r| r.to_i32() + 1));
+    let first = |v: &[antiphon_crypto::community::NodeRef]| v.first().cloned().unwrap_or_default();
+    let (mailbox, files) = (first(&m.nodes.mailbox), first(&m.nodes.files));
+    app.set_space_mailbox_node(mailbox.addr.into());
+    app.set_space_mailbox_code(mailbox.code.into());
+    app.set_space_files_node(files.addr.into());
+    app.set_space_files_code(files.code.into());
+    app.set_space_dht_node(m.nodes.dht.first().cloned().unwrap_or_default().into());
+}
+
+/// A picture from a card (base64 JPEG), for the member list.
+fn avatar_image(b64: &str) -> Option<slint::Image> {
+    if b64.is_empty() || b64.len() > community::MAX_AVATAR {
+        return None;
+    }
+    let bytes = file_transfer::decode_b64(b64)?;
+    let rgba = image::load_from_memory(&bytes).ok()?.thumbnail(64, 64).to_rgba8();
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), rgba.width(), rgba.height());
+    Some(slint::Image::from_rgba8(buffer))
+}
+
+/// A picked image as a card picture: a 48 px square JPEG, base64, made
+/// smaller until it fits [`community::MAX_AVATAR`].
+fn avatar_from_file(path: &std::path::Path) -> Result<String, String> {
+    let img = image::open(path).map_err(|e| format!("couldn't read that picture: {e}"))?;
+    let square = img.resize_to_fill(48, 48, image::imageops::FilterType::Lanczos3).to_rgb8();
+    for quality in [80u8, 65, 50, 35] {
+        let mut out = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+        encoder.encode_image(&square).map_err(|e| e.to_string())?;
+        let b64 = file_transfer::encode_b64(&out);
+        if b64.len() <= community::MAX_AVATAR {
+            return Ok(b64);
+        }
+    }
+    Err("that picture won't shrink small enough".into())
+}
+
+/// The selected space's "How I appear here" fields, from what's saved.
+/// Only on selecting or saving, so a redraw never wipes what's being typed.
+fn load_look_to_ui(app: &MainWindow) {
+    let (Some(store), Some(id)) = (community::Store::app(), selected_space(app)) else { return };
+    let look = store.appearance(&id);
+    app.set_space_look_name(look.name.into());
+    app.set_space_look_status(look.status.into());
+    app.set_space_look_avatar(avatar_image(&look.avatar).unwrap_or_default());
+    app.set_space_look_avatar_data(look.avatar.into());
+}
+
+fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_save_look(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let look = community::Appearance {
+                name: app.get_space_look_name().trim().to_string(),
+                status: app.get_space_look_status().trim().to_string(),
+                avatar: app.get_space_look_avatar_data().to_string(),
+            };
+            space_action(&app, |store, id| store.set_appearance(id, look));
+            if app.get_space_status().is_empty() {
+                app.set_space_status("Saved. Members see it when they next collect their mail.".into());
+            }
+            load_look_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_clear_look_avatar(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_space_look_avatar_data("".into());
+            app.set_space_look_avatar(slint::Image::default());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_pick_look_avatar(move || {
+            let window_weak = window_weak.clone();
+            // The dialog blocks, so not on the UI thread.
+            std::thread::spawn(move || {
+                let Some(path) = rfd::FileDialog::new().set_title("A picture for this space").add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp"]).pick_file() else { return };
+                let result = avatar_from_file(&path);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(app) = window_weak.upgrade() else { return };
+                    match result {
+                        Ok(b64) => {
+                            app.set_space_look_avatar(avatar_image(&b64).unwrap_or_default());
+                            app.set_space_look_avatar_data(b64.into());
+                            app.set_space_status("Save to send it.".into());
+                        }
+                        Err(e) => app.set_space_status(e.into()),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_open_communities(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_refresh_space(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_select_space(move |id| {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_selected_space(id);
+            app.set_space_thread_root("".into());
+            app.set_space_channel_index(0);
+            app.set_space_status("".into());
+            load_look_to_ui(&app);
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_select_space_channel(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            app.set_space_channel_index(index);
+            app.set_space_thread_root("".into());
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_create_space(move |name, is_community| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(store) = community::Store::app() else { return };
+            let kind = if is_community { antiphon_crypto::community::Kind::Community } else { antiphon_crypto::community::Kind::Group };
+            match store.create(kind, &name, app.get_space_new_separate()) {
+                Ok(id) => {
+                    app.set_space_new_name("".into());
+                    app.set_selected_space(delivery::hex(&id.0).into());
+                    app.set_space_status("".into());
+                }
+                Err(e) => app.set_space_status(e.into()),
+            }
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_accept_space_invite(move |index, separate| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(store) = community::Store::app() else { return };
+            match store.accept_invite(index.max(0) as usize, separate) {
+                Ok(id) => {
+                    app.set_selected_space(delivery::hex(&id.0).into());
+                    app.set_space_status("Accepted. You'll be let in when they next collect their mail.".into());
+                }
+                Err(e) => app.set_space_status(e.into()),
+            }
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_decline_space_invite(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            if let Some(store) = community::Store::app() {
+                store.decline_invite(index.max(0) as usize);
+            }
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_send(move |text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let channel_index = app.get_space_channel_index().max(0) as usize;
+            let reply_to: Option<u64> = app.get_space_thread_root().parse().ok();
+            let mut sent = false;
+            space_action(&app, |store, id| {
+                store.with_space(id, |space, _| {
+                    let channel = space.manifest().channels.get(channel_index).map(|c| c.id).unwrap_or(0);
+                    let (outs, event) = space.post(channel, &text, reply_to)?;
+                    Ok(((), outs, vec![event]))
+                })?;
+                sent = true;
+                Ok(())
+            });
+            if sent {
+                app.set_space_input("".into());
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_edit_message(move |id, text| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Ok(id) = id.parse::<u64>() else { return };
+            let mut done = false;
+            space_action(&app, |store, sid| {
+                store.with_space(sid, |space, identity| {
+                    let me = identity.public().identity_key;
+                    let outs = space.edit(id, &text)?;
+                    Ok(((), outs, vec![community::Event::Edited { id, sender: me, text: text.trim().to_string() }]))
+                })?;
+                done = true;
+                Ok(())
+            });
+            if done {
+                app.set_space_editing("".into());
+                app.set_space_input("".into());
+            }
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_delete_message(move |id, sender| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let (Ok(id), Some(author)) = (id.parse::<u64>(), connection_mode::decode_hex32(&sender)) else { return };
+            space_action(&app, |store, sid| {
+                store.with_space(sid, |space, _| Ok(((), space.delete(id, author)?, vec![community::Event::Deleted { id, author }])))
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_invite(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let config = config::load();
+            space_action(&app, |store, id| {
+                let space = store.load(id).ok_or("couldn't open it")?;
+                let candidates: Vec<config::Contact> = invitable_contacts(&config)
+                    .into_iter()
+                    .filter(|c| !space.manifest().is_member(&connection_mode::decode_hex32(&c.identity_key).unwrap_or_default()))
+                    .collect();
+                let contact = candidates.get(index.max(0) as usize).ok_or("pick a contact")?;
+                let key = connection_mode::decode_hex32(&contact.identity_key).ok_or("no key for them")?;
+                store.with_space(id, |space, identity| Ok(((), space.invite(identity, key, &contact.name)?, vec![community::Event::Changed])))
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_kick(move |key| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_action(&app, |store, id| store.with_space(id, |space, identity| Ok(((), space.kick(identity, key)?, vec![]))));
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_ban(move |key, reason| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_action(&app, |store, id| store.with_space(id, |space, identity| Ok(((), space.ban(identity, key, &reason)?, vec![]))));
+            app.set_space_ban_reason("".into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_unban(move |key| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_update(&app, |m| m.bans.retain(|b| b.key.0 != key));
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_set_role(move |key, role| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(key) = connection_mode::decode_hex32(&key) else { return };
+            space_update(&app, |m| {
+                if let Some(x) = m.members.iter_mut().find(|x| x.key.0 == key) {
+                    x.role = role.max(0) as u16;
+                }
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_add_channel(move |name| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let name: String = name.trim().trim_start_matches('#').chars().take(80).collect();
+            if name.is_empty() {
+                return;
+            }
+            space_update(&app, |m| {
+                let id = m.channels.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+                m.channels.push(antiphon_crypto::community::Channel { id, name, topic: String::new() });
+            });
+            app.set_space_new_channel("".into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_remove_channel(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let index = app.get_space_channel_index().max(0) as usize;
+            space_update(&app, |m| {
+                if m.channels.len() > 1 && index < m.channels.len() {
+                    m.channels.remove(index);
+                }
+            });
+            app.set_space_channel_index(0);
+            apply_spaces_to_ui(&app);
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_save_settings(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let node = |addr: SharedString, code: SharedString| {
+                let addr = addr.trim().to_string();
+                (!addr.is_empty()).then(|| antiphon_crypto::community::NodeRef { addr, code: code.trim().to_string() })
+            };
+            let mailbox = node(app.get_space_mailbox_node(), app.get_space_mailbox_code());
+            let files = node(app.get_space_files_node(), app.get_space_files_code());
+            let dht = app.get_space_dht_node().trim().to_string();
+            let hosted = app.get_space_server_hosted();
+            space_update(&app, |m| {
+                m.nodes.mailbox = mailbox.into_iter().collect();
+                m.nodes.files = files.into_iter().collect();
+                m.nodes.dht = if dht.is_empty() { Vec::new() } else { vec![dht] };
+                m.server_hosted_files = hosted;
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_set_ring_rule(move |index| {
+            let Some(app) = window_weak.upgrade() else { return };
+            let rule = (index > 0).then(|| notify::RingRule::from_i32(index - 1));
+            space_action(&app, |store, id| {
+                store.set_ring_rule(id, rule);
+                Ok(())
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_use_nodes(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(m) = community::Store::app().zip(selected_space(&app)).and_then(|(s, id)| s.load(&id)).map(|s| s.manifest().clone()) else { return };
+            let mut config = config::load();
+            let Some(tier) = config.routes.iter_mut().find(|r| r.kind == delivery::RouteKind::CommunityNode) else { return };
+            let Some(node) = m.nodes.mailbox.first() else { return };
+            if !tier.code.is_empty() && tier.code != node.code && !tier.nodes.is_empty() {
+                app.set_space_status("Your Community node route already uses another community's code; edit it under Call → Delivery routes.".into());
+                return;
+            }
+            if !tier.nodes.contains(&node.addr) {
+                tier.nodes.push(node.addr.clone());
+            }
+            tier.code = node.code.clone();
+            tier.enabled = true;
+            for d in &m.nodes.dht {
+                if !config.dht_bootstrap.contains(d) {
+                    config.dht_bootstrap.push(d.clone());
+                }
+            }
+            save_routes(&app, config);
+            app.set_space_status(format!("{} now holds your mail too; your contacts and fellow members get your new route list.", node.addr).into());
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        let runtime = app_state.runtime.clone();
+        main_window.on_space_share_file(move || {
+            let window_weak = window_weak.clone();
+            let runtime = runtime.clone();
+            let Some(app) = window_weak.upgrade() else { return };
+            let Some(id) = selected_space(&app) else { return };
+            let channel_index = app.get_space_channel_index().max(0) as usize;
+            // The dialog and the sealing block, so not on the UI thread.
+            std::thread::spawn(move || {
+                let Some(path) = rfd::FileDialog::new().set_title("Share a file here").pick_file() else { return };
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+                let result = (|| {
+                    let store = community::Store::app().ok_or("not ready")?;
+                    let manifest = store.load(&id).ok_or("couldn't open it")?.manifest().clone();
+                    let (name, size, file_id, key, holders) = sharing::share_in_community(&runtime, &path, &name, &manifest)?;
+                    store.with_space(&id, |space, _| {
+                        let channel = space.manifest().channels.get(channel_index).map(|c| c.id).unwrap_or(0);
+                        let at_secs = now_secs();
+                        let mut b = [0u8; 8];
+                        getrandom::fill(&mut b).map_err(|e| e.to_string())?;
+                        let mid = u64::from_le_bytes(b) >> 1;
+                        let post = community::Post::File { id: mid, channel, name: name.clone(), size, file_id: file_id.clone(), key: key.clone(), holders: holders.clone(), at_secs };
+                        let outs = space.share_file(post)?;
+                        Ok(((), outs, vec![community::Event::File { channel, id: mid, sender: space.me(), name, size, file_id, key, holders, at_secs }]))
+                    })
+                })();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(app) = window_weak.upgrade() else { return };
+                    match result {
+                        Ok(()) => app.set_space_status("Shared. It's under Shared files too.".into()),
+                        Err(e) => app.set_space_status(SharedString::from(e)),
+                    }
+                    apply_spaces_to_ui(&app);
+                });
+            });
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_leave(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            space_action(&app, |store, id| store.with_space(id, |space, identity| Ok(((), space.leave(identity)?, vec![]))));
+        });
+    }
+    {
+        let window_weak = main_window.as_weak();
+        main_window.on_space_forget(move || {
+            let Some(app) = window_weak.upgrade() else { return };
+            if let (Some(store), Some(id)) = (community::Store::app(), selected_space(&app)) {
+                store.forget(&id);
+            }
+            app.set_selected_space("".into());
+            apply_spaces_to_ui(&app);
+        });
     }
 }
 

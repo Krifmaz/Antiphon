@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use device_query::{DeviceQuery, DeviceState, Keycode};
-use tokio::net::UdpSocket;
+use antiphon_net::vpn::TrafficKind;
+use antiphon_net::AppSocket;
 use tokio::task::JoinHandle;
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -83,6 +84,12 @@ pub struct TransmitSettings {
     /// is not cut off." Milliseconds the mic stays open after the key comes
     /// up.
     pub ptt_release_ms: AtomicU32,
+    /// The other half of "PTT or mute/deafen switched to toggle behavior
+    /// per user": mute and deafen toggle by default, and either can be
+    /// switched to *hold* -- muted only while the key is down
+    /// (push-to-mute), deafened only while it is down.
+    pub mute_hold: AtomicBool,
+    pub deafen_hold: AtomicBool,
 }
 
 impl TransmitSettings {
@@ -102,8 +109,25 @@ impl TransmitSettings {
             ptt_toggle: AtomicBool::new(false),
             ptt_latched: AtomicBool::new(false),
             ptt_release_ms: AtomicU32::new(0),
+            mute_hold: AtomicBool::new(false),
+            deafen_hold: AtomicBool::new(false),
         }
     }
+}
+
+/// Every key physically down right now. The polling backend's answer, plus
+/// Caps Lock when the push-to-talk hook is swallowing it -- a swallowed key
+/// never reaches the backend (see `caps_lock.rs`).
+pub fn keys_down(device_state: &DeviceState) -> HashSet<Keycode> {
+    let mut down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+    if crate::caps_lock::hooked() {
+        if crate::caps_lock::held() {
+            down.insert(Keycode::CapsLock);
+        } else {
+            down.remove(&Keycode::CapsLock);
+        }
+    }
+    down
 }
 
 /// Waits (up to `timeout`) for the next key press and returns it, for the
@@ -113,9 +137,9 @@ impl TransmitSettings {
 pub fn capture_next_key(timeout: Duration) -> Option<Keycode> {
     let device_state = DeviceState::new();
     let start = Instant::now();
-    let mut previously_down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+    let mut previously_down = keys_down(&device_state);
     while start.elapsed() < timeout {
-        let now_down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+        let now_down = keys_down(&device_state);
         if let Some(key) = now_down.iter().find(|k| !previously_down.contains(k)) {
             return Some(*key);
         }
@@ -151,6 +175,8 @@ pub struct ActiveCall {
     /// after the user edits their profile mid-call) via `AppState::runtime`
     /// -- see `main::sync_transmit_from_ui`'s sibling for profile pushes.
     pub peer: Arc<PeerConnection>,
+    /// Everyone beyond `peer` in a group call (spec §3).
+    pub group: Arc<crate::group::Group>,
     /// Live Monitoring (spec §1 Utility): hear your own processed mic in
     /// your headphones. Toggling this doesn't open/close a stream -- the
     /// monitor playback stream runs for the whole call, this just decides
@@ -210,7 +236,7 @@ pub struct ActiveCall {
     /// Rolling buffer of the most recent *received* audio
     /// (spec §2 "Replay") -- captured pre-deafen/pre-volume, so it holds
     /// what the peer actually sent, not what happened to be audible.
-    replay: Arc<Mutex<std::collections::VecDeque<f32>>>,
+    replay: Arc<Mutex<crate::sealed_ring::SealedRing>>,
     /// Clips cut around damaged moments (spec §2 replay history).
     replay_clips: Arc<Mutex<crate::replay_history::ReplayHistory>>,
     /// File transfer (spec §5) progress/offer state for this call -- see
@@ -260,6 +286,7 @@ pub fn monitor_added_latency_ms() -> u32 {
 
 impl Drop for ActiveCall {
     fn drop(&mut self) {
+        crate::community::clear_live(&self.peer.peer_identity().identity_key);
         self.send_task.abort();
         self.recv_task.abort();
         self.drain_task.abort();
@@ -448,6 +475,14 @@ impl ActiveCall {
                     eprintln!("[outbox] could not save queue: {e}");
                 }
             }
+        });
+    }
+
+    /// Sends a control message as is, best effort.
+    pub fn send_control(&self, runtime: &tokio::runtime::Handle, message: ControlMessage) {
+        let peer = self.peer.clone();
+        runtime.spawn(async move {
+            let _ = peer.send_control(&message.encode()).await;
         });
     }
 
@@ -665,7 +700,14 @@ impl ActiveCall {
     /// One kept clip's audio, for playing it back.
     pub fn replay_clip(&self, index: usize) -> Option<(u32, Vec<f32>)> {
         let history = self.replay_clips.lock().unwrap();
-        history.get(index).map(|c| (c.sample_rate, c.samples.clone()))
+        let clip = history.get(index)?;
+        let samples = self.replay.lock().unwrap().open(&clip.audio)?;
+        Some((clip.sample_rate, samples))
+    }
+
+    /// How many clips this call has cut so far (spec §2 replay modes).
+    pub fn replay_clips_cut(&self) -> u64 {
+        self.replay_clips.lock().unwrap().cut()
     }
 
     pub fn clear_replay_clips(&self) {
@@ -673,7 +715,7 @@ impl ActiveCall {
     }
 
     pub fn take_replay_snapshot(&self) -> (u32, Vec<f32>) {
-        let samples: Vec<f32> = self.replay.lock().unwrap().iter().copied().collect();
+        let samples = self.replay.lock().unwrap().snapshot();
         (self.sample_rate.load(Ordering::Relaxed), samples)
     }
 
@@ -829,7 +871,7 @@ pub struct AppState {
     pub echo_canceller: Arc<Mutex<EchoCanceller>>,
     /// The socket STUN discovery ran on, held so the follow-up punch can
     /// reuse it -- see `establish_punch`. Cleared once a call starts.
-    pub punch_socket: Mutex<Option<Arc<UdpSocket>>>,
+    pub punch_socket: Mutex<Option<Arc<AppSocket>>>,
     /// The running port-forward renewal task (spec §10), if one is up.
     ///
     /// Held so it can be stopped -- and the mapping released -- when the
@@ -840,11 +882,72 @@ pub struct AppState {
     /// startup and shared by every call, so the user is the same person
     /// across connections rather than a fresh stranger each time.
     pub identity: Arc<IdentityKeyPair>,
+    /// The relay the current or next call goes through, if any -- what
+    /// tells a connection that arrived from this address apart from a
+    /// direct one (spec §3 "active mode visible in the call UI").
+    pub relay_addr: Mutex<Option<SocketAddr>>,
 }
 
-pub async fn establish_listen(port: u16, identity: Arc<IdentityKeyPair>) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+/// Recomputes the tokens to register at a relay; see [`establish_listen`].
+pub type RelayTokens = Box<dyn Fn() -> Vec<antiphon_net::relay::RelayToken> + Send>;
+
+/// Listens for a call on `port`. With a relay, the same socket is also
+/// registered there under `tokens()` -- re-evaluated on every refresh, so
+/// a new contact or a new day is picked up without restarting -- so people
+/// who can't reach this machine directly still can through the relay
+/// (spec §3).
+pub async fn establish_listen(
+    port: u16,
+    identity: Arc<IdentityKeyPair>,
+    relay: Option<(SocketAddr, RelayTokens)>,
+) -> Result<PeerConnection> {
+    let mut socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, port).await?);
+    if let Some((mut relay_addr, tokens)) = relay {
+        // Spec §3 anonymity mode: register through a circuit, so the relay
+        // only ever sees the last hop. The direct port stays unused --
+        // listening on it would hand your address to whoever calls.
+        if let Some(hops) = crate::anonymity::configured_hops() {
+            (socket, relay_addr) = crate::anonymity::route_to(&hops, relay_addr).await?;
+        }
+        // Holds only a weak handle: once the listen (or the call it
+        // became) drops the socket, the refresh stops on its own.
+        let weak = Arc::downgrade(&socket);
+        tokio::spawn(async move {
+            while let Some(socket) = weak.upgrade() {
+                let _ = antiphon_net::relay::register(&socket, relay_addr, &tokens()).await;
+                drop(socket);
+                tokio::time::sleep(antiphon_net::relay::REGISTER_INTERVAL).await;
+            }
+        });
+    }
     Ok(PeerConnection::listen(socket, &identity).await?)
+}
+
+/// Resolves a `host:port` the user typed, for a relay -- through the
+/// VPN's DNS when calls go through the VPN (spec §6).
+pub async fn resolve(address: &str) -> Result<SocketAddr> {
+    Ok(crate::vpn::resolve(TrafficKind::Voice, address).await?)
+}
+
+/// Calls someone through a relay (spec §3 "Everyone else -> Relay"): asks
+/// the relay to pair this socket with whoever registered `token`, then
+/// handshakes with the relay's address exactly as if it were theirs.
+pub async fn establish_relayed_call(
+    relay: SocketAddr,
+    token: antiphon_net::relay::RelayToken,
+    local_port: u16,
+    identity: Arc<IdentityKeyPair>,
+) -> Result<PeerConnection> {
+    let (socket, relay) = match crate::anonymity::configured_hops() {
+        // Spec §3 anonymity mode: the relay sees the circuit's last hop.
+        Some(hops) => crate::anonymity::route_to(&hops, relay).await?,
+        None => (Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?), relay),
+    };
+    antiphon_net::relay::dial(&socket, relay, token, Duration::from_secs(5)).await?;
+    match tokio::time::timeout(Duration::from_secs(15), PeerConnection::connect(socket, relay, &identity)).await {
+        Ok(result) => Ok(result?),
+        Err(_) => anyhow::bail!("the relay paired the call, but they never answered"),
+    }
 }
 
 pub async fn establish_call(
@@ -852,7 +955,7 @@ pub async fn establish_call(
     local_port: u16,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
     Ok(PeerConnection::connect(socket, remote, &identity).await?)
 }
 
@@ -865,8 +968,8 @@ pub const PUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// that socket as. The socket is returned alongside the answer because the
 /// discovered mapping belongs to *this* socket -- calling on a different
 /// one would get a different (and useless) public port.
-pub async fn discover_public_address(local_port: u16) -> Result<(SocketAddr, Arc<UdpSocket>)> {
-    let socket = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
+pub async fn discover_public_address(local_port: u16) -> Result<(SocketAddr, Arc<AppSocket>)> {
+    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
     let public = antiphon_net::stun::discover_public_addr_default(&socket).await?;
     Ok((public, socket))
 }
@@ -876,6 +979,10 @@ pub struct PortMapHandle {
     pub gateway: std::net::Ipv4Addr,
     pub internal_port: u16,
     pub external_port: u16,
+    /// The port the router forwards *now*: a renewal may come back with
+    /// a different one (spec §6), and this follows it so the DHT record
+    /// is republished with the new address.
+    current_external: Arc<std::sync::atomic::AtomicU16>,
     renewal: tokio::task::JoinHandle<()>,
 }
 
@@ -888,6 +995,11 @@ impl PortMapHandle {
     fn stop(self) -> (std::net::Ipv4Addr, u16) {
         self.renewal.abort();
         (self.gateway, self.internal_port)
+    }
+
+    /// The forwarded port as of the latest renewal.
+    pub fn current_external_port(&self) -> u16 {
+        self.current_external.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Stops renewing and asks the router to drop the mapping, without
@@ -932,12 +1044,17 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
         .ok_or_else(|| anyhow::anyhow!("this machine has no IPv4 address on a local network"))?;
     let (gateway, mapping) = antiphon_net::port_map::open_port(local, local_port).await?;
 
+    let current_external = Arc::new(std::sync::atomic::AtomicU16::new(mapping.external_port));
+    let follow = current_external.clone();
     let renewal = tokio::spawn(async move {
         let mut interval = mapping.renew_after();
         loop {
             tokio::time::sleep(interval).await;
             match antiphon_net::port_map::request_mapping(gateway, local_port).await {
-                Ok(renewed) => interval = renewed.renew_after(),
+                Ok(renewed) => {
+                    interval = renewed.renew_after();
+                    follow.store(renewed.external_port, std::sync::atomic::Ordering::Relaxed);
+                }
                 // Kept trying rather than given up on: a router that was
                 // rebooting a moment ago will answer the next one, and
                 // stopping here would silently end the user's
@@ -952,6 +1069,7 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
         gateway,
         internal_port: mapping.internal_port,
         external_port: mapping.external_port,
+        current_external,
         renewal,
     })
 }
@@ -963,12 +1081,12 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
 pub async fn establish_punch(
     remote: SocketAddr,
     local_port: u16,
-    existing: Option<Arc<UdpSocket>>,
+    existing: Option<Arc<AppSocket>>,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
     let socket = match existing {
         Some(s) => s,
-        None => Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?),
+        None => Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?),
     };
     Ok(PeerConnection::punch(socket, remote, PUNCH_TIMEOUT, &identity).await?)
 }
@@ -1023,7 +1141,7 @@ pub fn watch_for_key(key: Keycode, timeout: Duration) -> bool {
     let device_state = DeviceState::new();
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if device_state.get_keys().contains(&key) {
+        if keys_down(&device_state).contains(&key) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -1077,6 +1195,41 @@ impl Drop for LoopbackHandle {
 /// but hand samples to a channel, and a worker thread does the DSP. Audio
 /// callbacks run on a realtime thread, so doing filter work (or taking a
 /// lock someone else might hold) inside one is how you get dropouts.
+/// How long the spec §1 mic test records for.
+pub const MIC_TEST_SECONDS: u64 = 5;
+
+/// Records `seconds` of microphone and returns it processed through the
+/// chain, exactly as a call would send it (spec §1 "Mic Test & Record
+/// Preview": "Record five seconds and play it back so you hear exactly
+/// what everyone else hears").
+///
+/// The chain runs over the recording after the fact rather than live, so
+/// nothing is heard while recording -- which is the point: you listen back
+/// once, without your own voice in your ears confusing the comparison.
+/// Blocks for the whole recording, so call it from `spawn_blocking`.
+pub fn record_mic_test(input_device: Option<&str>, config: &ChainConfig, seconds: u64) -> Result<(u32, Vec<f32>)> {
+    let recorded = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let sink = recorded.clone();
+    let capture = start_capture(input_device, move |samples: &[f32]| {
+        if let Ok(mut buf) = sink.lock() {
+            buf.extend_from_slice(samples);
+        }
+    })?;
+    let sample_rate = capture.sample_rate;
+    std::thread::sleep(Duration::from_secs(seconds));
+    drop(capture);
+
+    let mut samples = std::mem::take(&mut *recorded.lock().unwrap());
+    let mut chain = AudioChain::from_config(sample_rate, config);
+    // Same 10 ms blocks a device callback hands the chain, so stages with
+    // per-block state (meters, envelopes) behave as they do live.
+    let block = (sample_rate as usize / 100).max(1);
+    for chunk in samples.chunks_mut(block) {
+        chain.process(chunk);
+    }
+    Ok((sample_rate, samples))
+}
+
 pub fn start_loopback(
     input_device: Option<&str>,
     output_device: Option<&str>,
@@ -1236,7 +1389,9 @@ pub fn start_pipeline(
         Arc::new(Mutex::new(None));
     let pending_friend_request: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let friend_accepted: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let replay: Arc<Mutex<std::collections::VecDeque<f32>>> = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    // Sealed in RAM under a key made for this call (spec §2 "Ephemeral by
+    // design"); dropping the call drops the key.
+    let replay: Arc<Mutex<crate::sealed_ring::SealedRing>> = Arc::new(Mutex::new(Default::default()));
     let replay_clips: Arc<Mutex<crate::replay_history::ReplayHistory>> =
         Arc::new(Mutex::new(crate::replay_history::ReplayHistory::default()));
     // Recently sent audio, so a peer's resend request can be answered.
@@ -1269,10 +1424,15 @@ pub fn start_pipeline(
             // running. `None` when not in a release.
             let mut release_pending_since: Option<Instant> = None;
             while !stop.load(Ordering::Relaxed) {
-                let down: HashSet<Keycode> = device_state.get_keys().into_iter().collect();
+                let down = keys_down(&device_state);
 
                 let ptt = *transmit.ptt_key.lock().unwrap();
                 let held = down.contains(&ptt);
+                // Caps Lock as push-to-talk flips the lock on platforms
+                // where it can't be swallowed; put it back on release.
+                if ptt == Keycode::CapsLock && !held && previously_down.contains(&ptt) {
+                    crate::caps_lock::after_release();
+                }
 
                 if transmit.ptt_toggle.load(Ordering::Relaxed) {
                     // Toggle mode: latch on the press edge. Level-triggering
@@ -1310,10 +1470,20 @@ pub fn start_pipeline(
                 let newly_pressed = |k: &Mutex<Option<Keycode>>| {
                     k.lock().unwrap().is_some_and(|key| down.contains(&key) && !previously_down.contains(&key))
                 };
-                if newly_pressed(&transmit.mute_key) {
+                // Hold mode toggles on both edges: press mutes, release
+                // unmutes, through the same pending flag the UI already acts
+                // on, so the two modes cannot drift apart.
+                let newly_released = |k: &Mutex<Option<Keycode>>| {
+                    k.lock().unwrap().is_some_and(|key| !down.contains(&key) && previously_down.contains(&key))
+                };
+                if newly_pressed(&transmit.mute_key)
+                    || (transmit.mute_hold.load(Ordering::Relaxed) && newly_released(&transmit.mute_key))
+                {
                     transmit.pending_mute.store(true, Ordering::Relaxed);
                 }
-                if newly_pressed(&transmit.deafen_key) {
+                if newly_pressed(&transmit.deafen_key)
+                    || (transmit.deafen_hold.load(Ordering::Relaxed) && newly_released(&transmit.deafen_key))
+                {
                     transmit.pending_deafen.store(true, Ordering::Relaxed);
                 }
                 if newly_pressed(&transmit.hangup_key) {
@@ -1342,6 +1512,9 @@ pub fn start_pipeline(
     let sample_rate = capture.sample_rate;
     let chain = Arc::new(Mutex::new(AudioChain::from_config(sample_rate, &config)));
 
+    // Spec §3 group calls: everyone beyond the primary connection.
+    let group = Arc::new(crate::group::Group::default());
+    let send_group = group.clone();
     let send_peer = peer.clone();
     let send_muted = muted.clone();
     let send_ptt = ptt_active.clone();
@@ -1416,6 +1589,13 @@ pub fn start_pipeline(
                 _ => send_ptt.load(Ordering::Relaxed),
             };
             if should_send && !send_muted.load(Ordering::Relaxed) {
+                // Spec §7: your own words in the captions, only if asked
+                // for, and only what actually went out.
+                if crate::captions::own_voice() {
+                    if let Some(tap) = crate::captions::tap() {
+                        tap.push(crate::captions::OWN_VOICE, sample_rate, &samples);
+                    }
+                }
                 // Spec §2, layer one: every frame carries a low-quality
                 // copy of the one before it, so a single lost frame is
                 // repaired with no round trip and no added delay.
@@ -1431,8 +1611,22 @@ pub fn start_pipeline(
                     }
                 }
                 sequence = sequence.wrapping_add(1);
-                if let Err(e) = send_peer.send_audio(&bytes).await {
-                    eprintln!("[net] send error: {e}");
+                if let Some(sfu) = send_group.sfu_call() {
+                    // Spec §3 past the mesh: one SFrame-sealed upload, and
+                    // the SFU forwards it to everyone.
+                    sfu.send_audio(&bytes).await;
+                } else {
+                    // Spec §3 SFrame: in a group call with MLS keys, sealed
+                    // once under this epoch's key for everyone keyed in.
+                    let sealed = send_group.keys.seal_audio(&bytes);
+                    let to_primary =
+                        send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                    if let Err(e) = send_peer.send_audio(to_primary).await {
+                        eprintln!("[net] send error: {e}");
+                    }
+                    // Spec §3 group mesh: the same frame to everyone else in
+                    // the call, one upload each.
+                    send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
                 }
             } else {
                 // Cleared while not transmitting, so the first frame after
@@ -1454,8 +1648,11 @@ pub fn start_pipeline(
     let jitter = Arc::new(Mutex::new(JitterBuffer::new(JITTER_MAX_WAIT)));
 
     let recv_peer = peer.clone();
+    let recv_link_peer = peer.clone();
     let recv_jitter = jitter.clone();
     let recv_profile = peer_profile.clone();
+    let recv_group = group.clone();
+    let recv_primary_key = peer.peer_identity().identity_key;
     let recv_ft_state = file_transfer_state.clone();
     let recv_ft_peer = peer.clone();
     let recv_chat_log = chat_log.clone();
@@ -1473,6 +1670,9 @@ pub fn start_pipeline(
         let result = recv_peer
             .recv_loop(move |msg| match msg {
                 Received::Audio { counter: _, plaintext } => {
+                    // Spec §3 SFrame: a group member's audio is opened
+                    // under the MLS epoch key; anything refused is lost.
+                    let Some(plaintext) = recv_group.keys.open_audio(&recv_primary_key, &plaintext) else { return };
                     // A frame that won't parse is dropped like a lost one;
                     // the buffer already knows how to handle a gap.
                     //
@@ -1488,6 +1688,12 @@ pub fn start_pipeline(
                     }
                 }
                 Received::Control(bytes) => match ControlMessage::decode(&bytes) {
+                    Some(m) if crate::group::is_group_message(&m) => {
+                        recv_group.inbox.lock().unwrap().push((crate::group::Link::Primary, m));
+                    }
+                    // The primary connection leaving ends this call, as a
+                    // 1:1 hang-up always has; nothing more to do here.
+                    Some(ControlMessage::GroupLeave) => {}
                     Some(ControlMessage::Hello(hello)) => {
                         // Spec §9: the caller said up front that this is a
                         // knock. Handled here, on the same flag the
@@ -1513,9 +1719,14 @@ pub fn start_pipeline(
                                 .collect()
                         };
                         let peer = recv_resend_peer.clone();
+                        let group = recv_group.clone();
                         tokio::spawn(async move {
                             for bytes in to_send {
-                                let _ = peer.send_audio(&bytes).await;
+                                // Sealed afresh: a resend gets a new SFrame
+                                // counter, like it gets a new crypto one.
+                                let sealed = group.keys.seal_audio(&bytes);
+                                let frame = group.keys.frame_for(&peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                                let _ = peer.send_audio(frame).await;
                             }
                         });
                     }
@@ -1527,11 +1738,34 @@ pub fn start_pipeline(
                                 note,
                             });
                     }
+                    Some(ControlMessage::Community { data }) => {
+                        // Off the receive loop: it may be a commit to
+                        // process and a file to write, and audio is waiting.
+                        let from = recv_primary_key;
+                        tokio::task::spawn_blocking(move || {
+                            if let Some(store) = crate::community::Store::app() {
+                                store.receive_fragment(from, &data);
+                            }
+                        });
+                    }
                     Some(ControlMessage::EscalateCall) => {
                         recv_ring.store(true, Ordering::Relaxed);
                     }
                     Some(ControlMessage::SilentCall) => {
                         recv_silent.store(true, Ordering::Relaxed);
+                    }
+                    Some(ControlMessage::FileLink { name, size, file_id, key, seed_port, holders }) => {
+                        // Their seeder is on the address this call came
+                        // from. A relayed call's address is the relay's,
+                        // where a seeder won't answer; asking costs only
+                        // a timeout.
+                        let seeder = (seed_port != 0).then(|| {
+                            let mut a = recv_link_peer.remote_addr();
+                            a.set_port(seed_port);
+                            a
+                        });
+                        let with = crate::delivery::hex(&recv_link_peer.peer_identity().identity_key);
+                        crate::sharing::receive_link(name, size, file_id, key, holders, seeder, with);
                     }
                     Some(ControlMessage::Chat { id, text }) => {
                         if let Some(history) = &recv_history {
@@ -1638,10 +1872,17 @@ pub fn start_pipeline(
     let drain_peer_eq = peer_eq.clone();
     let drain_ptt = ptt_active.clone();
     let drain_peer_muted = peer_muted.clone();
+    let drain_group = group.clone();
+    // Spec §3 group calls and §1 ducking: everyone's audio meets here.
+    // The primary connection is source 0; each leg is its id + 1.
+    let mut mixer = crate::mixer::Mixer::default();
+    let mut mixed_legs: Vec<u64> = Vec::new();
     let drain_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         loop {
             tick.tick().await;
+            let caption_tap = crate::captions::tap();
+            mixer.set_duck_db(drain_duck_db.load(Ordering::Relaxed) as f32);
             // Cheap no-op most ticks (a single mutex check, internally
             // throttled to once every couple of seconds) -- riding the
             // existing 10ms tick instead of a dedicated timer.
@@ -1668,16 +1909,21 @@ pub fn start_pipeline(
                     PopResult::Empty => break,
                 };
                 drained_samples += samples.len() as u64;
+                // Spec §7 live captions: before the deafen gate and the
+                // volume, since someone who can't hear the call is who
+                // captions are for. Never blocks; see `captions`.
+                if let Some(tap) = &caption_tap {
+                    if !drain_peer_muted.load(Ordering::Relaxed) {
+                        tap.push(0, sample_rate, &samples);
+                    }
+                }
                 {
                     // Replay ring: record everything received, before the
                     // deafen gate and volume scaling below, so "save the
                     // last 30 seconds" means what the peer sent.
                     let mut ring = drain_replay.lock().unwrap();
-                    ring.extend(samples.iter().copied());
                     let cap = replay_cap(drain_replay_seconds.load(Ordering::Relaxed));
-                    while ring.len() > cap {
-                        ring.pop_front();
-                    }
+                    ring.push(&samples, cap);
 
                     // Spec §2 replay history. Cut here, while the ring is
                     // already locked and still holds the moment -- a
@@ -1688,8 +1934,8 @@ pub fn start_pipeline(
                             sample_rate,
                             damaged_frames,
                         );
-                        let clip_samples: Vec<f32> =
-                            ring.iter().copied().skip(bounds.start).take(bounds.len()).collect();
+                        let clip_samples = ring.copy_range(bounds.start, bounds.len());
+                        let clip_audio = ring.seal(&clip_samples);
                         // The damage happened a settle window ago, not now.
                         let settled_ago = (crate::replay_history::SETTLE_FRAMES as u64
                             + damaged_frames as u64)
@@ -1703,7 +1949,7 @@ pub fn start_pipeline(
                                 at_seconds: at_seconds as u32,
                                 damaged_frames,
                                 sample_rate,
-                                samples: clip_samples,
+                                audio: clip_audio,
                             },
                         );
                     }
@@ -1768,27 +2014,70 @@ pub fn start_pipeline(
                     let speed = catch_up_speed(backlog);
                     catch_up_out.clear();
                     catch_up.process(&samples, speed, &mut catch_up_out);
-                    drain_sink.lock().unwrap().push(&catch_up_out);
+                    mixer.push(0, &catch_up_out);
+                }
+            }
 
-                    // The echo canceller's reference is what actually
-                    // reaches the speaker -- after the gain, the ducking
-                    // and the EQ -- because that is what the room hears
-                    // and therefore what comes back. Feeding it the raw
-                    // received audio instead would have it hunting for an
-                    // echo of a signal nobody played.
-                    {
-                        let mut far = drain_aec_far.lock().unwrap();
-                        far.extend(catch_up_out.iter().copied());
-                        while far.len() > AEC_REFERENCE_SAMPLES {
-                            far.pop_front();
-                        }
+            // Spec §3 group calls: everyone else, at the master level and
+            // under the same deafen switch, mixed with the primary.
+            let legs = drain_group.leg_audio();
+            mixed_legs.retain(|id| {
+                let present = legs.iter().any(|(leg, _)| leg == id);
+                if !present {
+                    mixer.remove(id + 1);
+                }
+                present
+            });
+            let master = 10f32.powf(*output_gain_db.lock().unwrap() / 20.0);
+            for (id, leg_jitter) in legs {
+                if !mixed_legs.contains(&id) {
+                    mixed_legs.push(id);
+                }
+                let mut leg_jitter = leg_jitter.lock().unwrap();
+                // Legs repair with FEC only; the requests are dropped so
+                // they don't pile up.
+                leg_jitter.take_retransmit_requests();
+                while let PopResult::Frame(mut samples)
+                | PopResult::Recovered(mut samples)
+                | PopResult::Concealed(mut samples) = leg_jitter.pop_ready()
+                {
+                    if let Some(tap) = &caption_tap {
+                        tap.push(id + 1, sample_rate, &samples);
                     }
+                    if drain_deafened.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    for s in &mut samples {
+                        *s *= master;
+                    }
+                    mixer.push(id + 1, &samples);
+                }
+            }
+
+            let out = mixer.pull();
+            if !out.is_empty() {
+                drain_sink.lock().unwrap().push(&out);
+                // The echo canceller's reference is what actually
+                // reaches the speaker -- after the gain, the ducking, the
+                // EQ and the mix -- because that is what the room hears
+                // and therefore what comes back. Feeding it the raw
+                // received audio instead would have it hunting for an
+                // echo of a signal nobody played.
+                let mut far = drain_aec_far.lock().unwrap();
+                far.extend(out.iter().copied());
+                while far.len() > AEC_REFERENCE_SAMPLES {
+                    far.pop_front();
                 }
             }
         }
     });
 
+    // Group chat and community messages for this person go over the call
+    // while it lasts (spec §9), rather than through their mailbox.
+    crate::community::set_live(peer.clone());
+
     Ok(ActiveCall {
+        group,
         echo_canceller,
         chain,
         sample_rate: AtomicU32::new(sample_rate),

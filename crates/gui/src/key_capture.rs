@@ -19,12 +19,9 @@
 //!
 //! On Caps Lock specifically: the spec wants it as the *default* PTT key,
 //! and it is genuinely the best physical choice -- big, unused, reachable.
-//! But it is a *latching* key: the OS reports a toggle state, not a
-//! press-and-hold, so level-triggered push-to-talk on it behaves like a
-//! toggle that gets stuck. Making it work needs a per-platform low-level
-//! hook (a Windows `WH_KEYBOARD_LL` hook, macOS HID access, a Wayland
-//! portal), none of which is done. Until then it is refused with a reason
-//! rather than accepted and quietly misbehaving.
+//! Where `caps_lock.rs` can keep the lock from flipping (Windows, X11) it
+//! is accepted and is the default; where it cannot (macOS, Wayland) it is
+//! refused with a reason rather than accepted and quietly misbehaving.
 
 /// Why a key cannot be used for push-to-talk.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,8 +68,10 @@ impl Unusable {
 pub fn check(key: &str) -> Result<(), Unusable> {
     let k = key.trim().to_lowercase();
 
-    if matches!(k.as_str(), "capslock" | "caps lock" | "numlock" | "num lock" | "scrolllock" | "scroll lock")
-    {
+    if matches!(k.as_str(), "capslock" | "caps lock") && !crate::caps_lock::supported() {
+        return Err(Unusable::Latching);
+    }
+    if matches!(k.as_str(), "numlock" | "num lock" | "scrolllock" | "scroll lock") {
         return Err(Unusable::Latching);
     }
 
@@ -120,11 +119,16 @@ mod tests {
     }
 
     #[test]
-    fn caps_lock_is_refused_with_the_actual_reason() {
-        // The spec wants Caps Lock as the default, and it is the right
-        // physical choice -- but it latches, so level-triggered PTT sticks
-        // on. Refusing with a reason beats accepting and misbehaving.
-        assert_eq!(check("CapsLock"), Err(Unusable::Latching));
+    fn caps_lock_is_accepted_exactly_where_it_can_be_held() {
+        // The spec's default key. Accepted where the lock can be kept from
+        // flipping, refused with the reason everywhere else.
+        for key in ["CapsLock", "  capslock  ", "CAPSLOCK", "Caps Lock"] {
+            if crate::caps_lock::supported() {
+                assert_eq!(check(key), Ok(()), "{key}");
+            } else {
+                assert_eq!(check(key), Err(Unusable::Latching), "{key}");
+            }
+        }
 
         let message = Unusable::Latching.explain("CapsLock");
         assert!(message.contains("held down"), "{message}");
@@ -156,9 +160,9 @@ mod tests {
     fn the_check_ignores_case_and_spacing() {
         // These strings come from a Keycode's Display and from hand-edited
         // config, so neither form can be assumed.
-        assert_eq!(check("  capslock  "), Err(Unusable::Latching));
-        assert_eq!(check("CAPSLOCK"), Err(Unusable::Latching));
-        assert_eq!(check("Caps Lock"), Err(Unusable::Latching));
+        assert_eq!(check("  numlock  "), Err(Unusable::Latching));
+        assert_eq!(check("NUMLOCK"), Err(Unusable::Latching));
+        assert_eq!(check("Scroll Lock"), Err(Unusable::Latching));
     }
 
     #[test]

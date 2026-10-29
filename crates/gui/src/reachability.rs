@@ -107,19 +107,20 @@ impl Reachability {
 
 /// How a call is currently carried (spec §3).
 ///
-/// One variant today, and that is the honest shape: there is no relay, so
-/// every call is direct. Written as an enum rather than a hardcoded string
-/// because the *point* of showing it is that it will one day differ, and a
-/// UI that only ever says one thing teaches people not to read it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Direct,
+    Relayed,
+    /// Through several relays, each knowing only the step before and after.
+    Anonymous,
 }
 
 impl Mode {
     pub fn label(&self) -> &'static str {
         match self {
             Mode::Direct => "Direct",
+            Mode::Relayed => "Relayed",
+            Mode::Anonymous => "Anonymous",
         }
     }
 
@@ -130,13 +131,237 @@ impl Mode {
                 "Connected straight to them, with nothing in between -- which also means \
                  you can each see the other's IP address."
             }
+            Mode::Relayed => {
+                "Going through a relay that passes along encrypted data -- neither of you \
+                 learns the other's IP address, and the relay can't read or hear anything. \
+                 Slightly slower."
+            }
+            Mode::Anonymous => {
+                "Going through several relays, each one only knowing the step before and \
+                 after it -- the strongest privacy available, at the cost of noticeable delay."
+            }
         }
     }
+}
+
+/// The always-visible reachability line (spec §6: "always visible, never
+/// discovered through failure: Direct · Relayed — VPN doesn't allow
+/// incoming connections · Relayed — network blocks direct connections").
+///
+/// Worked out *before* anyone calls, from checks the app runs on its own at
+/// start-up, so the first time someone learns their network blocks direct
+/// connections is not a call that failed to connect.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Status {
+    /// The start-up checks have not finished.
+    Checking,
+    /// They finished without an answer: no STUN server replied, so the
+    /// network may be offline or blocking UDP.
+    Unchecked,
+    /// People can reach you straight, and you them.
+    Direct,
+    /// A VPN is carrying your traffic, and VPNs don't forward incoming
+    /// connections, so calls go through a relay.
+    RelayedVpn,
+    /// Your network blocks direct connections (a symmetric NAT, or a
+    /// router that refused to open a port), so calls go through a relay.
+    RelayedBlocked,
+    /// Direct connections are blocked *and* there is no relay to fall back
+    /// on. Calls out to people who can be reached still work.
+    Blocked,
+}
+
+/// What [`Status`] is worked out from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct StatusInputs {
+    /// What the local port mapping and STUN said about reaching this machine.
+    pub reach: Reachability,
+    /// `Some(true)` for an endpoint-dependent (symmetric) NAT, from asking
+    /// two STUN servers; `None` while unknown.
+    pub symmetric_nat: Option<bool>,
+    /// The default route goes through a VPN interface.
+    pub vpn_active: bool,
+    /// A relay is set, or a fallback relay answered.
+    pub relay_available: bool,
+}
+
+impl Status {
+    /// Works out the status line from what was measured, erring towards
+    /// "relayed" or "checking" rather than promising "Direct".
+    pub fn from_inputs(i: &StatusInputs) -> Status {
+        let blocked_reason = if i.vpn_active {
+            Some(Status::RelayedVpn)
+        } else if i.symmetric_nat == Some(true) {
+            Some(Status::RelayedBlocked)
+        } else if i.symmetric_nat.is_none() && !i.reach.public_address_known {
+            // Nothing answered yet: saying "Direct" here would be the very
+            // optimism the spec forbids.
+            return Status::Checking;
+        } else {
+            None
+        };
+        match blocked_reason {
+            None => Status::Direct,
+            Some(_) if !i.relay_available => Status::Blocked,
+            Some(reason) => reason,
+        }
+    }
+
+    /// The line itself, in the spec's words.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Status::Checking => "Checking your connection...",
+            Status::Unchecked => "Couldn't check -- click to try again",
+            Status::Direct => "Direct",
+            Status::RelayedVpn => "Relayed — VPN doesn't allow incoming connections",
+            Status::RelayedBlocked => "Relayed — network blocks direct connections",
+            Status::Blocked => "Blocked — network blocks direct connections and no relay is set",
+        }
+    }
+
+    /// One sentence on what it means and what to do about it.
+    pub fn explain(&self) -> &'static str {
+        match self {
+            Status::Checking => "Asking two STUN servers how your network maps connections.",
+            Status::Unchecked => {
+                "No STUN server answered, so whether people can reach you is unknown. You may \
+                 be offline, or your network may block UDP."
+            }
+            Status::Direct => {
+                "Calls connect straight to the other person. Contacts you haven't verified \
+                 still go through a relay unless you say otherwise."
+            }
+            Status::RelayedVpn => {
+                "Your VPN carries everything, and VPNs don't pass incoming connections, so \
+                 calls go through a relay. The relay can't read or hear anything."
+            }
+            Status::RelayedBlocked => {
+                "Your network gives each destination a different port, so direct connections \
+                 can't be set up. Calls go through a relay, which can't read or hear anything."
+            }
+            Status::Blocked => {
+                "Direct connections can't be set up from this network. Add a relay in \
+                 Settings > Call so people can reach you."
+            }
+        }
+    }
+
+    /// What a finished check shows: never "still checking".
+    pub fn settled(self) -> Status {
+        if self == Status::Checking { Status::Unchecked } else { self }
+    }
+
+    /// Whether people can reach this machine, directly or through a relay.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Status::Direct | Status::RelayedVpn | Status::RelayedBlocked)
+    }
+}
+
+/// Whether this machine's default route goes through a VPN interface.
+///
+/// Read from the routing table where that's a file (Linux) and from
+/// `route` where it's a command (macOS); `None` where neither is
+/// available, which callers treat as "no VPN" rather than guessing.
+pub fn default_route_via_vpn() -> Option<bool> {
+    default_route_interface().map(|name| is_vpn_interface(&name))
+}
+
+/// The interface the default route leaves through, by name.
+fn default_route_interface() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let table = std::fs::read_to_string("/proc/net/route").ok()?;
+        return default_interface_from_proc_route(&table);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("route").args(["-n", "get", "default"]).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        return text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("interface:").map(|s| s.trim().to_string()));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// The interface of the `00000000` destination with the lowest metric.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn default_interface_from_proc_route(table: &str) -> Option<String> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.len() > 6 && f[1] == "00000000").then(|| (f[6].parse::<u32>().unwrap_or(u32::MAX), f[0].to_string()))
+        })
+        .min()
+        .map(|(_, name)| name)
+}
+
+/// WireGuard, OpenVPN/tun, macOS utun, PPP and IPsec interfaces.
+pub fn is_vpn_interface(name: &str) -> bool {
+    ["wg", "tun", "tap", "utun", "ppp", "ipsec", "nordlynx", "proton", "mullvad"]
+        .iter()
+        .any(|p| name.starts_with(p))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Status inputs with the public address known whenever the NAT check
+    /// answered at all.
+    fn inputs(symmetric: Option<bool>, vpn: bool, relay: bool) -> StatusInputs {
+        StatusInputs {
+            reach: Reachability { public_address_known: symmetric.is_some(), ..Default::default() },
+            symmetric_nat: symmetric,
+            vpn_active: vpn,
+            relay_available: relay,
+        }
+    }
+
+    #[test]
+    fn the_status_line_uses_the_spec_wording() {
+        assert_eq!(Status::from_inputs(&inputs(Some(false), false, false)).label(), "Direct");
+        assert_eq!(
+            Status::from_inputs(&inputs(Some(false), true, true)).label(),
+            "Relayed — VPN doesn't allow incoming connections"
+        );
+        assert_eq!(
+            Status::from_inputs(&inputs(Some(true), false, true)).label(),
+            "Relayed — network blocks direct connections"
+        );
+    }
+
+    #[test]
+    fn nothing_known_is_checking_not_direct() {
+        assert_eq!(Status::from_inputs(&inputs(None, false, true)), Status::Checking);
+    }
+
+    #[test]
+    fn blocked_with_no_relay_says_so_and_points_at_settings() {
+        let s = Status::from_inputs(&inputs(Some(true), false, false));
+        assert_eq!(s, Status::Blocked);
+        assert!(!s.is_ok());
+        assert!(s.explain().contains("Settings"));
+    }
+
+    #[test]
+    fn a_vpn_is_relayed_even_before_stun_answers() {
+        assert_eq!(Status::from_inputs(&inputs(None, true, true)), Status::RelayedVpn);
+    }
+
+    #[test]
+    fn the_default_route_is_read_from_the_routing_table() {
+        let table = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                     eth0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\n\
+                     wg0\t00000000\t00000000\t0001\t0\t0\t50\t00000000\n\
+                     eth0\t0002A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\n";
+        assert_eq!(default_interface_from_proc_route(table).as_deref(), Some("wg0"));
+        assert!(is_vpn_interface("wg0"));
+        assert!(!is_vpn_interface("eth0"));
+    }
 
     #[test]
     fn nothing_checked_yet_is_not_the_same_as_a_problem() {
