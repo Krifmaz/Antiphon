@@ -1703,6 +1703,7 @@ pub fn start_pipeline(
     let recv_friend_pending = pending_friend_request.clone();
     let recv_friend_accepted = friend_accepted.clone();
     let video = Arc::new(crate::video::CallVideo::new());
+    *group.video.lock().unwrap() = Some(video.clone());
     let peer_card = Arc::new(Mutex::new(None));
     let recv_card = peer_card.clone();
     let recv_video = video.clone();
@@ -1913,6 +1914,10 @@ pub fn start_pipeline(
     // wall clock so a clip's label matches the audio it contains even if
     // the stream stalled.
     let mut drained_samples: u64 = 0;
+    // Spec §2 "Replay": where each concealed frame's stand-in went in the
+    // replay ring (position from the start of the call, and length), so a
+    // late copy of the real frame can be written back over it.
+    let mut concealed_at: std::collections::BTreeMap<u64, (usize, usize)> = std::collections::BTreeMap::new();
     let stats_jitter = jitter.clone();
     let drain_nack_peer = peer.clone();
     // Current ducking amount in dB, ramped toward its target each frame.
@@ -1940,6 +1945,8 @@ pub fn start_pipeline(
             if report_ticks >= crate::link_quality::REPORT_EVERY_TICKS {
                 report_ticks = 0;
                 drain_video.set_share(drain_group.link.plan().video_percent);
+                // Spec §3 group calls: our video to everyone in the mesh.
+                drain_video.set_group_peers(drain_group.leg_peers());
                 let mut reports = vec![(drain_nack_peer.clone(), drain_group.link.report(0).encode())];
                 for (source, leg) in drain_group.leg_sources() {
                     reports.push((leg, drain_group.link.report(source).encode()));
@@ -1971,7 +1978,12 @@ pub fn start_pipeline(
                 });
             }
             loop {
-                let popped = jitter.lock().unwrap().pop_ready();
+                let (popped, popped_seq) = {
+                    let mut j = jitter.lock().unwrap();
+                    let popped = j.pop_ready();
+                    (popped, j.last_popped())
+                };
+                let concealed = matches!(popped, PopResult::Concealed(_));
                 let damaged = matches!(popped, PopResult::Recovered(_) | PopResult::Concealed(_));
                 let mut samples = match popped {
                     PopResult::Frame(s) | PopResult::Recovered(s) | PopResult::Concealed(s) => s,
@@ -1992,6 +2004,14 @@ pub fn start_pipeline(
                     // last 30 seconds" means what the peer sent.
                     let mut ring = drain_replay.lock().unwrap();
                     let cap = replay_cap(drain_replay_seconds.load(Ordering::Relaxed));
+                    if let (true, Some(seq)) = (concealed, popped_seq) {
+                        concealed_at.insert(seq, (ring.end(), samples.len()));
+                        // Only the last few seconds matter: anything older
+                        // has rolled out of every clip it could be in.
+                        while concealed_at.len() > 256 {
+                            concealed_at.pop_first();
+                        }
+                    }
                     ring.push(&samples, cap);
 
                     // Spec §2 replay history. Cut here, while the ring is
@@ -2092,6 +2112,21 @@ pub fn start_pipeline(
                     catch_up_out.clear();
                     catch_up.process(&samples, speed, &mut catch_up_out);
                     mixer.push(0, &catch_up_out);
+                }
+            }
+
+            // Spec §2 "Replay": a resend or late packet for a moment that
+            // was already played as a stand-in. Too late to hear live, but
+            // it is the real audio, so it goes back into the replay ring
+            // over the stand-in -- and a clip cut from there replays what
+            // was actually said.
+            let late = jitter.lock().unwrap().take_late();
+            if !late.is_empty() {
+                let mut ring = drain_replay.lock().unwrap();
+                for (seq, real) in late {
+                    if let Some((position, len)) = concealed_at.remove(&seq) {
+                        ring.overwrite(position, &real[..real.len().min(len)]);
+                    }
                 }
             }
 
