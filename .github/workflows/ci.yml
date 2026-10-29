@@ -1,44 +1,27 @@
-# One pipeline, every desktop target, from the same commit (spec §10).
+# Build, test and clippy for every push and pull request (spec §10).
 #
 # Jobs:
-#   test     -- build + test + clippy on Linux and Windows for every push
-#               and pull request. Required.
+#   test       -- Linux and Windows. Required.
 #   test-macos -- the same on macOS. Optional: macOS runners are sometimes
-#               unavailable for hours (a queued job gets cancelled without
-#               ever starting), and that should not hold a release back.
-#   android  -- clippy the Android crate and build the APK (Rust + iced)
-#               for every push and pull request. Required for a release.
-#   ios      -- clippy the iOS crate and build the simulator app (and a
-#               device build, signed when the IOS_* secrets exist) on
-#               macOS. Optional, like test-macos; nothing waits on it.
-#   release  -- on a tag, build the release binaries the reproducible way
-#               (BUILDING.md), twice on each platform, and refuse to publish
-#               unless both builds hash identically. That turns "reproducible
-#               in principle" into something checked on every release.
-#   publish  -- attach every platform's binaries, the APK, and checksums to a GitHub
-#               Release for the tag. Linux, Windows and the APK must be there; macOS
-#               ships when its tests and reproducible build both passed. A pre-release when the tag says so
-#               (v0.1.0-rc1), a release otherwise. Also reachable by hand
-#               through workflow_dispatch, which creates the tag too.
+#                 unavailable for hours (a queued job gets cancelled without
+#                 ever starting), and that should not hold anything back.
+#   android    -- clippy the Android crate and build the APK with
+#                 crates/android/build-apk.sh, so a broken APK shows up on
+#                 the push that broke it rather than at release time.
+#   ios        -- clippy the iOS crate and build the simulator app (and a
+#                 device build, signed when the IOS_* secrets exist) on
+#                 macOS. Optional, like test-macos; nothing waits on it.
+#
+# Releases are made by release.yml (Actions -> release -> Run workflow).
 name: CI
 
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
-  # Manual release from any branch: builds exactly as a tag push would,
-  # and the publish job creates the tag at this commit along with the
-  # Release. For when a tag cannot be pushed directly.
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to create (e.g. v0.1.0-rc1)"
-        required: true
-        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -50,13 +33,6 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # The user chose this (2026-10-26): GitHub's macOS runners are scarce,
-    # and a job can sit queued until it is cancelled without running a
-    # line. macOS still builds and tests on every push, but a missing Mac
-    # runner no longer turns the pipeline red or holds back the release of
-    # the other platforms and the APK.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
-    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -76,6 +52,11 @@ jobs:
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test-macos:
+    name: test (macos-latest)
+    runs-on: macos-latest
+    steps: *test-steps
 
   android:
     name: android (apk)
@@ -147,11 +128,6 @@ jobs:
           name: apk-android
           path: out/*
 
-  test-macos:
-    name: test (macos-latest)
-    runs-on: macos-latest
-    steps: *test-steps
-
   ios:
     name: ios (simulator app)
     # Linking for iOS needs Apple's SDK, so this is a macOS job, and so
@@ -200,143 +176,3 @@ jobs:
           # Not "antiphon-*": publish packages every artifact named that.
           name: app-ios
           path: out/*
-
-  release:
-    name: release (${{ matrix.os }})
-    # Runs once Linux and Windows pass, whatever happened on macOS; the
-    # macOS leg checks its own tests below.
-    if: >-
-      !cancelled() && needs.test.result == 'success' &&
-      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
-    needs: [test, test-macos]
-    runs-on: ${{ matrix.os }}
-    # As in test: the macOS build never holds back the other platforms.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            ext: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            ext: ".exe"
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            ext: ""
-    steps:
-      - name: macOS tests must have passed
-        if: runner.os == 'macOS' && needs.test-macos.result != 'success'
-        run: |
-          echo "::error::test (macos-latest) did not pass (${{ needs.test-macos.result }}); not shipping a macOS build"
-          exit 1
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: ${{ matrix.target }}
-      - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev libgtk-3-dev
-      - name: Reproducible environment
-        shell: bash
-        # CARGO_ENCODED_RUSTFLAGS rather than RUSTFLAGS, and Windows-form
-        # paths on Windows: under Git Bash $PWD is /d/a/... while rustc sees
-        # D:\a\..., so a POSIX-form prefix never matches and the path ships
-        # in the binary. See BUILDING.md.
-        run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
-          SRC="$PWD"; CH="${CARGO_HOME:-$HOME/.cargo}"; EXTRA=""
-          if [ "$RUNNER_OS" = Windows ]; then
-            SRC="$(cygpath -w "$SRC")"; CH="$(cygpath -w "$CH")"
-            # The MSVC linker stamps the current time into the PE header
-            # unless told otherwise; see .cargo/config.toml. Setting the
-            # environment variable replaces that file's flags, so repeat it.
-            EXTRA=$'\x1f-Clink-arg=/Brepro'
-          fi
-          printf 'CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo%s\n' "$SRC" "$CH" "$EXTRA" >> "$GITHUB_ENV"
-      - name: Build once
-        shell: bash
-        run: |
-          cargo build --release --locked --target ${{ matrix.target }}
-          mkdir -p out/first
-          cp target/${{ matrix.target }}/release/antiphon${{ matrix.ext }} target/${{ matrix.target }}/release/antiphon-cli${{ matrix.ext }} out/first/
-      - name: Build again from clean
-        shell: bash
-        run: |
-          cargo clean
-          cargo build --release --locked --target ${{ matrix.target }}
-          mkdir -p out/second
-          cp target/${{ matrix.target }}/release/antiphon${{ matrix.ext }} target/${{ matrix.target }}/release/antiphon-cli${{ matrix.ext }} out/second/
-      - name: Refuse to ship anything that does not reproduce
-        shell: bash
-        run: |
-          cd out
-          for bin in antiphon${{ matrix.ext }} antiphon-cli${{ matrix.ext }}; do
-            cmp first/$bin second/$bin || {
-              echo "::error::$bin differs between two builds of the same commit ($(cmp -l first/$bin second/$bin | wc -l) bytes, first at offset $(cmp -l first/$bin second/$bin | head -1 | awk '{print $1}'))"
-              exit 1
-            }
-          done
-          # sha256sum on Linux and Git Bash for Windows; macOS ships only shasum.
-          cd first
-          if command -v sha256sum >/dev/null; then sha256sum *; else shasum -a 256 *; fi > ../SHA256SUMS-${{ matrix.target }}.txt
-          cat ../SHA256SUMS-${{ matrix.target }}.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: antiphon-${{ matrix.target }}
-          path: |
-            out/first/*
-            out/SHA256SUMS-${{ matrix.target }}.txt
-
-  publish:
-    name: publish
-    # Not skipped when the macOS leg fails; the check below decides.
-    # A failed APK stops it.
-    if: >-
-      !cancelled() && needs.release.result != 'skipped' &&
-      needs.android.result == 'success' &&
-      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
-    env:
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-    needs: [release, android]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Linux and Windows builds are required
-        run: |
-          for t in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
-            [ -d artifacts/antiphon-$t ] || { echo "::error::no $t build; not publishing"; exit 1; }
-          done
-          [ -d artifacts/antiphon-aarch64-apple-darwin ] || echo "::warning::publishing without a macOS build"
-      - name: Package per platform
-        run: |
-          cd artifacts
-          # The APK ships as it is: it is already a signed archive.
-          mv apk-android/antiphon-android.apk .
-          for d in antiphon-*/; do
-            d=${d%/}
-            case $d in *windows*) (cd $d && zip -r ../$d.zip .) ;; *) tar czf $d.tar.gz -C $d . ;; esac
-          done
-          # Hashes of the archives (what a downloader verifies),
-          # then of the binaries inside them (what a rebuild is compared to).
-          sha256sum *.zip *.tar.gz *.apk > SHA256SUMS.txt
-          cat antiphon-*/SHA256SUMS-*.txt >> SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          ls -l
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG }}
-          target_commitish: ${{ github.sha }}
-          prerelease: ${{ contains(env.TAG, '-') }}
-          generate_release_notes: true
-          files: |
-            artifacts/*.zip
-            artifacts/*.tar.gz
-            artifacts/*.apk
-            artifacts/SHA256SUMS.txt

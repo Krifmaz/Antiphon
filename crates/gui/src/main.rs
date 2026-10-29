@@ -1000,6 +1000,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             set_status(&app, &tray_weak, "Not connected");
         });
     }
+    main_window.on_initial_of(|name| initial_of(&name).into());
     {
         let window_weak = main_window.as_weak();
         let state = app_state.clone();
@@ -5454,6 +5455,12 @@ fn apply_section_defaults(app: &MainWindow, expanded: bool) {
 /// Computes the profile bar's avatar-circle letter from the current
 /// display name -- Rust does the string-uppercase-first-char work since
 /// `.slint` expressions can't.
+/// First letter of a name, uppercased, for the letter avatars; "?" for an
+/// empty name.
+fn initial_of(name: &str) -> String {
+    name.trim().chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".to_string())
+}
+
 fn update_display_initial(app: &MainWindow) {
     let name = app.get_display_name();
     let initial = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "Y".to_string());
