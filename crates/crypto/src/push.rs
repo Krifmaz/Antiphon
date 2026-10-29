@@ -34,6 +34,20 @@
 //! What still shows: that *some* wake-up reached this endpoint, and when.
 //! The push service already knows which device an endpoint belongs to.
 //! See `docs/mobile-push.md`.
+//!
+//! The wire format, all sizes in bytes:
+//!
+//! ```text
+//! sealed (368)  = ephemeral X25519 public key (32)
+//!               || ChaCha20-Poly1305 ciphertext of plain (320)
+//!               || Poly1305 tag (16)
+//! plain  (320)  = body (91) || sender PublicIdentity (128)
+//!               || Ed25519 signature (64) || zero padding (37)
+//! body   (91)   = version (1) || kind (1) || sent_at, big-endian u64 (8)
+//!               || id (16) || hint length (1) || hint, zero-padded (64)
+//! ```
+
+#![warn(clippy::missing_docs_in_private_items)]
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -45,8 +59,14 @@ use zeroize::Zeroizing;
 use crate::error::CryptoError;
 use crate::identity::{verify_signature, IdentityKeyPair, PublicIdentity};
 
+/// The HKDF salt for the sealing key, so a key derived here can never
+/// collide with one derived for mail or anything else from the same DH.
 const SEAL_SALT: &[u8] = b"antiphon/push/seal/v1";
+/// Prefixed to what the sender signs, so a push signature cannot be passed
+/// off as the identity key's signature on anything else.
 const SIGN_CONTEXT: &[u8] = b"antiphon/push/sender/v1";
+/// The body format's version byte. A body with any other version is
+/// refused as if damaged, since its layout cannot be trusted.
 const VERSION: u8 = 1;
 
 /// The most a wake-up's hint can carry: enough for a relay rendezvous
@@ -54,11 +74,14 @@ const VERSION: u8 = 1;
 pub const HINT_MAX: usize = 64;
 
 /// version, kind, sent-at, id, hint length, hint (always padded to full
-/// length).
+/// length): 1 + 1 + 8 + 16 + 1 + 64 = 91 bytes.
 const BODY_LEN: usize = 1 + 1 + 8 + 16 + 1 + HINT_MAX;
 /// The body, the sender's public identity and the signature, padded up so
-/// the format has room to grow without changing size.
+/// the format has room to grow without changing size. 320 bytes, of which
+/// 91 + 128 + 64 = 283 are used today.
 const PLAIN_LEN: usize = 320;
+// The used part must fit: checked at compile time, so growing the body or
+// the identity encoding cannot silently overrun the padding.
 const _: () = assert!(BODY_LEN + PublicIdentity::ENCODED_LEN + 64 <= PLAIN_LEN);
 
 /// The size of every sealed wake-up: ephemeral key, ciphertext, AEAD tag.
@@ -67,10 +90,13 @@ pub const SEALED_LEN: usize = 32 + PLAIN_LEN + 16;
 
 /// A device's key for push wake-ups.
 pub struct PushKeyPair {
+    /// The X25519 secret, 32 bytes. Zeroed on drop by `x25519-dalek`.
     secret: StaticSecret,
 }
 
 impl PushKeyPair {
+    /// A new random key, from the OS's randomness. Panics only if the OS
+    /// has none to give, when no key would be safe anyway.
     pub fn generate() -> Self {
         let mut seed = Zeroizing::new([0u8; 32]);
         getrandom::fill(&mut seed[..]).expect("OS randomness is unavailable");
@@ -82,6 +108,8 @@ impl PushKeyPair {
         Self { secret: StaticSecret::from(secret) }
     }
 
+    /// The 32-byte secret, for the device's own key store; zeroed when the
+    /// returned value is dropped. Never sent anywhere.
     pub fn to_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret.to_bytes())
     }
@@ -107,6 +135,7 @@ pub enum WakeKind {
 }
 
 impl WakeKind {
+    /// The kind's byte in the body. 0 is never sent by this build.
     fn to_byte(self) -> u8 {
         match self {
             WakeKind::Call => 1,
@@ -116,6 +145,8 @@ impl WakeKind {
         }
     }
 
+    /// The inverse of [`WakeKind::to_byte`]; total, so an unknown byte is
+    /// [`WakeKind::Other`] rather than an error.
     fn from_byte(b: u8) -> Self {
         match b {
             1 => WakeKind::Call,
@@ -129,6 +160,7 @@ impl WakeKind {
 /// What a wake-up says, once opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wake {
+    /// Why the device is being woken, which decides whether it rings.
     pub kind: WakeKind,
     /// When it was sent, in Unix seconds, by the sender's clock.
     pub sent_at: u64,
@@ -157,6 +189,9 @@ impl Wake {
         now.abs_diff(self.sent_at) <= max_age
     }
 
+    /// The fixed-size body, laid out as in the module comment. Checks the
+    /// hint again because the fields are public and may have been changed
+    /// since [`Wake::new`].
     fn body(&self) -> Result<[u8; BODY_LEN], CryptoError> {
         if self.hint.len() > HINT_MAX {
             return Err(CryptoError::PushHintTooLong { max: HINT_MAX });
@@ -171,6 +206,9 @@ impl Wake {
         Ok(b)
     }
 
+    /// Parses a body. Only called after the AEAD and the signature have
+    /// both checked out, so a bad version or hint length means a sender
+    /// that is broken or newer, and is refused like damage.
     fn from_body(b: &[u8]) -> Result<Self, CryptoError> {
         if b.len() != BODY_LEN || b[0] != VERSION {
             return Err(CryptoError::DecryptionFailed);
@@ -244,6 +282,10 @@ pub fn open(push_key: &PushKeyPair, sealed: &[u8]) -> Result<(PublicIdentity, Wa
     Ok((sender, Wake::from_body(body)?))
 }
 
+/// The AEAD for one push: a 32-byte ChaCha20-Poly1305 key from
+/// HKDF-SHA256 over the DH output, with both public keys (64 bytes) as the
+/// info so the key is tied to this ephemeral key and this recipient. The
+/// key is used for exactly one message, which is why a zero nonce is safe.
 fn cipher(shared: &[u8; 32], eph_pub: &[u8; 32], recipient: &[u8; 32]) -> ChaCha20Poly1305 {
     let mut info = [0u8; 64];
     info[..32].copy_from_slice(eph_pub);
@@ -255,6 +297,9 @@ fn cipher(shared: &[u8; 32], eph_pub: &[u8; 32], recipient: &[u8; 32]) -> ChaCha
     ChaCha20Poly1305::new(&Key::from(*key))
 }
 
+/// What the sender signs: [`SIGN_CONTEXT`], the recipient's push key (32),
+/// the ephemeral public key (32) and the body (91).
+///
 /// Binding the push key and the ephemeral key into the signature stops a
 /// wake-up being re-sealed to some other device as though the sender had
 /// called it.
@@ -267,10 +312,12 @@ fn signed_bytes(recipient: &[u8; 32], eph_pub: &[u8; 32], body: &[u8]) -> Vec<u8
     m
 }
 
+/// Round trips, size, unlinkability, tampering and freshness.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The intended device opens a wake-up and learns who sent it.
     #[test]
     fn the_device_opens_it_and_learns_the_sender() {
         let alice = IdentityKeyPair::generate();
@@ -282,6 +329,7 @@ mod tests {
         assert_eq!(opened, wake);
     }
 
+    /// The shortest and the longest wake-up both seal to [`SEALED_LEN`].
     #[test]
     fn every_wake_up_is_the_same_size() {
         let alice = IdentityKeyPair::generate();
@@ -293,6 +341,8 @@ mod tests {
         assert_eq!(open(&phone, &seal(&alice, &phone.public(), &long).unwrap()).unwrap().1, long);
     }
 
+    /// Two seals of the same wake-up differ, and no public key appears in
+    /// the blob in the clear.
     #[test]
     fn the_blob_names_nobody_and_never_repeats() {
         let alice = IdentityKeyPair::generate();
@@ -307,6 +357,7 @@ mod tests {
         }
     }
 
+    /// A different push key cannot open the blob.
     #[test]
     fn another_device_cannot_open_it() {
         let alice = IdentityKeyPair::generate();
@@ -316,6 +367,7 @@ mod tests {
         assert!(open(&other, &sealed).is_err());
     }
 
+    /// A flipped bit anywhere, or a byte too few or too many, is refused.
     #[test]
     fn damage_and_wrong_lengths_are_refused() {
         let alice = IdentityKeyPair::generate();
@@ -332,11 +384,13 @@ mod tests {
         assert!(open(&phone, &longer).is_err());
     }
 
+    /// A hint over [`HINT_MAX`] is refused at construction, not at sealing.
     #[test]
     fn a_hint_too_long_is_refused_when_made() {
         assert!(Wake::new(WakeKind::Call, 0, &[0; HINT_MAX + 1]).is_err());
     }
 
+    /// A kind byte this build does not know is carried through as `Other`.
     #[test]
     fn unknown_kinds_survive_the_trip() {
         let alice = IdentityKeyPair::generate();
@@ -346,6 +400,7 @@ mod tests {
         assert_eq!(opened.kind, WakeKind::Other(42));
     }
 
+    /// Freshness tolerates clock skew in both directions, up to `max_age`.
     #[test]
     fn freshness_allows_skew_both_ways() {
         let wake = Wake::new(WakeKind::Call, 1_000, b"").unwrap();
@@ -355,6 +410,7 @@ mod tests {
         assert!(!wake.is_fresh(939, 60));
     }
 
+    /// A saved and restored push key has the same public half.
     #[test]
     fn a_push_key_round_trips_through_bytes() {
         let key = PushKeyPair::generate();

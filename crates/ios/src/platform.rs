@@ -50,6 +50,9 @@ fn request_notifications() {
     );
 }
 
+/// iOS's half of [`Platform`], installed by `shell::run`. It holds no
+/// state, so it is `Send` and `Sync` as the trait needs; what state there
+/// is lives main-thread-only in the framework modules.
 pub struct Ios;
 
 impl Platform for Ios {

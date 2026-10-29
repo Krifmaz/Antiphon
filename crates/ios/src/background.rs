@@ -29,6 +29,10 @@ thread_local! {
     static LAST: RefCell<BackgroundWork> = RefCell::new(BackgroundWork::default());
 }
 
+/// Brings CallKit and the transfer grace period in line with what the
+/// shared code says must keep running. Called on the main thread (the
+/// marker proves it) with the whole of the work on every change; only a
+/// change of call reaches CallKit, so repeats cost nothing.
 pub fn set(mtm: MainThreadMarker, work: &BackgroundWork) {
     let previous = LAST.with(|last| std::mem::replace(&mut *last.borrow_mut(), work.clone()));
     if previous.call != work.call {
@@ -66,6 +70,9 @@ fn begin_grace(mtm: MainThreadMarker) {
     }
 }
 
+/// Ends the grace period, if one is held, so iOS may suspend the app as
+/// soon as it likes. Main thread only, like everything that touches the
+/// `TASK` slot, which is thread-local for that reason.
 fn end_grace(mtm: MainThreadMarker) {
     if let Some(task) = TASK.take() {
         UIApplication::sharedApplication(mtm).endBackgroundTask(task);

@@ -11,6 +11,8 @@
 //! Everything is `cfg(target_os = "ios")`: on a desktop this binary is an
 //! empty `main`, so `cargo build --workspace` is unaffected.
 
+#![warn(missing_docs, clippy::missing_docs_in_private_items)]
+
 #[cfg(target_os = "ios")]
 mod audio;
 #[cfg(target_os = "ios")]
@@ -30,10 +32,13 @@ mod screen;
 #[cfg(target_os = "ios")]
 mod shell;
 
+/// Hands the main thread to the app. It must be the process's first
+/// thread: UIKit, and so winit's event loop, run only there.
 #[cfg(target_os = "ios")]
 fn main() {
     shell::run();
 }
 
+/// The desktop stand-in, so the workspace builds everywhere.
 #[cfg(not(target_os = "ios"))]
 fn main() {}
