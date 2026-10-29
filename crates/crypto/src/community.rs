@@ -55,6 +55,14 @@ pub const MAX_CHANNELS: usize = 50;
 pub const MAX_ROLES: usize = 16;
 pub const MAX_BANS: usize = 1000;
 const MAX_NAME: usize = 80;
+/// Custom emoji a community may have. Few, because the whole set travels
+/// with every new version of the manifest.
+pub const MAX_EMOJI: usize = 16;
+/// The longest a custom emoji's picture may be, as base64: a small image
+/// (the apps make them 32 pixels square, about a kilobyte).
+pub const MAX_EMOJI_IMAGE: usize = 1800;
+/// The longest a custom emoji's name may be.
+pub const MAX_EMOJI_NAME: usize = 24;
 const MAX_TEXT: usize = 500;
 
 /// Permission bits a role carries.
@@ -123,12 +131,43 @@ pub struct Member {
     pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct Channel {
     pub id: u32,
     pub name: String,
     #[serde(default)]
     pub topic: String,
+    /// A private channel: only these members (and owners) may read or
+    /// post in it. `None` is open to every member. Members' apps send a
+    /// private channel's messages only to its readers, each sealed to them,
+    /// so nobody else ever receives them. Who the readers are is in the
+    /// manifest, which every member can read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readers: Option<Vec<Key>>,
+    /// A voice channel: a standing group call members drop in and out of,
+    /// rather than text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub voice: bool,
+}
+
+/// A community's own emoji (spec §13 "custom emoji"): a short name,
+/// written `:name:` in a message, and a small picture. Only someone who
+/// may manage the community adds or removes them, so what members are
+/// shown is chosen by the people they agreed to be governed by when they
+/// joined, never by whoever posts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Emoji {
+    /// Lowercase letters, digits and underscores, 2 to [`MAX_EMOJI_NAME`].
+    pub name: String,
+    /// The picture (PNG or JPEG), base64.
+    pub image: String,
+}
+
+impl Emoji {
+    /// Whether `name` is usable as an emoji name.
+    pub fn valid_name(name: &str) -> bool {
+        (2..=MAX_EMOJI_NAME).contains(&name.len()) && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -184,6 +223,10 @@ pub struct Manifest {
     /// default": members pin files shared here to `nodes.files`.
     #[serde(default)]
     pub server_hosted_files: bool,
+    /// Its custom emoji. Left out of the JSON while empty, so a manifest
+    /// without any reads exactly as one from before they existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emoji: Vec<Emoji>,
 }
 
 /// Why a manifest, or a change to one, was refused.
@@ -295,10 +338,11 @@ impl Manifest {
             owners: vec![me],
             roles,
             members: vec![Member { key: me, role: default_role, name: clip(creator_name, MAX_NAME) }],
-            channels: vec![Channel { id: 0, name: if kind == Kind::Group { "chat".into() } else { "general".into() }, topic: String::new() }],
+            channels: vec![Channel { id: 0, name: if kind == Kind::Group { "chat".into() } else { "general".into() }, ..Channel::default() }],
             bans: Vec::new(),
             nodes: Nodes::default(),
             server_hosted_files: false,
+            emoji: Vec::new(),
         }
     }
 
@@ -354,6 +398,49 @@ impl Manifest {
         self.member(key).and_then(|m| self.roles.get(m.role as usize)).map(|r| r.perms).unwrap_or(0)
     }
 
+    /// The channel with this number.
+    pub fn channel(&self, id: u32) -> Option<&Channel> {
+        self.channels.iter().find(|c| c.id == id)
+    }
+
+    /// May `key` read (and, with Post, write in) channel `id`: every member
+    /// for an open channel; its readers and the owners for a private one.
+    pub fn can_read(&self, id: u32, key: &[u8; 32]) -> bool {
+        let Some(c) = self.channel(id) else { return false };
+        self.is_member(key) && c.readers.as_ref().is_none_or(|r| self.is_owner(key) || r.iter().any(|k| k.0 == *key))
+    }
+
+    /// Adds a role at rank `at` (0 is the most powerful), keeping everyone's
+    /// role where it was. The newcomers' role stays last, so `at` is capped
+    /// to sit above it.
+    pub fn insert_role(&mut self, at: usize, role: Role) {
+        let at = at.min(self.roles.len().saturating_sub(1));
+        self.roles.insert(at, role);
+        for m in &mut self.members {
+            if m.role as usize >= at {
+                m.role += 1;
+            }
+        }
+    }
+
+    /// Removes the role at `at`; whoever held it gets the newcomers' role.
+    /// The newcomers' role itself (the last) can't be removed.
+    pub fn remove_role(&mut self, at: usize) -> bool {
+        if at + 1 >= self.roles.len() {
+            return false;
+        }
+        self.roles.remove(at);
+        let default = self.default_role();
+        for m in &mut self.members {
+            match (m.role as usize).cmp(&at) {
+                std::cmp::Ordering::Equal => m.role = default,
+                std::cmp::Ordering::Greater => m.role -= 1,
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        true
+    }
+
     /// May `actor` use `permission` on `target` -- holding it and, when
     /// there is a target, strictly outranking them.
     pub fn can(&self, actor: &[u8; 32], permission: u32, target: Option<&[u8; 32]>) -> bool {
@@ -389,11 +476,23 @@ impl Manifest {
         if self.members.iter().any(|m| self.is_banned(&m.key.0)) {
             return bad("a banned person is still a member");
         }
+        if self.emoji.len() > MAX_EMOJI || self.emoji.iter().any(|e| !Emoji::valid_name(&e.name) || e.image.is_empty() || e.image.len() > MAX_EMOJI_IMAGE) {
+            return bad("emoji");
+        }
+        let mut names: Vec<_> = self.emoji.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        names.dedup();
+        if names.len() != self.emoji.len() {
+            return bad("an emoji name is used twice");
+        }
         let mut ids: Vec<_> = self.channels.iter().map(|c| c.id).collect();
         ids.sort();
         ids.dedup();
         if ids.len() != self.channels.len() || self.channels.iter().any(|c| c.name.chars().count() > MAX_NAME) {
             return bad("channels");
+        }
+        if self.channels.iter().any(|c| c.readers.as_ref().is_some_and(|r| r.len() > self.max_members())) {
+            return bad("a private channel lists too many readers");
         }
         Ok(())
     }
@@ -446,6 +545,9 @@ pub fn check_transition(old: &Manifest, old_signed: &SignedManifest, new: &Signe
     if n.name != old.name || n.description != old.description || n.nodes != old.nodes || n.server_hosted_files != old.server_hosted_files {
         need(perm::MANAGE_COMMUNITY, "change the community's settings")?;
     }
+    if n.emoji != old.emoji {
+        need(perm::MANAGE_COMMUNITY, "change the community's emoji")?;
+    }
     if n.channels != old.channels {
         need(perm::MANAGE_CHANNELS, "change channels")?;
     }
@@ -492,7 +594,13 @@ pub fn check_transition(old: &Manifest, old_signed: &SignedManifest, new: &Signe
                     return Err(Denied::NotAllowed("give a newcomer that role"));
                 }
             }
-            Some(before) if before.role != m.role => {
+            // Compared by the role itself, not its number: an owner adding or
+            // removing a role renumbers the ones below it without anyone's
+            // role changing.
+            // An owner's role means nothing while they are one (they may do
+            // everything), so it is not checked: otherwise an owner couldn't
+            // rename a role another owner, or they themselves, hold.
+            Some(before) if old.roles.get(before.role as usize) != n.roles.get(m.role as usize) && !old.is_owner(&m.key.0) => {
                 // Re-roling: only someone you outrank, and only to a role
                 // below your own.
                 if !old.can(s, perm::MANAGE_ROLES, Some(&m.key.0)) || old.rank(s) > m.role as u32 {
@@ -552,6 +660,48 @@ mod tests {
             self.signed = s;
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_private_channel_is_readable_only_by_its_readers_and_owners() {
+        let mut w = community();
+        let (a, b) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
+        let owner = std::mem::replace(&mut w.owner, IdentityKeyPair::generate());
+        let ak = Key(a.public().identity_key);
+        w.apply(&owner, |m| {
+            add(m, &a, 2);
+            add(m, &b, 2);
+            m.channels.push(Channel { id: 1, name: "staff".into(), readers: Some(vec![ak]), ..Channel::default() });
+        })
+        .unwrap();
+        assert!(w.m.can_read(1, &a.public().identity_key));
+        assert!(!w.m.can_read(1, &b.public().identity_key));
+        assert!(w.m.can_read(1, &owner.public().identity_key));
+        assert!(w.m.can_read(0, &b.public().identity_key));
+        // Making a channel private is a channel change: a member can't.
+        assert!(w.apply(&b, |m| m.channels[1].readers = None).is_err());
+    }
+
+    #[test]
+    fn custom_roles_keep_everyone_where_they_were() {
+        let mut w = community();
+        let a = IdentityKeyPair::generate();
+        let owner = std::mem::replace(&mut w.owner, IdentityKeyPair::generate());
+        w.apply(&owner, |m| add(m, &a, 1)).unwrap(); // a Moderator
+        w.apply(&owner, |m| m.insert_role(1, Role { name: "Host".into(), perms: perm::POST | perm::INVITE })).unwrap();
+        assert_eq!(w.m.roles[w.m.member(&a.public().identity_key).unwrap().role as usize].name, "Moderator");
+        assert_eq!(w.m.roles.last().unwrap().name, "Member", "the newcomers' role stays last");
+        let mut gone = w.m.clone();
+        assert!(gone.remove_role(2));
+        assert_eq!(gone.roles[gone.member(&a.public().identity_key).unwrap().role as usize].name, "Member");
+        assert!(!gone.remove_role(gone.roles.len() - 1), "the newcomers' role stays");
+        // Only an owner redefines roles.
+        assert!(w.apply(&a, |m| m.roles[0].perms = 0).is_err());
+        // An owner may rename or rewrite any role, the ones owners and the
+        // people below them hold included.
+        let mine = w.m.member(&owner.public().identity_key).unwrap().role as usize;
+        w.apply(&owner, |m| m.roles[mine].name = "Founders".into()).unwrap();
+        w.apply(&owner, |m| m.roles[0].perms &= !perm::BAN).unwrap();
     }
 
     fn add(m: &mut Manifest, who: &IdentityKeyPair, role: u16) {
@@ -626,6 +776,36 @@ mod tests {
     }
 
     #[test]
+    fn only_managers_change_the_emoji_and_bad_ones_are_refused() {
+        let mut w = community();
+        let owner = IdentityKeyPair::from_master_seed(w.owner.master_seed());
+        let member = IdentityKeyPair::generate();
+        w.apply(&owner, |m| add(m, &member, 2)).unwrap();
+        let party = || Emoji { name: "party_cat".into(), image: "iVBORw0KGgo=".into() };
+        assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.emoji.push(party()))).is_err(), "a member can't add one");
+        w.apply(&owner, |m| m.emoji.push(party())).unwrap();
+        assert_eq!(w.m.emoji.len(), 1);
+        assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.emoji.clear())).is_err(), "nor remove one");
+        // Names that could be confused with text, oversized pictures and
+        // a name used twice are malformed for everyone.
+        for bad in [
+            Emoji { name: "Party Cat".into(), image: "x".into() },
+            Emoji { name: "p".into(), image: "x".into() },
+            Emoji { name: "big".into(), image: "x".repeat(MAX_EMOJI_IMAGE + 1) },
+            party(),
+        ] {
+            assert!(w.apply(&owner, |m| m.emoji.push(bad.clone())).is_err(), "{:?} was let in", bad.name);
+        }
+    }
+
+    #[test]
+    fn a_manifest_without_emoji_reads_as_before() {
+        let w = community();
+        let json = String::from_utf8(w.signed.body.clone()).unwrap();
+        assert!(!json.contains("emoji"), "an empty set isn't written, so older apps see the same manifest");
+    }
+
+    #[test]
     fn versions_must_chain_and_settings_need_their_permission() {
         let mut w = community();
         let owner = IdentityKeyPair::from_master_seed(w.owner.master_seed());
@@ -633,12 +813,12 @@ mod tests {
         w.apply(&owner, |m| add(m, &member, 2)).unwrap();
         // A member can't rename, add channels or redefine roles.
         assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.name = "x".into())).is_err());
-        assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.channels.push(Channel { id: 9, name: "x".into(), topic: String::new() }))).is_err());
+        assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.channels.push(Channel { id: 9, name: "x".into(), ..Default::default() }))).is_err());
         assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.roles[2].perms = perm::ALL)).is_err());
         assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.server_hosted_files = true)).is_err());
         // The owner can.
         w.apply(&owner, |m| {
-            m.channels.push(Channel { id: 1, name: "voice".into(), topic: String::new() });
+            m.channels.push(Channel { id: 1, name: "voice".into(), ..Default::default() });
             m.server_hosted_files = true;
             m.nodes.files.push(NodeRef { addr: "files.example:3479".into(), code: "choir".into() });
         })

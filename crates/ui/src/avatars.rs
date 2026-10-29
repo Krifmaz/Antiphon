@@ -64,6 +64,12 @@ pub fn set(id: &str, source: &str, color: &str, decode: impl FnOnce(&str) -> Opt
     }
 }
 
+/// The id a community's custom emoji is registered under, so its picture
+/// sits beside people's without the two ever meeting.
+pub fn emoji_id(community: &str, name: &str) -> String {
+    format!("emoji/{community}/{name}")
+}
+
 /// `id`'s picture, if one is registered.
 pub fn picture(id: &str) -> Option<Handle> {
     looks().lock().unwrap_or_else(|e| e.into_inner()).get(id).and_then(|l| l.picture.clone())

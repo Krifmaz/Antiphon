@@ -51,6 +51,52 @@ pub fn avatar_from_image(bytes: &[u8]) -> Result<String, String> {
     Err("That picture is too detailed to send; try a simpler one".into())
 }
 
+/// The most bytes a custom emoji's picture may take: its base64 must fit
+/// `antiphon_crypto::community::MAX_EMOJI_IMAGE`.
+pub const MAX_EMOJI_BYTES: usize = antiphon_crypto::community::MAX_EMOJI_IMAGE / 4 * 3;
+
+/// Makes a community's custom emoji from an image file's bytes: the
+/// middle square at 32 pixels, as PNG so a transparent background stays
+/// transparent, smaller (or as JPEG) if that doesn't fit. Base64.
+pub fn emoji_from_image(bytes: &[u8]) -> Result<String, String> {
+    let img = image::load_from_memory(bytes).map_err(|_| "That file isn't a picture Stoop can read".to_string())?;
+    let square = crop_square(&img);
+    for side in [32, 24] {
+        let small = square.resize_exact(side, side, FilterType::Lanczos3);
+        let mut out = Vec::new();
+        small.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        if out.len() <= MAX_EMOJI_BYTES {
+            return Ok(crate::file_transfer::encode_b64(&out));
+        }
+    }
+    // A busy photo: JPEG, on the dark ground most themes draw messages on.
+    let small = square.resize_exact(32, 32, FilterType::Lanczos3).to_rgb8();
+    for quality in (40..=85).rev().step_by(15) {
+        let mut out = Vec::new();
+        small.write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut out), quality)).map_err(|e| e.to_string())?;
+        if out.len() <= MAX_EMOJI_BYTES {
+            return Ok(crate::file_transfer::encode_b64(&out));
+        }
+    }
+    Err("That picture is too detailed for an emoji; try a simpler one".into())
+}
+
+/// A custom emoji's picture as RGBA pixels, or `None` if it isn't a small
+/// PNG or JPEG. Anything bigger than an emoji could be is refused unread.
+pub fn decode_emoji(b64: &str) -> Option<(u32, u32, Vec<u8>)> {
+    if b64.is_empty() || b64.len() > antiphon_crypto::community::MAX_EMOJI_IMAGE {
+        return None;
+    }
+    let bytes = crate::file_transfer::decode_b64(b64)?;
+    let format = image::guess_format(&bytes).ok().filter(|f| matches!(f, image::ImageFormat::Png | image::ImageFormat::Jpeg))?;
+    let img = image::load_from_memory_with_format(&bytes, format).ok()?;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 || w > 64 || h > 64 {
+        return None;
+    }
+    Some((w, h, img.to_rgba8().into_raw()))
+}
+
 /// The largest square from the middle of `img`: a portrait loses its top
 /// and bottom, a landscape its sides, so a face in the centre stays.
 fn crop_square(img: &DynamicImage) -> DynamicImage {
@@ -131,6 +177,15 @@ mod tests {
         assert_eq!(clean_bio("  Plays bass.\n\nUp late.  "), "Plays bass. Up late.");
         assert_eq!(clean_bio(&"x".repeat(500)).chars().count(), MAX_BIO);
         assert_eq!(clean_bio("a\u{1}b"), "ab");
+    }
+
+    #[test]
+    fn an_emoji_is_small_and_reads_back() {
+        let b64 = emoji_from_image(&png(300, 200)).unwrap();
+        assert!(b64.len() <= antiphon_crypto::community::MAX_EMOJI_IMAGE);
+        let (w, h, _) = decode_emoji(&b64).unwrap();
+        assert!(w <= 32 && w == h);
+        assert!(decode_emoji(&avatar_from_image(&png(300, 300)).unwrap()).is_none(), "an avatar is too big to pass as an emoji");
     }
 
     /// The largest card there can be -- the biggest picture, an About line

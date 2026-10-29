@@ -71,12 +71,16 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Start it", Btn::Primary, (!ui.space_name.trim().is_empty()).then_some(Msg::SpaceCreate))].spacing(8);
             modal(if ui.space_group { "Start a group chat" } else { "Start a community" }, super::community::new_space(ui), Some(footer.into()), 480.0, close, rise)
         }
+        Dialog::EmojiPicker(id) => modal("Emoji", super::community::emoji_picker(m, id), None, 420.0, close, rise),
+        Dialog::SpaceEmoji(id) => modal("Custom emoji", super::community::emoji_manager(m, id), None, 460.0, close, rise),
         Dialog::SpaceNotify(id) => modal("Notifications", super::community::notify(m, id), None, 520.0, close, rise),
         Dialog::InviteToSpace(id) => modal("Invite someone", super::community::invite(m, id), None, 460.0, close, rise),
         Dialog::AddChannel(id) => {
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Add channel", Btn::Primary, Some(Msg::ChannelCreate(id.clone())))].spacing(8);
             modal("Add a channel", super::community::add_channel(ui, id), Some(footer.into()), 440.0, close, rise)
         }
+        Dialog::ChannelSettings(id, channel) => modal("Who can read it", super::community::channel_settings(m, id, *channel), None, 480.0, close, rise),
+        Dialog::Roles(id) => modal("Roles", super::community::roles(ui, m, id), None, 560.0, close, rise),
         Dialog::ConfirmLeave(id) => {
             let name = m.communities.iter().find(|c| &c.id == id).map(|c| c.name.as_str()).unwrap_or("it");
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Leave", Btn::DangerSolid, Some(Msg::Do(Action::LeaveSpace(id.clone()))))].spacing(8);

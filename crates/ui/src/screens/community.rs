@@ -4,9 +4,8 @@
 //!
 //! A group chat and a community share these screens; a group chat is a
 //! community with one channel and no roles, so it simply shows no channel
-//! list. Two slots, [`voice_bar`] and [`member_badges`], are where a
-//! community's voice room and members' role badges go; they draw nothing
-//! yet.
+//! list. [`voice_bar`] is where a community's voice room goes (it draws
+//! nothing yet); [`member_badges`] shows each member's role.
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Length};
@@ -16,7 +15,7 @@ use super::{clip, fill};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
-use crate::{Action, Channel, Community, Dialog, El, Line, Member, Model, Msg, Notify, Route, Ui};
+use crate::{Action, Channel, Community, Dialog, El, Line, Member, Model, Msg, Notify, Route, SpaceChange, Ui};
 
 /// How wide the channel column beside a channel is.
 const CHANNELS_W: f32 = 232.0;
@@ -224,26 +223,39 @@ fn side<'a>(ui: &'a Ui, c: &'a Community, channel: u32) -> El<'a, Msg> {
     let mut col = column![].spacing(2);
     if !c.group {
         let mut head = row![label("Channels"), fill()].align_y(Alignment::Center);
+        if c.can_manage {
+            head = head.push(icon_btn(Icon::Smile, "Custom emoji", Some(Msg::Dialog(Some(Dialog::SpaceEmoji(c.id.clone()))))));
+        }
         if c.can_manage_channels {
             head = head.push(icon_btn(Icon::Plus, "Add a channel", Some(Msg::Dialog(Some(Dialog::AddChannel(c.id.clone()))))));
         }
         col = col.push(container(head).padding(pad(10.0, 4.0, 4.0, 8.0)));
         for x in &c.channels {
             let on = x.id == channel;
-            col = col.push(
-                button(
-                    row![icon(Icon::Hash, 15.0, if on { p.text } else { p.faint }), t(clip(&x.name, 22)).size(13.5).font(theme::semibold()).color(if on { p.text } else { p.muted })]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .padding([6, 10])
-                .style(theme::btn(if on { Btn::RowOn } else { Btn::Row }))
-                .on_press(Msg::Nav(Route::Community(c.id.clone(), x.id))),
-            );
+            // A private channel shows a lock where the others show a hash.
+            let mark = if x.private { Icon::Lock } else { Icon::Hash };
+            let entry = button(
+                row![icon(mark, 15.0, if on { p.text } else { p.faint }), t(clip(&x.name, 20)).size(13.5).font(theme::semibold()).color(if on { p.text } else { p.muted })]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([6, 10])
+            .style(theme::btn(if on { Btn::RowOn } else { Btn::Row }))
+            .on_press(Msg::Nav(Route::Community(c.id.clone(), x.id)));
+            if c.can_manage_channels {
+                let gear = icon_btn(Icon::Gear, "Who can read it", Some(Msg::Dialog(Some(Dialog::ChannelSettings(c.id.clone(), x.id)))));
+                col = col.push(row![entry, gear].spacing(2).align_y(Alignment::Center));
+            } else {
+                col = col.push(entry);
+            }
         }
     }
-    col = col.push(container(row![label("Members"), faint(c.members.len().to_string()).size(11)].spacing(8).align_y(Alignment::Center)).padding(pad(16.0, 4.0, 4.0, 8.0)));
+    let mut members_head = row![label("Members"), faint(c.members.len().to_string()).size(11), fill()].spacing(8).align_y(Alignment::Center);
+    if !c.group && (c.can_edit_roles || c.can_assign_roles) {
+        members_head = members_head.push(icon_btn(Icon::Shield, "Roles", Some(Msg::Dialog(Some(Dialog::Roles(c.id.clone()))))));
+    }
+    col = col.push(container(members_head).padding(pad(16.0, 4.0, 4.0, 8.0)));
     for member in &c.members {
         col = col.push(member_row(member));
     }
@@ -272,9 +284,14 @@ pub fn voice_bar<'a>(_m: &'a Model, _c: &'a Community) -> El<'a, Msg> {
     space().height(0).into()
 }
 
-/// Where a member's role badges go, after their name. Nothing yet.
-pub fn member_badges<'a>(_member: &'a Member) -> El<'a, Msg> {
-    space().width(0).into()
+/// A member's role, after their name, unless it is the plain one
+/// newcomers get (which says nothing about them).
+pub fn member_badges<'a>(member: &'a Member) -> El<'a, Msg> {
+    match member.role_index {
+        _ if member.plain || member.role.is_empty() => space().width(0).into(),
+        None => badge(member.role.as_str(), theme::Badge::Accent),
+        Some(_) => badge(member.role.as_str(), theme::Badge::Plain),
+    }
 }
 
 /// The start of the channel, then every message, newest at the bottom.
@@ -336,7 +353,7 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, line: &'a Line, first: bool, phone:
         .max_width(520)
         .into()
     } else {
-        let words = if line.deleted { t("Message deleted").size(13.5).color(p.faint) } else { t(line.text.as_str()).size(14).wrapping(Wrapping::WordOrGlyph) };
+        let words: El<'a, Msg> = if line.deleted { t("Message deleted").size(13.5).color(p.faint).into() } else { with_emoji(&line.text, c) };
         let mut words = column![words].spacing(2);
         if line.edited {
             words = words.push(faint("edited").size(10.5));
@@ -385,7 +402,9 @@ fn composer<'a>(ui: &'a Ui, c: &'a Community, ch: Option<&'a Channel>) -> El<'a,
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }
+    let picker = (!c.emoji.is_empty() && can_send).then(|| Msg::Dialog(Some(Dialog::EmojiPicker(c.id.clone()))));
     let bar = row![
+        icon_btn(Icon::Smile, "Emoji", picker),
         container(input).width(Length::Fill).padding([0, 6]),
         icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send)),
     ]
@@ -499,10 +518,92 @@ pub fn notify<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
     col.into()
 }
 
+/// A message's words with its community's `:name:` emoji drawn as
+/// pictures. A message of nothing but emoji draws them large. Words that
+/// aren't a known emoji stay words, so `:unknown:` reads as typed.
+fn with_emoji<'a>(text: &'a str, c: &'a Community) -> El<'a, Msg> {
+    let emoji_at = |word: &str| -> Option<iced_core::image::Handle> {
+        let name = word.strip_prefix(':')?.strip_suffix(':')?;
+        c.emoji.iter().any(|e| e == name).then(|| crate::avatars::picture(&crate::avatars::emoji_id(&c.id, name)))?
+    };
+    let words: Vec<&str> = text.split(' ').collect();
+    if c.emoji.is_empty() || !words.iter().any(|w| emoji_at(w).is_some()) {
+        return t(text).size(14).wrapping(Wrapping::WordOrGlyph).into();
+    }
+    let only_emoji = words.iter().all(|w| w.is_empty() || emoji_at(w).is_some());
+    let size = if only_emoji { 40.0 } else { 20.0 };
+    let mut r = row![].spacing(0).align_y(Alignment::Center);
+    for (i, w) in words.iter().enumerate() {
+        let gap = if i + 1 < words.len() { " " } else { "" };
+        match emoji_at(w) {
+            Some(handle) => {
+                r = r.push(with_tip(iced_widget::image(handle).width(size).height(size), *w, iced_widget::tooltip::Position::Top));
+                if !gap.is_empty() {
+                    r = r.push(t(gap).size(14));
+                }
+            }
+            None => r = r.push(t(format!("{w}{gap}")).size(14)),
+        }
+    }
+    r.wrap().into()
+}
+
+/// The community's emoji to pick from; one goes into the message.
+pub fn emoji_picker<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let mut grid = row![].spacing(6);
+    for name in &c.emoji {
+        let face: El<'a, Msg> = match crate::avatars::picture(&crate::avatars::emoji_id(&c.id, name)) {
+            Some(h) => iced_widget::image(h).width(32).height(32).into(),
+            None => t(format!(":{name}:")).size(12).into(),
+        };
+        let b = button(container(face).center(40)).padding(2).style(theme::btn(Btn::Ghost)).on_press(Msg::InsertEmoji(name.clone()));
+        grid = grid.push(with_tip(b, format!(":{name}:"), iced_widget::tooltip::Position::Top));
+    }
+    let mut col = column![grid.wrap()].spacing(14);
+    if c.can_manage {
+        col = col.push(row![fill(), btn_sm("Manage emoji", Btn::Ghost, Some(Msg::Dialog(Some(Dialog::SpaceEmoji(c.id.clone())))))]);
+    }
+    col.into()
+}
+
+/// A community's custom emoji, for someone who may change them: each with
+/// its name and a way to remove it, and adding another.
+pub fn emoji_manager<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let mut col = column![muted(format!(
+        "Everyone in {} sees these, written :name: in a message. Pick a small, square picture; its file name becomes the emoji's name. Up to 16.",
+        c.name
+    ))
+    .size(13.5)]
+    .spacing(8);
+    for name in &c.emoji {
+        let face: El<'a, Msg> = match crate::avatars::picture(&crate::avatars::emoji_id(&c.id, name)) {
+            Some(h) => iced_widget::image(h).width(28).height(28).into(),
+            None => space().width(28).into(),
+        };
+        col = col.push(
+            row![
+                face,
+                t(format!(":{name}:")).size(13.5).font(theme::mono()).width(Length::Fill),
+                icon_btn(Icon::Trash, "Remove", c.can_manage.then(|| Msg::Do(Action::RemoveEmoji { community: c.id.clone(), name: name.clone() }))),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    if c.emoji.is_empty() {
+        col = col.push(faint("None yet.").size(12.5));
+    }
+    let full = c.emoji.len() >= 16;
+    col = col.push(row![fill(), btn_icon(Icon::Plus, "Add emoji", Btn::Primary, (c.can_manage && !full).then(|| Msg::Do(Action::AddEmoji(c.id.clone()))))]);
+    col.into()
+}
+
 /// Name a new channel.
 pub fn add_channel<'a>(ui: &'a Ui, id: &'a str) -> El<'a, Msg> {
     column![
-        muted("Everyone in the community can read and post in it, as with the others.").size(13.5),
+        muted("Everyone in the community can read and post in it. You can make it private afterwards, from its gear.").size(13.5),
         field(
             "Name",
             text_input("band-practice", &ui.channel_name).on_input(Msg::ChannelName).on_submit(Msg::ChannelCreate(id.to_string())).padding([10, 12]).size(14).style(theme::input)
@@ -510,4 +611,93 @@ pub fn add_channel<'a>(ui: &'a Ui, id: &'a str) -> El<'a, Msg> {
     ]
     .spacing(14)
     .into()
+}
+
+/// Who can read a channel: open to everyone, or private to the members
+/// ticked here (owners always can).
+pub fn channel_settings<'a>(m: &'a Model, id: &'a str, channel: u32) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let Some(ch) = c.channels.iter().find(|x| x.id == channel) else { return faint("That channel is gone.").into() };
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let private = ch.private;
+    let mut col = column![setting(
+        "Private",
+        Some("Only the people ticked below, and the owners, get its messages. Nobody else sees it at all."),
+        switch(private, move |on| change(SpaceChange::ChannelPrivate { channel, private: on })),
+    )]
+    .spacing(10);
+    if private {
+        col = col.push(label("Who can read it"));
+        for member in &c.members {
+            let owner = member.role_index.is_none();
+            let reads = owner || ch.readers.contains(&member.id);
+            let sub = if owner { "Owner: always can" } else { member.role.as_str() };
+            let mut r = row![avatar(&member.name, &member.id, 28.0), column![t(clip(&member.name, 24)).size(13.5).font(theme::semibold()), faint(sub).size(11.5)].spacing(1).width(Length::Fill)]
+                .spacing(10)
+                .align_y(Alignment::Center);
+            if !owner {
+                let who = member.id.clone();
+                r = r.push(switch(reads, move |on| change(SpaceChange::ChannelReader { channel, member: who.clone(), on })));
+            }
+            col = col.push(r);
+        }
+    }
+    scrollable(col).height(Length::Shrink).style(theme::scroll).into()
+}
+
+/// A community's roles, most powerful first: what each may do (owners
+/// change that), a way to add one, and who holds which.
+pub fn roles<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let mut col = column![muted("Higher roles outrank lower ones: someone can only change the role of people below them, and only to a role below their own.").size(13)].spacing(12);
+    let last = c.roles.len().saturating_sub(1);
+    for (i, role) in c.roles.iter().enumerate() {
+        let holders = format!("{} {}", role.holders, if role.holders == 1 { "member" } else { "members" });
+        let mut head = row![t(role.name.as_str()).size(14).font(theme::semibold()), faint(holders).size(12), fill()].spacing(8).align_y(Alignment::Center);
+        if i == last {
+            head = head.push(faint("Newcomers get this").size(11.5));
+        } else if c.can_edit_roles {
+            head = head.push(icon_btn(Icon::Trash, "Remove this role", Some(change(SpaceChange::RemoveRole(i)))));
+        }
+        let mut perms = column![].spacing(6);
+        for (n, (what, on)) in role.perms.iter().enumerate() {
+            let toggle: El<'a, Msg> = if c.can_edit_roles {
+                switch(*on, move |on| change(SpaceChange::RolePerm { role: i, perm: n, on }))
+            } else {
+                faint(if *on { "Yes" } else { "No" }).size(12).into()
+            };
+            perms = perms.push(row![t(what.as_str()).size(13).width(Length::Fill), toggle].spacing(10).align_y(Alignment::Center));
+        }
+        col = col.push(card(column![head, perms].spacing(8)).padding([10, 12]));
+    }
+    if c.can_edit_roles {
+        col = col.push(
+            row![
+                text_input("New role, e.g. Helper", &ui.role_name).on_input(Msg::RoleName).on_submit(Msg::RoleCreate(c.id.clone())).padding([8, 10]).size(13.5).style(theme::input),
+                btn_sm("Add role", Btn::Primary, (!ui.role_name.trim().is_empty()).then(|| Msg::RoleCreate(c.id.clone()))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    let mut people = column![label("Who holds which")].spacing(8);
+    for member in &c.members {
+        let mut r = row![avatar(&member.name, &member.id, 26.0), t(clip(&member.name, 18)).size(13).font(theme::semibold()).width(Length::Fill)].spacing(8).align_y(Alignment::Center);
+        if member.assignable.is_empty() {
+            r = r.push(faint(member.role.as_str()).size(12));
+        } else {
+            let mut chips = row![].spacing(4);
+            for &at in &member.assignable {
+                let name = c.roles.get(at).map(|r| r.name.as_str()).unwrap_or("");
+                let on = member.role_index == Some(at);
+                let pick = (!on).then(|| change(SpaceChange::MemberRole { member: member.id.clone(), role: at }));
+                chips = chips.push(btn_sm(name, if on { Btn::Primary } else { Btn::Ghost }, pick));
+            }
+            r = r.push(chips);
+        }
+        people = people.push(r);
+    }
+    col = col.push(people);
+    scrollable(col).height(Length::Fixed(520.0)).style(theme::scroll).into()
 }

@@ -138,10 +138,18 @@ pub enum Dialog {
     InviteToSpace(String),
     /// Add a channel to this community (by id).
     AddChannel(String),
+    /// Who can read this channel of this community (by id).
+    ChannelSettings(String, u32),
+    /// This community's roles and who holds which (by id).
+    Roles(String),
     /// Are you sure: leave this group chat or community (by id).
     ConfirmLeave(String),
     /// Which messages notify you in this group chat or community (by id).
     SpaceNotify(String),
+    /// Pick one of this community's emoji to put in the message (by id).
+    EmojiPicker(String),
+    /// This community's custom emoji: see, add and remove them (by id).
+    SpaceEmoji(String),
 }
 
 /// How a toast is coloured.
@@ -480,6 +488,16 @@ pub enum Action {
     },
     /// Leave a group chat or community (the dialog already asked).
     LeaveSpace(String),
+    /// Choose a picture to add as one of this community's emoji (by id);
+    /// its name comes from the file's.
+    AddEmoji(String),
+    /// Take one of a community's emoji away.
+    RemoveEmoji {
+        /// The community's id.
+        community: String,
+        /// The emoji's name.
+        name: String,
+    },
     /// Choose which messages notify me in a space or one of its channels.
     SpaceNotify {
         /// The group chat or community's id.
@@ -488,6 +506,58 @@ pub enum Action {
         channel: Option<u32>,
         /// The setting; `None` for a channel follows the space's.
         level: Option<Notify>,
+    },
+    /// Change how a community is set up: its channels' readers, its
+    /// roles, who holds which.
+    ManageSpace {
+        /// The community's id.
+        community: String,
+        /// What to change.
+        change: SpaceChange,
+    },
+}
+
+/// One change to how a community is set up, signed into its manifest by
+/// whoever makes it (and refused by everyone else if they aren't allowed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpaceChange {
+    /// Make a channel private (only its readers and the owners get it) or
+    /// open to every member again.
+    ChannelPrivate {
+        /// The channel.
+        channel: u32,
+        /// Private rather than open.
+        private: bool,
+    },
+    /// Let a member read a private channel, or stop them.
+    ChannelReader {
+        /// The channel.
+        channel: u32,
+        /// The member's id (hex).
+        member: String,
+        /// Let them rather than stop them.
+        on: bool,
+    },
+    /// Add a role, just above the one newcomers get.
+    AddRole(String),
+    /// Remove the role at this place; whoever held it gets the newcomers'.
+    RemoveRole(usize),
+    /// Allow or disallow one thing (a place in [`Role::perms`]) for the
+    /// role at a place.
+    RolePerm {
+        /// The role's place.
+        role: usize,
+        /// The thing's place in its list.
+        perm: usize,
+        /// Allow rather than disallow.
+        on: bool,
+    },
+    /// Give a member the role at a place.
+    MemberRole {
+        /// The member's id (hex).
+        member: String,
+        /// The role's place.
+        role: usize,
     },
 }
 
@@ -593,6 +663,12 @@ pub enum Msg {
     ChannelCreate(String),
     /// Show or hide the files waiting to be sent.
     ToggleQueue,
+    /// Put `:name:` (a custom emoji) at the end of the composer's text.
+    InsertEmoji(String),
+    /// The new role's name box changed.
+    RoleName(String),
+    /// Add the role named in the box to this community (by id).
+    RoleCreate(String),
     /// Close a toast by its id.
     DismissToast(u64),
     /// Where the pointer is, so a right-click menu opens under it.
@@ -674,6 +750,8 @@ pub struct Ui {
     /// The list of files waiting to be sent is open (it starts folded,
     /// so a long queue never pushes the messages off screen).
     queue_open: bool,
+    /// The new role's name box.
+    role_name: String,
     /// Toasts on screen, oldest first.
     toasts: Vec<Toast>,
     /// The id the next toast gets.
@@ -743,6 +821,7 @@ impl Ui {
             space_group: false,
             channel_name: String::new(),
             queue_open: false,
+            role_name: String::new(),
             toasts: Vec::new(),
             next_toast: 1,
             cursor: Point::ORIGIN,
@@ -1161,9 +1240,32 @@ impl Ui {
                 self.set_dialog(None);
                 vec![Action::AddChannel { community, name }]
             }
+            Msg::InsertEmoji(name) => {
+                if let Some(key) = self.draft_key() {
+                    let draft = self.drafts.entry(key).or_default();
+                    if !draft.is_empty() && !draft.ends_with(' ') {
+                        draft.push(' ');
+                    }
+                    draft.push_str(&format!(":{name}: "));
+                }
+                self.set_dialog(None);
+                Vec::new()
+            }
             Msg::ToggleQueue => {
                 self.queue_open = !self.queue_open;
                 Vec::new()
+            }
+            Msg::RoleName(s) => {
+                self.role_name = s.chars().take(40).collect();
+                Vec::new()
+            }
+            Msg::RoleCreate(community) => {
+                let name = self.role_name.trim().to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                self.role_name.clear();
+                vec![Action::ManageSpace { community, change: SpaceChange::AddRole(name) }]
             }
             Msg::DismissToast(id) => {
                 self.toasts.retain(|t| t.id != id);
@@ -1338,6 +1440,10 @@ mod tests {
         ui.update(Msg::ChannelName("#Band Practice".into()), &m);
         assert_eq!(ui.update(Msg::ChannelCreate("c1".into()), &m), vec![Action::AddChannel { community: "c1".into(), name: "band-practice".into() }]);
         assert!(ui.update(Msg::ChannelCreate("c1".into()), &m).is_empty(), "the box is cleared once used");
+        ui.update(Msg::RoleName("  Helper ".into()), &m);
+        let add = Action::ManageSpace { community: "c1".into(), change: SpaceChange::AddRole("Helper".into()) };
+        assert_eq!(ui.update(Msg::RoleCreate("c1".into()), &m), vec![add]);
+        assert!(ui.update(Msg::RoleCreate("c1".into()), &m).is_empty(), "the role box is cleared once used");
     }
 
     #[test]

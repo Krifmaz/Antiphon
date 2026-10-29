@@ -101,6 +101,10 @@ impl Demo {
         // Chosen colours, as the engine registers saved ones.
         ui::avatars::set(&model.me.id, "", &model.me.color, |_| None);
         ui::avatars::set(ROBIN, "", "sage", |_| None);
+        // The club's emoji: small made-up pictures.
+        for (name, color) in [("vinyl", [30, 30, 34, 255]), ("porch", [214, 160, 92, 255]), ("yes", [120, 200, 130, 255])] {
+            ui::avatars::set(&ui::avatars::emoji_id(CLUB, name), name, "", |_| Some(emoji_picture(color)));
+        }
         Demo { model, next_id: 100 }
     }
 
@@ -177,7 +181,8 @@ impl Demo {
                 post(3, mara, "who's picking the record this week?", "18:05", None),
                 post(4, (ME, "Azule"), "I can bring Kind of Blue, the old pressing", "18:11", None),
                 Line { edited: true, ..post(5, theo, "yes please. I'll do snacks", "18:14", None) },
-                post(6, (ROBIN, "Robin Okafor"), "porch opens at 8. bring a chair if you have one", "09:30", Some("Today")),
+                post(6, (ROBIN, "Robin Okafor"), "porch opens at 8. bring a chair if you have one :porch:", "09:30", Some("Today")),
+                post(8, mara, ":vinyl: :yes:", "09:33", None),
                 Line { deleted: true, ..post(7, theo, "", "09:41", None) },
             ]
         } else {
@@ -286,6 +291,11 @@ impl Demo {
                     }
                 }
             }
+            Action::RemoveEmoji { community, name } => {
+                if let Some(c) = self.model.communities.iter_mut().find(|c| c.id == community) {
+                    c.emoji.retain(|e| *e != name);
+                }
+            }
             Action::QueueMove { id, up } => {
                 let q = &mut self.model.transfers.queued;
                 if let Some(at) = q.iter().position(|f| f.id == id) {
@@ -385,10 +395,26 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
     }
 }
 
+/// A made-up emoji: a disc of `color` with a lighter centre, 32 pixels.
+fn emoji_picture(color: [u8; 4]) -> (u32, u32, Vec<u8>) {
+    let mut px = Vec::with_capacity(32 * 32 * 4);
+    for y in 0..32 {
+        for x in 0..32 {
+            let d = ((x as f32 - 15.5).powi(2) + (y as f32 - 15.5).powi(2)).sqrt();
+            px.extend_from_slice(&match d {
+                d if d < 5.0 => [240, 230, 210, 255],
+                d if d < 15.0 => color,
+                _ => [0, 0, 0, 0],
+            });
+        }
+    }
+    (32, 32, px)
+}
+
 /// The made-up group chats and communities.
 fn communities() -> Vec<ui::Community> {
-    let member = |id: &str, name: &str, role: &str, status: &str| ui::Member { id: id.into(), name: name.into(), status: status.into(), role: role.into(), me: id == ME };
-    let channel = |id: u32, name: &str, topic: &str| ui::Channel { id, name: name.into(), topic: topic.into(), notify: None };
+    let member = |id: &str, name: &str, role: &str, status: &str| ui::Member { id: id.into(), name: name.into(), status: status.into(), role: role.into(), me: id == ME, plain: role == "Member", role_index: (role != "Owner").then_some(0), ..Default::default() };
+    let channel = |id: u32, name: &str, topic: &str| ui::Channel { id, name: name.into(), topic: topic.into(), ..Default::default() };
     vec![
         ui::Community {
             id: "5a7c0000000000000000000000000000000000000000000000000000000000a7".into(),
@@ -418,6 +444,8 @@ fn communities() -> Vec<ui::Community> {
             can_post: true,
             can_invite: true,
             can_manage_channels: true,
+            can_manage: true,
+            emoji: vec!["vinyl".into(), "porch".into(), "yes".into()],
             ..ui::Community::default()
         },
     ]
