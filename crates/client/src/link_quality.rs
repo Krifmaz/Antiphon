@@ -114,6 +114,13 @@ impl LinkQuality {
         self.controller.lock().unwrap().on_report(source, loss_pct.unwrap_or(0), rtt_ms, now);
     }
 
+    /// Takes a loss figure with no timing, as reports through a group
+    /// relay's room carry (they go to everyone, so there is no one echo
+    /// to time a round trip with).
+    pub fn on_loss(&self, source: u64, loss_pct: u8) {
+        self.controller.lock().unwrap().on_report(source, loss_pct, None, Instant::now());
+    }
+
     /// What to send now, with "Low data" applied.
     pub fn plan(&self) -> Plan {
         let mut c = self.controller.lock().unwrap();
