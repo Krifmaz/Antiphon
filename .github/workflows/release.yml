@@ -150,7 +150,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # the oldest supported Ubuntu, not ubuntu-latest: a Linux binary needs a glibc at least as new as the
+          # one it was built against, so building on 24.04 (glibc 2.39) is what lets the AppImage, the .deb and
+          # the Flatpak run on the distributions people actually have
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
             ext: ""
@@ -189,8 +192,10 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder
           flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           # the newest branch: the binaries are built on this runner, so the runtime's glibc must be as new as its
-          RT=$(flatpak --user remote-ls flathub --runtime --columns=ref | sed -n 's|^org\.freedesktop\.Platform/x86_64/\([0-9][0-9.]*\)$|\1|p' | sort -V | tail -1)
-          [ -n "$RT" ] || { echo "::error::no org.freedesktop.Platform on Flathub"; exit 1; }
+          REFS=$(flatpak --user remote-ls flathub --runtime --arch=x86_64 --columns=ref)
+          RT=$(sed -n 's|^\(runtime/\)\{0,1\}org\.freedesktop\.Platform/x86_64/\([0-9][0-9.]*\)[[:space:]]*$|\2|p' <<< "$REFS" | sort -V | tail -1)
+          [ -n "$RT" ] || { echo "::error::no org.freedesktop.Platform on Flathub"; grep -i 'freedesktop.Platform' <<< "$REFS" | head; exit 1; }
+          echo "runtime: org.freedesktop.Platform//$RT"
           echo "FLATPAK_RUNTIME=$RT" >> "$GITHUB_ENV"
           flatpak --user install -y --noninteractive flathub "org.freedesktop.Platform//$RT" "org.freedesktop.Sdk//$RT"
       - name: Version ${{ env.SV }}
