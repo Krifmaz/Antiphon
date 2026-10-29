@@ -24,7 +24,7 @@
 #
 # Needs: Linux – dpkg-deb (dpkg-shlibdeps from dpkg-dev for the Depends line), curl (appimagetool is fetched
 # once into ~/.cache/stoop-packaging unless APPIMAGETOOL names one), and for the Flatpak flatpak-builder with
-# org.freedesktop.Platform and .Sdk 24.08 installed; macOS – the Xcode command line tools; Windows – NSIS
+# org.freedesktop.Platform and .Sdk installed (FLATPAK_RUNTIME, below); macOS – the Xcode command line tools; Windows – NSIS
 # (makensis), Git Bash, and for the MSI the WiX Toolset 4 command line (dotnet tool install --global wix).
 set -euo pipefail
 
@@ -191,7 +191,9 @@ tarball() {
 }
 
 # The Flatpak: the same two binaries in org.freedesktop.Platform, built by flatpak-builder from the manifest
-# and exported as a single-file bundle (flatpak install --user Stoop-<v>-linux-x86_64.flatpak). The app id
+# and exported as a single-file bundle (flatpak install --user Stoop-<v>-linux-x86_64.flatpak). FLATPAK_RUNTIME
+# names the runtime branch (default 25.08); it needs a glibc at least as new as the one the binaries were built
+# against, which is why the release workflow picks the newest. The app id
 # names the desktop file and icons, as Flatpak requires. FLATPAK_CHECK=1 then installs the bundle for this
 # user and fails if the app is missing a shared library inside the runtime (the release workflow does this).
 flatpak_bundle() {
@@ -204,7 +206,8 @@ flatpak_bundle() {
   sed -e "s/@APP_BIN@/$APP_BIN/g" -e "s/^Icon=stoop$/Icon=$id/" "$PKG/linux/stoop.desktop" > "$src/stage/$id.desktop"
   for s in 32 64 128 256 512; do cp "$PKG/icons/${s}x${s}.png" "$src/stage/icon-$s.png"; done
   cp "$PKG/icons/stoop.svg" "$src/stage/icon.svg"
-  sed -e "s/@APP_BIN@/$APP_BIN/g" -e "s/@CLI_BIN@/$CLI_BIN/g" "$PKG/linux/$id.yml" > "$src/$id.yml"
+  sed -e "s/@APP_BIN@/$APP_BIN/g" -e "s/@CLI_BIN@/$CLI_BIN/g" -e "s/@RUNTIME@/${FLATPAK_RUNTIME:-25.08}/g" \
+    "$PKG/linux/$id.yml" > "$src/$id.yml"
   rm -f "$out"
   run flatpak-builder --user --force-clean --disable-rofiles-fuse --repo="$src/repo" "$src/build" "$src/$id.yml"
   run flatpak build-bundle "$src/repo" "$out" "$id"

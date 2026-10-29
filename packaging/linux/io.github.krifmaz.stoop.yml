@@ -3,7 +3,9 @@
 # stages the files beside a copy of this manifest under stage/.
 app-id: io.github.krifmaz.stoop
 runtime: org.freedesktop.Platform
-runtime-version: "24.08"
+# the newest org.freedesktop.Platform, passed in by package.sh (FLATPAK_RUNTIME): the binaries are built on
+# the CI runner, so the runtime's glibc must be at least as new as the runner's
+runtime-version: "@RUNTIME@"
 sdk: org.freedesktop.Sdk
 command: "@APP_BIN@"
 finish-args:

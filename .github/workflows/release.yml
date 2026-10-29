@@ -18,7 +18,7 @@ name: release
 #     Windows  Stoop-<v>-windows-x86_64.exe     the installer, per user, no administrator rights
 #              Stoop-<v>-windows-x86_64.msi     the same as an MSI, for Group Policy, Intune or winget
 #     Linux    Stoop-<v>-linux-x86_64.AppImage, stoop_<v>_amd64.deb, stoop-<v>-linux-x86_64.tar.gz and
-#              Stoop-<v>-linux-x86_64.flatpak   (a single-file bundle on org.freedesktop.Platform)
+#              Stoop-<v>-linux-x86_64.flatpak   (a single-file bundle on the newest org.freedesktop.Platform)
 #     macOS    Stoop-<v>-macos-aarch64.dmg      signed ad hoc
 #     Android  Stoop-android-<v>.apk            built twice from clean and compared, like the desktop binaries
 #     SHA256SUMS covers every file of the release, then the bare desktop binaries inside them (BUILDING.md).
@@ -188,7 +188,11 @@ jobs:
         run: |
           sudo apt-get install -y flatpak flatpak-builder
           flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak --user install -y --noninteractive flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+          # the newest branch: the binaries are built on this runner, so the runtime's glibc must be as new as its
+          RT=$(flatpak --user remote-ls flathub --runtime --columns=ref | sed -n 's|^org\.freedesktop\.Platform/x86_64/\([0-9][0-9.]*\)$|\1|p' | sort -V | tail -1)
+          [ -n "$RT" ] || { echo "::error::no org.freedesktop.Platform on Flathub"; exit 1; }
+          echo "FLATPAK_RUNTIME=$RT" >> "$GITHUB_ENV"
+          flatpak --user install -y --noninteractive flathub "org.freedesktop.Platform//$RT" "org.freedesktop.Sdk//$RT"
       - name: Version ${{ env.SV }}
         shell: bash
         run: bash packaging/set-version.sh "$SV"

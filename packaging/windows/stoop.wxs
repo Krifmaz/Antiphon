@@ -52,5 +52,12 @@
                        KeyPath="yes" />
       </Component>
     </StandardDirectory>
+    <!-- one feature, always installed: the app, the tool, the README and the shortcut -->
+    <Feature Id="Stoop" Title="Stoop" AllowAbsent="no">
+      <ComponentRef Id="App" />
+      <ComponentRef Id="Cli" />
+      <ComponentRef Id="Readme" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
   </Package>
 </Wix>
