@@ -354,8 +354,8 @@ mobile, packaging, SFU forwarding, and voice channels inside communities.
 
 ## 11. Deferred (v1.5+) — the spec's own list, tracked for completeness
 
-- [ ] Video calls
-- [ ] Screen share with audio
+- [~] Video calls — built ahead of the spec's schedule for 1:1 calls: camera on desktop, shown on desktop and phone; sending from a phone's camera and video in group calls are still to come. A tile codec in plain Rust (JPEG patches of what changed, one band refreshed per frame so loss heals itself, a byte budget with quality that follows it), sealed by the call's own session like the voice ([`crates/video`](crates/video/src), [`video.rs`](crates/client/src/video.rs))
+- [~] Screen share — desktop to desktop or phone, sharp text (full colour, up to 1920 px), next to nothing sent while the screen is still; on Wayland the system asks which screen or window. The screen's own audio is not sent yet
 - [x] SFU relay for large calls — built ahead of the spec's schedule, see §3
 - [ ] Communities at full scale
 - [ ] Plugin host

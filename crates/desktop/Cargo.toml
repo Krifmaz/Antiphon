@@ -9,9 +9,11 @@ name = "antiphon"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.14.0", features = ["tokio", "svg", "canvas", "qr_code", "advanced"] }
+iced = { version = "0.14.0", features = ["tokio", "svg", "canvas", "qr_code", "image", "advanced"] }
 antiphon-ui = { version = "0.1.0", path = "../ui" }
 antiphon-client = { version = "0.1.0", path = "../client" }
+# Which video a picture is (camera or screen), for the call's tiles.
+antiphon-video = { version = "0.1.0", path = "../video" }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }

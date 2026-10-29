@@ -19,10 +19,11 @@ use antiphon_client::control::Hello;
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
     caps_lock, config, connection_mode, delivery, discovery, file_integrity, file_preview, file_transfer, history, key_capture, moderation,
-    notify, outbox, presence, reachability, reactions, sharing, vpn,
+    notify, outbox, presence, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
 use antiphon_ui::{self as ui, ToastKind};
+use antiphon_video::Stream;
 use device_query::Keycode;
 use iced::widget::qr_code;
 
@@ -179,6 +180,10 @@ pub struct Engine {
     their_level: f32,
     /// True while a STUN check is running.
     checking: bool,
+    /// The call's pictures as last drawn, by tile key, with the version
+    /// each was built from: a tile is rebuilt (and its picture uploaded
+    /// again) only when a newer frame has come.
+    tiles: HashMap<String, (u64, ui::VideoTile)>,
 }
 
 impl Engine {
@@ -214,6 +219,7 @@ impl Engine {
             peer_routes_saved: String::new(),
             their_level: 0.0,
             checking: false,
+            tiles: HashMap::new(),
         };
         engine.load_previews();
         engine.refresh_invite();
@@ -308,6 +314,12 @@ impl Engine {
         }
         if hangup {
             self.act(ui::Action::Hangup, open);
+        }
+
+        // A camera unplugged, or sharing stopped from the system's own
+        // controls: say so, and the button goes back to off by itself.
+        for (_, why) in self.with_call(|a| a.video.take_failures()).unwrap_or_default() {
+            self.toast(why, ToastKind::Warn);
         }
 
         self.watch_call(open);
@@ -1063,6 +1075,8 @@ impl Engine {
                     open_folder(&dir);
                 }
             }
+            A::Camera(on) => self.set_video(Stream::Camera, on),
+            A::ShareScreen(on) => self.set_video(Stream::Screen, on),
             // Only the phone shows the controls that send these.
             A::Speaker(_)
             | A::Talk(_)
@@ -1076,6 +1090,39 @@ impl Engine {
             | A::Restore(_) => {}
         }
         let _ = open;
+    }
+
+    /// Turns the camera or the screen share on or off. Opening a device
+    /// can block -- a camera warming up, macOS asking permission, Wayland
+    /// asking which screen -- so it happens off the interface's thread and
+    /// the stream starts on the call when it is ready.
+    fn set_video(&mut self, stream: Stream, on: bool) {
+        if !on {
+            self.with_call(|a| a.video.stop(stream));
+            return;
+        }
+        if self.state.call.lock().unwrap().is_none() {
+            self.toast("Video starts once you're on a call", ToastKind::Info);
+            return;
+        }
+        let (state, events) = (self.state.clone(), self.events.clone());
+        self.state.runtime.spawn_blocking(move || {
+            let opened = match stream {
+                Stream::Camera => video_capture::open_camera(),
+                Stream::Screen => video_capture::open_screen(),
+            };
+            match opened {
+                Ok(source) => {
+                    let call = state.call.lock().unwrap();
+                    // The call may have ended while the device opened;
+                    // the source is then dropped, and the device let go.
+                    if let Some(a) = call.as_ref() {
+                        a.video.start(stream, source, a.peer.clone(), state.runtime.clone());
+                    }
+                }
+                Err(why) => Engine::push(&events, Event::Toast(why, ToastKind::Err)),
+            }
+        });
     }
 
     /// Restarts listening so a changed port or relay takes effect.
@@ -1226,7 +1273,8 @@ impl Engine {
     pub fn model(&mut self, open: Option<&str>) -> ui::Model {
         let me = self.me();
         let people = self.people();
-        let call = self.call_model();
+        let mut call = self.call_model();
+        call.video = self.video_tiles();
         let conversation = open.and_then(|id| self.conversation(id));
         ui::Model {
             me,
@@ -1337,6 +1385,10 @@ impl Engine {
         let call = self.state.call.lock().unwrap();
         if let Some(a) = call.as_ref() {
             m.seconds = a.started_at.elapsed().as_secs();
+            m.camera_on = a.video.sending(Stream::Camera);
+            m.sharing = a.video.sending(Stream::Screen);
+            m.can_camera = true;
+            m.can_share = true;
             m.muted = a.muted.load(Ordering::Relaxed);
             m.deafened = a.deafened.load(Ordering::Relaxed);
             m.my_level = a.mic_level.lock().map(|l| *l).unwrap_or(0.0).min(1.0);
@@ -1357,6 +1409,73 @@ impl Engine {
             });
         }
         m
+    }
+
+    /// The call's pictures: theirs, then my previews. A tile whose picture
+    /// has not changed since the last frame is reused as it was, so iced
+    /// keeps the texture it already has.
+    fn video_tiles(&mut self) -> Vec<ui::VideoTile> {
+        let state = self.state.clone();
+        let call = state.call.lock().unwrap();
+        let Some(a) = call.as_ref() else {
+            self.tiles.clear();
+            return Vec::new();
+        };
+        let first = self.call.name.split_whitespace().next().unwrap_or("Their").to_string();
+        let mut tiles = Vec::new();
+        for (stream, version) in a.video.remote_versions() {
+            let (key, label) = match stream {
+                Stream::Camera => ("their-camera", first.clone()),
+                Stream::Screen => ("their-screen", format!("{first}'s screen")),
+            };
+            let tile = self.tile(key, version, || {
+                let p = a.video.remote_picture(stream)?;
+                Some(ui::VideoTile {
+                    key: key.into(),
+                    label,
+                    image: iced::widget::image::Handle::from_rgba(p.width, p.height, p.rgba),
+                    width: p.width,
+                    height: p.height,
+                    mine: false,
+                    screen: stream == Stream::Screen,
+                })
+            });
+            tiles.extend(tile);
+        }
+        for stream in [Stream::Camera, Stream::Screen] {
+            let Some((n, frame)) = a.video.preview(stream) else { continue };
+            let (key, label) = match stream {
+                Stream::Camera => ("my-camera", "You"),
+                Stream::Screen => ("my-screen", "Your screen"),
+            };
+            let tile = self.tile(key, n, || {
+                Some(ui::VideoTile {
+                    key: key.into(),
+                    label: label.into(),
+                    image: iced::widget::image::Handle::from_rgba(frame.width, frame.height, frame.rgba.clone()),
+                    width: frame.width,
+                    height: frame.height,
+                    mine: true,
+                    screen: stream == Stream::Screen,
+                })
+            });
+            tiles.extend(tile);
+        }
+        self.tiles.retain(|k, _| tiles.iter().any(|t| &t.key == k));
+        tiles
+    }
+
+    /// The tile `key` at `version`: the cached one if it is that version,
+    /// else a fresh one from `build`, cached for next time.
+    fn tile(&mut self, key: &str, version: u64, build: impl FnOnce() -> Option<ui::VideoTile>) -> Option<ui::VideoTile> {
+        if let Some((v, tile)) = self.tiles.get(key) {
+            if *v == version {
+                return Some(tile.clone());
+            }
+        }
+        let tile = build()?;
+        self.tiles.insert(key.into(), (version, tile.clone()));
+        Some(tile)
     }
 
     /// Files on their way in either direction.

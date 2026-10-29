@@ -100,6 +100,10 @@ mod reactions;
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/transfer_limits.rs"]
 mod transfer_limits;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/video.rs"]
+mod video;
 
 /// What `file_transfer` asks of the desktop's `config` module, answered
 /// from the phone's own storage.

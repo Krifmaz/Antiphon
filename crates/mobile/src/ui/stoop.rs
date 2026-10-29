@@ -120,7 +120,8 @@ impl App {
         // Most recent conversation first, as on the desktop.
         people.sort_by_key(|p| std::cmp::Reverse(self.previews.get(&p.id).map(|(_, at)| *at).unwrap_or(0)));
 
-        let call = self.call_model(&phase);
+        let mut call = self.call_model(&phase);
+        call.video = self.video_tiles(live.as_deref());
         let conversation = open.as_deref().and_then(|id| self.conversation_model(id, live_peer.as_deref() == Some(id)));
         let transfers = self.transfers_model();
 
@@ -247,6 +248,43 @@ impl App {
             Phase::Ended { message } => stoop::Call { phase: stoop::Phase::Ended(message.clone()), ..stoop::Call::default() },
             Phase::Idle | Phase::Listening { .. } => stoop::Call::default(),
         }
+    }
+
+    /// The other side's pictures on the call. A picture that has not
+    /// changed since the last frame keeps its handle, so iced keeps the
+    /// texture it already has.
+    fn video_tiles(&mut self, live: Option<&crate::call::Live>) -> Vec<stoop::VideoTile> {
+        let Some(live) = live else {
+            self.tiles.clear();
+            return Vec::new();
+        };
+        let name = self.display_name_for(&hex(&live.peer_key));
+        let first = name.split_whitespace().next().unwrap_or("Their").to_string();
+        let mut tiles = Vec::new();
+        for (stream, version) in live.video.remote_versions() {
+            let screen = stream == antiphon_video::Stream::Screen;
+            let key = if screen { "their-screen" } else { "their-camera" };
+            if let Some((v, tile)) = self.tiles.get(key) {
+                if *v == version {
+                    tiles.push(tile.clone());
+                    continue;
+                }
+            }
+            let Some(p) = live.video.remote_picture(stream) else { continue };
+            let tile = stoop::VideoTile {
+                key: key.into(),
+                label: if screen { format!("{first}'s screen") } else { first.clone() },
+                image: iced_core::image::Handle::from_rgba(p.width, p.height, p.rgba),
+                width: p.width,
+                height: p.height,
+                mine: false,
+                screen,
+            };
+            self.tiles.insert(key.into(), (version, tile.clone()));
+            tiles.push(tile);
+        }
+        self.tiles.retain(|k, _| tiles.iter().any(|t| &t.key == k));
+        tiles
     }
 
     /// The open conversation's lines, from the history on disk.
@@ -444,6 +482,10 @@ impl App {
                 self.network = crate::platform::network();
             }
             Action::Speaker(on) => self.update(Message::Speaker(on)),
+            // The phone shows what the other side sends; sending its own
+            // camera and screen needs the OS capture APIs, so the buttons
+            // are not offered yet (`can_camera` and `can_share` stay off).
+            Action::Camera(_) | Action::ShareScreen(_) => self.stoop.toast("Sending video from the phone is coming; you can already see theirs", ToastKind::Info),
             Action::Talk(on) => {
                 self.talking = on && !self.muted;
                 self.update(if self.talking { Message::PttPressed } else { Message::PttReleased });

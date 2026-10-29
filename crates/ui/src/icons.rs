@@ -111,6 +111,14 @@ pub enum Icon {
     Sparkle,
     /// A keyboard: push-to-talk key.
     Keyboard,
+    /// A video camera: turn the camera on.
+    Video,
+    /// A video camera, crossed: the camera is off.
+    VideoOff,
+    /// A screen with an arrow up out of it: share your screen.
+    Screen,
+    /// A screen, crossed: stop sharing.
+    ScreenOff,
 }
 
 impl Icon {
@@ -165,6 +173,10 @@ impl Icon {
             Icon::Info => r#"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>"#,
             Icon::Clock => r#"<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>"#,
             Icon::Sparkle => r#"<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>"#,
+            Icon::Video => r#"<path d="m16 13 5.2 3.5a.5.5 0 0 0 .8-.4V7.9a.5.5 0 0 0-.8-.4L16 11"/><rect x="2" y="6" width="14" height="12" rx="2"/>"#,
+            Icon::VideoOff => r#"<path d="M10.7 6H14a2 2 0 0 1 2 2v3.3l1 1L22 8v8"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><path d="m2 2 20 20"/>"#,
+            Icon::Screen => r#"<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M9 10l3-3 3 3M12 7v6"/>"#,
+            Icon::ScreenOff => r#"<path d="M7 3h13a2 2 0 0 1 2 2v10a2 2 0 0 1-1 1.7M4 3.3A2 2 0 0 0 2 5v10a2 2 0 0 0 2 2h13"/><path d="M8 21h8M12 17v4"/><path d="m2 2 20 20"/>"#,
             Icon::Keyboard => r#"<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M8 16h8M10 13h4"/>"#,
         }
     }

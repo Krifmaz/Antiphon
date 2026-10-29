@@ -101,6 +101,14 @@ const TOUR: &[Step] = &[
         },
     },
     Step {
+        name: "video-call",
+        size: (1440.0, 900.0),
+        setup: |app| {
+            app.demo().video_on();
+            app.go(Route::Person(Demo::robin()));
+        },
+    },
+    Step {
         name: "volume",
         size: (1280.0, 820.0),
         setup: |app| {

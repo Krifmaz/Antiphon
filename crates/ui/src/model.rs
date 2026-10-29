@@ -181,6 +181,40 @@ pub struct Call {
     pub talk_hint: Option<String>,
     /// Trust problems found at connect ("This key is new for this address").
     pub warning: Option<String>,
+    /// The pictures on the call: theirs first, then my own previews.
+    /// Empty for a voice-only call, which then looks as it always has.
+    pub video: Vec<VideoTile>,
+    /// My camera is on.
+    pub camera_on: bool,
+    /// My screen is being shared.
+    pub sharing: bool,
+    /// What this device can send: a camera button and a share button
+    /// appear only for what it can actually do.
+    pub can_camera: bool,
+    /// This device can share its screen.
+    pub can_share: bool,
+}
+
+/// One picture on a call: someone's camera or screen.
+#[derive(Clone, Debug)]
+pub struct VideoTile {
+    /// Stable for the life of the picture ("their-screen", "my-camera"),
+    /// so a picture chosen to be shown large stays chosen as frames come.
+    pub key: String,
+    /// Whose it is and what ("Sam's screen", "You").
+    pub label: String,
+    /// The picture. Built by the app only when a new frame arrives, so a
+    /// redraw with nothing new uploads nothing.
+    pub image: iced_core::image::Handle,
+    /// Its width in pixels, for laying tiles out at the right shape.
+    pub width: u32,
+    /// Its height in pixels.
+    pub height: u32,
+    /// Mine, rather than theirs. The app mirrors my own camera before it
+    /// gets here, the way a mirror shows a face.
+    pub mine: bool,
+    /// A screen rather than a camera: shown whole, never cropped.
+    pub screen: bool,
 }
 
 /// Where a call is.

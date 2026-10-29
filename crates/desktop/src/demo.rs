@@ -96,8 +96,22 @@ impl Demo {
             their_level: 0.75,
             quality: Some("Clear".into()),
             talk_hint: Some("Speak to talk".into()),
+            can_camera: true,
+            can_share: true,
             ..ui::Call::default()
         };
+    }
+
+    /// Turns video on in the demo call: Robin sharing a screen and on
+    /// camera, and my own camera. Robin's pictures go through the real
+    /// encoder and decoder, so the tour shows what the codec delivers.
+    pub fn video_on(&mut self) {
+        self.model.call.camera_on = true;
+        self.model.call.video = vec![
+            through_codec(antiphon_video::Encoder::screen(), &fake_screen(1600, 900), "their-screen", "Robin's screen"),
+            through_codec(antiphon_video::Encoder::camera(), &fake_face(640, 480, [214, 160, 120], [58, 92, 140], [236, 222, 200]), "their-camera", "Robin"),
+            mine("my-camera", "You", &fake_face(480, 360, [190, 140, 105], [140, 58, 64], [200, 214, 228])),
+        ];
     }
 
     /// Makes the demo a phone (push to talk, the loudspeaker, battery and
@@ -208,6 +222,20 @@ impl Demo {
                     ph.speaker = on;
                 }
             }
+            Action::Camera(on) => {
+                self.model.call.camera_on = on;
+                self.model.call.video.retain(|t| t.key != "my-camera");
+                if on {
+                    self.model.call.video.push(mine("my-camera", "You", &fake_face(480, 360, [190, 140, 105], [140, 58, 64], [200, 214, 228])));
+                }
+            }
+            Action::ShareScreen(on) => {
+                self.model.call.sharing = on;
+                self.model.call.video.retain(|t| t.key != "my-screen");
+                if on {
+                    self.model.call.video.push(mine("my-screen", "Your screen", &fake_screen(800, 450)));
+                }
+            }
             _ => {}
         }
     }
@@ -257,4 +285,99 @@ fn line(id: u64, mine: bool, text: &str, time: &str, day: Option<&str>) -> Line 
 /// A made-up reachability check.
 fn check(label: &str, state: CheckState, detail: &str) -> ui::Check {
     ui::Check { label: label.into(), state, detail: detail.into() }
+}
+
+/// Sends `frame` through `encoder` and a decoder, and makes a tile of what
+/// comes out: the picture exactly as the other side would see it.
+fn through_codec(mut encoder: antiphon_video::Encoder, frame: &antiphon_video::Frame, key: &str, label: &str) -> ui::VideoTile {
+    let screen = encoder.stream() == antiphon_video::Stream::Screen;
+    let mut decoder = antiphon_video::Decoder::new();
+    for datagram in encoder.encode(frame) {
+        decoder.push(&datagram);
+    }
+    let p = decoder.picture(encoder.stream()).expect("a whole first frame decodes");
+    ui::VideoTile {
+        key: key.into(),
+        label: label.into(),
+        image: iced::widget::image::Handle::from_rgba(p.width, p.height, p.rgba),
+        width: p.width,
+        height: p.height,
+        mine: false,
+        screen,
+    }
+}
+
+/// A tile of my own, straight from a frame.
+fn mine(key: &str, label: &str, frame: &antiphon_video::Frame) -> ui::VideoTile {
+    ui::VideoTile {
+        key: key.into(),
+        label: label.into(),
+        image: iced::widget::image::Handle::from_rgba(frame.width, frame.height, frame.rgba.clone()),
+        width: frame.width,
+        height: frame.height,
+        mine: true,
+        screen: key.ends_with("screen"),
+    }
+}
+
+/// Fills the rectangle `(x, y, w, h)` of `f` with `rgb`, clipped.
+fn fill_rect(f: &mut antiphon_video::Frame, x: u32, y: u32, w: u32, h: u32, rgb: [u8; 3]) {
+    for row in y..(y + h).min(f.height) {
+        for col in x..(x + w).min(f.width) {
+            let at = ((row * f.width + col) * 4) as usize;
+            f.rgba[at..at + 3].copy_from_slice(&rgb);
+        }
+    }
+}
+
+/// A made-up shared screen: an editor window with a sidebar and lines of
+/// coloured "code", the kind of picture screen sharing is for.
+fn fake_screen(w: u32, h: u32) -> antiphon_video::Frame {
+    let mut f = antiphon_video::Frame::solid(w, h, [30, 31, 36, 255]);
+    let u = |v: u32| v * w / 1600; // lay out at 1600 wide, scale to `w`
+    fill_rect(&mut f, 0, 0, w, u(36), [22, 22, 26]);
+    for (i, c) in [[237, 106, 94], [245, 191, 79], [98, 197, 84]].iter().enumerate() {
+        fill_rect(&mut f, u(16 + i as u32 * 22), u(12), u(12), u(12), *c);
+    }
+    fill_rect(&mut f, 0, u(36), u(260), h, [25, 26, 30]);
+    for i in 0..14 {
+        let width = [150, 120, 170, 90, 140][i % 5];
+        fill_rect(&mut f, u(28), u(64 + i as u32 * 34), u(width), u(10), if i == 3 { [240, 234, 214] } else { [92, 96, 110] });
+    }
+    let palette = [[198, 120, 221], [97, 175, 239], [152, 195, 121], [229, 192, 123], [171, 178, 191]];
+    let mut seed = 7u32;
+    for line in 0..24 {
+        let y = u(64 + line * 32);
+        let mut x = u(300 + (line % 4) * 32);
+        fill_rect(&mut f, u(280), y, u(18), u(10), [70, 74, 86]);
+        for _ in 0..(3 + line % 5) {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let len = u(40 + (seed >> 16) % 160);
+            fill_rect(&mut f, x, y, len, u(10), palette[((seed >> 8) % 5) as usize]);
+            x += len + u(14);
+        }
+    }
+    f
+}
+
+/// A made-up camera picture: a person's head and shoulders against a wall,
+/// with a soft light from the left.
+fn fake_face(w: u32, h: u32, skin: [u8; 3], top: [u8; 3], wall: [u8; 3]) -> antiphon_video::Frame {
+    let mut f = antiphon_video::Frame::solid(w, h, [0, 0, 0, 255]);
+    let (cx, head_y, r) = (w as f32 * 0.5, h as f32 * 0.42, h as f32 * 0.2);
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32, y as f32);
+            let light = 1.05 - 0.35 * fx / w as f32;
+            let head = ((fx - cx) / (r * 0.85)).powi(2) + ((fy - head_y) / r).powi(2) <= 1.0;
+            let hair = ((fx - cx) / (r * 0.92)).powi(2) + ((fy - head_y + r * 0.25) / (r * 0.9)).powi(2) <= 1.0 && fy < head_y - r * 0.35;
+            let body = ((fx - cx) / (w as f32 * 0.32)).powi(2) + ((fy - h as f32 * 1.02) / (h as f32 * 0.38)).powi(2) <= 1.0;
+            let c = if hair { [52, 38, 32] } else if head { skin } else if body { top } else { wall };
+            let at = ((y * w + x) * 4) as usize;
+            for (out, v) in f.rgba[at..at + 3].iter_mut().zip(c) {
+                *out = (v as f32 * light).min(255.0) as u8;
+            }
+        }
+    }
+    f
 }

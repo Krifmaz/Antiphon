@@ -146,6 +146,8 @@ pub struct Live {
     /// A handle to the engine's runtime, for spawning sends and transfers
     /// from the interface thread.
     runtime: tokio::runtime::Handle,
+    /// The other side's camera and screen, fed by the receive loop.
+    pub video: Arc<crate::video::CallVideo>,
 }
 
 impl Live {
@@ -602,6 +604,7 @@ async fn run(
         files: Arc::new(Mutex::new(FileTransferState::default())),
         inbox: Mutex::new(Vec::new()),
         runtime: tokio::runtime::Handle::current(),
+        video: Arc::new(crate::video::CallVideo::new()),
     });
     *shared.live.lock().unwrap() = Some(live.clone());
     // The transfer pacer slows down while a call shares the link.
@@ -611,6 +614,7 @@ async fn run(
     // Whatever arrived of an interrupted download stays on disk with a
     // record of which chunks it is, so offering it again resumes it.
     file_transfer::save_partial_if_interrupted(&live.files);
+    live.video.stop_all();
     *shared.live.lock().unwrap() = None;
     result
 }
@@ -715,6 +719,9 @@ async fn talk(
                     None => {}
                 },
                 Received::File(bytes) => file_transfer::handle_file_chunk(&bytes, &files, &peer),
+                // No wake: a connected call already draws every frame,
+                // and each one picks up the newest picture.
+                Received::Video(bytes) => recv_live.video.receive(&bytes),
             })
             .await
     });

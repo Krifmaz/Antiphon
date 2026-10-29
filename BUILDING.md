@@ -25,7 +25,8 @@ setting is there".)
 On Linux the audio and UI stacks need their development headers first:
 
 ```bash
-sudo apt-get install libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev
+sudo apt-get install libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev \
+    libpipewire-0.3-dev libspa-0.2-dev libgbm-dev libxcb1-dev libclang-dev
 ```
 
 There is deliberately **no `rust-toolchain.toml`**, and the reason is worth

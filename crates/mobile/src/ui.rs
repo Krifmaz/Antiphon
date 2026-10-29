@@ -357,6 +357,9 @@ pub struct App {
     /// The last message with each person, hex key to (text, unix seconds),
     /// for the people list.
     previews: HashMap<String, (String, u64)>,
+    /// The call's pictures as last drawn, by tile key, with the version
+    /// each was built from, so an unchanged picture is not uploaded again.
+    tiles: HashMap<String, (u64, antiphon_ui::VideoTile)>,
     /// Muted from the call screen: nothing is sent, however the mic is keyed.
     muted: bool,
     /// The push-to-talk pad is held.
@@ -440,6 +443,7 @@ impl App {
             look: Default::default(),
             qr: None,
             previews,
+            tiles: HashMap::new(),
             muted: false,
             talking: false,
             connected_at: None,

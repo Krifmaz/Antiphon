@@ -440,7 +440,7 @@ pub(crate) async fn run_call(
                 // name/status, file-transfer offers) and file chunks are
                 // just dropped.
                 antiphon_net::Received::Control(_) => {}
-                antiphon_net::Received::File(_) => {}
+                antiphon_net::Received::File(_) | antiphon_net::Received::Video(_) => {}
             })
             .await;
         if let Err(e) = result {

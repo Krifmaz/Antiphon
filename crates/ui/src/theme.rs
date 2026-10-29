@@ -674,6 +674,27 @@ pub fn accent_box(_: &Theme) -> container::Style {
     }
 }
 
+/// The box a call picture sits in: near-black behind letterboxing, with
+/// the panel's border and the given corner radius.
+pub fn video_frame(_: &Theme, radius: f32) -> container::Style {
+    let p = look();
+    container::Style {
+        background: Some(Background::Color(hex("#0e0e11"))),
+        border: Border { color: p.border, width: 1.0, radius: radius.into() },
+        ..container::Style::default()
+    }
+}
+
+/// The name chip in a call picture's corner: dark glass, readable over
+/// any picture in any theme.
+pub fn video_label(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.62, ..hex("#0e0e11") })),
+        border: Border { radius: 99.0.into(), ..Border::default() },
+        ..container::Style::default()
+    }
+}
+
 /// The call stage: a soft wash of the accent over the panel.
 pub fn call_stage(_: &Theme) -> container::Style {
     let p = look();

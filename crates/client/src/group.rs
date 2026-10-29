@@ -262,7 +262,7 @@ impl Group {
                             _ => {}
                         },
                         // Files and chat stay on the primary connection.
-                        Received::File(_) => {}
+                        Received::File(_) | Received::Video(_) => {}
                     })
                     .await;
             })

@@ -25,6 +25,12 @@ pub enum FrameType {
     /// into) actual control traffic. `payload` is ciphertext whose plaintext
     /// is `[transfer_id: u64 BE][chunk_index: u32 BE][chunk bytes...]`.
     File,
+    /// An AEAD-sealed video datagram: one part of one patch of a camera or
+    /// screen picture (`antiphon_video::wire` defines the plaintext). Its
+    /// own type, not `File`'s or `Control`'s, so a burst of video can be
+    /// told apart, and a peer from before video drops it as unknown rather
+    /// than misreading it.
+    Video,
 }
 
 impl FrameType {
@@ -34,6 +40,7 @@ impl FrameType {
             FrameType::Audio => 1,
             FrameType::Control => 2,
             FrameType::File => 3,
+            FrameType::Video => 4,
         }
     }
 
@@ -43,6 +50,7 @@ impl FrameType {
             1 => Ok(FrameType::Audio),
             2 => Ok(FrameType::Control),
             3 => Ok(FrameType::File),
+            4 => Ok(FrameType::Video),
             other => Err(ProtocolError::UnknownFrameType(other)),
         }
     }
@@ -112,6 +120,14 @@ mod tests {
         assert_eq!(decoded.frame_type, FrameType::File);
         assert_eq!(decoded.counter, 3);
         assert_eq!(decoded.payload, b"chunk bytes");
+    }
+
+    #[test]
+    fn video_frame_type_round_trips_too() {
+        let encoded = encode(FrameType::Video, 9, b"patch part");
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded.frame_type, FrameType::Video);
+        assert_eq!(decoded.payload, b"patch part");
     }
 
     #[test]

@@ -250,6 +250,8 @@ pub struct ActiveCall {
     /// File transfer (spec §5) progress/offer state for this call -- see
     /// `crate::file_transfer` for the actual send/receive logic.
     pub file_transfer: Arc<Mutex<FileTransferState>>,
+    /// Camera and screen video, both ways (`crate::video`).
+    pub video: Arc<crate::video::CallVideo>,
 
     // Device Hot-Swap (spec §1 Utility: "change microphone or headphones
     // mid-call without dropping"). The stream handles live behind a Mutex
@@ -299,6 +301,8 @@ impl Drop for ActiveCall {
         self.recv_task.abort();
         self.drain_task.abort();
         self.ptt_stop.store(true, Ordering::Relaxed);
+        // Lets the camera go and tells the other side the pictures ended.
+        self.video.stop_all();
     }
 }
 
@@ -1694,6 +1698,8 @@ pub fn start_pipeline(
     let recv_introduction = pending_introduction.clone();
     let recv_friend_pending = pending_friend_request.clone();
     let recv_friend_accepted = friend_accepted.clone();
+    let video = Arc::new(crate::video::CallVideo::new());
+    let recv_video = video.clone();
     let recv_task = tokio::spawn(async move {
         let result = recv_peer
             .recv_loop(move |msg| match msg {
@@ -1866,6 +1872,7 @@ pub fn start_pipeline(
                     None => {}
                 },
                 Received::File(bytes) => file_transfer::handle_file_chunk(&bytes, &recv_ft_state, &recv_ft_peer),
+                Received::Video(bytes) => recv_video.receive(&bytes),
             })
             .await;
         if let Err(e) = result {
@@ -2147,6 +2154,7 @@ pub fn start_pipeline(
         replay,
         replay_clips,
         file_transfer: file_transfer_state,
+        video,
         capture: Mutex::new(capture),
         capture_tx,
         playback: Mutex::new(playback),

@@ -27,6 +27,8 @@ antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-captions = { version = "0.1.0", path = "../captions" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
+# Camera and screen video on calls, with the desktop capture.
+antiphon-video = { version = "0.1.0", path = "../video", features = ["capture"] }
 # The mailbox, run in-app when this device holds mail for your others.
 antiphon-relay = { version = "0.1.0", path = "../relay" }
 

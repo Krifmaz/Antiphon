@@ -10,6 +10,7 @@ members = [
     "crates/desktop",
     "crates/gui",
     "crates/ui",
+    "crates/video",
     "crates/relay",
     "crates/captions",
     "crates/mobile",
@@ -32,6 +33,16 @@ version = "0.1.0"
 # fast rebuilds. Measure with:
 #   cargo test -p antiphon-audio real_time -- --ignored --nocapture
 [profile.dev.package.antiphon-audio]
+opt-level = 3
+
+# Video for the same reason: an unoptimised JPEG encoder and the change
+# scan over every pixel take longer than a frame lasts, so a debug build
+# would send a slideshow. The codecs underneath are optimised with it.
+[profile.dev.package.antiphon-video]
+opt-level = 3
+[profile.dev.package.jpeg-encoder]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
 opt-level = 3
 
 # The same argument for the crypto primitives: every audio frame and every

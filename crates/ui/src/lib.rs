@@ -288,6 +288,10 @@ pub enum Action {
     OpenDownloads,
     /// Play the call through the loudspeaker (true) or the earpiece.
     Speaker(bool),
+    /// Turn my camera on (true) or off.
+    Camera(bool),
+    /// Start (true) or stop sharing my screen.
+    ShareScreen(bool),
     /// The push-to-talk pad was pressed (true) or let go.
     Talk(bool),
     /// Ask the system for the microphone.
@@ -313,6 +317,9 @@ pub enum Action {
 pub enum Msg {
     /// The window's size changed.
     Resized(Size),
+    /// Show this call picture large (by its tile key), or hand the
+    /// choice back if it already is.
+    FocusVideo(String),
     /// An animation frame (or a tick): advances animations and toasts.
     Frame(Instant),
     /// Go to a screen.
@@ -445,6 +452,9 @@ pub struct Ui {
     epoch: Instant,
     /// Animations off: everything jumps to its end state.
     reduced_motion: bool,
+    /// The call picture chosen to be shown large, by its tile key. `None`
+    /// lets the stage choose: their screen, then their camera, then mine.
+    video_focus: Option<String>,
 }
 
 impl Default for Ui {
@@ -486,6 +496,7 @@ impl Ui {
             now,
             epoch: now,
             reduced_motion: false,
+            video_focus: None,
         }
     }
 
@@ -735,6 +746,11 @@ impl Ui {
             }
             Msg::LimitEdit(s) => {
                 self.limit_edit = Some(s.chars().filter(char::is_ascii_digit).take(6).collect());
+                Vec::new()
+            }
+            Msg::FocusVideo(key) => {
+                // Choosing the picture already large hands the choice back.
+                self.video_focus = if self.video_focus.as_ref() == Some(&key) { None } else { Some(key) };
                 Vec::new()
             }
             Msg::LimitSave => match self.limit_edit.take() {

@@ -981,7 +981,7 @@ mod integration_tests {
                             }
                         }
                         Received::File(bytes) => handle_file_chunk(&bytes, &state, &peer),
-                        Received::Audio { .. } => {}
+                        Received::Audio { .. } | Received::Video(_) => {}
                     })
                     .await;
             });
@@ -1016,7 +1016,7 @@ mod integration_tests {
                             }
                             handle_file_chunk(&bytes, &state, &peer)
                         }
-                        Received::Audio { .. } => {}
+                        Received::Audio { .. } | Received::Video(_) => {}
                     })
                     .await;
             });

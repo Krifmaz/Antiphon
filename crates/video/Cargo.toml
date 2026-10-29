@@ -1,0 +1,26 @@
+[package]
+name = "antiphon-video"
+description = "Camera and screen video for calls: a small tile codec, its packets, and (on desktops) the capture"
+edition.workspace = true
+version.workspace = true
+
+# Pure Rust all the way down, so the same codec builds for every platform
+# the app ships on -- Windows, macOS, Linux, Android and iOS -- with no C
+# toolchain, NASM or NDK compiler in the way, and a desktop and a phone
+# always speak the same video.
+
+[dependencies]
+jpeg-encoder = "0.6.1"
+zune-jpeg = "0.5.15"
+zune-core = "0.5.3"
+
+# Capture is desktop-only: phones bring their own camera through the OS.
+# Without mozjpeg (nokhwa's default decoder is C): a camera's MJPEG frames
+# are decoded with zune-jpeg, which is already here for the codec.
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"], optional = true }
+xcap = { version = "0.9.8", optional = true }
+
+[features]
+default = []
+# The camera (nokhwa) and the screen (xcap).
+capture = ["dep:nokhwa", "dep:xcap"]

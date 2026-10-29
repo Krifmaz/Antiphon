@@ -243,8 +243,22 @@ impl PeerConnection {
         Ok(())
     }
 
+    /// Sends one video datagram (a part of a camera or screen patch, as
+    /// `antiphon_video` cuts them). Sealed by the same session as the
+    /// voice, so video is end-to-end encrypted exactly as audio is; its
+    /// own AAD ("video") for the same reason each other kind has one.
+    pub async fn send_video(&self, plaintext: &[u8]) -> Result<(), NetError> {
+        let sealed = {
+            let mut session = self.session.lock().await;
+            session.encrypt(plaintext, b"video")?
+        };
+        let packet = encode(FrameType::Video, sealed.counter, &sealed.ciphertext);
+        self.socket.send_to(&packet, self.remote).await?;
+        Ok(())
+    }
+
     /// Runs forever, decrypting incoming frames from `remote` and handing
-    /// each to `on_message` as [`Received::Audio`] or [`Received::Control`].
+    /// each to `on_message` as the matching [`Received`] kind.
     /// Frames from any other address, or that fail to decrypt (forged/
     /// corrupted/replayed), are dropped.
     pub async fn recv_loop(self: Arc<Self>, mut on_message: impl FnMut(Received) + Send) -> Result<(), NetError> {
@@ -259,6 +273,7 @@ impl PeerConnection {
                 FrameType::Audio => b"audio",
                 FrameType::Control => b"control",
                 FrameType::File => b"file",
+                FrameType::Video => b"video",
                 FrameType::Handshake => continue, // stray retransmit after the session is already up
             };
             let mut session = self.session.lock().await;
@@ -267,6 +282,7 @@ impl PeerConnection {
             on_message(match raw.frame_type {
                 FrameType::Audio => Received::Audio { counter: raw.counter, plaintext },
                 FrameType::File => Received::File(plaintext),
+                FrameType::Video => Received::Video(plaintext),
                 _ => Received::Control(plaintext),
             });
         }
@@ -281,4 +297,6 @@ pub enum Received {
     Audio { counter: u64, plaintext: Vec<u8> },
     Control(Vec<u8>),
     File(Vec<u8>),
+    /// One video datagram, for an `antiphon_video::Decoder`.
+    Video(Vec<u8>),
 }

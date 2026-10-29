@@ -1,15 +1,19 @@
 //! The call stage: both of you, who is talking, how long, the words to
 //! compare, and the controls. It sits at the top of the conversation, so
 //! the call and the chat beside it are one place.
+//!
+//! When either side turns a camera on or shares a screen, the two avatars
+//! give way to the pictures: one large, the rest as small tiles beside it
+//! (below it on a phone) that can be clicked to swap in.
 
-use iced_core::{Alignment, Length};
-use iced_widget::{column, container, mouse_area, row, space};
+use iced_core::{Alignment, ContentFit, Length};
+use iced_widget::{button, column, container, image, mouse_area, row, space, stack};
 
 use super::{clock, fill};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::*;
-use crate::{Action, El, Model, Msg, Phase, Transmit, Ui};
+use crate::{Action, El, Model, Msg, Phase, Transmit, Ui, VideoTile};
 
 /// The stage. `compact` is the phone's: smaller avatars, controls in one row.
 pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
@@ -61,15 +65,21 @@ pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
         middle = middle.push(faint("Ringing their door").size(12));
     }
 
-    let people: El<'a, Msg> = row![
-        person(&m.me.name, &m.me.id, me_strength, p.ok, me_caption),
-        container(middle).width(Length::Fill).center_x(Length::Fill),
-        person(&c.peer_name, &peer_seed, them_strength, them_color, them_caption),
-    ]
-    .align_y(Alignment::Center)
-    .into();
-
-    let mut col = column![people].spacing(16).align_x(Alignment::Center);
+    let mut col = column![].spacing(16).align_x(Alignment::Center);
+    if let Some(video) = video_area(ui, m, compact) {
+        // The pictures take the avatars' place; the clock and badges stay
+        // above them.
+        col = col.push(middle).push(video);
+    } else {
+        col = col.push(
+            row![
+                person(&m.me.name, &m.me.id, me_strength, p.ok, me_caption),
+                container(middle).width(Length::Fill).center_x(Length::Fill),
+                person(&c.peer_name, &peer_seed, them_strength, them_color, them_caption),
+            ]
+            .align_y(Alignment::Center),
+        );
+    }
 
     if c.phase == Phase::Connected && !c.code.is_empty() {
         col = col.push(code_strip(m));
@@ -108,7 +118,9 @@ fn code_strip<'a>(m: &'a Model) -> El<'a, Msg> {
 fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
     let p = theme::look();
     let c = &m.call;
-    let size = if compact { 48.0 } else { 52.0 };
+    // A phone with every control showing has seven of them across about
+    // 370 pixels: a touch smaller and closer, so none falls off the edge.
+    let size = if compact { 44.0 } else { 52.0 };
     if c.phase != Phase::Connected {
         return row![round_btn(Icon::PhoneOff, "Stop calling", Btn::DangerSolid, Some(Msg::Do(Action::Hangup)), size)].into();
     }
@@ -128,8 +140,26 @@ fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
             size
         ),
     ]
-    .spacing(12)
+    .spacing(if compact { 8 } else { 12 })
     .align_y(Alignment::Center);
+    if c.can_camera {
+        r = r.push(round_btn(
+            if c.camera_on { Icon::Video } else { Icon::VideoOff },
+            if c.camera_on { "Turn the camera off" } else { "Turn the camera on" },
+            if c.camera_on { Btn::RoundOn } else { Btn::Round },
+            Some(Msg::Do(Action::Camera(!c.camera_on))),
+            size,
+        ));
+    }
+    if c.can_share {
+        r = r.push(round_btn(
+            if c.sharing { Icon::ScreenOff } else { Icon::Screen },
+            if c.sharing { "Stop sharing your screen" } else { "Share your screen" },
+            if c.sharing { Btn::RoundOn } else { Btn::Round },
+            Some(Msg::Do(Action::ShareScreen(!c.sharing))),
+            size,
+        ));
+    }
     if let Some(ph) = &m.phone {
         r = r.push(round_btn(
             if ph.speaker { Icon::Volume } else { Icon::Phone },
@@ -170,13 +200,70 @@ fn talk_pad<'a>(m: &'a Model) -> Option<El<'a, Msg>> {
     }
     let p = theme::look();
     let (label, color) = if ph.talking { ("Talking…", p.ok) } else { ("Hold to talk", p.muted) };
+    // Shorter when pictures are showing, so the chat keeps some room.
+    let height = if m.call.video.is_empty() { 110.0 } else { 72.0 };
     let pad = container(column![icon(Icon::Mic, 28.0, color), t(label).size(15).font(theme::semibold()).color(color)].spacing(6).align_x(Alignment::Center))
         .width(Length::Fill)
-        .height(110)
+        .height(height)
         .center_x(Length::Fill)
-        .center_y(110)
+        .center_y(height)
         .style(theme::inset);
     // Let go anywhere and it stops: the runner also ends it when every
     // finger leaves the screen.
     Some(mouse_area(pad).on_press(Msg::Do(Action::Talk(true))).on_release(Msg::Do(Action::Talk(false))).into())
+}
+
+/// The call's pictures: the chosen one large, the others as tiles to
+/// click. `None` on a voice-only call.
+fn video_area<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> Option<El<'a, Msg>> {
+    let tiles = &m.call.video;
+    if tiles.is_empty() || m.call.phase != Phase::Connected {
+        return None;
+    }
+    let main = ui
+        .video_focus
+        .as_ref()
+        .and_then(|k| tiles.iter().find(|t| &t.key == k))
+        .unwrap_or_else(|| first_choice(tiles));
+    let height = if compact { 196.0 } else { 360.0 };
+    let big = picture(main, Length::Fill, Length::Fixed(height), 12.0);
+    let others: Vec<El<'a, Msg>> = tiles
+        .iter()
+        .filter(|t| t.key != main.key)
+        .map(|t| {
+            let (w, h) = if compact { (112.0, 63.0) } else { (176.0, 99.0) };
+            button(picture(t, Length::Fixed(w), Length::Fixed(h), 8.0))
+                .padding(0)
+                .style(theme::btn(Btn::Ghost))
+                .on_press(Msg::FocusVideo(t.key.clone()))
+                .into()
+        })
+        .collect();
+    let area: El<'a, Msg> = if others.is_empty() {
+        big
+    } else if compact {
+        column![big, row(others).spacing(8)].spacing(8).into()
+    } else {
+        row![big, column(others).spacing(8)].spacing(10).into()
+    };
+    Some(container(area).max_width(1100).into())
+}
+
+/// Which picture is large when nobody chose: their screen (what they
+/// shared is what they want seen), their camera, then my own.
+fn first_choice(tiles: &[VideoTile]) -> &VideoTile {
+    let rank = |t: &VideoTile| (t.mine, !t.screen);
+    tiles.iter().min_by_key(|t| rank(t)).expect("not empty")
+}
+
+/// One picture with its label in the corner. A screen is shown whole; a
+/// camera fills its box, cropping the edges, as video calls do.
+fn picture<'a>(tile: &'a VideoTile, w: Length, h: Length, radius: f32) -> El<'a, Msg> {
+    let fit = if tile.screen { ContentFit::Contain } else { ContentFit::Cover };
+    let pic = image(tile.image.clone()).content_fit(fit).width(Length::Fill).height(Length::Fill).border_radius(radius);
+    let label = container(t(tile.label.as_str()).size(11.5).font(theme::semibold()).color(theme::hex("#f4f1ea")))
+        .padding([3, 8])
+        .style(theme::video_label);
+    let label = container(label).padding(8).width(Length::Fill).height(Length::Fill).align_bottom(Length::Fill);
+    container(stack![pic, label]).width(w).height(h).clip(true).style(move |th| theme::video_frame(th, radius)).into()
 }
