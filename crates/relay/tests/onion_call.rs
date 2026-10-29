@@ -226,3 +226,46 @@ async fn a_node_without_hops_says_so() {
     let err = connect_via(&[(addr, fake), (addr, fake)], addr).await.err().unwrap();
     assert!(matches!(err, NetError::OnionRefused), "{err}");
 }
+
+/// A hop node whose state can be wiped, as a restart with a kept key does.
+async fn restartable_hop() -> (SocketAddr, Arc<Mutex<HopNode>>, [u8; 32]) {
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let addr = socket.local_addr().unwrap();
+    let secret = HopSecret::generate();
+    let bytes = secret.to_bytes();
+    let limits = HopLimits { allow_private: true, ..HopLimits::default() };
+    let hops = Arc::new(Mutex::new(HopNode::new(secret, limits)));
+    let relay = Arc::new(Mutex::new(Relay::new(Limits::default())));
+    tokio::spawn(run_node_with_hops(socket, relay, None, None, Some(hops.clone())));
+    (addr, hops, bytes)
+}
+
+#[tokio::test]
+async fn a_circuit_rebuilds_itself_after_a_hop_restarts() {
+    let (h1, _, _) = restartable_hop().await;
+    let (h2, node2, key2) = restartable_hop().await;
+    let (target, _) = logging_relay().await;
+    let shim = connect_via(&hop_keys(&[h1, h2]).await, target).await.unwrap();
+
+    // A listener at the target, so a dial has someone to find.
+    let token = [3u8; 32];
+    let listener = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    relay::register(&listener, target, &[token]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    relay::dial(&shim.socket(), shim.relay_addr(), token, T).await.expect("dial over the circuit");
+
+    // The exit restarts: same key, no memory of the circuit.
+    let limits = HopLimits { allow_private: true, ..HopLimits::default() };
+    *node2.lock().unwrap() = HopNode::new(HopSecret::from_bytes(key2), limits);
+
+    // The next cell meets "unknown circuit", the shim rebuilds, and a dial
+    // through the same shim works again.
+    // (A second listener: the first counts as busy in its fresh pairing.)
+    let second = [4u8; 32];
+    let listener2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    relay::register(&listener2, target, &[second]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    relay::dial(&shim.socket(), shim.relay_addr(), second, Duration::from_secs(10)).await.expect("dial after the rebuild");
+    assert_eq!(node2.lock().unwrap().stats().circuits, 1, "the exit holds the rebuilt circuit");
+}

@@ -36,7 +36,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use antiphon_crypto::onion::{HopSecret, LayerKeys};
-use antiphon_net::onion::{Cell, Setup, CREATED_MARK};
+use antiphon_net::onion::{exit_backward, hop_backward, hop_forward, Cell, Setup, CREATED_MARK};
 
 /// Bounds on what a hop node holds, so offering hops cannot be turned into
 /// a way to exhaust the operator's memory or sockets.
@@ -135,6 +135,9 @@ struct Circuit {
     next: Next,
     /// This hop's layer keys for the circuit, in memory only.
     keys: LayerKeys,
+    /// This hop's place on the path, from its setup: how much of each data
+    /// cell is filler (see `antiphon_net::onion` on cell sizes).
+    position: u8,
     /// The next backward sequence number under `keys`.
     back_seq: u64,
     /// When a cell last passed, for idle expiry.
@@ -228,9 +231,16 @@ impl HopNode {
                 out.push(Action::Send(c.prev, Cell::Created { circ: c.prev_circ, layer }.encode()));
             }
             Cell::Forward { circ, layer } => {
-                let Some(&id) = self.by_prev.get(&(from, circ)) else { return out };
+                let Some(&id) = self.by_prev.get(&(from, circ)) else {
+                    // Not a circuit this node knows -- it restarted, or forgot
+                    // an idle one. Saying so lets the caller rebuild instead
+                    // of talking into silence. Smaller than what came in.
+                    out.push(Action::Send(from, Cell::Destroy { circ }.encode()));
+                    return out;
+                };
                 let c = self.circuits.get_mut(&id).expect("indexed circuits exist");
-                let Ok(inner) = c.keys.open_forward(&layer) else { return out };
+                let exit = matches!(c.next, Next::Exit { .. });
+                let Some(inner) = hop_forward(&c.keys, c.position, exit, &layer) else { return out };
                 c.last_seen = now;
                 match c.next {
                     Next::Linked { addr, circ } => out.push(Action::Send(addr, Cell::Forward { circ, layer: inner }.encode())),
@@ -240,13 +250,16 @@ impl HopNode {
                 self.cells += 1;
             }
             Cell::Backward { circ, layer } => {
-                let Some(&id) = self.by_next.get(&(from, circ)) else { return out };
+                let Some(&id) = self.by_next.get(&(from, circ)) else {
+                    out.push(Action::Send(from, Cell::Destroy { circ }.encode()));
+                    return out;
+                };
                 let c = self.circuits.get_mut(&id).expect("indexed circuits exist");
                 if !matches!(c.next, Next::Linked { .. }) {
                     return out;
                 }
                 c.last_seen = now;
-                let layer = c.wrap_backward(&layer);
+                let Some(layer) = hop_backward(&c.keys, &mut c.back_seq, c.position, &layer) else { return out };
                 out.push(Action::Send(c.prev, Cell::Backward { circ: c.prev_circ, layer }.encode()));
                 self.cells += 1;
             }
@@ -291,7 +304,7 @@ impl HopNode {
             return vec![];
         }
         c.last_seen = now;
-        let layer = c.wrap_backward(bytes);
+        let Some(layer) = exit_backward(&c.keys, &mut c.back_seq, c.position, bytes) else { return vec![] };
         self.cells += 1;
         vec![Action::Send(c.prev, Cell::Backward { circ: c.prev_circ, layer }.encode())]
     }
@@ -325,8 +338,11 @@ impl HopNode {
         let id = self.next_id;
         self.next_id += 1;
         let mut out = Vec::new();
+        let position = match setup {
+            Setup::Extend { position, .. } | Setup::Exit { position, .. } => position,
+        };
         let next = match setup {
-            Setup::Extend { next, ephemeral, sealed } => {
+            Setup::Extend { next, ephemeral, sealed, .. } => {
                 if !self.may_reach(next.ip()) || next == from {
                     return self.refuse(from, circ);
                 }
@@ -340,7 +356,7 @@ impl HopNode {
                 out.push(Action::Send(next, Cell::Create { circ: next_circ, ephemeral, sealed }.encode()));
                 Next::Pending { addr: next, circ: next_circ }
             }
-            Setup::Exit { target } => {
+            Setup::Exit { target, .. } => {
                 if !self.may_reach(target.ip()) {
                     return self.refuse(from, circ);
                 }
@@ -348,7 +364,7 @@ impl HopNode {
                 Next::Exit { target }
             }
         };
-        let mut c = Circuit { prev: from, prev_circ: circ, next, keys, back_seq: 0, last_seen: now };
+        let mut c = Circuit { prev: from, prev_circ: circ, next, keys, position, back_seq: 0, last_seen: now };
         if matches!(c.next, Next::Exit { .. }) {
             let layer = c.wrap_backward(CREATED_MARK);
             out.push(Action::Send(from, Cell::Created { circ, layer }.encode()));

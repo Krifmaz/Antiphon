@@ -85,6 +85,9 @@ pub struct Encoder {
     /// The token bucket: bytes that may be sent before a frame is skipped.
     /// Negative while a big frame is being paid off.
     tokens: i64,
+    /// Percent of the profile's budget allowed now: lowered by the call's
+    /// automatic bandwidth (spec §2) when the link is struggling.
+    budget_percent: u8,
 }
 
 impl Encoder {
@@ -100,7 +103,7 @@ impl Encoder {
 
     /// An encoder for `stream` with `profile`.
     fn new(stream: Stream, profile: Profile) -> Self {
-        Self { stream, profile, reference: None, frame: 0, refresh: 0, keyframe: true, quality: profile.best, tokens: profile.budget as i64 }
+        Self { stream, profile, reference: None, frame: 0, refresh: 0, keyframe: true, quality: profile.best, tokens: profile.budget as i64, budget_percent: 100 }
     }
 
     /// The stream this encoder sends.
@@ -112,6 +115,19 @@ impl Encoder {
     /// look slow.
     pub fn fps(&self) -> u32 {
         self.profile.fps
+    }
+
+    /// Uses `percent` of the stream's usual byte budget (1 to 100), so a
+    /// struggling link carries less video and more of it is left for the
+    /// voice. Quality and frame skipping follow the smaller budget the
+    /// same way they follow the full one.
+    pub fn set_budget_percent(&mut self, percent: u8) {
+        self.budget_percent = percent.clamp(1, 100);
+    }
+
+    /// Bytes per second allowed now.
+    fn budget(&self) -> usize {
+        self.profile.budget * self.budget_percent as usize / 100
     }
 
     /// The JPEG quality in use now (for a readout).
@@ -147,7 +163,8 @@ impl Encoder {
         // The bucket fills by a frame's share of the budget each frame,
         // and holds at most a second's worth.
         let p = self.profile;
-        self.tokens = (self.tokens + (p.budget / p.fps as usize) as i64).min(p.budget as i64);
+        let budget = self.budget();
+        self.tokens = (self.tokens + (budget / p.fps as usize) as i64).min(budget as i64);
         if self.tokens < 0 {
             return Vec::new();
         }
@@ -251,7 +268,7 @@ impl Encoder {
             return;
         }
         let p = self.profile;
-        let share = p.budget / p.fps as usize;
+        let share = self.budget() / p.fps as usize;
         if sent > share + share / 4 {
             self.quality = self.quality.saturating_sub(4).max(p.worst);
         } else if sent < share / 2 && self.tokens > 0 {
@@ -578,6 +595,29 @@ mod tests {
         let mut bytes = enc.patch(&scene(64, 64, 0), 0, 0, 64, 64).unwrap();
         bytes[0..2].copy_from_slice(&32u16.to_be_bytes()); // x = 32: runs off the edge
         assert!(!paint(&mut canvas, &Patch::from_bytes(&bytes).unwrap()));
+    }
+
+    #[test]
+    fn a_smaller_budget_sends_less() {
+        // Noise, so every frame presses the budget.
+        let mut seed = 7u32;
+        let frames: Vec<Frame> = (0..Profile::CAMERA.fps * 3)
+            .map(|_| {
+                let mut f = Frame::solid(640, 480, [0, 0, 0, 255]);
+                for b in f.rgba.iter_mut() {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    *b = (seed >> 24) as u8;
+                }
+                f
+            })
+            .collect();
+        let total = |percent: u8| {
+            let mut e = Encoder::camera();
+            e.set_budget_percent(percent);
+            frames.iter().map(|f| e.encode(f).iter().map(Vec::len).sum::<usize>()).sum::<usize>()
+        };
+        let (full, quarter) = (total(100), total(25));
+        assert!(quarter * 2 < full, "{quarter} bytes at 25% vs {full} at 100%");
     }
 
     #[test]

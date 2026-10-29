@@ -11,7 +11,7 @@
 //! the app's business (`crate::video_capture` on desktops).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -63,18 +63,39 @@ impl Drop for Sender {
 }
 
 /// Everything video on one call.
-#[derive(Default)]
 pub struct CallVideo {
     /// The other side's pictures.
     remote: Mutex<Decoder>,
     /// Our streams being sent.
     senders: Mutex<HashMap<Stream, Sender>>,
+    /// Percent of each stream's byte budget to use, from the call's
+    /// automatic bandwidth (spec §2); 0 pauses sending. Shared with every
+    /// sender thread.
+    share: Arc<AtomicU8>,
+}
+
+impl Default for CallVideo {
+    fn default() -> Self {
+        Self { remote: Mutex::default(), senders: Mutex::default(), share: Arc::new(AtomicU8::new(100)) }
+    }
 }
 
 impl CallVideo {
     /// Video for a call with nothing on yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets how much of its usual budget video may use, in percent: video
+    /// gives way first when the link struggles, and at 0 it pauses (the
+    /// other side's tile goes away) until the link recovers.
+    pub fn set_share(&self, percent: u8) {
+        self.share.store(percent.min(100), Ordering::Relaxed);
+    }
+
+    /// Whether video is paused for the link's sake.
+    pub fn paused_for_bandwidth(&self) -> bool {
+        self.share.load(Ordering::Relaxed) == 0
     }
 
     /// Takes one video datagram from the receive loop.
@@ -127,6 +148,7 @@ impl CallVideo {
         let preview = Arc::new(Mutex::new(None));
         let failed = Arc::new(Mutex::new(None));
         let (t_stop, t_preview, t_failed) = (stop.clone(), preview.clone(), failed.clone());
+        let t_share = self.share.clone();
         let thread = std::thread::Builder::new()
             .name(format!("{stream:?} sender"))
             .spawn(move || {
@@ -136,16 +158,36 @@ impl CallVideo {
                 };
                 let period = Duration::from_secs(1) / encoder.fps();
                 let mut last = None;
+                let mut paused = false;
                 while !t_stop.load(Ordering::Relaxed) {
                     let started = Instant::now();
                     if let Some(why) = source.failed() {
                         *t_failed.lock().unwrap() = Some(why);
                         break;
                     }
+                    // Spec §2 automatic bandwidth: pausing tells the other
+                    // side once, as stopping does; resuming starts with a
+                    // whole picture, since theirs was cleared.
+                    let share = t_share.load(Ordering::Relaxed);
+                    if share == 0 {
+                        if !paused {
+                            paused = true;
+                            let stop = encoder.stop();
+                            runtime.block_on(async {
+                                for _ in 0..3 {
+                                    let _ = peer.send_video(&stop).await;
+                                }
+                            });
+                        }
+                    } else if paused {
+                        paused = false;
+                        encoder.request_keyframe();
+                    }
+                    encoder.set_budget_percent(share.max(1));
                     if let Some((n, frame)) = source.latest().filter(|(n, _)| Some(*n) != last) {
                         last = Some(n);
                         *t_preview.lock().unwrap() = Some((n, Arc::new(preview_of(&frame, stream))));
-                        let datagrams = encoder.encode(&frame);
+                        let datagrams = if paused { Vec::new() } else { encoder.encode(&frame) };
                         if !datagrams.is_empty() {
                             runtime.block_on(async {
                                 for d in &datagrams {

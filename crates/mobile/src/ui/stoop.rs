@@ -143,6 +143,7 @@ impl App {
             transmit: if self.settings.open_mic { Transmit::Open } else { Transmit::PushToTalk },
             noise_suppression: chain.noise_suppress.enabled,
             echo_cancel: false,
+            low_data: self.settings.data_saver,
             auto_gain: matches!(chain.gain, antiphon_audio::GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -534,6 +535,8 @@ impl App {
             Action::NoiseSuppression(on) => self.update(Message::Toggle(super::Stage::NoiseSuppress, on)),
             Action::AutoGain(on) => self.update(Message::Toggle(super::Stage::AutoGain, on)),
             Action::EchoCancel(_) => {}
+            // The phone's data saver is its "Low data" switch.
+            Action::LowData(on) => self.update(Message::DataSaver(on)),
             Action::Preset(name) if name == NATURAL => self.update(Message::ResetChain),
             Action::Preset(name) => self.update(Message::EqPreset(name)),
             Action::MicTest(on) => self.update(Message::MicTest(on)),

@@ -445,6 +445,11 @@ pub struct AppConfig {
     /// spec's default too.
     #[serde(default = "default_true")]
     pub echo_cancel: bool,
+    /// "Low data" calls (spec §2 automatic bandwidth): voice held at
+    /// 8 kbit/s in 60 ms packets and no video, for metered or poor links.
+    /// Off by default -- calls adapt by themselves anyway.
+    #[serde(default)]
+    pub low_data_calls: bool,
     /// How far to lower the other side while you talk, in dB (spec §1
     /// "Ducking"). Zero is off.
     #[serde(default)]
@@ -856,6 +861,7 @@ impl Default for AppConfig {
             silent_call_mode: 0,
             start_call_silently: false,
             echo_cancel: true,
+            low_data_calls: false,
             duck_db: 0,
             presence: 0,
             crash_reporting: false,

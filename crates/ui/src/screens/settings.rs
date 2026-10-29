@@ -259,6 +259,12 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         setting("Echo cancellation", Some("Stops them hearing themselves when you use speakers."), switch(s.echo_cancel, |on| Msg::Do(Action::EchoCancel(on)))),
         divider(),
         setting("Automatic level", Some("Keeps your voice at an even loudness."), switch(s.auto_gain, |on| Msg::Do(Action::AutoGain(on)))),
+        divider(),
+        setting(
+            "Low data calls",
+            Some("Voice only, at the least data that stays clear. Calls already lower their quality by themselves when the connection is poor."),
+            switch(s.low_data, |on| Msg::Do(Action::LowData(on))),
+        ),
     ]
     .spacing(12);
     if !s.presets.is_empty() {
@@ -337,10 +343,22 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
         switch(m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
     ));
+    let anonymity = column![
+        setting(
+            "Anonymity mode",
+            Some("Calls go through two or three relays, each knowing only the step before and after it. The strongest privacy, with noticeable delay. Needs at least two hops."),
+            switch(m.network.anonymity, |on| Msg::Do(Action::Anonymity(on))),
+        ),
+        divider(),
+        field("Hops", edit_box("hop1.example:3479, hop2.example:3479#key", &ui.hops_edit, &m.network.hops, Msg::HopsEdit, Msg::HopsSave)),
+        faint("Add #key after an address to pin the hop's key (shown when its operator starts it). Without one, the first key a hop gives is remembered and a different one is refused.").size(12.5),
+    ]
+    .spacing(12);
     column![
         card(check_card),
         titled_card("Your door", None, listen),
         titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay),
+        titled_card("Anonymity", None, anonymity),
     ]
     .spacing(14)
     .into()

@@ -114,6 +114,20 @@ pub enum ControlMessage {
     /// getting a fresh crypto counter, because reusing an AEAD nonce would
     /// be catastrophic. See `antiphon_net::fec`.
     AudioMissing { sequences: Vec<u32> },
+    /// How our voice is reaching the person who sent this (spec §2,
+    /// automatic bandwidth), about once a second: the share of our voice
+    /// packets they lost since their last report (`None` when they heard
+    /// none, e.g. while we were quiet), their clock's `sent_ms`, and the
+    /// echo of our last report's `sent_ms` with how long they held it, for
+    /// the round trip. See `crate::link_quality`.
+    LinkReport {
+        loss_pct: Option<u8>,
+        sent_ms: u32,
+        #[serde(default)]
+        echo_ms: Option<u32>,
+        #[serde(default)]
+        held_ms: u32,
+    },
     /// "I am here if you want to talk" -- a silent call (spec §9).
     ///
     /// A *request* for less attention, never more: the receiver's own
