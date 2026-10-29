@@ -25,20 +25,23 @@
 //!
 //! Everything that touches the phone is `cfg`'d to Android and iOS, so
 //! `cargo build --workspace` on a desktop does not build a second GUI
-//! toolkit. The two rule modules, [`queue`] and [`data_rules`], are plain
-//! std and compile everywhere, so their tests run on the host.
+//! toolkit. The rule modules, [`queue`], [`data_rules`] and [`stream`], and
+//! the camera picture conversion in [`camera`] are plain std and compile
+//! everywhere, so their tests run on the host.
 
 // Every item this crate owns is documented, and these keep it that way.
 // The modules compiled in by `#[path]` below belong to the desktop crate
 // and carry their own `allow`, so its documentation is not enforced twice.
 #![warn(missing_docs, clippy::missing_docs_in_private_items)]
 
+pub mod camera;
 pub mod data_rules;
 pub mod fling;
 // The desktop's own send queue, shared by path so both order files the
 // same way.
 #[path = "../../client/src/transfer_queue.rs"]
 pub mod queue;
+pub mod stream;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod account;
@@ -46,6 +49,8 @@ mod account;
 mod call;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod call_log;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod camera_source;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod contacts;
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -56,6 +61,8 @@ mod convert;
 mod files;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod platform;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod push;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod runner;
 #[cfg(any(target_os = "android", target_os = "ios"))]

@@ -2,8 +2,8 @@
 //! them, the messages, files on their way, and the composer.
 
 use iced_core::text::Wrapping;
-use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, hover, progress_bar, row, scrollable, space};
+use iced_core::{Alignment, ContentFit, Length};
+use iced_widget::{button, column, container, hover, image, progress_bar, row, scrollable, space};
 
 use super::{call, fill};
 use crate::icons::{icon, Icon};
@@ -268,10 +268,16 @@ pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut col = column![].spacing(8).padding([0, 20]);
     if let Some((name, size)) = m.transfers.offer.as_ref() {
+        // The sender's own preview of a picture, when they sent one, in
+        // place of the generic download mark.
+        let mark: El<'a, Msg> = match &m.transfers.offer_thumbnail {
+            Some(picture) => image(picture.clone()).width(56).height(56).content_fit(ContentFit::Cover).border_radius(6).into(),
+            None => container(icon(Icon::Download, 18.0, p.accent2)).center(38).style(theme::inset).into(),
+        };
         col = col.push(
             container(
                 row![
-                    container(icon(Icon::Download, 18.0, p.accent2)).center(38).style(theme::inset),
+                    mark,
                     column![t(format!("{} wants to send you a file", m.call.peer_name)).size(13.5).font(theme::semibold()), faint(format!("{name} · {size}")).size(12)].spacing(2).width(Length::Fill),
                     btn_sm("Decline", Btn::Ghost, Some(Msg::Do(Action::DeclineFile))),
                     btn_sm("Accept", Btn::Primary, Some(Msg::Do(Action::AcceptFile))),
@@ -385,9 +391,17 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }
-    let file_ok = live && m.device.files && m.call.with(&person.id);
+    // With a queue that outlives the call, a file can be chosen for anyone
+    // at any time and goes at the next call with them.
+    let on_call = live && m.call.with(&person.id);
+    let file_ok = m.device.files && (on_call || m.transfers.pick_anytime);
+    let file_tip = match (file_ok, on_call) {
+        (true, true) => "Send a file",
+        (true, false) => "Send a file on your next call",
+        (false, _) => "Files go during a call",
+    };
     let bar = row![
-        icon_btn(Icon::Paperclip, if file_ok { "Send a file" } else { "Files go during a call" }, file_ok.then_some(Msg::Do(Action::SendFile))),
+        icon_btn(Icon::Paperclip, file_tip, file_ok.then_some(Msg::Do(Action::SendFile))),
         input,
         // With nothing typed, the button records a voice message instead.
         if draft.trim().is_empty() && can_send && m.device.voice_messages {

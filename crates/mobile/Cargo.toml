@@ -9,10 +9,13 @@ version.workspace = true
 # than a second GUI toolkit.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 log = "0.4"
-iced_wgpu = "0.14.0"
+# `image` draws pictures: a call's video, and the thumbnail a sender
+# attaches to a photo they offer. antiphon-ui turns it on as well; it is
+# named here because this crate builds image handles itself.
+iced_wgpu = { version = "0.14.0", features = ["image"] }
 iced_runtime = "0.14.0"
 iced_core = "0.14.0"
-iced_widget = { version = "0.14.0", features = ["wgpu"] }
+iced_widget = { version = "0.14.0", features = ["wgpu", "image"] }
 # The phone has fonts, but the fallback chain cosmic-text builds from them
 # varies by vendor; bundling Fira Sans makes every device render the same.
 iced_graphics = { version = "0.14.0", features = ["fira-sans"] }
@@ -27,6 +30,10 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "s
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
+# What a push target is and how it goes in the route record, plus the rate
+# limit on received wake-ups. Without default features: the phone receives
+# pushes and never posts them, so it carries no HTTP or TLS stack for this.
+antiphon-push = { version = "0.1.0", path = "../push", default-features = false }
 # Stoop's interface, the same screens the desktop draws.
 antiphon-ui = { version = "0.1.0", path = "../ui" }
 # The other side's camera and screen on a call. Without the `capture`
@@ -36,7 +43,8 @@ antiphon-video = { version = "0.1.0", path = "../video" }
 # into this crate as they are (see `lib.rs`); these are their dependencies
 # rather than choices made here.
 anyhow = "1.0.104"
-# Only for the sender-side thumbnail on an offered picture, so only the
-# formats a phone's gallery hands over, and nothing that pulls in threads.
+# Making the thumbnail on a picture we offer and decoding the one on a
+# picture offered to us, so only the formats a phone's gallery hands over,
+# and nothing that pulls in threads.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 

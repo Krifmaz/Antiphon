@@ -17,12 +17,28 @@
 //! registered are refused before anything is stored, so a public node
 //! can't be filled by strangers. The operator's view is aggregate
 //! counters ([`MailboxStats`]) and nothing else.
+//!
+//! **Push wake-ups** (off unless [`Mailbox::enable_push`] is called, which
+//! `antiphon-relay --mailbox-push` does). An inbox's owner may register a
+//! push endpoint and push key against their label; when new mail arrives
+//! the node seals a `Message` wake-up to that key, signed with the node's
+//! own key, and queues it for [`Mailbox::take_wakes`]. What the node learns
+//! by this is the endpoint and push key *of a label it already holds*: it
+//! still has no identity, no sender and no contents. Two nodes holding
+//! inboxes for the same phone could match them up by the shared endpoint,
+//! which the per-node label otherwise prevents, so a phone should register
+//! its endpoint at one node only (or a separate endpoint per node, which
+//! UnifiedPush allows). The node also passes on already sealed wake-ups
+//! for senders ([`Message::Wake`]), which it can neither open nor link to
+//! anyone. Both are rate-limited, per inbox and per endpoint and address,
+//! so a node can't be used to make a phone buzz all day.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use antiphon_net::mailbox::{InboxStatus, Label, MailId, Message, Refusal};
+use antiphon_push::{RateLimit, Target, Transport};
 
 /// How many blobs one fetch hands back before its count. The rest come
 /// on the next fetch, after these are acknowledged.
@@ -87,6 +103,44 @@ struct Inbox {
     mail: VecDeque<Held>,
     bytes: u64,
     recent: VecDeque<Instant>,
+    /// Where to wake the owner when mail arrives, if they asked.
+    push: Option<Target>,
+}
+
+/// A wake-up the node owes someone, for whoever drives the node to post.
+/// Kept apart from sending so the mailbox stays plain, synchronous and
+/// testable, and the HTTP happens off the packet loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WakeJob {
+    /// Mail arrived for an inbox with a push target: seal a `Message`
+    /// wake-up to it with the node's key, then post it.
+    Seal(Target),
+    /// A sender's own sealed wake-up, to post unchanged.
+    Forward { transport: Transport, sealed: Vec<u8> },
+}
+
+/// Most wake-ups queued at once. Past this they are dropped: the queue is
+/// drained every fraction of a second, so a full one means the push
+/// service is not keeping up and more would only wait longer.
+pub const MAX_PENDING_WAKES: usize = 1024;
+
+/// The node's push settings and limits, present once push is enabled.
+struct Push {
+    /// The identity key the node signs its own wake-ups with, told to each
+    /// owner who registers so their phone can recognise them.
+    node_key: [u8; 32],
+    /// Whether APNs targets can be served (an Apple key is configured).
+    apns: bool,
+    /// One mail wake-up per inbox per minute: the phone fetches everything
+    /// waiting when it wakes, so more would only drain its battery.
+    per_inbox: RateLimit<Label>,
+    /// Forwarded wake-ups per endpoint, as a phone would allow calls.
+    per_endpoint: RateLimit<String>,
+    /// Forwarded wake-ups per sending address, so one sender can't spray
+    /// many endpoints through the node.
+    per_addr: RateLimit<std::net::IpAddr>,
+    /// Waiting for [`Mailbox::take_wakes`].
+    pending: Vec<WakeJob>,
 }
 
 pub struct Mailbox {
@@ -94,11 +148,47 @@ pub struct Mailbox {
     inboxes: HashMap<Label, Inbox>,
     held_bytes: u64,
     stats: MailboxStats,
+    /// `None` until [`Mailbox::enable_push`]; push requests are refused
+    /// with [`Refusal::NoPush`] until then.
+    push: Option<Push>,
 }
 
 impl Mailbox {
     pub fn new(limits: MailboxLimits) -> Self {
-        Self { limits, inboxes: HashMap::new(), held_bytes: 0, stats: MailboxStats::default() }
+        Self { limits, inboxes: HashMap::new(), held_bytes: 0, stats: MailboxStats::default(), push: None }
+    }
+
+    /// Lets owners register push endpoints and senders forward wake-ups.
+    /// `node_key` is the public identity key the caller will seal the
+    /// node's own wake-ups with; `apns` says whether it can post to APNs,
+    /// so APNs endpoints are refused up front rather than accepted and
+    /// silently dropped.
+    pub fn enable_push(&mut self, node_key: [u8; 32], apns: bool) {
+        self.push = Some(Push {
+            node_key,
+            apns,
+            per_inbox: RateLimit::for_mail(),
+            per_endpoint: RateLimit::for_calls(),
+            per_addr: RateLimit::new(10, Duration::from_secs(6)),
+            pending: Vec::new(),
+        });
+    }
+
+    /// The wake-ups owed since the last call, oldest first.
+    pub fn take_wakes(&mut self) -> Vec<WakeJob> {
+        self.push.as_mut().map(|p| std::mem::take(&mut p.pending)).unwrap_or_default()
+    }
+
+    /// Whether this node can post to `transport` at all.
+    fn serves(push: &Push, transport: &Transport) -> bool {
+        push.apns || matches!(transport, Transport::UnifiedPush(_))
+    }
+
+    /// Queues a job unless the queue is full.
+    fn queue(push: &mut Push, job: WakeJob) {
+        if push.pending.len() < MAX_PENDING_WAKES {
+            push.pending.push(job);
+        }
     }
 
     /// Whether anyone may register, rather than only members.
@@ -121,7 +211,7 @@ impl Mailbox {
         let replies = if !self.limits.enabled {
             vec![Message::Refused(Refusal::Disabled)]
         } else {
-            self.answer(request, now)
+            self.answer(from, request, now)
         };
         replies
             .into_iter()
@@ -136,7 +226,7 @@ impl Mailbox {
             .collect()
     }
 
-    fn answer(&mut self, request: Message, now: Instant) -> Vec<Message> {
+    fn answer(&mut self, from: SocketAddr, request: Message, now: Instant) -> Vec<Message> {
         let one = |m| vec![m];
         match request {
             Message::Register { label, fetch_hash, code } => {
@@ -163,6 +253,7 @@ impl Mailbox {
                             mail: VecDeque::new(),
                             bytes: 0,
                             recent: VecDeque::new(),
+                            push: None,
                         },
                     );
                 }
@@ -191,6 +282,11 @@ impl Mailbox {
                 inbox.bytes += size;
                 self.held_bytes += size;
                 inbox.mail.push_back(Held { id, blob, arrived: now });
+                if let (Some(push), Some(target)) = (self.push.as_mut(), inbox.push.as_ref()) {
+                    if push.per_inbox.allow(&label, now) {
+                        Self::queue(push, WakeJob::Seal(target.clone()));
+                    }
+                }
                 one(Message::Deposited { id })
             }
             Message::Fetch { label, secret } => match self.owned(&label, &secret) {
@@ -232,6 +328,44 @@ impl Mailbox {
                     })),
                 }
             }
+            Message::RegisterPush { label, secret, push_key, endpoint } => {
+                let Some(push) = self.push.as_ref() else { return one(Message::Refused(Refusal::NoPush)) };
+                let node_key = push.node_key;
+                let target = if endpoint.is_empty() {
+                    None
+                } else {
+                    match Transport::parse(&endpoint) {
+                        Some(transport) if Self::serves(push, &transport) => Some(Target { push_key, transport }),
+                        _ => return one(Message::Refused(Refusal::NoPush)),
+                    }
+                };
+                match self.owned(&label, &secret) {
+                    Err(r) => one(Message::Refused(r)),
+                    Ok(inbox) => {
+                        inbox.push = target;
+                        one(Message::PushRegistered { node_key })
+                    }
+                }
+            }
+            Message::Wake { code, endpoint, sealed } => {
+                if let Some(expected) = &self.limits.member_code {
+                    if !constant_time_eq(expected, &code) {
+                        return one(Message::Refused(Refusal::NotAMember));
+                    }
+                }
+                let Some(push) = self.push.as_mut() else { return one(Message::Refused(Refusal::NoPush)) };
+                let transport = match Transport::parse(&endpoint) {
+                    Some(t) if Self::serves(push, &t) => t,
+                    _ => return one(Message::Refused(Refusal::NoPush)),
+                };
+                // Both limits are checked before either is spent, so a
+                // refusal by one doesn't use up the other.
+                if !push.per_addr.allow(&from.ip(), now) || !push.per_endpoint.allow(&transport.to_text(), now) {
+                    return one(Message::Refused(Refusal::RateLimited));
+                }
+                Self::queue(push, WakeJob::Forward { transport, sealed });
+                one(Message::Woken)
+            }
             // Replies arriving at the node are noise.
             _ => Vec::new(),
         }
@@ -258,6 +392,11 @@ impl Mailbox {
             inbox.registered_until > now || !inbox.mail.is_empty()
         });
         self.held_bytes -= freed;
+        if let Some(push) = self.push.as_mut() {
+            push.per_inbox.forget_refilled(now);
+            push.per_endpoint.forget_refilled(now);
+            push.per_addr.forget_refilled(now);
+        }
     }
 }
 
@@ -392,6 +531,106 @@ mod tests {
         assert_eq!(r, vec![Message::Refused(Refusal::UnknownLabel)], "lapsed registration takes no new mail");
         m.sweep(now + Duration::from_secs(101));
         assert_eq!(m.stats(), MailboxStats { refused: 1, bytes_in: m.stats().bytes_in, bytes_out: m.stats().bytes_out, ..Default::default() });
+    }
+
+    /// A push-enabled node with an inbox registered at label 1, secret 2.
+    fn push_node(now: Instant) -> Mailbox {
+        let mut m = node();
+        m.enable_push([0xEE; 32], false);
+        register(&mut m, [1; 32], [2; 32], now);
+        m
+    }
+
+    /// Without `enable_push`, both push requests are refused, so a node never posts to the web unless its operator asked it to.
+    #[test]
+    fn push_is_refused_until_enabled() {
+        let mut m = node();
+        let now = Instant::now();
+        register(&mut m, [1; 32], [2; 32], now);
+        let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
+        assert_eq!(r, vec![Message::Refused(Refusal::NoPush)]);
+        let r = ask(&mut m, Message::Wake { code: vec![], endpoint: "https://h/x".into(), sealed: vec![0; antiphon_net::mailbox::WAKE_LEN] }, now);
+        assert_eq!(r, vec![Message::Refused(Refusal::NoPush)]);
+    }
+
+    /// The wire format's copy of the sealed size agrees with the crypto crate's.
+    #[test]
+    fn the_wake_length_matches_the_crypto_crate() {
+        assert_eq!(antiphon_net::mailbox::WAKE_LEN, antiphon_crypto::push::SEALED_LEN);
+    }
+
+    /// New mail queues one wake-up, and more mail within the minute does not queue another.
+    #[test]
+    fn mail_wakes_a_registered_owner_once_a_minute() {
+        let now = Instant::now();
+        let mut m = push_node(now);
+        let endpoint = "https://ntfy.sh/upX".to_string();
+        let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: endpoint.clone() }, now);
+        assert_eq!(r, vec![Message::PushRegistered { node_key: [0xEE; 32] }]);
+        for i in 0..3u8 {
+            ask(&mut m, Message::Deposit { label: [1; 32], id: [i; 16], blob: vec![0; 10] }, now);
+        }
+        let target = Target { push_key: [3; 32], transport: Transport::UnifiedPush(endpoint) };
+        assert_eq!(m.take_wakes(), vec![WakeJob::Seal(target.clone())], "three deposits, one wake-up");
+        assert!(m.take_wakes().is_empty());
+        let later = now + Duration::from_secs(61);
+        ask(&mut m, Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 10] }, later);
+        assert_eq!(m.take_wakes(), vec![WakeJob::Seal(target)]);
+    }
+
+    /// Setting or clearing the endpoint takes the fetch secret, and a cleared one is not woken.
+    #[test]
+    fn only_the_owner_sets_or_clears_the_endpoint() {
+        let now = Instant::now();
+        let mut m = push_node(now);
+        let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [9; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
+        assert_eq!(r, vec![Message::Refused(Refusal::WrongSecret)]);
+        ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
+        ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: String::new() }, now);
+        ask(&mut m, Message::Deposit { label: [1; 32], id: [1; 16], blob: vec![0; 10] }, now);
+        assert!(m.take_wakes().is_empty(), "cleared endpoints are not woken");
+    }
+
+    /// APNs endpoints need an Apple key on the node, and unparseable endpoints are never stored.
+    #[test]
+    fn apns_and_junk_endpoints_are_refused_without_a_key() {
+        let now = Instant::now();
+        let mut m = push_node(now);
+        let voip = format!("apns-voip:{}", "ab".repeat(32));
+        for endpoint in [voip.as_str(), "not a url"] {
+            let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: endpoint.into() }, now);
+            assert_eq!(r, vec![Message::Refused(Refusal::NoPush)], "{endpoint}");
+        }
+        let mut with_apns = node();
+        with_apns.enable_push([0; 32], true);
+        register(&mut with_apns, [1; 32], [2; 32], now);
+        let r = ask(&mut with_apns, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: voip }, now);
+        assert!(matches!(r[0], Message::PushRegistered { .. }));
+    }
+
+    /// Forwarded wake-ups are queued unchanged, and an endpoint gets at most a burst of them.
+    #[test]
+    fn forwarded_wakes_are_queued_and_rate_limited() {
+        let now = Instant::now();
+        let mut m = push_node(now);
+        let wake = |n: u8| Message::Wake { code: vec![], endpoint: "https://h/x".into(), sealed: vec![n; antiphon_net::mailbox::WAKE_LEN] };
+        for n in 0..3 {
+            assert_eq!(ask(&mut m, wake(n), now), vec![Message::Woken]);
+        }
+        assert_eq!(ask(&mut m, wake(3), now), vec![Message::Refused(Refusal::RateLimited)]);
+        let jobs = m.take_wakes();
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[0], WakeJob::Forward { transport: Transport::UnifiedPush("https://h/x".into()), sealed: vec![0; antiphon_net::mailbox::WAKE_LEN] });
+    }
+
+    /// A members-only node forwards only for members, as it registers only members.
+    #[test]
+    fn a_community_node_wants_its_code_to_forward() {
+        let mut m = Mailbox::new(MailboxLimits { enabled: true, member_code: Some(b"guild".to_vec()), ..Default::default() });
+        m.enable_push([0; 32], false);
+        let msg = |code: &[u8]| Message::Wake { code: code.to_vec(), endpoint: "https://h/x".into(), sealed: vec![0; antiphon_net::mailbox::WAKE_LEN] };
+        assert_eq!(ask(&mut m, msg(b"nope"), Instant::now()), vec![Message::Refused(Refusal::NotAMember)]);
+        assert_eq!(ask(&mut m, msg(b"guild"), Instant::now()), vec![Message::Woken]);
     }
 
     #[test]

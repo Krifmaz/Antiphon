@@ -76,13 +76,27 @@ pub enum FileSource {
         modified: Option<SystemTime>,
         file: Mutex<File>,
     },
+    /// A file with no path to open, read a range at a time through a
+    /// function: on a phone, a picked document is reachable only through
+    /// the platform's handle for it (a content URI on Android, a
+    /// security-scoped bookmark on iOS). `read(offset, len)` answers with
+    /// exactly `len` bytes or an error, and whatever buffering makes the
+    /// small chunk reads cheap is its own business. Added for the phone app,
+    /// which compiles this module by path; the desktop never builds one.
+    Ranged {
+        /// The file's length when it was hashed.
+        len: u64,
+        /// Reads `len` bytes from `offset`.
+        #[allow(clippy::type_complexity)]
+        read: Box<dyn Fn(u64, usize) -> std::io::Result<Vec<u8>> + Send + Sync>,
+    },
 }
 
 impl FileSource {
     pub fn len(&self) -> u64 {
         match self {
             FileSource::Memory(bytes) => bytes.len() as u64,
-            FileSource::Disk { len, .. } => *len,
+            FileSource::Disk { len, .. } | FileSource::Ranged { len, .. } => *len,
         }
     }
 
@@ -122,6 +136,16 @@ impl FileSource {
                 file.seek(SeekFrom::Start(index as u64 * CHUNK_SIZE as u64))?;
                 let mut buf = vec![0u8; want];
                 file.read_exact(&mut buf)?;
+                Ok(buf)
+            }
+            FileSource::Ranged { read, .. } => {
+                let buf = read(index as u64 * CHUNK_SIZE as u64, want)?;
+                // A short answer means the file shrank after it was hashed;
+                // sending a short chunk would only fail the receiver's
+                // hash check later, with less said about why.
+                if buf.len() != want {
+                    return Err(std::io::Error::other("the file changed after it was offered"));
+                }
                 Ok(buf)
             }
         }
@@ -226,6 +250,23 @@ mod tests {
         let bytes: Vec<u8> = (0..CHUNK_SIZE + 9).map(|i| i as u8).collect();
         let source = FileSource::Memory(bytes.clone());
         assert_eq!(read_all(&source), bytes);
+    }
+
+    #[test]
+    fn a_ranged_source_reads_back_the_same_way_and_notices_a_short_read() {
+        let bytes: Vec<u8> = (0..CHUNK_SIZE * 2 + 5).map(|i| (i % 251) as u8).collect();
+        let shared = bytes.clone();
+        let source = FileSource::Ranged {
+            len: bytes.len() as u64,
+            read: Box::new(move |offset, len| {
+                let start = offset as usize;
+                Ok(shared[start..start + len].to_vec())
+            }),
+        };
+        assert_eq!(read_all(&source), bytes);
+
+        let shrunk = FileSource::Ranged { len: 10, read: Box::new(|_, _| Ok(vec![0u8; 3])) };
+        assert!(shrunk.read_chunk(0).unwrap_err().to_string().contains("changed"));
     }
 
     #[test]

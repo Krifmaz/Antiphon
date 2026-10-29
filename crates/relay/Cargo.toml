@@ -19,3 +19,11 @@ antiphon-net = { version = "0.1.0", path = "../net" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Push wake-ups for inbox owners and senders (`--mailbox-push`).
+antiphon-push = { version = "0.1.0", path = "../push" }
+
+[features]
+# Posting to Apple's push service, for an operator with an Apple developer
+# key (`--apns-key` and friends). Off by default: it adds an HTTP/2 stack
+# that nobody without that key can use. See docs/mobile-push.md.
+apns = ["antiphon-push/apns", "clap/env"]

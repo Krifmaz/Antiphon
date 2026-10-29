@@ -5,8 +5,9 @@
 //! for the length of a transfer. A file opened in place is reachable only
 //! through a security-scoped URL, which stops working when the app exits.
 //! So the handle given to the shared code is a bookmark for that URL,
-//! base64-encoded; [`read`] resolves it and asks for access each time,
-//! which survives a restart and so lets a transfer resume.
+//! base64-encoded; [`read`], [`size`] and [`read_range`] resolve it and
+//! ask for access each time, which survives a restart and so lets a
+//! transfer resume, or a file queued between calls go at the next one.
 
 use std::cell::RefCell;
 use std::io;
@@ -17,7 +18,9 @@ use base64::Engine;
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_foundation::{NSArray, NSData, NSURLBookmarkCreationOptions, NSURLBookmarkResolutionOptions, NSURL};
+use objc2_foundation::{
+    NSArray, NSData, NSFileHandle, NSURLBookmarkCreationOptions, NSURLBookmarkResolutionOptions, NSURL,
+};
 use objc2_ui_kit::{UIDocumentPickerDelegate, UIDocumentPickerViewController};
 use objc2_uniform_type_identifiers::UTTypeItem;
 
@@ -149,9 +152,54 @@ pub fn pick(mtm: MainThreadMarker) {
     presenter.presentViewController_animated_completion(&picker, true, None);
 }
 
-/// Reads a picked file by its handle. Safe from any thread: NSURL and
-/// bookmark resolution are.
+/// Reads a picked file by its handle, whole. Safe from any thread: NSURL
+/// and bookmark resolution are.
 pub fn read(handle: &str) -> io::Result<Vec<u8>> {
+    let url = resolve(handle)?;
+    let _access = Access::start(&url);
+    std::fs::read(path_of(&url)?)
+}
+
+/// A picked file's size, by its handle, from the file system rather than
+/// the picker, which is what the hash and the offer must agree with.
+pub fn size(handle: &str) -> io::Result<u64> {
+    let url = resolve(handle)?;
+    let _access = Access::start(&url);
+    Ok(std::fs::metadata(path_of(&url)?)?.len())
+}
+
+/// Up to `len` bytes of a picked file from `offset`, fewer only at its end,
+/// so a large file is sent without ever being held whole.
+///
+/// The bookmark is resolved and access taken for each range, as [`read`]
+/// does, rather than an open handle kept between calls: the shared code
+/// asks for a megabyte at a time, so that cost is small, and nothing holds
+/// one of the app's limited security-scoped accesses between transfers.
+/// Read through NSFileHandle, which reads a security-scoped URL the way the
+/// system intends.
+pub fn read_range(handle: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    let url = resolve(handle)?;
+    let _access = Access::start(&url);
+    let ns = |e: Retained<objc2_foundation::NSError>| io::Error::other(e.to_string());
+    let file = NSFileHandle::fileHandleForReadingFromURL_error(&url).map_err(ns)?;
+    file.seekToOffset_error(offset).map_err(ns)?;
+    let mut out = Vec::with_capacity(len);
+    // A read may return less than asked before the end; only an empty one
+    // means the end.
+    while out.len() < len {
+        let data = file.readDataUpToLength_error(len - out.len()).map_err(ns)?;
+        if data.is_empty() {
+            break;
+        }
+        out.extend_from_slice(&data.to_vec());
+    }
+    let _ = file.closeAndReturnError();
+    Ok(out)
+}
+
+/// The URL a handle's bookmark points at. A stale bookmark still resolves;
+/// it means the file moved, and is logged in case a later resolve fails.
+fn resolve(handle: &str) -> io::Result<Retained<NSURL>> {
     let bookmark = BASE64.decode(handle).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let data = NSData::with_bytes(&bookmark);
     let mut stale = Bool::NO;
@@ -170,6 +218,5 @@ pub fn read(handle: &str) -> io::Result<Vec<u8>> {
         // handle cannot be replaced from here, so it may fail next time.
         log::info!("a picked file's bookmark is stale");
     }
-    let _access = Access::start(&url);
-    std::fs::read(path_of(&url)?)
+    Ok(url)
 }

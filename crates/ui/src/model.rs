@@ -376,11 +376,20 @@ pub enum Delivery {
 pub struct Transfers {
     /// A file they offered, waiting for yes or no: (name, size).
     pub offer: Option<(String, String)>,
+    /// The picture the sender made of the offered file, already decoded,
+    /// shown beside the offer so a photo can be judged before taking it.
+    /// `None` when they sent none.
+    pub offer_thumbnail: Option<iced_core::image::Handle>,
     /// Transfers under way.
     pub active: Vec<Transfer>,
     /// Files waiting their turn, in the order they will go. One goes at a
     /// time: the call and the files share one connection.
     pub queued: Vec<QueuedFile>,
+    /// Files can be chosen for a person with no call up: they join
+    /// [`queued`](Self::queued) and go at the next call with them. The
+    /// phone app keeps its queue across restarts by file handle; the
+    /// desktop offers files only during a call.
+    pub pick_anytime: bool,
 }
 
 /// A file waiting to be sent.
