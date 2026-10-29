@@ -135,6 +135,9 @@ const TOUR: &[Step] = &[
         setup: |app| {
             let _ = app.send(Msg::Dialog(None));
             app.demo().as_phone(true);
+            // A typical Android phone's status bar and gesture bar, so the
+            // shots show the layout keeping clear of them.
+            app.ui.set_insets(32.0, 24.0);
             app.go(Route::Home);
         },
     },
@@ -145,6 +148,7 @@ const TOUR: &[Step] = &[
         size: (1280.0, 820.0),
         setup: |app| {
             app.demo().as_phone(false);
+            app.ui.set_insets(0.0, 0.0);
             app.demo().act(Action::Theme("light".into()));
             app.go(Route::Person(Demo::robin()));
         },

@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use antiphon_audio::{eq_preset, ChainConfig, GainConfig};
 use antiphon_crypto::{BackupKey, IdentityKeyPair};
-use iced_core::{Element, Length, Padding, Size, Theme};
+use iced_core::{Element, Length, Size, Theme};
 use iced_widget::{container, qr_code};
 
 use crate::call::{self, now_secs, CallEngine, Phase, Waker};
@@ -1132,9 +1132,8 @@ impl App {
 
     /// The whole screen. `top` and `bottom` are the logical pixels the
     /// system draws over (status bar, gesture bar or keyboard), kept clear.
-    pub fn view(&self, top: f32, bottom: f32) -> Element<'_, Message, Theme, Renderer> {
+    pub fn view(&self) -> Element<'_, Message, Theme, Renderer> {
         container(self.stoop.view(&self.model).map(Message::Ui))
-            .padding(Padding { top, bottom, ..Padding::ZERO })
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -1148,6 +1147,13 @@ impl App {
     /// colour behind the system bars.
     pub fn theme(&self) -> Theme {
         antiphon_ui::theme::iced_theme(&antiphon_ui::theme::look())
+    }
+
+    /// The system's insets, in logical pixels, as (top, bottom). The
+    /// interface keeps its controls out of them and runs its bar colours
+    /// on underneath, rather than the whole app sitting in a padded box.
+    pub fn set_insets(&mut self, top: f32, bottom: f32) {
+        self.stoop.set_insets(top, bottom);
     }
 
     /// The window's size changed, in logical pixels: the interface picks

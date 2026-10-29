@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use antiphon_mobile::platform::{BackgroundWork, Network, Platform};
 use jni::objects::{JClass, JObject, JValue};
@@ -260,37 +260,79 @@ fn read_clipboard() -> Option<String> {
     .flatten()
 }
 
-/// The parts of the screen the system draws over -- status bar, gesture
-/// bar, and the soft keyboard while it is up -- in physical pixels, as
-/// (top, bottom). Android 15 draws every app edge to edge, so without this
-/// the first row of the app sits under the clock.
+/// The parts of the screen the system draws over -- status bar, camera
+/// cutout, gesture bar, and the soft keyboard while it is up -- in
+/// physical pixels, as (top, bottom). Android 15 draws every app edge to
+/// edge, so without this the first row of the app sits under the clock
+/// and the last under the home bar.
+///
+/// The live answer comes from the window's insets. Those are not there
+/// until the view is attached (the first frames of a launch) and can fail
+/// to read on some builds; reading zero then put the whole app under the
+/// bars. So a missing or empty answer falls back to the system's own
+/// status and navigation bar sizes, which always exist, and the last good
+/// answer is kept for the moments in between.
 fn system_insets() -> (f32, f32) {
-    with_activity("reading window insets", |env, activity| {
-        let window = env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
-        let decor = env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?.l()?;
-        let insets = env.call_method(&decor, "getRootWindowInsets", "()Landroid/view/WindowInsets;", &[])?.l()?;
-        if insets.is_null() {
-            return Ok((0.0, 0.0));
+    static LAST: Mutex<Option<(f32, f32)>> = Mutex::new(None);
+    let live = with_activity("reading window insets", window_insets).flatten().filter(|(top, _)| *top > 0.0);
+    let insets = live.or_else(|| *LAST.lock().unwrap()).or_else(|| with_activity("reading bar sizes", bar_sizes)).unwrap_or((0.0, 0.0));
+    if live.is_some() {
+        *LAST.lock().unwrap() = live;
+    }
+    insets
+}
+
+/// The window's insets now, or `None` before the view is attached.
+fn window_insets(env: &mut JNIEnv, activity: &JObject) -> jni::errors::Result<Option<(f32, f32)>> {
+    let window = env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
+    let decor = env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?.l()?;
+    let insets = env.call_method(&decor, "getRootWindowInsets", "()Landroid/view/WindowInsets;", &[])?.l()?;
+    if insets.is_null() {
+        return Ok(None);
+    }
+    let sdk = env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?.i()?;
+    if sdk >= 30 {
+        // WindowInsets.Type.systemBars() | ime() | displayCutout().
+        let bars = env.call_static_method("android/view/WindowInsets$Type", "systemBars", "()I", &[])?.i()?;
+        let ime = env.call_static_method("android/view/WindowInsets$Type", "ime", "()I", &[])?.i()?;
+        let cutout = env.call_static_method("android/view/WindowInsets$Type", "displayCutout", "()I", &[])?.i()?;
+        let rect = env
+            .call_method(&insets, "getInsets", "(I)Landroid/graphics/Insets;", &[JValue::Int(bars | ime | cutout)])?
+            .l()?;
+        let top = env.get_field(&rect, "top", "I")?.i()?;
+        let bottom = env.get_field(&rect, "bottom", "I")?.i()?;
+        Ok(Some((top as f32, bottom as f32)))
+    } else {
+        let top = env.call_method(&insets, "getSystemWindowInsetTop", "()I", &[])?.i()?;
+        let bottom = env.call_method(&insets, "getSystemWindowInsetBottom", "()I", &[])?.i()?;
+        Ok(Some((top as f32, bottom as f32)))
+    }
+}
+
+/// The system's status bar and navigation bar heights, from its own
+/// resources: always readable, and what the bars measure when shown.
+fn bar_sizes(env: &mut JNIEnv, activity: &JObject) -> jni::errors::Result<(f32, f32)> {
+    let resources = env.call_method(activity, "getResources", "()Landroid/content/res/Resources;", &[])?.l()?;
+    let size = |env: &mut JNIEnv, name: &str| -> jni::errors::Result<f32> {
+        let name = env.new_string(name)?;
+        let kind = env.new_string("dimen")?;
+        let package = env.new_string("android")?;
+        let id = env
+            .call_method(
+                &resources,
+                "getIdentifier",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I",
+                &[JValue::Object(&name), JValue::Object(&kind), JValue::Object(&package)],
+            )?
+            .i()?;
+        if id == 0 {
+            return Ok(0.0);
         }
-        let sdk = env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?.i()?;
-        if sdk >= 30 {
-            // WindowInsets.Type.systemBars() | ime() | displayCutout().
-            let bars = env.call_static_method("android/view/WindowInsets$Type", "systemBars", "()I", &[])?.i()?;
-            let ime = env.call_static_method("android/view/WindowInsets$Type", "ime", "()I", &[])?.i()?;
-            let cutout = env.call_static_method("android/view/WindowInsets$Type", "displayCutout", "()I", &[])?.i()?;
-            let rect = env
-                .call_method(&insets, "getInsets", "(I)Landroid/graphics/Insets;", &[JValue::Int(bars | ime | cutout)])?
-                .l()?;
-            let top = env.get_field(&rect, "top", "I")?.i()?;
-            let bottom = env.get_field(&rect, "bottom", "I")?.i()?;
-            Ok((top as f32, bottom as f32))
-        } else {
-            let top = env.call_method(&insets, "getSystemWindowInsetTop", "()I", &[])?.i()?;
-            let bottom = env.call_method(&insets, "getSystemWindowInsetBottom", "()I", &[])?.i()?;
-            Ok((top as f32, bottom as f32))
-        }
-    })
-    .unwrap_or((0.0, 0.0))
+        Ok(env.call_method(&resources, "getDimensionPixelSize", "(I)I", &[JValue::Int(id)])?.i()? as f32)
+    };
+    let top = size(env, "status_bar_height")?;
+    let bottom = size(env, "navigation_bar_height")?;
+    Ok((top, bottom))
 }
 
 /// One of the app's own classes. A thread that native code attached

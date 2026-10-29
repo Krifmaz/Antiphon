@@ -452,6 +452,11 @@ pub struct Ui {
     epoch: Instant,
     /// Animations off: everything jumps to its end state.
     reduced_motion: bool,
+    /// The strips the phone's system draws over, in logical pixels, as
+    /// (top, bottom): the status bar and camera cutout, and the gesture
+    /// bar (or the keyboard while it is up). The layout keeps every
+    /// control out of them, while backgrounds still run underneath.
+    insets: (f32, f32),
     /// The call picture chosen to be shown large, by its tile key. `None`
     /// lets the stage choose: their screen, then their camera, then mine.
     video_focus: Option<String>,
@@ -497,6 +502,7 @@ impl Ui {
             epoch: now,
             reduced_motion: false,
             video_focus: None,
+            insets: (0.0, 0.0),
         }
     }
 
@@ -511,6 +517,13 @@ impl Ui {
             Route::Person(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// The system's insets for this frame, in logical pixels: what the
+    /// status bar and the gesture bar (or the keyboard while it is up)
+    /// cover, as (top, bottom). Desktops leave them at zero.
+    pub fn set_insets(&mut self, top: f32, bottom: f32) {
+        self.insets = (top.max(0.0), bottom.max(0.0));
     }
 
     /// Whether the phone layout is in use.
