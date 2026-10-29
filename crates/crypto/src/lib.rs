@@ -25,9 +25,19 @@
 //!   pinned on first use, with a key change surfaced rather than resolved
 //!   silently.
 //!
-//! Not yet implemented, each a larger piece of work building on
-//! [`Session`]: the DH ratchet step (post-compromise security), MLS for
-//! groups, and SFrame for relayed media.
+//! - **Sessions are a Double Ratchet** ([`Session`]): symmetric chains for
+//!   forward secrecy, plus DH steps every few seconds of traffic so a
+//!   stolen chain key stops working (post-compromise security).
+//!
+//! - **Groups are MLS** ([`group`]): RFC 9420 through `openmls`, with
+//!   every member's credential being their identity key, so a group member
+//!   is the same verified person as a 1:1 contact.
+//! - **Communities are signed manifests** ([`community`]): versioned,
+//!   each version signed by someone allowed to make it, so roles, bans and
+//!   membership are enforced by every client with no server to ask.
+//! - **Media a relay forwards is SFrame** ([`sframe`]): RFC 9605, keyed
+//!   per epoch and per sender from the MLS exporter, so a forwarder never
+//!   holds a key and someone who left can't hear what follows.
 //!
 //! # Frozen labels
 //!
@@ -45,15 +55,25 @@
 pub mod backup;
 mod contact;
 mod device;
+pub mod dht_record;
 mod error;
+pub mod community;
+pub mod group;
 mod handshake;
 mod identity;
 mod invite;
 pub mod keystore;
+pub mod file_seal;
+pub mod mail;
+pub mod memory_seal;
 pub mod mnemonic;
+pub mod persona;
 mod ratchet;
+pub mod relay_token;
+pub mod shamir;
 mod route;
 mod session;
+pub mod sframe;
 pub mod store;
 mod verification;
 

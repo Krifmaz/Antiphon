@@ -54,6 +54,104 @@ pub struct AppConfig {
     /// held (spec section 1 Utility).
     #[serde(default)]
     pub ptt_toggle: bool,
+    /// Mute / deafen only while their key is held, instead of toggling
+    /// (spec §1: "PTT or mute/deafen switched to toggle behavior").
+    #[serde(default)]
+    pub mute_hold: bool,
+    /// The relay this machine listens at, `host:port`; empty for none
+    /// (spec §3). Self-hosted or a community's -- the app ships with no
+    /// default, so nothing is relayed through anyone you didn't choose.
+    #[serde(default)]
+    pub relay_server: String,
+    /// The secret behind the relay part of your invite link, hex. Made on
+    /// first use; replacing it revokes every link handed out before.
+    #[serde(default)]
+    pub relay_invite_secret: String,
+    /// Your delivery routes (spec §8), in order -- your inbox
+    /// configuration, published to contacts. See `crate::delivery`.
+    #[serde(default = "crate::delivery::default_routes")]
+    pub routes: Vec<crate::delivery::RouteConfig>,
+    /// Fan out: leave each message at every node instead of the first
+    /// that takes it.
+    #[serde(default)]
+    pub route_fan_out: bool,
+    /// Strict mode: Direct only, nothing ever stored anywhere.
+    #[serde(default)]
+    pub strict_mode: bool,
+    /// Bumped whenever the route list changes, so contacts replace the
+    /// old one and can't be rolled back to it.
+    #[serde(default)]
+    pub route_sequence: u64,
+    /// This device holds mail for your other devices (spec §8 "My other
+    /// devices"). Off by default.
+    #[serde(default)]
+    pub hold_mail_for_devices: bool,
+    #[serde(default = "default_hold_mail_port")]
+    pub hold_mail_port: u16,
+    /// On-device live captions in the call view (spec §7). Off by
+    /// default; nothing is downloaded until the user asks.
+    #[serde(default)]
+    pub captions_enabled: bool,
+    /// Caption your own voice as well as everyone else's.
+    #[serde(default)]
+    pub captions_own_voice: bool,
+    /// Keep sealed copies of files you share or download and hand them
+    /// out (spec §5 "Seeding"). Off by default.
+    #[serde(default)]
+    pub seeding: bool,
+    /// Who seeded files go to: 0 the conversation it was shared in,
+    /// 1 your contacts, 2 anyone with the link.
+    #[serde(default)]
+    pub seed_scope: i32,
+    #[serde(default = "default_seed_port")]
+    pub seed_port: u16,
+    /// Nodes that keep a sealed copy of files you share (spec §5
+    /// "Pinning"), `host[:port]`.
+    #[serde(default)]
+    pub pin_nodes: Vec<String>,
+    /// The code a members-only pin node asks for.
+    #[serde(default)]
+    pub pin_code: String,
+    /// Bring your own VPN (spec §6). Off by default. The configs
+    /// themselves -- private keys -- are in their own sealed file (see
+    /// `vpn.rs`), never here: settings export copies this file verbatim.
+    #[serde(default)]
+    pub vpn_enabled: bool,
+    /// Id of the stored config to use.
+    #[serde(default)]
+    pub vpn_active: String,
+    /// Which traffic goes through the VPN. Calls default to direct,
+    /// because a tunnel adds latency and voice notices it first; files
+    /// and offline messages default to the tunnel.
+    #[serde(default)]
+    pub vpn_route_voice: bool,
+    #[serde(default = "default_true")]
+    pub vpn_route_files: bool,
+    #[serde(default = "default_true")]
+    pub vpn_route_messages: bool,
+    /// When the VPN is down, refuse to send the routed traffic rather
+    /// than sending it from your real address. Off by default.
+    #[serde(default)]
+    pub vpn_kill_switch: bool,
+    /// Publish where you are to the DHT and look contacts up there when
+    /// their address changes (spec §4). Off by default.
+    #[serde(default)]
+    pub dht_enabled: bool,
+    /// DHT nodes to join through, `host[:port]`. Empty by default: the
+    /// app ships with none, so nothing is asked of anyone you didn't
+    /// choose.
+    #[serde(default)]
+    pub dht_bootstrap: Vec<String>,
+    /// Community directories to browse (spec §4 "Opt-in directories"),
+    /// `host[:port]`. Empty by default.
+    #[serde(default)]
+    pub directories: Vec<String>,
+    /// Each directory's key, `address=hex`, pinned the first time it
+    /// answered.
+    #[serde(default)]
+    pub directory_pins: Vec<String>,
+    #[serde(default)]
+    pub deafen_hold: bool,
     /// Milliseconds the mic stays open after the push-to-talk key comes up,
     /// so the tail of the last word is not clipped.
     #[serde(default)]
@@ -265,14 +363,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub start_call_silently: bool,
     /// Cancel the echo of the other person out of your microphone
-    /// (spec §1).
-    ///
-    /// Off by default, which the spec does not ask for. An echo canceller
-    /// that misbehaves damages the user's own voice -- worse than the echo
-    /// it was fixing -- and this one has been proven against synthetic
-    /// echo paths, not real rooms. The default waits on evidence rather
-    /// than on the code existing.
-    #[serde(default)]
+    /// (spec §1: "On by default, with a manual off switch for users on
+    /// headphones"). A config saved before this field existed gets the
+    /// spec's default too.
+    #[serde(default = "default_true")]
     pub echo_cancel: bool,
     /// How far to lower the other side while you talk, in dB (spec §1
     /// "Ducking"). Zero is off.
@@ -436,6 +530,38 @@ pub struct Contact {
     /// until a verification code says otherwise.
     #[serde(default)]
     pub note: String,
+    /// Their X25519 prekey, hex, learned from the first completed call.
+    /// What makes them a *known* contact (spec §3) and what the pairwise
+    /// relay token is derived from.
+    #[serde(default)]
+    pub prekey: String,
+    /// The relay they listen at, `host:port`, from their invite link or
+    /// from what they said on a call. Empty when unknown.
+    #[serde(default)]
+    pub relay: String,
+    /// The secret from their invite link, hex, for ringing them through
+    /// their relay before you have ever spoken.
+    #[serde(default)]
+    pub relay_secret: String,
+    /// Per-conversation override (spec §3): 0 automatic, 1 direct, 2 relay.
+    /// See `crate::connection_mode`.
+    #[serde(default)]
+    pub connection_mode: i32,
+    /// Their signed route list (spec §8), hex, as they last sent it: where
+    /// to leave mail for them while they're offline. They decide it.
+    #[serde(default)]
+    pub route_record: String,
+    /// The sequence of `route_record`, so an older one can't replace it.
+    #[serde(default)]
+    pub route_sequence: Option<u64>,
+    /// Per-contact override (spec §8): 0 use their routes, 1 direct only
+    /// -- messages to them wait until you're both online.
+    #[serde(default)]
+    pub message_route: i32,
+    /// The highest DHT record sequence accepted for them (spec §4), so a
+    /// replayed older record can't move them back.
+    #[serde(default)]
+    pub dht_sequence: Option<u64>,
 }
 
 /// A freeform panel's position and size in logical pixels, relative to its
@@ -524,7 +650,7 @@ pub const AUDIO_SECTION_IDS: &[&str] =
 pub const APPEARANCE_SECTION_IDS: &[&str] = &["accent", "theme", "textmotion", "importexport"];
 pub const PROFILE_SECTION_IDS: &[&str] = &["profile", "about"];
 pub const CALL_SECTION_IDS: &[&str] =
-    &["callstart", "notifications", "soundboard", "transferlimits", "callparticipants", "outbox", "calladvanced"];
+    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "captions", "discovery", "callparticipants", "outbox", "calladvanced", "vpn"];
 
 fn default_audio_order() -> Vec<String> {
     AUDIO_SECTION_IDS.iter().map(|s| s.to_string()).collect()
@@ -599,7 +725,7 @@ impl Default for AppConfig {
             chain: ChainConfig::default_preset(),
             input_device: None,
             output_device: None,
-            ptt_key: "Space".to_string(),
+            ptt_key: crate::caps_lock::default_ptt_key().to_string(),
             transmit_mode: 0,
             mute_key: String::new(),
             deafen_key: String::new(),
@@ -637,13 +763,40 @@ impl Default for AppConfig {
             outbox_give_up_hours: 0,
             silent_call_mode: 0,
             start_call_silently: false,
-            echo_cancel: false,
+            echo_cancel: true,
             duck_db: 0,
             presence: 0,
             crash_reporting: false,
             default_ring_rule: 0,
             quiet_hours: crate::notify::QuietHours::default(),
             ptt_toggle: false,
+            mute_hold: false,
+            relay_server: String::new(),
+            relay_invite_secret: String::new(),
+            routes: crate::delivery::default_routes(),
+            route_fan_out: false,
+            strict_mode: false,
+            route_sequence: 0,
+            hold_mail_for_devices: false,
+            hold_mail_port: default_hold_mail_port(),
+            captions_enabled: false,
+            captions_own_voice: false,
+            seeding: false,
+            seed_scope: 0,
+            seed_port: default_seed_port(),
+            pin_nodes: Vec::new(),
+            pin_code: String::new(),
+            vpn_enabled: false,
+            vpn_active: String::new(),
+            vpn_route_voice: false,
+            vpn_route_files: true,
+            vpn_route_messages: true,
+            vpn_kill_switch: false,
+            dht_enabled: false,
+            dht_bootstrap: Vec::new(),
+            directories: Vec::new(),
+            directory_pins: Vec::new(),
+            deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,
             start_with_screen_share: false,
@@ -753,6 +906,14 @@ fn config_path() -> Option<std::path::PathBuf> {
 /// Loads the saved config, if any. Missing file or parse failure both just
 /// mean "start from defaults" -- a corrupt settings file shouldn't block
 /// the app from opening.
+fn default_hold_mail_port() -> u16 {
+    3480
+}
+
+fn default_seed_port() -> u16 {
+    3481
+}
+
 pub fn load() -> AppConfig {
     let Some(path) = config_path() else { return AppConfig::default() };
     let Ok(text) = std::fs::read_to_string(&path) else { return AppConfig::default() };
