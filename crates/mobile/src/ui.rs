@@ -30,6 +30,7 @@ use crate::files::{self, FileManager};
 use crate::platform::{self, BackgroundWork, Network};
 use crate::settings::Settings;
 
+/// iced's wgpu renderer, the one every view here is built for.
 pub type Renderer = iced_wgpu::Renderer;
 
 /// The face bundled through iced's `fira-sans` feature, named so cosmic-text
@@ -37,116 +38,215 @@ pub type Renderer = iced_wgpu::Renderer;
 pub const FONT: Font = Font::with_name("Fira Sans");
 
 
+/// The eight screens, chosen from two rows of tab buttons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    /// Calling, waiting for a call, and the call in progress.
     Call,
+    /// The conversation on screen, or the list of them.
     Chat,
+    /// The send queue, the transfers running, and received files.
     Files,
+    /// The address book.
     Contacts,
+    /// Past calls.
     Recent,
+    /// The microphone chain and the mic test.
     Voice,
+    /// Display name and the battery and data rules.
     Settings,
+    /// This phone's key, its recovery phrase, and restoring from one.
     Identity,
 }
 
+/// A stage of the microphone chain, for the switch that turns it on and
+/// off on the Voice screen.
 #[derive(Debug, Clone, Copy)]
 pub enum Stage {
+    /// Removes steady background noise, even under speech.
     NoiseSuppress,
+    /// Mutes the microphone between words.
     NoiseGate,
+    /// Cuts rumble below the voice.
     HighPass,
+    /// Cuts hiss above the voice.
     LowPass,
+    /// Softens sibilants.
     DeEsser,
+    /// Evens out loud and quiet moments.
     Compressor,
+    /// A hard ceiling against clipping.
     Limiter,
+    /// Slowly turns a quiet microphone up and a loud one down.
     AutoGain,
+    /// Raises or lowers the voice.
     PitchShift,
+    /// Adds a room around the voice.
     Reverb,
 }
 
+/// A slider on the Voice screen, each setting one field of the chain.
 #[derive(Debug, Clone, Copy)]
 pub enum Param {
+    /// How hard noise suppression works, from 0 to 1.
     SuppressStrength,
+    /// The noise gate's threshold, in dB.
     GateThreshold,
+    /// The high-pass filter's cutoff, in Hz.
     HighPassCutoff,
+    /// The low-pass filter's cutoff, in Hz.
     LowPassCutoff,
+    /// The compressor's threshold, in dB.
     CompressorThreshold,
+    /// The compressor's ratio, as the `n` in `n:1`.
     CompressorRatio,
+    /// The pitch shift, in semitones up (positive) or down.
     PitchSemitones,
+    /// How much of the reverb is heard against the dry voice, from 0 to 1.
     ReverbMix,
+    /// The reverb's room size, from 0 to 1.
     ReverbRoom,
 }
 
+/// Everything a tap or a keystroke can ask the interface to do. Handled
+/// by [`App::update`] on the interface thread; the call, contacts and
+/// settings ones change state and save it straight away.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Switch to a screen.
     Tab(Tab),
+    /// The listening port box changed; only digits are kept.
     PortChanged(String),
+    /// The dial box changed.
     RemoteChanged(String),
+    /// Fill the dial box from the clipboard.
     PasteRemote,
+    /// Start waiting for a call on the port in the box.
     Listen,
+    /// Dial what is in the dial box.
     Call,
+    /// Hang up, stop waiting, or cancel a dial.
     Stop,
+    /// The push-to-talk pad was pressed.
     PttPressed,
+    /// The push-to-talk pad was released.
     PttReleased,
+    /// Switch open mic on or off.
     OpenMic(bool),
+    /// Switch between loudspeaker and earpiece.
     Speaker(bool),
+    /// Copy this text to the clipboard: a key or an invite link.
     Copy(String),
+    /// Show or hide the recovery phrase.
     ShowPhrase(bool),
+    /// The restore phrase box changed.
     RestoreChanged(String),
+    /// Fill the restore phrase box from the clipboard.
     PasteRestore,
+    /// Restore from the phrase in the box; the first press only arms it
+    /// when it would replace a different identity.
     Restore,
+    /// Back out of an armed restore and clear the box.
     CancelRestore,
+    /// Show the system's microphone permission prompt.
     RequestMic,
+    /// Start or stop the mic test.
     MicTest(bool),
+    /// Load a named EQ preset into the chain.
     EqPreset(String),
+    /// Turn a chain stage on or off.
     Toggle(Stage, bool),
+    /// Move a chain slider to a new value, in that slider's units.
     Param(Param, f32),
+    /// Put the whole chain back to the default preset.
     ResetChain,
 
     // Contacts.
+    /// The new contact's name box changed.
     ContactName(String),
+    /// The new contact's invite box changed.
     ContactInvite(String),
+    /// Fill the invite box from the clipboard.
     PasteContactInvite,
+    /// Add the contact from the name and invite boxes.
     AddContact,
+    /// Call the contact with this key (hex).
     CallContact(String),
+    /// Remove the contact with this key (hex); the first press only arms
+    /// it.
     RemoveContact(String),
+    /// The name box for saving the person on the call changed.
     SaveCallerName(String),
+    /// Save the person on the call under the name in the box.
     SaveCaller,
+    /// Mark the contact with this key (hex) verified, or not.
     MarkVerified(String, bool),
 
     // Chat.
+    /// Open the conversation with this key (hex) and show the Chat screen.
     OpenChat(String),
+    /// Close the open conversation, back to the list.
     CloseChat,
+    /// The message box changed.
     Draft(String),
+    /// Send the message box, or save it over the message being edited.
     SendChat,
+    /// Show the actions for one message, or (`None`) hide them.
     SelectChat(Option<u64>),
+    /// Start editing one of our messages: its text goes into the message
+    /// box.
     EditChat(u64),
+    /// Stop editing and clear the message box.
     CancelEdit,
+    /// Delete one of our messages.
     DeleteChat(u64),
+    /// Toggle our reaction on a message.
     React(u64, &'static str),
+    /// Set the open conversation's disappearing-message timer.
     Expiry(Expiry),
 
     // Files.
+    /// Open the system file picker to send a file to the person on the
+    /// call.
     PickFile,
+    /// Accept the file being offered.
     AcceptOffer,
+    /// Decline the file being offered.
     DeclineOffer,
+    /// Stop receiving the file arriving.
     CancelIncoming,
+    /// Pause (`true`) or resume the file being sent.
     PauseSend(bool),
+    /// Stop sending the file being sent.
     CancelSend,
+    /// Move a queued file one place earlier.
     QueueUp(u64),
+    /// Move a queued file one place later.
     QueueDown(u64),
+    /// Hold (`true`) or release a queued file.
     QueueHold(u64, bool),
+    /// Take a file out of the queue.
     QueueRemove(u64),
 
     // Recent calls.
+    /// Call back the call at this index in the history, newest first.
     CallBack(usize),
+    /// Clear the call history; the first press only arms it.
     ClearCalls,
 
     // Settings.
+    /// The display name box changed.
     DisplayName(String),
+    /// Switch "Files only on Wi-Fi".
     WifiOnly(bool),
+    /// The monthly mobile data limit box changed, in MB; only digits are
+    /// kept, and empty means no limit.
     CellularLimit(String),
+    /// Switch the data saver.
     DataSaver(bool),
+    /// Switch listening for calls in the background.
     KeepListening(bool),
+    /// Switch listening in the background even on battery saver.
     ListenOnSaver(bool),
 }
 
@@ -154,16 +254,23 @@ pub enum Message {
 /// desktop, rather than a free duration nobody can reason about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expiry {
+    /// Messages are kept.
     Off,
+    /// Five minutes.
     FiveMinutes,
+    /// One hour.
     Hour,
+    /// One day.
     Day,
+    /// One week.
     Week,
 }
 
 impl Expiry {
+    /// Every choice, in the order the picker shows them.
     pub const ALL: [Expiry; 5] = [Expiry::Off, Expiry::FiveMinutes, Expiry::Hour, Expiry::Day, Expiry::Week];
 
+    /// The timer in seconds, or `None` to keep messages.
     pub fn secs(self) -> Option<u64> {
         match self {
             Expiry::Off => None,
@@ -174,6 +281,9 @@ impl Expiry {
         }
     }
 
+    /// The choice matching a stored timer. A timer that is not one of the
+    /// choices (set on a desktop, say) shows as Off; it is not changed
+    /// unless the user picks something.
     pub fn from_secs(secs: Option<u64>) -> Self {
         Self::ALL.into_iter().find(|e| e.secs() == secs).unwrap_or(Expiry::Off)
     }
@@ -191,18 +301,39 @@ impl std::fmt::Display for Expiry {
     }
 }
 
+/// The whole interface: its state, the call engine, and the files on
+/// disk it keeps in step.
+///
+/// Owned by the [`Runner`](crate::runner::Runner) and used only on the
+/// event-loop thread. The call runs on the engine's own threads and
+/// reaches this through [`App::poll`].
 pub struct App {
+    /// The app's private storage, where every file below lives.
     dir: PathBuf,
+    /// The settings as last saved; every change is written straight away.
     settings: Settings,
+    /// This phone's identity, or why it could not be loaded, which is shown
+    /// in place of anything that needs it.
     identity: Result<IdentityKeyPair, String>,
+    /// Runs calls and the mic test.
     engine: CallEngine,
+    /// The screen shown.
     tab: Tab,
+    /// The listening port box as typed, which may not be a valid port yet.
     port_text: String,
+    /// The EQ preset last chosen, for the picker; `None` once the chain is
+    /// reset.
     eq_choice: Option<String>,
+    /// Whether the recovery phrase is on screen.
     phrase_visible: bool,
+    /// The restore phrase box.
     restore_text: String,
+    /// The first press of Restore has been made and a second will replace
+    /// the identity.
     restore_armed: bool,
+    /// One sentence shown above the screen; cleared by the next tap.
     notice: Option<String>,
+    /// Whether the microphone may be used, as of the last start or resume.
     mic_permission: bool,
     /// Looked up on start and resume rather than every frame: it opens a
     /// socket to ask.
@@ -211,12 +342,20 @@ pub struct App {
     /// Seals chat history and the call log. The desktop's key file, made
     /// the desktop's way, in this app's private storage.
     backup_key: Result<BackupKey, String>,
+    /// The address book.
     contacts: Contacts,
+    /// Past calls, newest first.
     calls: Vec<CallRecord>,
+    /// The first press of "Clear call history" has been made.
     clear_calls_armed: bool,
+    /// The new contact's name box.
     contact_name: String,
+    /// The new contact's invite box.
     contact_invite: String,
+    /// The key (hex) of the contact whose Remove was pressed once.
     remove_armed: Option<String>,
+    /// The name box for saving the person on the call. Filled from their
+    /// Hello when it arrives and the box is still empty.
     save_name: String,
     /// What this phone dialled for the call in progress, or `None` when
     /// the call came in. Kept for "save as contact".
@@ -225,11 +364,18 @@ pub struct App {
     /// The conversation on screen: the person on the call, or one opened
     /// from contacts to read back.
     chat: Option<Conversation>,
+    /// The message box.
     draft: String,
+    /// The id of our message being edited, if the message box holds an
+    /// edit.
     editing: Option<u64>,
+    /// The message whose actions are shown, if any.
     selected: Option<u64>,
+    /// Messages from them that arrived while the Chat screen was not
+    /// showing, for the tab's badge.
     unread: usize,
 
+    /// The send queue and the transfers running.
     files: FileManager,
     /// Who the connected call is with, hex, as of the last poll: noticing
     /// it change is how a call's start and end are handled once.
@@ -240,19 +386,31 @@ pub struct App {
     /// Whether the app is on screen; notifications are only for when it
     /// is not.
     foreground: bool,
+    /// The network as last reported by the platform.
     network: Network,
+    /// Whether battery saver was on when last checked.
     battery_saver: bool,
+    /// Mobile data used by transfers this month, copied into the settings
+    /// now and then by [`save_meter`](Self::save_meter).
     meter: CellularMeter,
+    /// The mobile data limit box as typed.
     limit_text: String,
+    /// What the platform was last told must keep running, so it is told
+    /// only when that changes.
     background_work: BackgroundWork,
 }
 
+/// Loads this phone's identity from `dir`, creating one on first start.
 fn load_identity(dir: &std::path::Path) -> Result<IdentityKeyPair, String> {
     let path = antiphon_crypto::store::identity_path(dir);
     antiphon_crypto::store::load_or_create(&path).map_err(|e| format!("Could not load the identity at {}: {e}", path.display()))
 }
 
 impl App {
+    /// Loads everything from `dir` and starts the call engine. `wake` is
+    /// how the engine wakes the runner's event loop. Fails only when the
+    /// engine cannot start; a missing identity or backup key is shown on
+    /// screen instead.
     pub fn new(dir: PathBuf, wake: Waker) -> Result<Self, String> {
         let settings = Settings::load(&dir);
         let identity = load_identity(&dir);
@@ -383,6 +541,7 @@ impl App {
         }
     }
 
+    /// The network in the terms the data rules use.
     fn link(&self) -> Link {
         match self.network {
             Network::Unknown => Link::Unknown,
@@ -392,6 +551,7 @@ impl App {
         }
     }
 
+    /// The data settings in the terms the data rules use.
     fn data_settings(&self) -> DataSettings {
         DataSettings {
             wifi_only: self.settings.wifi_only_transfers,
@@ -400,6 +560,7 @@ impl App {
         }
     }
 
+    /// Whether file transfers must wait right now, and why.
     fn transfer_hold(&self) -> Option<data_rules::Hold> {
         data_rules::transfer_hold(self.data_settings(), self.link(), self.meter.used(now_secs()))
     }
@@ -415,6 +576,8 @@ impl App {
         }
     }
 
+    /// The name to show for a key: yours for them if saved, otherwise the
+    /// name they sent if they are on the call, otherwise a fingerprint.
     fn display_name_for(&self, key_hex: &str) -> String {
         match (self.contacts.by_key(key_hex), &self.peer_display_name) {
             (Some(contact), _) => contact.name.clone(),
@@ -423,6 +586,8 @@ impl App {
         }
     }
 
+    /// Opens the conversation with `key_hex`, unless it is already the one
+    /// open. Shows why instead when there is no backup key to read it with.
     fn open_chat(&mut self, key_hex: &str) {
         let Ok(key) = &self.backup_key else {
             self.notice = self.backup_key.as_ref().err().cloned();
@@ -576,15 +741,22 @@ impl App {
         self.engine.set_ptt(false);
     }
 
+    /// Writes the settings file.
     fn save(&self) {
         self.settings.save(&self.dir);
     }
 
+    /// Hands the changed chain to the engine, which applies it at once, and
+    /// saves it.
     fn chain_changed(&mut self) {
         self.engine.set_chain(self.settings.chain.clone());
         self.save();
     }
 
+    /// Applies one message. The call, identity and voice ones are handled
+    /// here and the rest in [`update_messaging`](Self::update_messaging).
+    /// Any message but the ones a held button or typing send clears the
+    /// notice, and anything else disarms a pending two-press action.
     pub fn update(&mut self, message: Message) {
         if !matches!(message, Message::PttPressed | Message::PttReleased | Message::Draft(_)) {
             self.notice = None;
@@ -751,6 +923,8 @@ impl App {
         }
     }
 
+    /// Dials `target` and shows the Call screen, once the microphone and
+    /// identity are in order.
     fn start_call(&mut self, target: &str) {
         if let Some(identity) = self.call_identity() {
             self.dialled = Some(target.to_string());
@@ -1104,6 +1278,7 @@ impl App {
             .into()
     }
 
+    /// A banner asking for the microphone, while permission is missing.
     fn mic_banner(&self) -> Option<Element<'_, Message, Theme, Renderer>> {
         (!self.mic_permission).then(|| {
             container(
@@ -1120,6 +1295,8 @@ impl App {
         })
     }
 
+    /// The Call screen: the call in progress, or waiting, dialling, and the
+    /// forms to start either.
     fn call_view(&self) -> Element<'_, Message, Theme, Renderer> {
         let mut content = column![].spacing(14);
         if let Some(banner) = self.mic_banner() {
@@ -1196,6 +1373,8 @@ impl App {
         content.into()
     }
 
+    /// The call in progress: the verification code, who it is with, the
+    /// push-to-talk pad and the switches.
     fn connected_view(&self, remote: String, code: String, peer_key: [u8; 32]) -> Element<'_, Message, Theme, Renderer> {
         let transmitting = self.engine.transmitting();
         let key_hex = hex(&peer_key);
@@ -1244,6 +1423,8 @@ impl App {
         content.into()
     }
 
+    /// The Voice screen: the mic test and every stage of the chain, each
+    /// with a sentence on what it does and its sliders while on.
     fn voice_view(&self) -> Element<'_, Message, Theme, Renderer> {
         let chain = &self.settings.chain;
         let mut content = column![
@@ -1352,6 +1533,8 @@ impl App {
         content.into()
     }
 
+    /// The Identity screen: this phone's key, the recovery phrase behind a
+    /// button, and restoring from a phrase.
     fn identity_view(&self) -> Element<'_, Message, Theme, Renderer> {
         let mut content = column![
             text("Your identity").size(22),

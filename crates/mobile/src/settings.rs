@@ -7,15 +7,22 @@ use std::path::{Path, PathBuf};
 use antiphon_audio::ChainConfig;
 use serde::{Deserialize, Serialize};
 
+/// Everything the phone keeps between launches. Missing fields take
+/// their defaults, so a settings file written by an older version still
+/// loads.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Settings {
+    /// The UDP port incoming calls are listened for on.
     pub listen_port: u16,
+    /// The address last dialled, so the call screen opens with it filled in.
     pub last_remote: String,
     /// Push-to-talk is the default, as on desktop: a phone held to the
     /// ear in a busy room should not transmit until asked to.
     pub open_mic: bool,
+    /// Play the call through the loudspeaker instead of the earpiece.
     pub speaker: bool,
+    /// The microphone processing chain, in the desktop's preset format.
     pub chain: ChainConfig,
     /// The name sent to the people you call.
     pub display_name: String,
@@ -33,6 +40,8 @@ pub struct Settings {
     /// Mobile data used by transfers this month, kept across restarts so
     /// the limit means a month rather than a session.
     pub cellular_month: u32,
+    /// Bytes counted in `cellular_month`; together they make the
+    /// `CellularMeter` the transfer rules read.
     pub cellular_used_bytes: u64,
 }
 
@@ -59,6 +68,7 @@ impl Default for Settings {
     }
 }
 
+/// The settings file in the app's private storage.
 fn path(dir: &Path) -> PathBuf {
     dir.join("settings.json")
 }
@@ -74,6 +84,9 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// Writes the settings as pretty JSON, so a user or a support request
+    /// can read the file. A failure is logged and otherwise ignored: the
+    /// app keeps working with what is in memory.
     pub fn save(&self, dir: &Path) {
         let result = serde_json::to_string_pretty(self)
             .map_err(std::io::Error::other)

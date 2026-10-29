@@ -31,26 +31,56 @@ const STUN_TIMEOUT: Duration = Duration::from_secs(4);
 /// progress bar and queue keep up even when nothing else happens.
 const TRANSFER_WAKE: Duration = Duration::from_millis(250);
 
+/// Where the call is up to, as the call screen shows it.
 #[derive(Clone, Debug, Default)]
 pub enum Phase {
+    /// Nothing running; also the state during a mic test.
     #[default]
     Idle,
-    Listening { local: String, public: Option<String> },
-    Dialing { remote: String },
-    Connected { remote: String, code: String, peer_key: [u8; 32] },
-    Ended { message: String },
+    /// Waiting for an incoming call.
+    Listening {
+        /// `ip:port` on the local network, for someone nearby to dial.
+        local: String,
+        /// The address STUN reported the outside world sees, once known.
+        public: Option<String>,
+    },
+    /// Resolving the target and running the handshake.
+    Dialing {
+        /// What the user dialled, as typed.
+        remote: String,
+    },
+    /// The handshake succeeded and audio is flowing.
+    Connected {
+        /// The other side's `ip:port`.
+        remote: String,
+        /// The verification code to read aloud and compare.
+        code: String,
+        /// Their identity key, as proved in the handshake.
+        peer_key: [u8; 32],
+    },
+    /// The last call or attempt is over.
+    Ended {
+        /// One sentence on how it ended, shown until the next call.
+        message: String,
+    },
 }
 
 /// What the audio and network tasks share with the interface.
 #[derive(Default)]
 struct Shared {
+    /// Where the call is up to; read by the interface every frame, written
+    /// only through [`Shared::set_phase`].
     phase: Mutex<Phase>,
     /// Peak level of the processed microphone signal, as f32 bits.
     level: AtomicU32,
     /// Push-to-talk held, or open mic on.
     transmitting: AtomicBool,
+    /// The open-mic setting: transmit without holding the button.
     open_mic: AtomicBool,
+    /// The push-to-talk button is held down.
     ptt_held: AtomicBool,
+    /// Play through the loudspeaker rather than the earpiece. Read when a
+    /// call connects, to put the audio session in the right mode.
     speaker: AtomicBool,
     /// Bumped by every new call or mic test, so a task that is still
     /// winding down cannot overwrite the phase of the one that replaced it.
@@ -72,10 +102,14 @@ struct Shared {
 }
 
 impl Shared {
+    /// Starts a new call or mic test and returns its generation, which
+    /// retires every task belonging to the one before.
     fn begin(&self) -> u64 {
         self.generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    /// Sets the phase, but only for the current generation: a task of a
+    /// call that has since been replaced changes nothing.
     fn set_phase(&self, generation: u64, phase: Phase) {
         let mut current = self.phase.lock().unwrap();
         if self.generation.load(Ordering::SeqCst) == generation {
@@ -83,17 +117,25 @@ impl Shared {
         }
     }
 
+    /// Recomputes `transmitting` from the open-mic setting and the
+    /// push-to-talk button.
     fn update_transmitting(&self) {
         let on = self.open_mic.load(Ordering::Relaxed) || self.ptt_held.load(Ordering::Relaxed);
         self.transmitting.store(on, Ordering::Relaxed);
     }
 }
 
+/// Wakes the interface's event loop. Called from the call's tasks,
+/// which run on the engine's runtime, so it must be callable from any
+/// thread.
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// A connected call, as the interface sees it.
 pub struct Live {
+    /// The encrypted link to the other side, shared with the call's tasks
+    /// and with file transfer.
     pub peer: Arc<PeerConnection>,
+    /// Their identity key, as proved in the handshake.
     pub peer_key: [u8; 32],
     /// The desktop's transfer state machine, driven by this call's receive
     /// loop and read by the interface for progress.
@@ -101,6 +143,8 @@ pub struct Live {
     /// Chat and profile messages that arrived, waiting for the interface,
     /// which owns the conversation and its history.
     inbox: Mutex<Vec<ControlMessage>>,
+    /// A handle to the engine's runtime, for spawning sends and transfers
+    /// from the interface thread.
     runtime: tokio::runtime::Handle,
 }
 
@@ -113,10 +157,14 @@ impl Live {
         });
     }
 
+    /// Takes the chat and profile messages that arrived since the last call,
+    /// oldest first. The interface calls it on every wake.
     pub fn take_inbox(&self) -> Vec<ControlMessage> {
         std::mem::take(&mut *self.inbox.lock().unwrap())
     }
 
+    /// The call's runtime, where file transfer runs its tasks next to the
+    /// call's own.
     pub fn runtime(&self) -> &tokio::runtime::Handle {
         &self.runtime
     }
@@ -125,18 +173,26 @@ impl Live {
 /// One finished call, for the call history.
 #[derive(Clone, Debug)]
 pub struct CallSummary {
+    /// Whether this phone placed the call rather than answered it.
     pub outgoing: bool,
     /// What was dialled, or where an incoming call came from.
     pub remote: String,
+    /// Who answered, as proved in the handshake, or `None` when the call
+    /// never connected.
     pub peer_key: Option<[u8; 32]>,
+    /// When the call began (dialling, or the incoming handshake), as Unix
+    /// seconds.
     pub started_secs: u64,
     /// When it connected, if it did.
     pub connected_secs: Option<u64>,
+    /// When the call ended, as Unix seconds.
     pub ended_secs: u64,
     /// The line shown when it ended.
     pub message: String,
 }
 
+/// The current time as Unix seconds, or 0 if the clock is set before
+/// 1970.
 pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -145,22 +201,40 @@ pub fn now_secs() -> u64 {
 /// is right however the call ends.
 #[derive(Default)]
 struct Facts {
+    /// What was dialled, or where the call came from.
     remote: String,
+    /// Who answered, once the handshake proved it.
     peer_key: Option<[u8; 32]>,
+    /// When it connected, as Unix seconds, if it did.
     connected_secs: Option<u64>,
 }
 
+/// Runs calls and the mic test for the interface: one at a time, each on
+/// its own tasks on a small runtime of the engine's, so the audio never
+/// waits on the interface thread.
+///
+/// Owned by the interface and driven from its thread; the tasks report
+/// back through the shared state and the waker.
 pub struct CallEngine {
+    /// Two worker threads for the network, audio and transfer tasks; the
+    /// microphone and speaker streams have a thread of their own.
     runtime: tokio::runtime::Runtime,
+    /// State the tasks write and the interface reads.
     shared: Arc<Shared>,
+    /// The current mic chain. Running calls and mic tests watch it, so a
+    /// change applies mid-call.
     chain: watch::Sender<ChainConfig>,
+    /// Called by the tasks whenever something the interface shows changed.
     wake: Waker,
     /// Ends the running call, listen, or mic test.
     stop: Option<oneshot::Sender<()>>,
+    /// Whether the running thing is a mic test rather than a call.
     mic_test: bool,
 }
 
 impl CallEngine {
+    /// Builds the engine and its runtime with the saved mic chain and
+    /// switches. Fails only if the runtime's threads cannot be started.
     pub fn new(chain: ChainConfig, open_mic: bool, speaker: bool, wake: Waker) -> std::io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
         let shared = Arc::new(Shared::default());
@@ -171,6 +245,7 @@ impl CallEngine {
         Ok(Self { runtime, shared, chain, wake, stop: None, mic_test: false })
     }
 
+    /// Where the call is up to now.
     pub fn phase(&self) -> Phase {
         self.shared.phase.lock().unwrap().clone()
     }
@@ -185,40 +260,55 @@ impl CallEngine {
         std::mem::take(&mut *self.shared.finished.lock().unwrap())
     }
 
+    /// Sets the name sent to the other side in the next call's greeting.
+    /// Surrounding whitespace is dropped.
     pub fn set_display_name(&self, name: &str) {
         *self.shared.display_name.lock().unwrap() = name.trim().to_string();
     }
 
+    /// Turns the data saver on or off for the running call and the next
+    /// ones: on drops the spare audio copy each packet carries.
     pub fn set_data_saver(&self, on: bool) {
         self.shared.data_saver.store(on, Ordering::Relaxed);
     }
 
+    /// Whether a call is waiting, dialling or connected, so a new one would
+    /// replace it.
     pub fn is_busy(&self) -> bool {
         matches!(self.phase(), Phase::Listening { .. } | Phase::Dialing { .. } | Phase::Connected { .. })
     }
 
+    /// Whether the mic test is running.
     pub fn mic_test_running(&self) -> bool {
         self.mic_test
     }
 
+    /// Peak level of the processed microphone signal in the last frame, as
+    /// a linear sample amplitude from 0 to 1, for the level meter. Zero
+    /// while not transmitting.
     pub fn level(&self) -> f32 {
         f32::from_bits(self.shared.level.load(Ordering::Relaxed))
     }
 
+    /// Whether the microphone is being sent right now.
     pub fn transmitting(&self) -> bool {
         self.shared.transmitting.load(Ordering::Relaxed)
     }
 
+    /// Records the push-to-talk button being pressed or released.
     pub fn set_ptt(&self, held: bool) {
         self.shared.ptt_held.store(held, Ordering::Relaxed);
         self.shared.update_transmitting();
     }
 
+    /// Switches open mic on or off.
     pub fn set_open_mic(&self, on: bool) {
         self.shared.open_mic.store(on, Ordering::Relaxed);
         self.shared.update_transmitting();
     }
 
+    /// Switches between loudspeaker and earpiece, at once if a call is
+    /// connected.
     pub fn set_speaker(&self, on: bool) {
         self.shared.speaker.store(on, Ordering::Relaxed);
         if matches!(self.phase(), Phase::Connected { .. }) {
@@ -273,6 +363,8 @@ impl CallEngine {
         });
     }
 
+    /// Spawns the task that runs one call (listening or dialling) and,
+    /// when it ends for any reason, records its summary and final phase.
     fn start(&mut self, mode: Mode, identity: IdentityKeyPair) {
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop = Some(stop_tx);
@@ -311,21 +403,37 @@ impl CallEngine {
     }
 }
 
+/// How a call starts.
 enum Mode {
-    Listen { port: u16 },
-    Call { target: String },
+    /// Wait for someone to call in.
+    Listen {
+        /// The UDP port to listen on.
+        port: u16,
+    },
+    /// Dial out.
+    Call {
+        /// What the user typed: an address or an invite link.
+        target: String,
+    },
 }
 
 /// Keeps the microphone and speaker open on a thread of their own, so the
 /// cpal streams (which are not `Send` on every platform) never cross an
 /// `.await`. Dropping it closes both.
 struct AudioIo {
+    /// Dropping this ends the audio thread, which closes both streams.
     _stop: std_mpsc::Sender<()>,
+    /// The rate the microphone captures at, in Hz; playback runs at the
+    /// same rate.
     sample_rate: u32,
+    /// Where decoded audio goes to be played.
     sink: PlaybackSink,
+    /// Microphone frames as they are captured, in samples from -1 to 1.
     frames: mpsc::UnboundedReceiver<Vec<f32>>,
 }
 
+/// Opens the microphone and speaker on a thread of their own and waits
+/// until both are running, or returns the reason one would not open.
 fn open_audio() -> Result<AudioIo, String> {
     let (frames_tx, frames) = mpsc::unbounded_channel::<Vec<f32>>();
     let (ready_tx, ready_rx) = std_mpsc::channel();
@@ -357,10 +465,13 @@ fn open_audio() -> Result<AudioIo, String> {
     Ok(AudioIo { _stop: stop, sample_rate, sink, frames })
 }
 
+/// The largest absolute sample in a frame: the level the meter shows.
 fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |m, s| m.max(s.abs()))
 }
 
+/// Plays the processed microphone straight back to the speaker until
+/// stopped, picking up chain changes as they are made.
 async fn mic_test(
     shared: Arc<Shared>,
     mut chain_rx: watch::Receiver<ChainConfig>,

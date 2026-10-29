@@ -17,6 +17,7 @@
 //! empty, so `cargo build --workspace` is unaffected.
 
 #![cfg(target_os = "android")]
+#![warn(missing_docs, clippy::missing_docs_in_private_items)]
 
 mod native;
 mod platform;

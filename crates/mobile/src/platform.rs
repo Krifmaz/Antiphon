@@ -9,6 +9,15 @@
 
 use std::sync::{Mutex, OnceLock};
 
+/// The phone-specific half of the app, implemented once by each
+/// platform shell and installed with [`install`].
+///
+/// `Send + Sync` because the shared code calls it from the interface
+/// thread and the call's own threads alike; an implementation that must
+/// run on the main thread (most of UIKit, some Android APIs) hops there
+/// itself. Methods return quickly: anything that waits on the user, such
+/// as a permission prompt or the file picker, answers later through
+/// [`post`].
 pub trait Platform: Send + Sync + 'static {
     /// Whether the user has granted microphone access. Both platforms ask
     /// at run time, so this can change while the app is open.
@@ -19,7 +28,10 @@ pub trait Platform: Send + Sync + 'static {
     /// Puts the audio session in voice-call mode (platform echo
     /// cancellation, earpiece unless `speaker`), or back to normal.
     fn set_call_audio(&self, in_call: bool, speaker: bool);
+    /// Puts text on the system clipboard, for sharing an invite link.
     fn copy_to_clipboard(&self, text: &str);
+    /// The clipboard's text, or `None` when it is empty, holds something
+    /// else, or the system refuses to hand it over.
     fn read_clipboard(&self) -> Option<String>;
     /// The parts of the screen the system draws over, in physical pixels,
     /// as (top, bottom): status bar, home indicator or gesture bar, and
@@ -87,9 +99,14 @@ pub trait Platform: Send + Sync + 'static {
 /// The network the phone is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Network {
+    /// The platform cannot tell. The transfer rules treat this as
+    /// unmetered, so a shell that never reports the network does not hold
+    /// every file forever.
     #[default]
     Unknown,
+    /// No network at all.
     None,
+    /// An unmetered network.
     Wifi,
     /// Mobile data, or any network the system marks as metered.
     Metered,
@@ -111,7 +128,10 @@ pub struct BackgroundWork {
 pub struct PickedFile {
     /// Opaque to the shared code; pass it back to [`Platform::read_file`].
     pub handle: String,
+    /// The file's name as the picker reported it, shown to both sides.
     pub name: String,
+    /// Its size in bytes, when the picker knows it; some providers do not
+    /// report one until the file is read.
     pub size: Option<u64>,
 }
 
@@ -119,27 +139,42 @@ pub struct PickedFile {
 /// lock screen, CallKit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallAction {
+    /// Pick up the ringing call.
     Answer,
+    /// Refuse the ringing call.
     Decline,
+    /// End the call in progress.
     HangUp,
+    /// Mute (`true`) or unmute the microphone, from CallKit or a
+    /// notification button.
     Mute(bool),
 }
 
 /// Something the platform reports back to the shared code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlatformEvent {
+    /// The user chose a file in the picker opened by [`Platform::pick_file`].
     FilePicked(PickedFile),
+    /// The user closed the picker without choosing.
     FilePickCancelled,
+    /// A call control pressed outside the app.
     CallAction(CallAction),
     /// The push address contacts should send wake-ups to.
     PushRegistered(String),
     /// A push arrived. The bytes are the sealed payload, still encrypted.
     Push(Vec<u8>),
+    /// The phone moved to a different kind of network, or lost it.
     NetworkChanged(Network),
 }
 
+/// The installed platform; empty until [`install`], when every wrapper
+/// below quietly does nothing.
 static PLATFORM: OnceLock<Box<dyn Platform>> = OnceLock::new();
+/// Events posted by the platform and not yet taken by the runner, oldest
+/// first. A mutex because [`post`] runs on whatever thread the platform
+/// calls back on.
 static EVENTS: Mutex<Vec<PlatformEvent>> = Mutex::new(Vec::new());
+/// Wakes the event loop after a [`post`]; set once by the runner.
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// Queues an event for the shared code and wakes the event loop. Safe
@@ -175,92 +210,115 @@ pub fn install(platform: impl Platform) {
     let _ = PLATFORM.set(Box::new(platform));
 }
 
+/// The installed platform, if [`install`] has run.
 fn get() -> Option<&'static dyn Platform> {
     PLATFORM.get().map(|p| p.as_ref())
 }
 
+/// [`Platform::has_mic_permission`], or `false` before a platform is
+/// installed.
 pub fn has_mic_permission() -> bool {
     get().is_some_and(|p| p.has_mic_permission())
 }
 
+/// [`Platform::request_mic_permission`].
 pub fn request_mic_permission() {
     if let Some(p) = get() {
         p.request_mic_permission();
     }
 }
 
+/// [`Platform::set_call_audio`].
 pub fn set_call_audio(in_call: bool, speaker: bool) {
     if let Some(p) = get() {
         p.set_call_audio(in_call, speaker);
     }
 }
 
+/// [`Platform::copy_to_clipboard`].
 pub fn copy_to_clipboard(text: &str) {
     if let Some(p) = get() {
         p.copy_to_clipboard(text);
     }
 }
 
+/// [`Platform::read_clipboard`].
 pub fn read_clipboard() -> Option<String> {
     get().and_then(|p| p.read_clipboard())
 }
 
+/// [`Platform::system_insets`], in physical pixels as (top, bottom), or
+/// none before a platform is installed.
 pub fn system_insets() -> (f32, f32) {
     get().map_or((0.0, 0.0), |p| p.system_insets())
 }
 
+/// [`Platform::network`], or [`Network::Unknown`] before a platform is
+/// installed.
 pub fn network() -> Network {
     get().map_or(Network::Unknown, |p| p.network())
 }
 
+/// [`Platform::battery_saver`], or `false` before a platform is
+/// installed.
 pub fn battery_saver() -> bool {
     get().is_some_and(|p| p.battery_saver())
 }
 
+/// [`Platform::set_background_work`].
 pub fn set_background_work(work: &BackgroundWork) {
     if let Some(p) = get() {
         p.set_background_work(work);
     }
 }
 
+/// [`Platform::pick_file`].
 pub fn pick_file() {
     if let Some(p) = get() {
         p.pick_file();
     }
 }
 
+/// [`Platform::read_file`], or `Unsupported` before a platform is
+/// installed.
 pub fn read_file(handle: &str) -> std::io::Result<Vec<u8>> {
     get().map_or(Err(std::io::ErrorKind::Unsupported.into()), |p| p.read_file(handle))
 }
 
+/// [`Platform::downloads_dir`].
 pub fn downloads_dir() -> Option<std::path::PathBuf> {
     get().and_then(|p| p.downloads_dir())
 }
 
+/// [`Platform::notify`].
 pub fn notify(title: &str, body: &str) {
     if let Some(p) = get() {
         p.notify(title, body);
     }
 }
 
+/// [`Platform::register_push`].
 pub fn register_push() {
     if let Some(p) = get() {
         p.register_push();
     }
 }
 
+/// [`Platform::call_connected`].
 pub fn call_connected() {
     if let Some(p) = get() {
         p.call_connected();
     }
 }
 
+/// [`Platform::ring`].
 pub fn ring(from: Option<&str>) {
     if let Some(p) = get() {
         p.ring(from);
     }
 }
 
+/// [`Platform::request_battery_exemption`].
 pub fn request_battery_exemption() {
     if let Some(p) = get() {
         p.request_battery_exemption();

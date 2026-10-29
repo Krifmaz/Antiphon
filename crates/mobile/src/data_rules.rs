@@ -20,7 +20,9 @@ pub enum Link {
     /// worse than one that occasionally uses data.
     #[default]
     Unknown,
+    /// No network at all; transfers wait.
     Offline,
+    /// An unmetered network, where nothing is held.
     Wifi,
     /// Mobile data, or any network the system marks as metered.
     Metered,
@@ -38,6 +40,7 @@ pub struct DataSettings {
     pub data_saver: bool,
 }
 
+/// One megabyte, the unit the data limit setting is in.
 const MB: u64 = 1024 * 1024;
 
 /// The upload cap a transfer gets on a metered network with the data
@@ -48,8 +51,11 @@ pub const SAVER_UPLOAD_KBPS: u32 = 64;
 /// Why a transfer is being held rather than sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hold {
+    /// The phone has no network at all.
     Offline,
+    /// On mobile data while "Files only on Wi-Fi" is on.
     WaitingForWifi,
+    /// On mobile data with this month's file allowance used up.
     CellularLimit,
 }
 
@@ -107,6 +113,7 @@ pub fn listen_in_background(keep_listening: bool, battery_saver: bool, ignore_sa
 pub struct CellularMeter {
     /// The month counted, as `YYYYMM`.
     pub month: u32,
+    /// Bytes counted so far in `month`.
     pub used_bytes: u64,
 }
 
@@ -120,6 +127,9 @@ impl CellularMeter {
         }
     }
 
+    /// Counts `bytes` of mobile data against the month `now_secs` (Unix
+    /// seconds) falls in, starting the count afresh when the month has
+    /// changed since the last call.
     pub fn add(&mut self, bytes: u64, now_secs: u64) {
         let month = month_of(now_secs);
         if self.month != month {

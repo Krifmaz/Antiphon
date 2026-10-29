@@ -8,6 +8,12 @@
 //! receiver, anything that has to run on the UI thread -- call into
 //! `java/org/antiphon/app`, and the answers come back through
 //! [`crate::native`].
+//!
+//! Threading: these run on the shared app's thread, which is
+//! `android_main`'s and not the UI thread. Each call attaches that thread to
+//! the JVM (a no-op after the first) and works inside a local frame. The
+//! framework calls used here are safe off the UI thread; anything that must
+//! run on it is left to the Java side, which posts it there itself.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -19,7 +25,9 @@ use antiphon_mobile::platform::{BackgroundWork, Network, Platform};
 use jni::objects::{JClass, JObject, JValue};
 use jni::{JNIEnv, JavaVM};
 
-/// Android's half of [`Platform`].
+/// Android's half of [`Platform`]. It holds nothing: the activity and the
+/// JavaVM are fetched from `ndk-context` on every call, so it is free to
+/// share across threads.
 pub struct Android;
 
 impl Platform for Android {
@@ -89,14 +97,20 @@ impl Platform for Android {
     }
 }
 
+/// `Manifest.permission.RECORD_AUDIO`, the run-time microphone permission.
 const RECORD_AUDIO: &str = "android.permission.RECORD_AUDIO";
 /// `PackageManager.PERMISSION_GRANTED`.
 const PERMISSION_GRANTED: i32 = 0;
-/// `AudioManager.MODE_NORMAL` and `MODE_IN_COMMUNICATION`.
+/// `AudioManager.MODE_NORMAL`: no call, audio plays as media.
 const MODE_NORMAL: i32 = 0;
+/// `AudioManager.MODE_IN_COMMUNICATION`: a VoIP call, with the platform's
+/// echo canceller engaged and the earpiece as the default output.
 const MODE_IN_COMMUNICATION: i32 = 3;
 
 /// Runs `f` with a JNI environment and the activity, logging any failure.
+/// Callable from any Rust thread: the thread is attached to the JVM if it
+/// was not already, and stays attached. A Java exception thrown inside `f`
+/// is described to logcat and cleared before this returns `None`.
 fn with_activity<T>(what: &str, f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<T>) -> Option<T> {
     let ctx = ndk_context::android_context();
     // SAFETY: android-activity initialises ndk-context with the process's
@@ -161,6 +175,7 @@ fn request_mic_permission() {
     });
 }
 
+/// The activity's `AudioManager` (`Context.AUDIO_SERVICE`).
 fn audio_manager<'a>(env: &mut JNIEnv<'a>, activity: &JObject) -> jni::errors::Result<JObject<'a>> {
     let name = env.new_string("audio")?;
     env.call_method(activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&name)])?
@@ -192,6 +207,8 @@ fn prepare_looper(env: &mut JNIEnv) -> jni::errors::Result<()> {
     Ok(())
 }
 
+/// The activity's `ClipboardManager`, with a Looper prepared first because
+/// fetching it the first time builds a Handler.
 fn clipboard_manager<'a>(env: &mut JNIEnv<'a>, activity: &JObject) -> jni::errors::Result<JObject<'a>> {
     prepare_looper(env)?;
     let name = env.new_string("clipboard")?;
@@ -297,19 +314,25 @@ fn call_activity(what: &str, method: &str) {
     });
 }
 
+/// `Build.VERSION.SDK_INT`, the API level of the running Android.
 fn sdk_int(env: &mut JNIEnv) -> jni::errors::Result<i32> {
     env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?.i()
 }
 
+/// `Context.getSystemService(name)` on the activity, for services that do
+/// not need a Looper on the calling thread. May be a Java `null` on a
+/// stripped-down build that lacks the service.
 fn system_service<'a>(env: &mut JNIEnv<'a>, activity: &JObject, name: &str) -> jni::errors::Result<JObject<'a>> {
     let name = env.new_string(name)?;
     env.call_method(activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&name)])?
         .l()
 }
 
-/// `NetworkCapabilities.NET_CAPABILITY_NOT_METERED` and
-/// `NET_CAPABILITY_TEMPORARILY_NOT_METERED`.
+/// `NetworkCapabilities.NET_CAPABILITY_NOT_METERED`: the user is not charged
+/// for data on this network.
 const NOT_METERED: i32 = 11;
+/// `NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED` (API 30):
+/// metered in general, but free for now, as some 5G plans are.
 const TEMPORARILY_NOT_METERED: i32 = 25;
 
 /// What the default network is now. "Wi-Fi" means what the user means by
@@ -397,6 +420,9 @@ fn ring(from: Option<&str>) {
     });
 }
 
+/// Shows a plain notification that opens the app when tapped, through
+/// `CallService.notify`, which also asks for the notification permission on
+/// Android 13 and later.
 fn notify(title: &str, body: &str) {
     with_activity("showing a notification", |env, activity| {
         let class = app_class(env, activity, "org.antiphon.app.CallService")?;
@@ -504,6 +530,8 @@ fn downloads_dir() -> Option<PathBuf> {
     private.filter(|d| writable(d))
 }
 
+/// The absolute path of a `java.io.File`, or `None` for a Java `null`, which
+/// the storage calls return when a volume is not mounted.
 fn file_path(env: &mut JNIEnv, file: &JObject) -> jni::errors::Result<Option<PathBuf>> {
     if file.is_null() {
         return Ok(None);

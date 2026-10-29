@@ -39,6 +39,8 @@ const GRAPHICS_BACKENDS: [wgpu::Backends; 2] = [wgpu::Backends::VULKAN, wgpu::Ba
 #[cfg(target_os = "ios")]
 const GRAPHICS_BACKENDS: [wgpu::Backends; 1] = [wgpu::Backends::METAL];
 
+/// iced's clipboard, answered by the platform's, so a long press in a
+/// text field can paste an invite link copied from another app.
 struct Clipboard;
 
 impl clipboard::Clipboard for Clipboard {
@@ -53,32 +55,69 @@ impl clipboard::Clipboard for Clipboard {
 
 /// Everything that only exists while the activity has a window.
 struct Graphics {
+    /// The window the surface draws into; shared with the surface, which
+    /// must not outlive it.
     window: Arc<Window>,
+    /// The wgpu surface; `'static` because it holds its own `Arc` of the
+    /// window.
     surface: wgpu::Surface<'static>,
+    /// The GPU device the renderer and surface were made with.
     device: wgpu::Device,
+    /// The surface's texture format: an sRGB one when offered, so colours
+    /// match iced's palette.
     format: wgpu::TextureFormat,
+    /// iced's wgpu renderer, with the bundled font loaded.
     renderer: Renderer,
+    /// The window's size in physical pixels and its scale factor, which
+    /// together give iced its logical size.
     viewport: Viewport,
+    /// Set when the window was resized or the surface was lost, so the next
+    /// redraw reconfigures the surface before drawing.
     needs_configure: bool,
 }
 
+/// The winit application each platform shell runs: it creates the
+/// [`App`] on first resume, builds the graphics whenever the system
+/// hands over a window, and turns winit events into iced ones.
+///
+/// Everything here runs on the event-loop thread. Other threads reach it
+/// only by sending a [`Wake`] through the proxy.
 pub struct Runner {
     /// The app's private storage: identity, settings.
     data_dir: PathBuf,
+    /// How the call engine and the platform wake the event loop. Behind a
+    /// mutex because the wake closures must be `Sync` and a proxy is not on
+    /// every platform.
     proxy: Arc<Mutex<EventLoopProxy<Wake>>>,
+    /// The interface and everything it owns. Created on the first resume
+    /// and kept for the life of the process, so a call survives the window
+    /// going away while the app is in the background.
     app: Option<App>,
+    /// Present only while the system has given the app a window.
     graphics: Option<Graphics>,
+    /// iced's layout cache, carried between frames.
     cache: user_interface::Cache,
+    /// Where the last touch was, in logical pixels: iced decides what a tap
+    /// hit from the cursor position.
     cursor: mouse::Cursor,
+    /// Converted events not yet run through the interface.
     events: Vec<Event>,
+    /// How many fingers are down, so a gesture ends only when the last one
+    /// lifts.
     fingers: usize,
     /// Status bar and gesture bar or keyboard, in physical pixels.
     insets: (f32, f32),
+    /// Whether the soft keyboard has been asked for, so it is requested or
+    /// dismissed only when a text field gains or loses focus.
     keyboard_shown: bool,
+    /// The palette the interface is drawn with.
     theme: Theme,
 }
 
 impl Runner {
+    /// Called by the platform shell with the app's private storage and a
+    /// proxy for its event loop. Nothing else happens until the first
+    /// resume, when the app and the window are created.
     pub fn new(data_dir: PathBuf, proxy: EventLoopProxy<Wake>) -> Self {
         Self {
             data_dir,
@@ -95,6 +134,9 @@ impl Runner {
         }
     }
 
+    /// Creates the [`App`] on first use and gives the platform its waker.
+    /// A failure to start (an unreadable identity, say) is logged and leaves
+    /// the app absent, so the window stays blank rather than crashing.
     fn ensure_app(&mut self) {
         if self.app.is_some() {
             return;
@@ -114,6 +156,9 @@ impl Runner {
         }
     }
 
+    /// Creates the window and the wgpu surface, device and renderer for it,
+    /// trying each backend in [`GRAPHICS_BACKENDS`] in turn. The error
+    /// names the last backend's failure.
     fn create_graphics(&mut self, event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
         let window = Arc::new(
             event_loop
@@ -179,6 +224,8 @@ impl Runner {
         Err(last_error)
     }
 
+    /// The window's scale factor (physical pixels per logical pixel), or 1
+    /// when there is no window.
     fn scale(&self) -> f64 {
         self.graphics.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0)
     }
@@ -211,6 +258,8 @@ impl Runner {
         graphics.window.request_redraw();
     }
 
+    /// Draws one frame. Also re-reads the system insets, and raises or
+    /// dismisses the soft keyboard to match whether a text field has focus.
     fn redraw(&mut self) {
         let (Some(app), Some(graphics)) = (self.app.as_mut(), self.graphics.as_mut()) else {
             return;

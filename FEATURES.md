@@ -12,7 +12,7 @@ are clean on Linux and Windows.
 | `[~]` | **Partial** — a real but reduced version exists; the gap is stated on the line |
 | `[ ]` | **Not started** — no code for it |
 
-**Score: 190 done · 28 partial · 14 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
+**Score: 194 done · 29 partial · 9 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
 
 **§0 Core Principles: 6 of 6 done.**
 

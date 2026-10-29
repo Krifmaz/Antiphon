@@ -29,6 +29,9 @@ pub fn init() {
     }
 }
 
+/// Sets PlayAndRecord with the mode and options for being in a call or
+/// not; see [`init`] and [`set_call_audio`]. Any thread. The error is
+/// AVFAudio's description, for the log.
 fn set_category(in_call: bool) -> Result<(), String> {
     // SAFETY: plain property reads and a setter with valid arguments;
     // the statics are constant strings from AVFAudio.

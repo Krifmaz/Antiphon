@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use antiphon_crypto::Invite;
 use serde::{Deserialize, Serialize};
 
+/// Someone saved in the address book, keyed by their identity key.
+/// Missing fields take their defaults, so an older file still loads.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct Contact {
@@ -52,10 +54,14 @@ impl Contact {
     }
 }
 
+/// Lower-case hex of a 32-byte key, the form keys are stored and
+/// compared in throughout the phone's files.
 pub fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The inverse of [`hex`]: `None` for anything that is not exactly 64
+/// hex digits, which is how an unpinned contact's empty key reads.
 pub fn decode_key(hex: &str) -> Option<[u8; 32]> {
     if hex.len() != 64 {
         return None;
@@ -67,11 +73,15 @@ pub fn decode_key(hex: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// The address book, kept sorted by name (case-insensitively) after
+/// every addition so the list screen can show it as it is.
 #[derive(Default)]
 pub struct Contacts {
+    /// Every saved contact, in display order.
     pub list: Vec<Contact>,
 }
 
+/// The contacts file in the app's private storage.
 fn path(dir: &Path) -> PathBuf {
     dir.join("contacts.json")
 }
@@ -92,6 +102,8 @@ impl Contacts {
         }
     }
 
+    /// Writes the whole address book as pretty JSON. A failure is logged and
+    /// otherwise ignored; the contacts stay in memory for this session.
     pub fn save(&self, dir: &Path) {
         let result = serde_json::to_string_pretty(&self.list)
             .map_err(std::io::Error::other)
@@ -101,10 +113,13 @@ impl Contacts {
         }
     }
 
+    /// The contact with this identity key (hex), if saved. A contact with no
+    /// key yet never matches, even an empty `key_hex`.
     pub fn by_key(&self, key_hex: &str) -> Option<&Contact> {
         self.list.iter().find(|c| !c.identity_key.is_empty() && c.identity_key == key_hex)
     }
 
+    /// As [`by_key`](Self::by_key), for changing the contact in place.
     pub fn by_key_mut(&mut self, key_hex: &str) -> Option<&mut Contact> {
         self.list.iter_mut().find(|c| !c.identity_key.is_empty() && c.identity_key == key_hex)
     }
@@ -172,10 +187,13 @@ impl Contacts {
         self.sort();
     }
 
+    /// Forgets the contact with this key. Their history and outbox files are
+    /// left alone; deleting a contact is not deleting a conversation.
     pub fn remove(&mut self, key_hex: &str) {
         self.list.retain(|c| c.identity_key != key_hex);
     }
 
+    /// Restores the by-name order the list screen relies on.
     fn sort(&mut self) {
         self.list.sort_by_key(|c| c.name.to_lowercase());
     }

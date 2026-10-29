@@ -9,16 +9,27 @@
 /// A queued item and the id the interface names it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry<T> {
+    /// Unique within its queue and never reused, so a tap on a row that
+    /// has since moved still finds the right file.
     pub id: u64,
     /// Skipped over when choosing what to send next, without losing its
     /// place: the user wants it sent, just not yet.
     pub held: bool,
+    /// What is waiting, typically an offered file and who it is for.
     pub item: T,
 }
 
+/// The files waiting to be sent, in the order they will go.
+///
+/// Ids come from a counter that only moves forward, even across
+/// [`push_front`](Self::push_front), so an id stays unique for the
+/// queue's lifetime.
 #[derive(Clone, Debug)]
 pub struct TransferQueue<T> {
+    /// Front first: the next to be sent is the first entry not held.
     entries: Vec<Entry<T>>,
+    /// The id the next [`push`](Self::push) hands out; always greater than
+    /// every id in the queue.
     next_id: u64,
 }
 
@@ -45,14 +56,17 @@ impl<T> TransferQueue<T> {
         self.entries.insert(0, entry);
     }
 
+    /// How many entries are waiting, held ones included.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether nothing is waiting, held or not.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// The entries in sending order, front first.
     pub fn iter(&self) -> impl Iterator<Item = &Entry<T>> {
         self.entries.iter()
     }
@@ -79,6 +93,8 @@ impl<T> TransferQueue<T> {
         }
     }
 
+    /// Holds an entry in place or releases it. Returns whether the id was
+    /// found.
     pub fn set_held(&mut self, id: u64, held: bool) -> bool {
         match self.entries.iter_mut().find(|e| e.id == id) {
             Some(entry) => {
@@ -103,6 +119,7 @@ impl<T> TransferQueue<T> {
         Some(self.entries.remove(at))
     }
 
+    /// Where the entry with this id is, if it is still queued.
     fn position(&self, id: u64) -> Option<usize> {
         self.entries.iter().position(|e| e.id == id)
     }

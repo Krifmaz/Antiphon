@@ -17,16 +17,23 @@ use crate::conversation::reaction_label;
 use crate::data_rules::{self, Link};
 use crate::reactions;
 
+/// Every screen and widget here produces the app's [`Message`] on the
+/// shared renderer.
 type View<'a> = Element<'a, Message, Theme, Renderer>;
 
+/// A padded, rounded box filling the width, which groups one thing's
+/// text and buttons together.
 fn card<'a>(content: impl Into<View<'a>>) -> View<'a> {
     container(content).padding(12).width(Length::Fill).style(container::rounded_box).into()
 }
 
+/// The small explanatory line under a control (13 logical pixels).
 fn help<'a>(line: impl text::IntoFragment<'a>) -> iced_widget::Text<'a, Theme, Renderer> {
     text(line).size(13)
 }
 
+/// Progress as a fraction from 0 to 1 for a progress bar. Nothing to do
+/// reads as finished rather than dividing by zero.
 fn fraction(done: u32, total: u32) -> f32 {
     if total == 0 {
         1.0
@@ -71,6 +78,9 @@ impl App {
         }
     }
 
+    /// The Chat screen: the open conversation with its messages, actions on
+    /// the selected one, and the composer; or the list of conversations
+    /// when none is open.
     pub(super) fn chat_view(&self) -> View<'_> {
         let Some(chat) = &self.chat else { return self.chat_list_view() };
         let live = self.engine.live();
@@ -182,6 +192,9 @@ impl App {
         column![header, scrollable(list).anchor_bottom().height(Length::Fill).spacing(6), composer].spacing(10).into()
     }
 
+    /// Every contact with a known key, each with a button to open their
+    /// conversation. Contacts saved from a bare address are left out until
+    /// a call pins their key, since there is no history to file under.
     fn chat_list_view(&self) -> View<'_> {
         let mut content = column![
             text("Messages").size(22),
@@ -203,6 +216,8 @@ impl App {
         content.into()
     }
 
+    /// The Files screen: an offer to answer, the file arriving, the file
+    /// being sent, the queue in sending order, and what has been received.
     pub(super) fn files_view(&self) -> View<'_> {
         let live = self.engine.live();
         let live_peer = live.as_ref().map(|l| hex(&l.peer_key));
@@ -357,6 +372,9 @@ impl App {
         content.into()
     }
 
+    /// The Contacts screen: adding someone from an invite link, then every
+    /// contact with their verification state and buttons to call, chat or
+    /// remove them.
     pub(super) fn contacts_view(&self) -> View<'_> {
         let mut content = column![
             text("Contacts").size(22),
@@ -412,6 +430,8 @@ impl App {
         content.into()
     }
 
+    /// The Recent screen: past calls, newest first, each with a button to
+    /// call back and, when the key is known, to open the chat.
     pub(super) fn recent_view(&self) -> View<'_> {
         let now = now_secs();
         let mut content = column![
@@ -449,6 +469,9 @@ impl App {
         content.into()
     }
 
+    /// The Settings screen: your display name, then the data and battery
+    /// rules, with the network and battery saver state as they are now
+    /// beside the switches they affect.
     pub(super) fn settings_view(&self) -> View<'_> {
         let settings = &self.settings;
         let setting = |toggle: iced_widget::Toggler<'static, Message, Theme, Renderer>, line: &'static str| -> View<'static> {

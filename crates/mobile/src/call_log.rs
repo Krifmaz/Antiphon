@@ -16,14 +16,18 @@ use crate::contacts::hex;
 /// every call, so it is bounded.
 const MAX_RECORDS: usize = 500;
 
+/// One past call, as stored in the sealed log and shown on the Recent
+/// screen.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CallRecord {
+    /// Whether this phone placed the call rather than answered it.
     pub outgoing: bool,
     /// What was dialled, or the address an incoming call came from.
     pub remote: String,
     /// Who answered, hex, or empty when the call never connected.
     #[serde(default)]
     pub peer_key: String,
+    /// When the call started, as Unix seconds.
     pub started_secs: u64,
     /// How long it was connected, or `None` if it never was.
     #[serde(default)]
@@ -46,6 +50,7 @@ impl From<&CallSummary> for CallRecord {
     }
 }
 
+/// The sealed log's file in the app's private storage.
 fn path(dir: &Path) -> PathBuf {
     dir.join("calls.log")
 }
@@ -58,6 +63,9 @@ pub fn load(dir: &Path, key: &BackupKey) -> Vec<CallRecord> {
     serde_json::from_slice(&plain).unwrap_or_default()
 }
 
+/// Seals the whole list and writes it over the old file. A failure is
+/// logged and otherwise ignored: losing the call history is not worth
+/// interrupting the user over.
 pub fn save(dir: &Path, key: &BackupKey, log: &[CallRecord]) {
     let result = serde_json::to_vec(log)
         .map_err(|e| e.to_string())

@@ -5,11 +5,12 @@
 #   test-macos -- the same on macOS. Optional: macOS runners are sometimes
 #                 unavailable for hours (a queued job gets cancelled without
 #                 ever starting), and that should not hold anything back.
-#   android  -- clippy the Android crate and build the APK (Rust + iced)
-#               for every push and pull request. Releases build it again in release.yml.
-#   ios      -- clippy the iOS crate and build the simulator app (and a
-#               device build, signed when the IOS_* secrets exist) on
-#               macOS. Optional, like test-macos; nothing waits on it.
+#   android    -- clippy the Android crate and build the APK with
+#                 crates/android/build-apk.sh, so a broken APK shows up on
+#                 the push that broke it rather than at release time.
+#   ios        -- clippy the iOS crate and build the simulator app (and a
+#                 device build, signed when the IOS_* secrets exist) on
+#                 macOS. Optional, like test-macos; nothing waits on it.
 #
 # Releases are made by release.yml (Actions -> release -> Run workflow).
 name: CI
@@ -32,13 +33,6 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # The user chose this (2026-10-26): GitHub's macOS runners are scarce,
-    # and a job can sit queued until it is cancelled without running a
-    # line. macOS still builds and tests on every push, but a missing Mac
-    # runner no longer turns the pipeline red or holds back the release of
-    # the other platforms and the APK.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
-    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +52,11 @@ jobs:
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test-macos:
+    name: test (macos-latest)
+    runs-on: macos-latest
+    steps: *test-steps
 
   android:
     name: android (apk)
@@ -129,11 +128,6 @@ jobs:
           name: apk-android
           path: out/*
 
-  test-macos:
-    name: test (macos-latest)
-    runs-on: macos-latest
-    steps: *test-steps
-
   ios:
     name: ios (simulator app)
     # Linking for iOS needs Apple's SDK, so this is a macOS job, and so
@@ -182,4 +176,3 @@ jobs:
           # Not "antiphon-*": publish packages every artifact named that.
           name: app-ios
           path: out/*
-
