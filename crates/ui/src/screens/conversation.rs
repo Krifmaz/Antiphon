@@ -3,7 +3,7 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, ContentFit, Length};
-use iced_widget::{button, column, container, hover, image, progress_bar, row, scrollable, space, text_input};
+use iced_widget::{button, column, container, hover, image, progress_bar, row, scrollable, space};
 
 use super::{call, fill};
 use crate::icons::{icon, Icon};
@@ -121,10 +121,23 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, first: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
+    // Read out as "who: what", in the order the conversation runs.
+    let who = if line.mine {
+        "You"
+    } else if line.author.is_empty() {
+        person.name.as_str()
+    } else {
+        line.author.as_str()
+    };
+    let said = match line.file.as_ref() {
+        Some((name, size)) => format!("{who} sent a file: {name}, {size}"),
+        None => format!("{who}: {}", line.text),
+    };
+    let _ = crate::a11y::Spec::new(crate::a11y::Role::Text, said).add();
 
     let content: El<'a, Msg> = if let Some((_, draft)) = editing {
         column![
-            text_input("", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14).style(theme::input),
+            input("Edit message", "stoop-edit", "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
             row![faint("Enter to save · Esc to cancel").size(11), fill(), btn_sm("Cancel", Btn::Ghost, Some(Msg::EditCancel)), btn_sm("Save", Btn::Primary, Some(Msg::EditSave))]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -191,10 +204,15 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         let mut rr = row![].spacing(4);
         for (emoji, n) in &line.reactions {
             rr = rr.push(
-                button(row![t(emoji.as_str()).size(13), t(n.to_string()).size(11.5).color(p.muted)].spacing(4).align_y(Alignment::Center))
-                    .padding([2, 8])
-                    .style(theme::btn(Btn::Default))
-                    .on_press(Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: emoji.clone() })),
+                pressable(
+                    row![t(emoji.as_str()).size(13), t(n.to_string()).size(11.5).color(p.muted)].spacing(4).align_y(Alignment::Center),
+                    crate::a11y::Role::Button,
+                    &format!("{emoji} {n}"),
+                    false,
+                    Btn::Default,
+                    Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: emoji.clone() }),
+                )
+                .padding([2, 8]),
             );
         }
         stack_col = stack_col.push(rr);
@@ -220,7 +238,10 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
     if editing.is_some() || line.file.is_some() || line.voice.is_some() {
         return container(body).padding([2, 0]).into();
     }
-    // The actions float over the far side of the row while the pointer is on it.
+    // The actions float over the far side of the row while the pointer is
+    // on it. They are built for every message, so they stay out of the
+    // keyboard's list: Tab would otherwise stop seven times per message.
+    crate::a11y::pause(true);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
     for e in QUICK {
         tools = tools.push(
@@ -236,6 +257,7 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         tools = tools.push(icon_btn(Icon::Trash, "Delete", Some(Msg::Do(Action::Delete { to: person.id.clone(), id: line.id }))));
     }
     tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
+    crate::a11y::pause(false);
     let bar = container(tools).padding(3).style(theme::menu_pop);
     let overlay = container(bar).width(Length::Fill).align_x(if line.mine { Alignment::Start } else { Alignment::End }).padding([0, 6]);
     hover(container(body).padding([2, 0]).width(Length::Fill), overlay)
@@ -302,7 +324,10 @@ pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         )
         .width(Length::Fill)
         .padding(0)
-        .style(|_, _| iced_widget::button::Style::default())
+        .style(focus_style(
+            |_, _| iced_widget::button::Style::default(),
+            crate::a11y::Spec::new(crate::a11y::Role::Toggle, format!("Up next, {n} files")).checked(ui.queue_open).on(Some(&Msg::ToggleQueue)).add(),
+        ))
         .on_press(Msg::ToggleQueue);
         let mut rows = column![head].spacing(4);
         let last = n - 1;
@@ -362,7 +387,7 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
         .align_y(Alignment::Center);
         return column![container(bar).padding([8, 12]).style(theme::composer)].into();
     }
-    let mut input = text_input(&placeholder, draft).id(crate::COMPOSER).size(14).padding([11, 4]).style(theme::input_bare);
+    let mut input = input("Message", crate::COMPOSER, &placeholder, draft).size(14).padding([11, 4]).style(theme::input_bare);
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }

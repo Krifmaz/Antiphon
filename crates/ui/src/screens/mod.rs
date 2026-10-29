@@ -36,8 +36,14 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     if let Some(d) = ui.dialog_shown.as_ref() {
         let rise = ui.dialog_rise();
         if rise > 0.001 {
+            // A dialog takes the keyboard while it is up.
+            crate::a11y::layer();
             layers = layers.push(container(dialogs::view(ui, m, d, rise)).padding(inset));
         }
+    }
+    if ui.menu.is_some() {
+        // So does a right-click menu.
+        crate::a11y::layer();
     }
     if let Some(layer) = menu::layer(ui, m) {
         layers = layers.push(layer);
@@ -50,6 +56,9 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
 
 /// The wide layout: people list, the screen, and the details panel.
 fn wide<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    // Built first so the keyboard and screen readers meet the people list
+    // before the screen beside it, as the eye does.
+    let side = sidebar::view(ui, m);
     let main: El<'a, Msg> = match &ui.route {
         Route::Home => home::view(ui, m),
         Route::Person(id) => conversation::view(ui, m, id),
@@ -61,7 +70,7 @@ fn wide<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Some(n) => column![notice(n), main].into(),
         None => main,
     };
-    let mut r = row![sidebar::view(ui, m), container(main).width(Length::Fill).height(Length::Fill).style(theme::stage)];
+    let mut r = row![side, container(main).width(Length::Fill).height(Length::Fill).style(theme::stage)];
     if let Route::Person(id) = &ui.route {
         let open = ui.panel_open_amount();
         if ui.size.width >= theme::PANEL_FITS && open > 0.01 {
@@ -76,6 +85,7 @@ fn wide<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
 
 /// The line across the top for something that needs attention now.
 fn notice<'a>(text: &'a str) -> El<'a, Msg> {
+    let _ = crate::a11y::Spec::new(crate::a11y::Role::Alert, text).add();
     let p = theme::look();
     container(row![icon(Icon::Info, 16.0, p.warn), t(text).size(13)].spacing(10).align_y(Alignment::Center))
         .padding([10, 18])
@@ -93,6 +103,8 @@ fn toasts<'a>(ui: &'a Ui) -> El<'a, Msg> {
     let p = theme::look();
     let mut col = column![].spacing(8).align_x(if ui.narrow() { Alignment::Center } else { Alignment::End });
     for toast in &ui.toasts {
+        // Read out as it appears; errors at once.
+        let _ = crate::a11y::Spec::new(crate::a11y::Role::Alert, toast.text.as_str()).urgent(toast.kind == ToastKind::Err).add();
         let (edge, i) = match toast.kind {
             ToastKind::Info => (p.info, Icon::Info),
             ToastKind::Ok => (p.ok, Icon::Check),

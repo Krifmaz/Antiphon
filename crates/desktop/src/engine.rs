@@ -80,6 +80,8 @@ enum Event {
     /// A picture picked to be a community's emoji: (community, file name,
     /// the picture made small), or why it couldn't be used.
     EmojiPicked(Result<(String, String, String), String>),
+    /// A theme file was chosen and read: use what it says.
+    Theme(ui::theme_file::ThemeFile),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -527,6 +529,50 @@ impl Engine {
         }
     }
 
+    /// Saves the theme, accent and reading font to a theme file the person
+    /// picks, off the window's thread.
+    fn export_theme(&mut self) {
+        let s = &self.cfg.stoop;
+        let file = ui::theme_file::ThemeFile::new(&s.theme, &s.accent, &s.custom_accent, &s.font);
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Export theme")
+                .set_file_name(ui::theme_file::FILE_NAME)
+                .add_filter("Stoop theme", &["json"])
+                .save_file()
+            else {
+                return;
+            };
+            let (text, kind) = match std::fs::write(&path, file.to_json()) {
+                Ok(()) => (format!("Theme saved to {}", path.display()), ToastKind::Ok),
+                Err(e) => (format!("Couldn't save the theme: {e}"), ToastKind::Err),
+            };
+            Self::push(&events, Event::Toast(text, kind));
+        });
+    }
+
+    /// Asks for a theme file, reads and checks it off the window's thread,
+    /// and hands it back as [`Event::Theme`]. Nothing in it is run: it is
+    /// parsed as data and every value checked (see `theme_file`).
+    fn import_theme(&mut self) {
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Import theme").add_filter("Stoop theme", &["json"]).pick_file() else { return };
+            // Refuse anything too big before reading it into memory.
+            let too_big = std::fs::metadata(&path).map(|m| m.len() > ui::theme_file::MAX_BYTES as u64).unwrap_or(false);
+            let parsed = if too_big {
+                Err("That file is too big to be a theme file.".to_string())
+            } else {
+                std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read the theme: {e}")).and_then(|t| ui::theme_file::ThemeFile::parse(&t))
+            };
+            match parsed {
+                Ok(file) => Self::push(&events, Event::Theme(file)),
+                Err(why) => Self::push(&events, Event::Toast(why, ToastKind::Err)),
+            }
+        });
+    }
+
     /// Offers a save dialog for a received file, off the window's thread.
     fn save_received(&mut self, name: String, stored: PathBuf) {
         let state = self.state.clone();
@@ -701,6 +747,16 @@ impl Engine {
                 }
             }
             Event::Toast(text, kind) => self.toast(text, kind),
+            Event::Theme(file) => {
+                self.cfg.stoop.theme = file.theme;
+                self.cfg.stoop.accent = file.accent;
+                if !file.custom_accent.is_empty() {
+                    self.cfg.stoop.custom_accent = file.custom_accent;
+                }
+                self.cfg.stoop.font = file.font;
+                self.save();
+                self.toast("Theme loaded", ToastKind::Ok);
+            }
             Event::Avatar(Ok(avatar)) => {
                 self.cfg.profile.avatar = avatar;
                 self.profile_changed();
@@ -1290,6 +1346,19 @@ impl Engine {
                 self.cfg.stoop.accent = accent;
                 self.save();
             }
+            A::CustomAccent(hex) => {
+                self.cfg.stoop.accent = "custom".into();
+                self.cfg.stoop.custom_accent = hex;
+                self.save();
+            }
+            A::Font(font) => {
+                self.cfg.stoop.font = font;
+                self.save();
+            }
+            A::ExportTheme => self.export_theme(),
+            A::ImportTheme => self.import_theme(),
+            // Moving the typing cursor is the window's job; the app does it.
+            A::FocusInput(_) => {}
             A::Input(name) => {
                 let device = (!name.is_empty()).then_some(name);
                 if let Some(Err(e)) = self.with_call(|a| a.swap_input_device(device.as_deref())) {
@@ -2162,6 +2231,8 @@ impl Engine {
         ui::Settings {
             theme: self.cfg.stoop.theme.clone(),
             accent: self.cfg.stoop.accent.clone(),
+            custom_accent: self.cfg.stoop.custom_accent.clone(),
+            font: self.cfg.stoop.font.clone(),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             input: self.cfg.input_device.clone().unwrap_or_default(),

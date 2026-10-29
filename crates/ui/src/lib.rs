@@ -15,10 +15,12 @@
 //! window, and one screen at a time with a tab bar on a narrow one
 //! ([`theme::NARROW`]), which is what a phone gets.
 
+pub mod a11y;
 pub mod avatars;
 pub mod icons;
 pub mod model;
 pub mod theme;
+pub mod theme_file;
 pub mod widgets;
 
 mod screens;
@@ -331,6 +333,17 @@ pub enum Action {
     Theme(String),
     /// Pick an accent by its id (see [`theme::ACCENTS`]).
     Accent(String),
+    /// Use this colour (`#rrggbb`) as a custom accent.
+    CustomAccent(String),
+    /// Pick the reading font by its id (see [`theme::FONTS`]).
+    Font(String),
+    /// Save the theme, accent and reading font to a theme file.
+    ExportTheme,
+    /// Load a theme file and use what it says.
+    ImportTheme,
+    /// Put the typing cursor in the text box with this widget id, or take
+    /// it out of every box (`None`): keyboard focus moved.
+    FocusInput(Option<&'static str>),
     /// Use this microphone; empty is the system default.
     Input(String),
     /// Use these speakers or headphones; empty is the system default.
@@ -677,6 +690,22 @@ pub enum Msg {
     Menu(Option<String>),
     /// Copy text and say so.
     Copy(String, &'static str),
+    /// The custom accent box changed.
+    AccentEdit(String),
+    /// Use the colour in the custom accent box.
+    AccentSave,
+    /// Tab (1) or Shift+Tab (-1): move keyboard focus to the next or
+    /// previous control.
+    Focus(i32),
+    /// Enter or Space: press the control with keyboard focus.
+    Activate,
+    /// An arrow key: step the focused slider or choice up (1) or down (-1).
+    Adjust(i32),
+    /// Shift+F10 or the menu key: open the focused control's right-click menu.
+    ContextMenu,
+    /// A screen reader asked for this to be done to the node with this
+    /// AccessKit id.
+    Reader(u64, a11y::ReaderAction),
     /// An action with nothing for the interface itself to do.
     Do(Action),
 }
@@ -776,6 +805,11 @@ pub struct Ui {
     /// The call picture chosen to be shown large, by its tile key. `None`
     /// lets the stage choose: their screen, then their camera, then mine.
     video_focus: Option<String>,
+    /// The custom accent box while it is being edited.
+    accent_edit: Option<String>,
+    /// The key of the control with keyboard focus (see [`a11y`]); `None`
+    /// until Tab is first pressed.
+    focus: Option<String>,
 }
 
 impl Default for Ui {
@@ -832,6 +866,8 @@ impl Ui {
             reduced_motion: false,
             video_focus: None,
             insets: (0.0, 0.0),
+            accent_edit: None,
+            focus: None,
         }
     }
 
@@ -1275,6 +1311,55 @@ impl Ui {
                 self.toast(format!("{what} copied"), ToastKind::Ok);
                 vec![Action::Copy(text)]
             }
+            Msg::AccentEdit(s) => {
+                self.accent_edit = Some(s);
+                vec![]
+            }
+            Msg::AccentSave => match self.accent_edit.take() {
+                Some(s) if theme::parse_hex(&s).is_some() => vec![Action::CustomAccent(theme::to_hex(theme::hex(&s)))],
+                Some(_) => {
+                    self.toast("A colour looks like #8b5cf6", ToastKind::Warn);
+                    vec![]
+                }
+                None => vec![],
+            },
+            Msg::Focus(step) => {
+                let nodes = a11y::nodes();
+                self.focus = a11y::next_stop(&nodes, self.focus.as_deref(), step);
+                let input = self.focus.as_deref().and_then(|k| nodes.iter().find(|n| n.key == k)).and_then(|n| n.input);
+                vec![Action::FocusInput(input)]
+            }
+            Msg::Activate => match self.focused().and_then(|n| n.activate) {
+                Some(msg) => self.update(msg, model),
+                None => vec![],
+            },
+            Msg::Adjust(step) => match self.focused().and_then(|n| if step > 0 { n.increase } else { n.decrease }) {
+                Some(msg) => self.update(msg, model),
+                None => vec![],
+            },
+            Msg::ContextMenu => match self.focused().and_then(|n| n.menu) {
+                Some(msg) => self.update(msg, model),
+                None => vec![],
+            },
+            Msg::Reader(id, act) => {
+                let Some(node) = a11y::nodes().into_iter().find(|n| n.id().0 == id) else { return vec![] };
+                let mut actions = Vec::new();
+                if node.role.focusable() {
+                    self.focus = Some(node.key.clone());
+                    actions.push(Action::FocusInput(node.input));
+                }
+                let msg = match act {
+                    a11y::ReaderAction::Focus => None,
+                    a11y::ReaderAction::Click => node.activate,
+                    a11y::ReaderAction::Increase => node.increase,
+                    a11y::ReaderAction::Decrease => node.decrease,
+                    a11y::ReaderAction::Menu => node.menu,
+                };
+                if let Some(msg) = msg {
+                    actions.extend(self.update(msg, model));
+                }
+                actions
+            }
             Msg::Do(action) => {
                 match &action {
                     Action::Call(_) => self.menu = None,
@@ -1309,7 +1394,20 @@ impl Ui {
 
     /// Draws the interface for `model`.
     pub fn view<'a>(&'a self, model: &'a Model) -> El<'a, Msg> {
+        // The controls register themselves as the view is built; see `a11y`.
+        a11y::begin(self.focus.as_deref());
         screens::view(self, model)
+    }
+
+    /// The control with keyboard focus, as the last frame drew it.
+    fn focused(&self) -> Option<a11y::Node> {
+        let key = self.focus.as_deref()?;
+        a11y::nodes().into_iter().find(|n| n.key == key)
+    }
+
+    /// The key of the control with keyboard focus, if any.
+    pub fn focus_key(&self) -> Option<&str> {
+        self.focus.as_deref()
     }
 
     /// How far open the dialog is, 0..1.
@@ -1444,6 +1542,47 @@ mod tests {
         let add = Action::ManageSpace { community: "c1".into(), change: SpaceChange::AddRole("Helper".into()) };
         assert_eq!(ui.update(Msg::RoleCreate("c1".into()), &m), vec![add]);
         assert!(ui.update(Msg::RoleCreate("c1".into()), &m).is_empty(), "the role box is cleared once used");
+    }
+
+    #[test]
+    fn the_keyboard_alone_opens_a_dialog_and_stays_inside_it() {
+        // Reduced motion, so the dialog is fully up the moment it opens.
+        let mut m = Model::default();
+        m.settings.reduced_motion = true;
+        let mut ui = Ui::new();
+        let _ = ui.view(&m);
+        // Tab to the invite button in the people list, press it.
+        let stops = a11y::nodes();
+        let invite = a11y::tab_stops(&stops).iter().position(|n| n.label == "Your invite").expect("the invite button is reachable");
+        for _ in 0..=invite {
+            ui.update(Msg::Focus(1), &m);
+        }
+        assert!(ui.focus_key().is_some_and(|k| k.contains("Your invite")));
+        ui.update(Msg::Activate, &m);
+        assert_eq!(ui.dialog, Some(Dialog::Invite));
+        // Now Tab only walks the dialog, and Escape closes it.
+        let _ = ui.view(&m);
+        let behind = ui.focus_key().map(str::to_string);
+        ui.update(Msg::Focus(1), &m);
+        let _ = ui.view(&m);
+        let layer = a11y::nodes().iter().find(|n| Some(n.key.as_str()) == ui.focus_key()).map(|n| n.layer);
+        assert_eq!(layer, Some(1), "focus moved into the dialog, away from {behind:?}");
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.dialog, None);
+    }
+
+    #[test]
+    fn arrows_step_the_focused_switch_and_slider_messages() {
+        let m = Model::default();
+        let mut ui = Ui::new();
+        ui.update(Msg::Nav(Route::Settings(Section::Appearance)), &m);
+        let _ = ui.view(&m);
+        let stops = a11y::nodes();
+        let motion = a11y::tab_stops(&stops).iter().position(|n| n.label == "Reduce motion").expect("the switch is reachable");
+        for _ in 0..=motion {
+            ui.update(Msg::Focus(1), &m);
+        }
+        assert_eq!(ui.update(Msg::Activate, &m), vec![Action::ReducedMotion(true)]);
     }
 
     #[test]

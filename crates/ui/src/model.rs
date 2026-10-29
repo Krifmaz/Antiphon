@@ -471,8 +471,12 @@ pub enum CheckState {
 pub struct Settings {
     /// The theme's id.
     pub theme: String,
-    /// The accent's id.
+    /// The accent's id, or `custom`.
     pub accent: String,
+    /// The custom accent as `#rrggbb`, used when `accent` is `custom`.
+    pub custom_accent: String,
+    /// The reading font's id (see [`crate::theme::FONTS`]).
+    pub font: String,
     /// Microphones found.
     pub inputs: Vec<String>,
     /// Speakers and headphones found.

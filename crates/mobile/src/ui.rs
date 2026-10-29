@@ -363,8 +363,9 @@ pub struct App {
     /// What the interface draws, rebuilt by [`refresh`](Self::refresh)
     /// after every change and before every frame.
     model: antiphon_ui::Model,
-    /// The theme and accent the palette was last built for.
-    look: (String, String),
+    /// What the look was last built from: theme, accent, custom accent
+    /// and reading font.
+    look: (String, String, String, String),
     /// The invite link and its QR code, rebuilt only when the link changes.
     qr: Option<(String, Arc<qr_code::Data>)>,
     /// The last message with each person, hex key to (text, unix seconds),

@@ -14,7 +14,7 @@
 //! `dialogs.rs`); nothing here deletes the old one outright.
 
 use iced_core::{Alignment, Color, Length};
-use iced_widget::{column, container, qr_code, row, text_input};
+use iced_widget::{column, container, qr_code, row};
 
 use crate::icons::Icon;
 use crate::theme::{self, Btn};
@@ -60,7 +60,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
 
 /// The history switch, shared by the move and backup cards.
 fn history_switch<'a>(ui: &'a Ui) -> El<'a, Msg> {
-    setting("Include message history", Some("Bigger, and everything you've said comes along. Off brings only the account."), switch(ui.include_history, Msg::IncludeHistory))
+    setting("Include message history", Some("Bigger, and everything you've said comes along. Off brings only the account."), switch("Include message history", ui.include_history, Msg::IncludeHistory))
 }
 
 /// Move: a button to open an offer, or the open offer's code and link.
@@ -69,7 +69,7 @@ fn moving<'a>(ui: &'a Ui, m: &'a Model, idle: bool) -> El<'a, Msg> {
         let receive = column![
             faint("Or, on the new device: paste the link from the old one.").size(12.5),
             row![
-                text_input("stoop-move:…", &ui.receive_link).on_input(Msg::ReceiveLink).padding([9, 12]).size(14).style(theme::input),
+                input("Move link from the old device", "stoop-move-link", "stoop-move:…", &ui.receive_link).on_input(Msg::ReceiveLink).padding([9, 12]).size(14),
                 btn("Receive", Btn::Default, (idle && !ui.receive_link.trim().is_empty()).then_some(Msg::Dialog(Some(Dialog::ConfirmReceive)))),
             ]
             .spacing(8)
@@ -118,11 +118,11 @@ fn backup<'a>(ui: &'a Ui, m: &'a Model, idle: bool) -> El<'a, Msg> {
     column![
         field(
             "Passphrase",
-            text_input(passphrase_hint(), &ui.backup_pass).secure(true).on_input(Msg::BackupPass).padding([9, 12]).size(14).style(theme::input)
+            secret_input("Backup passphrase", "stoop-backup-pass", passphrase_hint(), &ui.backup_pass).on_input(Msg::BackupPass).padding([9, 12]).size(14)
         ),
         field(
             "Type it again",
-            text_input("", &ui.backup_pass2).secure(true).on_input(Msg::BackupPass2).on_submit(Msg::BackupSave).padding([9, 12]).size(14).style(theme::input)
+            secret_input("Type the passphrase again", "stoop-backup-pass2", "", &ui.backup_pass2).on_input(Msg::BackupPass2).on_submit(Msg::BackupSave).padding([9, 12]).size(14)
         ),
         error_box(&ui.backup_error),
         history_switch(ui),
@@ -144,7 +144,7 @@ fn import<'a>(ui: &'a Ui, idle: bool) -> El<'a, Msg> {
     column![
         field(
             "Passphrase",
-            text_input("What the backup was locked with", &ui.import_pass).secure(true).on_input(Msg::ImportPass).padding([9, 12]).size(14).style(theme::input)
+            secret_input("Backup passphrase to import", "stoop-import-pass", "What the backup was locked with", &ui.import_pass).on_input(Msg::ImportPass).padding([9, 12]).size(14)
         ),
         row![btn_icon(Icon::File, "Choose backup file…", Btn::Danger, (idle && !ui.import_pass.is_empty()).then_some(Msg::Dialog(Some(Dialog::ConfirmImport))))],
     ]
@@ -174,7 +174,7 @@ fn phrase<'a>(m: &'a Model) -> El<'a, Msg> {
 fn restore<'a>(ui: &'a Ui) -> El<'a, Msg> {
     let ready = !ui.restore_edit.trim().is_empty();
     column![
-        text_input("The 24 words, in order", &ui.restore_edit).on_input(Msg::RestoreEdit).padding([10, 12]).size(14).style(theme::input),
+        input("Recovery phrase to restore", "stoop-restore", "The 24 words, in order", &ui.restore_edit).on_input(Msg::RestoreEdit).padding([10, 12]).size(14),
         row![btn("Restore", Btn::Danger, ready.then_some(Msg::Dialog(Some(Dialog::ConfirmRestore))))],
     ]
     .spacing(10)
