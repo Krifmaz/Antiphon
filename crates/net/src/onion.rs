@@ -68,25 +68,38 @@
 //!
 //! # Known limitations
 //!
-//! - **No fixed-size cells.** Each layer adds
-//!   [`antiphon_crypto::onion::LAYER_OVERHEAD`] bytes, so a hop can tell
-//!   from sizes roughly where on the path it sits -- in particular, the
-//!   entry can tell its neighbour is the caller. It learns nothing it
-//!   could not guess from the caller's address being a home connection,
-//!   and still nothing about the far end.
+//! # Cell sizes
+//!
+//! Data cells are the same size on every link of a circuit. The caller
+//! frames each datagram (`len:u16 | payload | zeros`) and pads it to one of
+//! a few sizes ([`CELL_BUCKETS`]); each hop peels its layer from the front
+//! of the cell and tops it back up with random filler at the end, so the
+//! bytes it forwards are exactly as many as it received. Each hop is told
+//! its position in its sealed setup, which is how it knows how much of a
+//! cell is filler. An observer of any link sees one of a handful of sizes,
+//! and the same size on every link, so sizes no longer say where on the
+//! path a link is. What still varies: the one-off CREATE and CREATED that
+//! build a circuit, and the size bucket, which says roughly how big the
+//! datagram inside is.
+//!
+//! # Known limitations
+//!
 //! - **No replay window at hops.** A replayed cell is forwarded again; the
 //!   call's own session rejects the duplicate end to end.
-//! - **Hop keys come from the hop itself** ([`fetch_hop_key`]), which an
-//!   attacker on the path to it could substitute. Pinning or a signed
-//!   directory is future work.
-//! - **A broken circuit is not rebuilt.** If a hop restarts or forgets an
-//!   idle circuit, traffic stops; the caller builds a new one.
+//! - **A hop key is only as good as where it came from.** Pin it
+//!   (`host:port#key` in the app) when you can; otherwise the app trusts
+//!   the first key a hop gives ([`fetch_hop_key`]) and refuses a different
+//!   one later.
+//! - **A hop that restarts breaks its circuits.** Hops answer a cell for a
+//!   circuit they don't know with DESTROY, and the caller's shim then
+//!   rebuilds the circuit through the same hops on the same socket, so the
+//!   call carries on after a short gap.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use antiphon_crypto::onion::{client_keys, LayerKeys};
+use antiphon_crypto::onion::{client_keys, LayerKeys, LAYER_OVERHEAD};
 use tokio::net::UdpSocket;
 
 use crate::AppSocket;
@@ -127,6 +140,79 @@ pub const MAX_HOPS: usize = 3;
 /// What the exit wraps up and sends back when the circuit is built. Every
 /// hop adds its layer to it, so opening it proves each one has its keys.
 pub const CREATED_MARK: &[u8; 8] = b"ON1BUILT";
+
+/// The sizes a data cell's layers are padded to, smallest first. A cell
+/// takes the smallest that fits its datagram, two length bytes and every
+/// hop's layer overhead. The largest stays under the biggest UDP datagram.
+pub const CELL_BUCKETS: &[usize] = &[256, 512, 1024, 1536, 4096, 16_384, 65_000];
+
+/// The padded size for a datagram of `payload` bytes through `hops` hops,
+/// or `None` if it cannot fit even the largest bucket.
+pub fn bucket_for(payload: usize, hops: usize) -> Option<usize> {
+    let need = payload + 2 + LAYER_OVERHEAD * hops;
+    CELL_BUCKETS.iter().copied().find(|&b| b >= need)
+}
+
+/// `len:u16 | payload | zeros`, `size` bytes long. `size` must fit.
+pub fn frame(payload: &[u8], size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(payload);
+    out.resize(size, 0);
+    out
+}
+
+/// The datagram inside a [`frame`], or `None` if the length is impossible.
+pub fn unframe(framed: &[u8]) -> Option<&[u8]> {
+    let len = u16::from_be_bytes(framed.get(..2)?.try_into().ok()?) as usize;
+    framed.get(2..2 + len)
+}
+
+/// `n` random bytes, for topping a cell back up to its size.
+pub fn filler(n: usize) -> Vec<u8> {
+    let mut out = vec![0u8; n];
+    getrandom::fill(&mut out).expect("OS randomness is unavailable");
+    out
+}
+
+/// A hop's handling of a forward data layer, keeping the cell's size:
+/// peels this hop's layer from the front (all but the `position` layers'
+/// worth of filler at the end), then tops the result back up with fresh
+/// filler. For the exit, returns the datagram inside instead.
+pub fn hop_forward(keys: &LayerKeys, position: u8, exit: bool, layer: &[u8]) -> Option<Vec<u8>> {
+    let keep = layer.len().checked_sub(LAYER_OVERHEAD * usize::from(position))?;
+    let inner = keys.open_forward(&layer[..keep]).ok()?;
+    if exit {
+        return unframe(&inner).map(<[u8]>::to_vec);
+    }
+    let mut out = inner;
+    out.extend_from_slice(&layer[keep..]);
+    out.extend_from_slice(&filler(LAYER_OVERHEAD));
+    Some(out)
+}
+
+/// A middle or entry hop's handling of a backward layer, keeping the
+/// cell's size: drops one layer's worth of filler from the end, seals what
+/// is left, and keeps the rest of the filler after it.
+pub fn hop_backward(keys: &LayerKeys, seq: &mut u64, position: u8, layer: &[u8]) -> Option<Vec<u8>> {
+    let keep = layer.len().checked_sub(LAYER_OVERHEAD * (usize::from(position) + 1))?;
+    let mut out = keys.seal_backward(*seq, &layer[..keep]);
+    *seq += 1;
+    out.extend_from_slice(&filler(LAYER_OVERHEAD * usize::from(position)));
+    Some(out)
+}
+
+/// The exit's wrapping of a reply from the target: framed and padded to
+/// its size bucket for a path of `position + 1` hops, sealed, and followed
+/// by filler for each hop still to add its layer.
+pub fn exit_backward(keys: &LayerKeys, seq: &mut u64, position: u8, payload: &[u8]) -> Option<Vec<u8>> {
+    let hops = usize::from(position) + 1;
+    let size = bucket_for(payload.len(), hops)?;
+    let mut out = keys.seal_backward(*seq, &frame(payload, size - LAYER_OVERHEAD * hops));
+    *seq += 1;
+    out.extend_from_slice(&filler(LAYER_OVERHEAD * usize::from(position)));
+    Some(out)
+}
 
 /// How long [`Circuit::build`] keeps trying.
 pub const BUILD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -264,6 +350,9 @@ fn with_layer(out: &mut Vec<u8>, op: u8, circ: u32, layer: &[u8]) {
 pub enum Setup {
     /// Pass this CREATE body on to `next`.
     Extend {
+        /// This hop's place on the path, 0 for the entry: how much of a
+        /// data cell is filler (see the module docs on cell sizes).
+        position: u8,
         /// The next hop's address.
         next: SocketAddr,
         /// The caller's ephemeral key for the next hop.
@@ -273,6 +362,8 @@ pub enum Setup {
     },
     /// Be the exit: send what arrives to `target` as plain UDP.
     Exit {
+        /// This hop's place on the path, 0 for the entry.
+        position: u8,
         /// The relay the call is placed or received through.
         target: SocketAddr,
     },
@@ -288,14 +379,16 @@ impl Setup {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
-            Setup::Extend { next, ephemeral, sealed } => {
+            Setup::Extend { position, next, ephemeral, sealed } => {
                 out.push(SETUP_EXTEND);
+                out.push(*position);
                 encode_addr(&mut out, next);
                 out.extend_from_slice(ephemeral);
                 out.extend_from_slice(sealed);
             }
-            Setup::Exit { target } => {
+            Setup::Exit { position, target } => {
                 out.push(SETUP_EXIT);
+                out.push(*position);
                 encode_addr(&mut out, target);
             }
         }
@@ -305,14 +398,19 @@ impl Setup {
     /// `None` for a setup that is malformed or carries trailing bytes.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (&kind, rest) = bytes.split_first()?;
+        let (&position, rest) = rest.split_first()?;
+        if usize::from(position) >= MAX_HOPS {
+            return None;
+        }
         let (addr, rest) = decode_addr(rest)?;
         match kind {
             SETUP_EXTEND if rest.len() > 32 => Some(Setup::Extend {
+                position,
                 next: addr,
                 ephemeral: rest[..32].try_into().expect("32 bytes"),
                 sealed: rest[32..].to_vec(),
             }),
-            SETUP_EXIT if rest.is_empty() => Some(Setup::Exit { target: addr }),
+            SETUP_EXIT if rest.is_empty() => Some(Setup::Exit { position, target: addr }),
             _ => None,
         }
     }
@@ -397,6 +495,11 @@ pub struct Circuit {
     entry: SocketAddr,
     /// The keys and counters that wrap and peel traffic.
     layers: Layers,
+    /// The hops, entry first, kept so a broken circuit can be rebuilt
+    /// through the same path.
+    path: Vec<(SocketAddr, [u8; 32])>,
+    /// Where the exit sends, kept for the same reason.
+    target: SocketAddr,
 }
 
 /// The caller's keys for a built circuit, without a socket: wraps
@@ -416,10 +519,16 @@ impl Layers {
         self.circ
     }
 
-    /// Wraps one datagram for the exit to deliver: the exit's layer
-    /// innermost, the entry's outermost.
+    /// Wraps one datagram for the exit to deliver: framed and padded to
+    /// its size bucket, the exit's layer innermost, the entry's outermost.
+    /// A datagram too big for the largest bucket is cut to fit -- no call
+    /// datagram comes near it.
     pub fn wrap(&mut self, payload: &[u8]) -> Vec<u8> {
-        let mut layer = payload.to_vec();
+        let n = self.hops.len();
+        let max = CELL_BUCKETS[CELL_BUCKETS.len() - 1] - 2 - LAYER_OVERHEAD * n;
+        let payload = &payload[..payload.len().min(max)];
+        let size = bucket_for(payload.len(), n).expect("cut to fit above");
+        let mut layer = frame(payload, size - LAYER_OVERHEAD * n);
         for (k, seq) in self.hops.iter().zip(self.seqs.iter_mut()).rev() {
             layer = k.seal_forward(*seq, &layer);
             *seq += 1;
@@ -431,7 +540,9 @@ impl Layers {
     /// this circuit. Checking it came from the entry is the caller's job.
     pub fn unwrap(&self, cell: &[u8]) -> Option<Vec<u8>> {
         match Cell::decode(cell)? {
-            Cell::Backward { circ, layer } if circ == self.circ => peel_backward(&self.hops, layer),
+            Cell::Backward { circ, layer } if circ == self.circ => {
+                peel_backward(&self.hops, layer).and_then(|inner| unframe(&inner).map(<[u8]>::to_vec))
+            }
             _ => None,
         }
     }
@@ -457,9 +568,10 @@ impl Plan {
         let mut keys = Vec::with_capacity(hops.len());
         let mut inner: Option<([u8; 32], Vec<u8>)> = None;
         for i in (0..hops.len()).rev() {
+            let position = i as u8;
             let setup = match inner.take() {
-                None => Setup::Exit { target: exit_target },
-                Some((ephemeral, sealed)) => Setup::Extend { next: hops[i + 1].0, ephemeral, sealed },
+                None => Setup::Exit { position, target: exit_target },
+                Some((ephemeral, sealed)) => Setup::Extend { position, next: hops[i + 1].0, ephemeral, sealed },
             };
             let (eph, k) = client_keys(&hops[i].1)?;
             inner = Some((eph, k.seal_setup(&setup.encode())));
@@ -494,6 +606,37 @@ fn peel_backward(hops: &[LayerKeys], mut layer: Vec<u8>) -> Option<Vec<u8>> {
     Some(layer)
 }
 
+/// Sends CREATEs to the entry until one is confirmed, refused, or time is
+/// up. A lost CREATE is simply tried again from scratch: new keys, new id;
+/// the half-built attempt expires at the hops.
+async fn negotiate(
+    socket: &AppSocket,
+    hops: &[(SocketAddr, [u8; 32])],
+    exit_target: SocketAddr,
+    timeout: Duration,
+) -> Result<Layers, NetError> {
+    let entry = hops[0].0;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut buf = vec![0u8; 4096];
+    while tokio::time::Instant::now() < deadline {
+        let plan = Plan::new(hops, exit_target)?;
+        socket.send_to(&plan.create, entry).await?;
+        let attempt_end = (tokio::time::Instant::now() + Duration::from_secs(1)).min(deadline);
+        while let Ok(Ok((n, from))) = tokio::time::timeout_at(attempt_end, socket.recv_from(&mut buf)).await {
+            if from != entry {
+                continue;
+            }
+            if plan.confirms(&buf[..n]) {
+                return Ok(plan.into_layers());
+            }
+            if Cell::decode(&buf[..n]) == Some(Cell::Refused { circ: plan.circ }) {
+                return Err(NetError::OnionRefused);
+            }
+        }
+    }
+    Err(NetError::OnionTimeout)
+}
+
 impl Circuit {
     /// Builds a circuit through `hops` (entry first; [`MIN_HOPS`] to
     /// [`MAX_HOPS`] of them) whose exit sends to `exit_target` -- the relay
@@ -517,28 +660,21 @@ impl Circuit {
         if !(MIN_HOPS..=MAX_HOPS).contains(&hops.len()) {
             return Err(NetError::OnionPathLength);
         }
-        let entry = hops[0].0;
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut buf = vec![0u8; 4096];
-        while tokio::time::Instant::now() < deadline {
-            // A lost CREATE is simply tried again from scratch: new keys,
-            // new id. The half-built attempt expires at the hops.
-            let plan = Plan::new(hops, exit_target)?;
-            socket.send_to(&plan.create, entry).await?;
-            let attempt_end = (tokio::time::Instant::now() + Duration::from_secs(1)).min(deadline);
-            while let Ok(Ok((n, from))) = tokio::time::timeout_at(attempt_end, socket.recv_from(&mut buf)).await {
-                if from != entry {
-                    continue;
-                }
-                if plan.confirms(&buf[..n]) {
-                    return Ok(Self { socket, entry, layers: plan.into_layers() });
-                }
-                if Cell::decode(&buf[..n]) == Some(Cell::Refused { circ: plan.circ }) {
-                    return Err(NetError::OnionRefused);
-                }
-            }
-        }
-        Err(NetError::OnionTimeout)
+        let layers = negotiate(&socket, hops, exit_target, timeout).await?;
+        Ok(Self { socket, entry: hops[0].0, layers, path: hops.to_vec(), target: exit_target })
+    }
+
+    /// Builds the circuit again through the same hops, on the same socket,
+    /// after a hop said it no longer knows it. The call code on the other
+    /// side of a shim never notices beyond a short gap.
+    pub async fn rebuild(&mut self, timeout: Duration) -> Result<(), NetError> {
+        self.layers = negotiate(&self.socket, &self.path, self.target, timeout).await?;
+        Ok(())
+    }
+
+    /// Whether `cell`, from `from`, is the entry saying this circuit is gone.
+    pub fn is_destroyed_by(&self, from: SocketAddr, cell: &[u8]) -> bool {
+        from == self.entry && Cell::decode(cell) == Some(Cell::Destroy { circ: self.layers.circ })
     }
 
     /// The entry hop's address.
@@ -614,29 +750,59 @@ impl Circuit {
 /// the call sends to the stand-in address is wrapped and sent to the
 /// entry; whatever comes back is unwrapped and handed to the call as if
 /// the target relay had sent it from the stand-in address.
+///
+/// It also keeps the circuit alive: when the entry says the circuit is gone
+/// (a hop restarted or forgot it), or when the call keeps sending but
+/// nothing has come back for [`SILENCE_BEFORE_REBUILD`], the circuit is
+/// rebuilt through the same hops on the same socket.
 async fn pump_loop(mut circuit: Circuit, pump: UdpSocket, user: SocketAddr) {
     let mut from_user = vec![0u8; 65_536];
     let mut from_net = vec![0u8; 65_536];
     let net = circuit.socket.clone();
+    let mut heard = tokio::time::Instant::now();
+    let mut sent = tokio::time::Instant::now();
+    let mut check = tokio::time::interval(Duration::from_secs(5));
     loop {
-        tokio::select! {
+        let broken = tokio::select! {
             r = pump.recv_from(&mut from_user) => {
                 let Ok((n, from)) = r else { return };
                 // Loopback, so the source cannot be spoofed from outside;
                 // anything but the call's own socket is ignored.
                 if from == user {
                     let _ = circuit.send(&from_user[..n]).await;
+                    sent = tokio::time::Instant::now();
                 }
+                false
             }
             r = net.recv_from(&mut from_net) => {
                 let Ok((n, from)) = r else { return };
                 if let Some(payload) = circuit.unwrap(from, &from_net[..n]) {
+                    heard = tokio::time::Instant::now();
                     let _ = pump.send_to(&payload, user).await;
+                    false
+                } else {
+                    circuit.is_destroyed_by(from, &from_net[..n])
                 }
             }
+            // Quiet both ways is just an idle circuit; sending into silence
+            // is a broken one.
+            _ = check.tick() => heard.elapsed() >= SILENCE_BEFORE_REBUILD && sent.elapsed() < Duration::from_secs(10),
+        };
+        if broken {
+            // Keep trying: a restarting hop takes a moment to come back.
+            // Traffic from the call meanwhile is dropped, as on any outage.
+            while circuit.rebuild(BUILD_TIMEOUT).await.is_err() {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            heard = tokio::time::Instant::now();
         }
     }
 }
+
+/// How long a circuit that is still being sent on may go without any
+/// reply before the shim rebuilds it. A listener's relay answers its registration every 20 s and a call
+/// carries audio both ways, so a live circuit is never this quiet.
+pub const SILENCE_BEFORE_REBUILD: Duration = Duration::from_secs(60);
 
 /// A circuit presented as a UDP socket. Use [`Self::socket`] where a call
 /// would use its own socket and [`Self::relay_addr`] where it would use
@@ -733,15 +899,25 @@ mod tests {
     fn setups_round_trip_for_both_address_families() {
         let v6: SocketAddr = "[2001:db8::1]:3479".parse().unwrap();
         for s in [
-            Setup::Exit { target: addr(3479) },
-            Setup::Exit { target: v6 },
-            Setup::Extend { next: v6, ephemeral: [1; 32], sealed: vec![7; 50] },
-            Setup::Extend { next: addr(1), ephemeral: [2; 32], sealed: vec![8; 1] },
+            Setup::Exit { position: 1, target: addr(3479) },
+            Setup::Exit { position: 2, target: v6 },
+            Setup::Extend { position: 0, next: v6, ephemeral: [1; 32], sealed: vec![7; 50] },
+            Setup::Extend { position: 1, next: addr(1), ephemeral: [2; 32], sealed: vec![8; 1] },
         ] {
             assert_eq!(Setup::decode(&s.encode()), Some(s));
         }
-        assert!(Setup::decode(&[SETUP_EXIT, 4, 1, 2]).is_none());
-        assert!(Setup::decode(&[9, 4, 1, 2, 3, 4, 0, 1]).is_none());
+        assert!(Setup::decode(&[SETUP_EXIT, 0, 4, 1, 2]).is_none());
+        assert!(Setup::decode(&[9, 0, 4, 1, 2, 3, 4, 0, 1]).is_none());
+        assert!(Setup::decode(&[SETUP_EXIT, 3, 4, 1, 2, 3, 4, 0, 1]).is_none(), "no fourth hop");
+    }
+
+    #[test]
+    fn framing_round_trips_and_buckets_fit() {
+        assert_eq!(unframe(&frame(b"abc", 64)).unwrap(), b"abc");
+        assert!(unframe(&[0, 9, 1]).is_none());
+        assert_eq!(bucket_for(10, 3), Some(256));
+        assert_eq!(bucket_for(1200, 3), Some(1536));
+        assert_eq!(bucket_for(70_000, 2), None);
     }
 
     #[test]
@@ -779,13 +955,14 @@ mod tests {
             let setup = Setup::decode(&k.open_setup(&sealed).unwrap()).unwrap();
             hop_keys.push(k);
             match setup {
-                Setup::Extend { next, ephemeral: e, sealed: s } => {
+                Setup::Extend { position, next, ephemeral: e, sealed: s } => {
+                    assert_eq!(usize::from(position), i);
                     assert_eq!(next, hops[i + 1].0);
                     ephemeral = e;
                     sealed = s;
                 }
-                Setup::Exit { target: t } => {
-                    assert_eq!(i, 2);
+                Setup::Exit { position, target: t } => {
+                    assert_eq!((i, position), (2, 2));
                     assert_eq!(t, target);
                 }
             }
@@ -800,23 +977,29 @@ mod tests {
 
         let socket = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
         let circ = plan.circ;
-        let mut circuit = Circuit { socket, entry: hops[0].0, layers: plan.into_layers() };
+        let mut circuit = Circuit { socket, entry: hops[0].0, layers: plan.into_layers(), path: hops.clone(), target };
 
         let cell = circuit.wrap(b"\xA7RL1 dial");
         let Some(Cell::Forward { mut layer, .. }) = Cell::decode(&cell) else { panic!() };
         let mut seen = vec![layer.clone()];
-        for k in &hop_keys {
-            layer = k.open_forward(&layer).unwrap();
+        for (i, k) in hop_keys.iter().enumerate().take(2) {
+            layer = hop_forward(k, i as u8, false, &layer).unwrap();
             seen.push(layer.clone());
         }
-        assert_eq!(layer, b"\xA7RL1 dial");
+        // Every link carries a cell of the same size.
+        assert!(seen.iter().all(|l| l.len() == seen[0].len()), "{:?}", seen.iter().map(Vec::len).collect::<Vec<_>>());
+        assert_eq!(hop_forward(&hop_keys[2], 2, true, &layer).unwrap(), b"\xA7RL1 dial");
         // No two links carry a common sequence number.
         let seqs: Vec<&[u8]> = seen[..3].iter().map(|l| &l[..8]).collect();
         assert!(seqs[0] != seqs[1] && seqs[1] != seqs[2]);
 
-        let mut back = hop_keys[2].seal_backward(1, b"reply");
-        back = hop_keys[1].seal_backward(1, &back);
-        back = hop_keys[0].seal_backward(1, &back);
+        let mut seq = 1;
+        let mut back = exit_backward(&hop_keys[2], &mut seq, 2, b"reply").unwrap();
+        let size = back.len();
+        back = hop_backward(&hop_keys[1], &mut seq, 1, &back).unwrap();
+        assert_eq!(back.len(), size);
+        back = hop_backward(&hop_keys[0], &mut seq, 0, &back).unwrap();
+        assert_eq!(back.len(), size);
         let cell = Cell::Backward { circ, layer: back }.encode();
         assert_eq!(circuit.unwrap(hops[0].0, &cell).unwrap(), b"reply");
         assert!(circuit.unwrap(addr(99), &cell).is_none(), "only the entry speaks for the circuit");

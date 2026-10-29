@@ -375,6 +375,10 @@ pub struct Network {
     pub relay_note: String,
     /// Whether contacts with no relay may listen at yours.
     pub lend_relay: bool,
+    /// Whether anonymity mode is on.
+    pub anonymity: bool,
+    /// Its hops, comma-separated `host:port[#key]`.
+    pub hops: String,
 }
 
 /// One line of the reachability check.

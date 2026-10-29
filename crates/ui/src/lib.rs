@@ -309,6 +309,10 @@ pub enum Action {
     Relay(String),
     /// Let contacts with no relay of their own listen at yours.
     LendRelay(bool),
+    /// Route calls through anonymity-mode hops, or stop.
+    Anonymity(bool),
+    /// The hops for anonymity mode, comma-separated `host:port[#key]`.
+    AnonymityHops(String),
     /// The port the door listens on.
     Port(u16),
     /// Re-run the reachability check.
@@ -424,6 +428,10 @@ pub enum Msg {
     RelayEdit(String),
     /// Save the relay.
     RelaySave,
+    /// The anonymity hop box is being edited.
+    HopsEdit(String),
+    /// Save the anonymity hops.
+    HopsSave,
     /// The port box is being edited (digits only are kept).
     PortEdit(String),
     /// Save the port.
@@ -500,6 +508,8 @@ pub struct Ui {
     bio_edit: Option<String>,
     /// The relay while it is being edited.
     relay_edit: Option<String>,
+    /// The anonymity hop list while it is being edited.
+    hops_edit: Option<String>,
     /// The port while it is being edited.
     port_edit: Option<String>,
     /// The open person's note while it is being edited: (id, text).
@@ -576,6 +586,7 @@ impl Ui {
             status_edit: None,
             bio_edit: None,
             relay_edit: None,
+            hops_edit: None,
             port_edit: None,
             note_edit: None,
             first_name: String::new(),
@@ -833,6 +844,14 @@ impl Ui {
                 self.relay_edit = Some(s);
                 Vec::new()
             }
+            Msg::HopsEdit(s) => {
+                self.hops_edit = Some(s);
+                Vec::new()
+            }
+            Msg::HopsSave => match self.hops_edit.take() {
+                Some(s) if s.trim() != model.network.hops => vec![Action::AnonymityHops(s.trim().to_string())],
+                _ => Vec::new(),
+            },
             Msg::RelaySave => match self.relay_edit.take() {
                 Some(s) if s.trim() != model.network.relay => vec![Action::Relay(s.trim().to_string())],
                 _ => Vec::new(),

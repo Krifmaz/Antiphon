@@ -343,10 +343,22 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
         switch(m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
     ));
+    let anonymity = column![
+        setting(
+            "Anonymity mode",
+            Some("Calls go through two or three relays, each knowing only the step before and after it. The strongest privacy, with noticeable delay. Needs at least two hops."),
+            switch(m.network.anonymity, |on| Msg::Do(Action::Anonymity(on))),
+        ),
+        divider(),
+        field("Hops", edit_box("hop1.example:3479, hop2.example:3479#key", &ui.hops_edit, &m.network.hops, Msg::HopsEdit, Msg::HopsSave)),
+        faint("Add #key after an address to pin the hop's key (shown when its operator starts it). Without one, the first key a hop gives is remembered and a different one is refused.").size(12.5),
+    ]
+    .spacing(12);
     column![
         card(check_card),
         titled_card("Your door", None, listen),
         titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay),
+        titled_card("Anonymity", None, anonymity),
     ]
     .spacing(14)
     .into()

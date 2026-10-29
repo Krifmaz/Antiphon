@@ -1217,6 +1217,19 @@ impl Engine {
                 self.cfg.stoop.door_on_start = on;
                 self.save();
             }
+            A::Anonymity(on) => {
+                self.cfg.anonymity_mode = on;
+                self.save();
+                if on && self.cfg.anonymity_hops.len() < antiphon_net::onion::MIN_HOPS {
+                    self.toast("Add at least two hops for anonymity mode to take effect", ToastKind::Warn);
+                }
+                self.relisten();
+            }
+            A::AnonymityHops(text) => {
+                self.cfg.anonymity_hops = fallback_relay::parse_list(&text);
+                self.save();
+                self.relisten();
+            }
             A::LendRelay(on) => {
                 self.cfg.lend_relay = on;
                 self.save();
@@ -1755,6 +1768,8 @@ impl Engine {
             relay: self.cfg.relay_server.clone(),
             relay_note,
             lend_relay: self.cfg.lend_relay,
+            anonymity: self.cfg.anonymity_mode,
+            hops: self.cfg.anonymity_hops.join(", "),
         }
     }
 
