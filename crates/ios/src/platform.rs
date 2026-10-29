@@ -109,6 +109,14 @@ impl Platform for Ios {
         files::read(handle)
     }
 
+    fn file_size(&self, handle: &str) -> std::io::Result<u64> {
+        files::size(handle)
+    }
+
+    fn read_file_range(&self, handle: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        files::read_range(handle, offset, len)
+    }
+
     /// The app's Documents folder. With `UIFileSharingEnabled` and
     /// `LSSupportsOpeningDocumentsInPlace` in Info.plist, the Files app
     /// shows it under "On My iPhone > Antiphon", which is as close as iOS

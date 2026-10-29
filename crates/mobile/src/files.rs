@@ -1,18 +1,21 @@
-//! Files during a call: the send queue, the one transfer running, and
-//! received files saved where the user can find them.
+//! Files to and from the people you call: the send queue, the one
+//! transfer running, and received files saved where the user can find them.
 //!
 //! The transfer itself is the desktop's `file_transfer` module on the
 //! call's runtime -- the offer, chunking, repair requests and hash check
 //! are its, unchanged, which is what lets a phone and a desktop swap files.
 //! What this adds is what a phone needs around it: picked files arrive as
-//! a platform handle rather than a path, transfers wait in a queue the
-//! user can reorder, and the data rules can hold them.
+//! a platform handle rather than a path and are read through it a window
+//! at a time, transfers wait in a queue the user can reorder (and that
+//! outlives the app, so a file picked for someone between calls goes at
+//! their next one), and the data rules can hold them.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use antiphon_net::file_transfer::{sha256_hex, CHUNK_SIZE};
+use antiphon_net::file_transfer::{sha256_hex, sha256_hex_reader, CHUNK_SIZE};
+use serde::{Deserialize, Serialize};
 
 use crate::call::Live;
 use crate::control::ControlMessage;
@@ -21,20 +24,33 @@ use crate::file_integrity::FileSource;
 use crate::file_transfer;
 use crate::platform::{self, PickedFile};
 use crate::queue::{Entry, TransferQueue};
+use crate::stream::Windowed;
 
-/// The largest file sent from a phone. The platform hands over a picked
-/// file as one buffer (there is no path to stream from), so this bounds
-/// the memory a send takes rather than the protocol, which has no limit.
-const MAX_SEND_BYTES: u64 = 256 * 1024 * 1024;
+/// The largest file sent when the platform cannot read it in ranges and
+/// hands it over as one buffer instead (an Android provider that serves a
+/// pipe rather than a file, say). Every other file is streamed and has no
+/// limit beyond the protocol's.
+const MAX_IN_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 
-/// A file waiting to be sent, and who to.
-#[derive(Clone, Debug)]
+/// The largest picture read whole to make a thumbnail of. Decoding needs
+/// it all in memory, and a preview is not worth holding a huge file for.
+const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The file the send queue is kept in, under the app's private storage,
+/// so files picked for someone survive the app being closed before their
+/// next call.
+const QUEUE_FILE: &str = "send-queue.json";
+
+/// A file waiting to be sent, and who to. Saved with the queue, so every
+/// field is something that still means the same after a restart: the
+/// platform handle does, a path would not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outgoing {
     /// Who it is for: their identity key, hex. It waits for a call with
     /// them and goes to nobody else.
     pub peer_hex: String,
     /// The platform's handle for the picked file, passed back to
-    /// [`platform::read_file`] when its turn comes.
+    /// [`platform::read_file_range`] when its turn comes.
     pub handle: String,
     /// The file's name, as offered to the receiver.
     pub name: String,
@@ -42,9 +58,10 @@ pub struct Outgoing {
     pub size: Option<u64>,
 }
 
-/// A picked file read into memory and ready to offer.
+/// A picked file measured and hashed, and ready to offer.
 struct Prepared {
-    /// The whole file, in memory.
+    /// Where the bytes come from as they are sent: read through the
+    /// platform a window at a time, or, when it cannot do that, in memory.
     source: FileSource,
     /// Its SHA-256, hex, which the receiver checks the reassembled file
     /// against.
@@ -68,6 +85,17 @@ enum Stage {
     /// task returns, which is the only reliable sign it is over: its state
     /// is briefly empty before the task first runs, too.
     Sending(Arc<AtomicBool>),
+}
+
+/// One queued file as saved: the file and whether the user held it.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    /// The file and who it is for.
+    #[serde(flatten)]
+    file: Outgoing,
+    /// Held by the user, so it keeps waiting after a restart too.
+    #[serde(default)]
+    held: bool,
 }
 
 /// The one file being sent now.
@@ -142,14 +170,25 @@ pub struct FileManager {
     /// The incoming transfer's id and the chunks already charged to the
     /// cellular meter, as `counted_chunks` is for the outgoing one.
     counted_incoming: (u64, u32),
+    /// The queue as last written to [`QUEUE_FILE`], so it is written only
+    /// when something changed.
+    saved: Vec<(Outgoing, bool)>,
+    /// The incoming offer's thumbnail decoded for the screen, by transfer
+    /// id, so a picture is decoded once rather than on every redraw.
+    offer_thumbnail: Option<(u64, Option<iced_core::image::Handle>)>,
 }
 
 impl FileManager {
-    /// An empty manager that saves received files under `dir` when the
-    /// platform has no downloads folder.
+    /// A manager with the queue saved in `dir`, which also saves received
+    /// files under `dir` when the platform has no downloads folder. A
+    /// missing or unreadable queue file starts an empty queue: losing the
+    /// list of what was waiting is better than not starting.
     pub fn new(dir: PathBuf) -> Self {
+        let saved = load_queue(&dir);
         Self {
-            queue: TransferQueue::default(),
+            queue: TransferQueue::restore(saved.iter().cloned()),
+            saved,
+            offer_thumbnail: None,
             active: None,
             received: Vec::new(),
             last_line: None,
@@ -159,18 +198,52 @@ impl FileManager {
         }
     }
 
-    /// Queues a picked file for `peer_hex`. Refuses one the picker says is
-    /// over [`MAX_SEND_BYTES`] now, rather than after the user waited for
-    /// its turn.
-    pub fn enqueue(&mut self, peer_hex: String, picked: PickedFile) -> Result<(), String> {
-        if picked.size.is_some_and(|size| size > MAX_SEND_BYTES) {
-            return Err(format!(
-                "{} is too big to send from a phone (the limit is 256 MB, because the phone hands the app the whole file at once).",
-                picked.name
-            ));
-        }
+    /// Queues a picked file for `peer_hex`, to go during the call with them
+    /// now or their next one, and saves the queue straight away so a file
+    /// picked just before the app is closed is not forgotten.
+    pub fn enqueue(&mut self, peer_hex: String, picked: PickedFile) {
         self.queue.push(Outgoing { peer_hex, handle: picked.handle, name: picked.name, size: picked.size });
-        Ok(())
+        self.save_queue();
+    }
+
+    /// Writes the queue to [`QUEUE_FILE`] if it changed since the last
+    /// write. The file being sent goes first, so a send cut short by the
+    /// app closing is tried again first at the next call, as it would be
+    /// had only the call ended. Called after every poll, which follows
+    /// every change; a failure is logged and tried again at the next one.
+    pub fn save_queue(&mut self) {
+        let now: Vec<(Outgoing, bool)> =
+            self.active.iter().map(|a| &a.entry).chain(self.queue.iter()).map(|e| (e.item.clone(), e.held)).collect();
+        if now == self.saved {
+            return;
+        }
+        let saved: Vec<Saved> = now.iter().map(|(file, held)| Saved { file: file.clone(), held: *held }).collect();
+        let result = serde_json::to_vec_pretty(&saved).map_err(std::io::Error::other).and_then(|json| {
+            // Written aside and renamed over, so a crash mid-write leaves
+            // the old queue rather than half of a new one.
+            let tmp = self.dir.join(format!("{QUEUE_FILE}.tmp"));
+            std::fs::write(&tmp, json)?;
+            std::fs::rename(&tmp, self.dir.join(QUEUE_FILE))
+        });
+        match result {
+            Ok(()) => self.saved = now,
+            Err(e) => log::warn!("could not save the send queue: {e}"),
+        }
+    }
+
+    /// The thumbnail the sender made for the offer waiting, decoded for the
+    /// image widget, or `None` when they sent none. Decoded once per offer;
+    /// its size was checked on arrival (`file_preview::accept_thumbnail`),
+    /// so this only has to turn PNG into pixels.
+    pub fn offer_thumbnail(&mut self, transfer_id: u64, png: &[u8]) -> Option<iced_core::image::Handle> {
+        match &self.offer_thumbnail {
+            Some((id, handle)) if *id == transfer_id => handle.clone(),
+            _ => {
+                let handle = decode_thumbnail(png);
+                self.offer_thumbnail = Some((transfer_id, handle.clone()));
+                handle
+            }
+        }
     }
 
     /// How many transfers are going or waiting for this call, for the
@@ -203,6 +276,8 @@ impl FileManager {
             }
             self.seen_offer = None;
             self.counted_incoming = (0, 0);
+            self.offer_thumbnail = None;
+            self.save_queue();
             return events;
         };
 
@@ -217,6 +292,7 @@ impl FileManager {
                 meter.add(charged, now);
             }
         }
+        self.save_queue();
         events
     }
 
@@ -306,8 +382,8 @@ impl FileManager {
         let result = slot.clone();
         let handle = entry.item.handle.clone();
         let name = entry.item.name.clone();
-        // Reading and hashing a large file takes a while, and the call's
-        // audio runs on the same runtime's async threads.
+        // Hashing a large file takes a while, and the call's audio runs on
+        // the same runtime's async threads.
         live.runtime().spawn_blocking(move || {
             *result.lock().unwrap() = Some(prepare(&handle, &name, thumbnails));
         });
@@ -432,12 +508,49 @@ impl FileManager {
     }
 }
 
-/// Reads, hashes and (for a picture, when allowed) thumbnails a picked
-/// file, on a blocking thread.
+/// Measures, hashes and (for a picture, when allowed) thumbnails a picked
+/// file, on a blocking thread, reading it through the platform a window at
+/// a time so a file of any size costs only a window of memory.
+///
+/// The length is measured before and after hashing, as the desktop's
+/// `file_integrity::open_and_hash` does with a file on disk: if it moved,
+/// something is still writing the file and there is no one version of it
+/// to offer. A platform that cannot read in ranges hands the whole file
+/// over instead, up to [`MAX_IN_MEMORY_BYTES`].
 fn prepare(handle: &str, name: &str, thumbnails: bool) -> Result<Prepared, String> {
+    let unreadable = |e: std::io::Error| format!("Could not read {name}: {e}");
+    let len = match platform::file_size(handle) {
+        Ok(len) => len,
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return prepare_in_memory(handle, name, thumbnails),
+        Err(e) => return Err(unreadable(e)),
+    };
+    let owned = handle.to_string();
+    let file = Windowed::new(len, move |offset, len| platform::read_file_range(&owned, offset, len));
+    let sha256 = sha256_hex_reader(file.reader()).map_err(unreadable)?;
+    if platform::file_size(handle).map_err(unreadable)? != len {
+        return Err(format!(
+            "{name} changed while it was being read. Wait for whatever is writing it to finish, then send it again."
+        ));
+    }
+    let previewable = thumbnails && crate::file_preview::is_previewable(name) && len <= MAX_THUMBNAIL_SOURCE_BYTES;
+    let thumbnail_b64 = previewable
+        .then(|| file.read_at(0, len as usize).ok())
+        .flatten()
+        .and_then(|bytes| thumbnail(&bytes))
+        .map(|png| file_transfer::encode_b64(&png))
+        .unwrap_or_default();
+    let source = FileSource::Ranged { len, read: Box::new(move |offset, len| file.read_at(offset, len)) };
+    Ok(Prepared { source, sha256, thumbnail_b64 })
+}
+
+/// [`prepare`] for a file the platform can only hand over whole, which
+/// has to fit in memory.
+fn prepare_in_memory(handle: &str, name: &str, thumbnails: bool) -> Result<Prepared, String> {
     let bytes = platform::read_file(handle).map_err(|e| format!("Could not read {name}: {e}"))?;
-    if bytes.len() as u64 > MAX_SEND_BYTES {
-        return Err(format!("{name} is too big to send from a phone (the limit is 256 MB)."));
+    if bytes.len() as u64 > MAX_IN_MEMORY_BYTES {
+        return Err(format!(
+            "{name} is too big to send: the app that holds it only hands it over whole, and the limit for that is 256 MB."
+        ));
     }
     let sha256 = sha256_hex(&bytes);
     let thumbnail_b64 = if thumbnails && crate::file_preview::is_previewable(name) {
@@ -446,6 +559,31 @@ fn prepare(handle: &str, name: &str, thumbnails: bool) -> Result<Prepared, Strin
         String::new()
     };
     Ok(Prepared { source: FileSource::Memory(bytes), sha256, thumbnail_b64 })
+}
+
+/// The send queue saved in `dir`, front first, with each file's held
+/// state, or nothing when there is none or it cannot be read.
+fn load_queue(dir: &Path) -> Vec<(Outgoing, bool)> {
+    let Ok(bytes) = std::fs::read(dir.join(QUEUE_FILE)) else { return Vec::new() };
+    match serde_json::from_slice::<Vec<Saved>>(&bytes) {
+        Ok(saved) => saved.into_iter().map(|s| (s.file, s.held)).collect(),
+        Err(e) => {
+            log::warn!("the saved send queue could not be read, so it starts empty: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// A sender's PNG thumbnail as pixels for the image widget. Decoded here
+/// rather than handed over as PNG so a bad picture is found once, now, and
+/// shows as no picture rather than failing inside the renderer.
+fn decode_thumbnail(png: &[u8]) -> Option<iced_core::image::Handle> {
+    if png.is_empty() {
+        return None;
+    }
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(iced_core::image::Handle::from_rgba(width, height, image.into_raw()))
 }
 
 /// The desktop's `file_preview::generate`, from bytes instead of a path,

@@ -2,8 +2,8 @@
 //! them, the messages, files on their way, and the composer.
 
 use iced_core::text::Wrapping;
-use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, hover, progress_bar, row, scrollable, space, text_input};
+use iced_core::{Alignment, ContentFit, Length};
+use iced_widget::{button, column, container, hover, image, progress_bar, row, scrollable, space, text_input};
 
 use super::{call, fill};
 use crate::icons::{icon, Icon};
@@ -24,7 +24,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
         col = col.push(call::stage(ui, m, false));
     }
     col = col.push(container(messages(ui, m, person, false)).height(Length::Fill));
-    col = col.push(transfers(m));
+    col = col.push(transfers(m, id));
     col = col.push(container(composer(ui, m, person)).padding(pad(4.0, 20.0, 18.0, 20.0)));
     col.height(Length::Fill).into()
 }
@@ -225,15 +225,22 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
     hover(container(body).padding([2, 0]).width(Length::Fill), overlay)
 }
 
-/// A file they offered, and files on their way.
-fn transfers<'a>(m: &'a Model) -> El<'a, Msg> {
+/// A file they offered, files on their way, and files waiting for the
+/// next call with `person`.
+pub fn transfers<'a>(m: &'a Model, person: &'a str) -> El<'a, Msg> {
     let p = theme::look();
     let mut col = column![].spacing(8).padding([0, 20]);
     if let Some((name, size)) = m.transfers.offer.as_ref() {
+        // The sender's own preview of a picture, when they sent one, in
+        // place of the generic download mark.
+        let mark: El<'a, Msg> = match &m.transfers.offer_thumbnail {
+            Some(picture) => image(picture.clone()).width(56).height(56).content_fit(ContentFit::Cover).border_radius(6).into(),
+            None => container(icon(Icon::Download, 18.0, p.accent2)).center(38).style(theme::inset).into(),
+        };
         col = col.push(
             container(
                 row![
-                    container(icon(Icon::Download, 18.0, p.accent2)).center(38).style(theme::inset),
+                    mark,
                     column![t(format!("{} wants to send you a file", m.call.peer_name)).size(13.5).font(theme::semibold()), faint(format!("{name} · {size}")).size(12)].spacing(2).width(Length::Fill),
                     btn_sm("Decline", Btn::Ghost, Some(Msg::Do(Action::DeclineFile))),
                     btn_sm("Accept", Btn::Primary, Some(Msg::Do(Action::AcceptFile))),
@@ -265,6 +272,25 @@ fn transfers<'a>(m: &'a Model) -> El<'a, Msg> {
             .style(theme::card_raised),
         );
     }
+    // On a call with them, a waiting file is only waiting its turn behind
+    // the one being sent.
+    let when = if m.call.with(person) { "Waiting its turn" } else { "Goes on your next call" };
+    for w in m.transfers.waiting.iter().filter(|w| w.person == person) {
+        col = col.push(
+            container(
+                row![
+                    icon(Icon::File, 14.0, p.muted),
+                    t(w.name.as_str()).size(13).font(theme::semibold()).width(Length::Fill),
+                    faint(when).size(11.5),
+                    icon_btn(Icon::X, "Don't send", Some(Msg::Do(Action::Unqueue(w.id)))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([8, 14])
+            .style(theme::card_raised),
+        );
+    }
     col.into()
 }
 
@@ -287,9 +313,17 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }
-    let file_ok = live && m.device.files && m.call.with(&person.id);
+    // With a queue that outlives the call, a file can be chosen for anyone
+    // at any time and goes at the next call with them.
+    let on_call = live && m.call.with(&person.id);
+    let file_ok = m.device.files && (on_call || m.transfers.pick_anytime);
+    let file_tip = match (file_ok, on_call) {
+        (true, true) => "Send a file",
+        (true, false) => "Send a file on your next call",
+        (false, _) => "Files go during a call",
+    };
     let bar = row![
-        icon_btn(Icon::Paperclip, if file_ok { "Send a file" } else { "Files go during a call" }, file_ok.then_some(Msg::Do(Action::SendFile))),
+        icon_btn(Icon::Paperclip, file_tip, file_ok.then_some(Msg::Do(Action::SendFile))),
         input,
         icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send)),
     ]

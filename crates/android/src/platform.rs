@@ -75,6 +75,14 @@ impl Platform for Android {
         read_file(handle)
     }
 
+    fn file_size(&self, handle: &str) -> io::Result<u64> {
+        file_size(handle)
+    }
+
+    fn read_file_range(&self, handle: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        read_file_range(handle, offset, len)
+    }
+
     fn downloads_dir(&self) -> Option<PathBuf> {
         static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
         DIR.get_or_init(downloads_dir).clone()
@@ -494,12 +502,59 @@ fn register_push() {
     }
 }
 
-/// Reads a picked document by its content URI. The content resolver opens
-/// a file descriptor and the bytes are read from that, rather than copied
-/// across JNI one Java array at a time. A plain path is read directly.
+/// Reads a picked document by its content URI, whole. Used only when the
+/// provider serves something that cannot be read in ranges; see
+/// [`file_size`].
 fn read_file(handle: &str) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_picked(handle)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// A picked document's size, from the descriptor the provider serves.
+///
+/// Most providers serve the file itself, which can be measured and read at
+/// any offset. Some (cloud drives fetching on demand, apps generating the
+/// content) serve a pipe instead, which has no size and cannot seek; that
+/// is reported as `Unsupported`, which tells the shared code to take the
+/// file whole through [`read_file`] instead.
+fn file_size(handle: &str) -> io::Result<u64> {
+    let meta = open_picked(handle)?.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "the provider serves a stream, not a file"));
+    }
+    Ok(meta.len())
+}
+
+/// Up to `len` bytes of a picked document from `offset`, fewer only at
+/// its end. The descriptor is opened afresh for each range: the shared
+/// code asks for a megabyte at a time, so the cost of opening is small
+/// beside the read, and nothing is left open between transfers.
+fn read_file_range(handle: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let file = open_picked(handle)?;
+    let mut buf = vec![0u8; len];
+    let mut filled = 0;
+    while filled < len {
+        // pread, so there is no seek position to keep in step.
+        match file.read_at(&mut buf[filled..], offset + filled as u64) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
+/// Opens a picked document by its content URI. The content resolver opens
+/// a file descriptor (`ContentResolver.openFileDescriptor`) and the bytes
+/// are read from that, rather than copied across JNI one Java array at a
+/// time. A plain path is opened directly.
+fn open_picked(handle: &str) -> io::Result<File> {
     if handle.starts_with('/') {
-        return std::fs::read(handle);
+        return File::open(handle);
     }
     let fd = with_activity("opening a picked file", |env, activity| {
         let resolver = env
@@ -528,10 +583,7 @@ fn read_file(handle: &str) -> io::Result<Vec<u8>> {
             // SAFETY: detachFd hands over sole ownership of an open
             // descriptor; nothing on the Java side will close it, and File
             // closes it when dropped.
-            let mut file = unsafe { File::from_raw_fd(fd) };
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            Ok(bytes)
+            Ok(unsafe { File::from_raw_fd(fd) })
         }
         // Usually the file was deleted, or its grant revoked, since it was
         // picked; with_activity has logged the exception.

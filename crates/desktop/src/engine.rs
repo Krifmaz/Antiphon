@@ -907,6 +907,9 @@ impl Engine {
             A::CancelTransfer => {
                 self.with_call(|a| a.cancel_file_transfer(&rt));
             }
+            // The desktop offers files only during a call, so it never
+            // lists a file as waiting and this never comes.
+            A::Unqueue(_) => {}
             A::AddPerson { name, invite } => self.add_person(name, invite),
             A::Remove(id) => {
                 if let Some(i) = contact_index(&self.cfg, &id) {

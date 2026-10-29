@@ -331,14 +331,23 @@ impl App {
         })
     }
 
-    /// The offer waiting, and the files moving either way.
-    fn transfers_model(&self) -> stoop::Transfers {
-        let mut t = stoop::Transfers::default();
+    /// The offer waiting with the sender's picture of it, the files moving
+    /// either way, and the files waiting for someone's next call. `&mut`
+    /// only so the offer's picture is decoded once, not every frame.
+    fn transfers_model(&mut self) -> stoop::Transfers {
+        let mut t = stoop::Transfers { pick_anytime: true, ..Default::default() };
+        t.waiting = self
+            .files
+            .queue
+            .iter()
+            .map(|e| stoop::Waiting { id: e.id, person: e.item.peer_hex.clone(), name: e.item.name.clone() })
+            .collect();
         let live = self.engine.live();
         if let Some(live) = &live {
             let files = live.files.lock().unwrap();
             if let Some(offer) = &files.pending_offer {
                 t.offer = Some((offer.file_name.clone(), data_rules::size(offer.file_size)));
+                t.offer_thumbnail = self.files.offer_thumbnail(offer.transfer_id, &offer.thumbnail_png);
             }
             if let Some(incoming) = &files.incoming {
                 t.active.push(stoop::Transfer {
@@ -423,6 +432,7 @@ impl App {
             Action::SendFile => self.update(Message::PickFile),
             Action::AcceptFile => self.update(Message::AcceptOffer),
             Action::DeclineFile => self.update(Message::DeclineOffer),
+            Action::Unqueue(id) => self.update(Message::QueueRemove(id)),
             Action::CancelTransfer => {
                 if self.files.active.is_some() {
                     self.update(Message::CancelSend);

@@ -221,6 +221,9 @@ pub enum Action {
     DeclineFile,
     /// Stop the file on its way, in either direction.
     CancelTransfer,
+    /// Take a file waiting for the next call out of the queue, by its
+    /// [`Waiting::id`](crate::Waiting::id).
+    Unqueue(u64),
     /// Add a contact from an invite link (or `host:port`).
     AddPerson {
         /// What to call them.

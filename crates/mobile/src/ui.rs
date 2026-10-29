@@ -152,8 +152,9 @@ pub enum Message {
     Expiry(Expiry),
 
     // Files.
-    /// Open the system file picker to send a file to the person on the
-    /// call.
+    /// Open the system file picker to send a file to the person whose
+    /// conversation is open: now if they are on the call, at their next
+    /// call if not.
     PickFile,
     /// Accept the file being offered.
     AcceptOffer,
@@ -176,7 +177,6 @@ pub enum Message {
     #[allow(dead_code)] // see the note on `Message`
     QueueHold(u64, bool),
     /// Take a file out of the queue.
-    #[allow(dead_code)] // see the note on `Message`
     QueueRemove(u64),
 
     // Recent calls.
@@ -323,6 +323,10 @@ pub struct App {
 
     /// The send queue and the transfers running.
     files: FileManager,
+    /// Who the file picker was opened for, hex, kept until the pick comes
+    /// back: the user may move to another conversation, or the call may
+    /// end, while the picker is up, and the file is still for them.
+    pick_for: Option<String>,
     /// Who the connected call is with, hex, as of the last poll: noticing
     /// it change is how a call's start and end are handled once.
     live_peer: Option<String>,
@@ -411,6 +415,7 @@ impl App {
             limit_text: if settings.cellular_limit_mb == 0 { String::new() } else { settings.cellular_limit_mb.to_string() },
             contacts,
             files: FileManager::new(dir.clone()),
+            pick_for: None,
             dir,
             settings,
             identity,
@@ -507,15 +512,14 @@ impl App {
         use platform::{CallAction, PlatformEvent};
         match event {
             PlatformEvent::FilePicked(picked) => {
-                let Some(peer) = self.live_peer.clone() else {
-                    self.notice = Some("The call ended before the file was picked. Send it during your next call.".into());
-                    return;
-                };
-                if let Err(e) = self.files.enqueue(peer, picked) {
-                    self.notice = Some(e);
+                let Some(peer) = self.pick_for.take().or_else(|| self.live_peer.clone()) else { return };
+                if self.live_peer.as_deref() != Some(peer.as_str()) {
+                    let who = self.display_name_for(&peer);
+                    self.stoop.toast(format!("{} goes to {who} on your next call", picked.name), antiphon_ui::ToastKind::Info);
                 }
+                self.files.enqueue(peer, picked);
             }
-            PlatformEvent::FilePickCancelled => {}
+            PlatformEvent::FilePickCancelled => self.pick_for = None,
             PlatformEvent::NetworkChanged(network) => self.network = network,
             PlatformEvent::CallAction(CallAction::Answer) => platform::ring(None),
             PlatformEvent::CallAction(CallAction::HangUp | CallAction::Decline) => {
@@ -983,10 +987,14 @@ impl App {
             }
 
             Message::PickFile => {
-                if live.is_none() {
-                    self.notice = Some("Files are sent during a call. Call them first.".into());
+                // The open conversation says who it is for; with none open,
+                // the person on the call. A file can be picked for someone
+                // between calls: it waits in the queue, saved across
+                // restarts, and goes at the next call with them.
+                let Some(peer) = self.stoop.open_person().map(str::to_string).or_else(|| self.live_peer.clone()) else {
                     return;
-                }
+                };
+                self.pick_for = Some(peer);
                 platform::pick_file();
             }
             Message::AcceptOffer => {
@@ -1008,15 +1016,19 @@ impl App {
             Message::CancelSend => self.files.cancel_active(live.as_deref()),
             Message::QueueUp(id) => {
                 self.files.queue.move_up(id);
+                self.files.save_queue();
             }
             Message::QueueDown(id) => {
                 self.files.queue.move_down(id);
+                self.files.save_queue();
             }
             Message::QueueHold(id, held) => {
                 self.files.queue.set_held(id, held);
+                self.files.save_queue();
             }
             Message::QueueRemove(id) => {
                 self.files.queue.remove(id);
+                self.files.save_queue();
             }
 
             Message::CallBack(index) => {
