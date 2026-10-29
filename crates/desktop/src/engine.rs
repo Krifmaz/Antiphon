@@ -1408,6 +1408,7 @@ impl Engine {
             | A::InviteToSpace { .. }
             | A::AddChannel { .. }
             | A::SpaceNotify { .. }
+            | A::ManageSpace { .. }
             | A::LeaveSpace(_)) => {
                 let invite = matches!(a, A::InviteToSpace { .. });
                 match self.spaces.act(a) {

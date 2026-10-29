@@ -18,8 +18,17 @@
 //!   instead of one per channel, one epoch to keep in step over mail that
 //!   arrives out of order, and one place a ban takes effect. The channel
 //!   is a field *inside* each encrypted message, so a mailbox can't even
-//!   tell which channel is busy. The cost is that a private channel -- a
-//!   subset of members -- would need a group of its own; that is not built.
+//!   tell which channel is busy.
+//! - **Private channels** ride the same group: a channel the manifest
+//!   gives a reader list to is *sent* only to those readers -- every
+//!   message, edit and removal in it goes out as a separate [`Out`] to each
+//!   reader, sealed to them as all mail is -- so other members never
+//!   receive a byte of it, and a reader's app drops anything in it from
+//!   someone who isn't one. What everyone can see is that the channel
+//!   exists and who may read it, because that is in the manifest. (A
+//!   member who never receives a sender's private messages skips ahead in
+//!   that sender's MLS key chain on their next public one; MLS allows a
+//!   gap of up to 1000 messages per sender per epoch.)
 //!
 //! # Getting messages there with no server
 //!
@@ -583,6 +592,16 @@ impl Space {
         Ok(self.to_all(wire, &[]))
     }
 
+    /// Sends `post`, which belongs to `channel`, only to those who may
+    /// read that channel (everyone, for an open one).
+    fn send_in(&mut self, channel: Option<u32>, post: &Post) -> Result<Vec<Out>, String> {
+        let wire = self.encrypt(post)?;
+        let Some(channel) = channel else { return Ok(self.to_all(wire, &[])) };
+        let m = self.manifest();
+        let to: Vec<[u8; 32]> = self.others_in_group().into_iter().filter(|k| m.can_read(channel, k)).collect();
+        Ok(to.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
+    }
+
     /// A manifest change: tell everyone, then bring the group in line.
     fn publish(&mut self, signed: &SignedManifest) -> Result<Vec<Out>, String> {
         let mut outs = self.send(&Post::Manifest { manifest: b64(&signed.encode()) })?;
@@ -729,29 +748,43 @@ impl Space {
         if !self.manifest().channels.iter().any(|c| c.id == channel) {
             return Err("no such channel".into());
         }
+        if !self.manifest().can_read(channel, &self.me) {
+            return Err("that channel is private and you're not one of its readers".into());
+        }
         let id = random_id();
         let at_secs = now_secs();
-        let outs = self.send(&Post::Message { id, channel, text: text.to_string(), reply_to, at_secs })?;
+        let outs = self.send_in(Some(channel), &Post::Message { id, channel, text: text.to_string(), reply_to, at_secs })?;
         Ok((outs, Event::Message { channel, id, sender: self.me, text: text.to_string(), reply_to, at_secs }))
     }
 
-    pub fn edit(&mut self, id: u64, text: &str) -> Result<Vec<Out>, String> {
+    /// Changes our message `id`, which is in `channel` -- so that an edit
+    /// to a private channel's message goes only to its readers. `None`
+    /// sends it to everyone; pass the channel whenever it is known.
+    pub fn edit(&mut self, id: u64, text: &str, channel: Option<u32>) -> Result<Vec<Out>, String> {
         if text.trim().is_empty() {
             return Err("an edit can't be empty; delete it instead".into());
         }
-        self.send(&Post::Edit { id, text: text.trim().to_string() })
+        self.send_in(channel, &Post::Edit { id, text: text.trim().to_string() })
     }
 
     /// Withdraws our own message, or removes someone else's if we may.
-    pub fn delete(&mut self, id: u64, author: [u8; 32]) -> Result<Vec<Out>, String> {
+    /// `channel` as for [`Space::edit`].
+    pub fn delete(&mut self, id: u64, author: [u8; 32], channel: Option<u32>) -> Result<Vec<Out>, String> {
         if author != self.me && !self.manifest().can(&self.me, perm::MANAGE_MESSAGES, Some(&author)) {
             return Err("you can't remove their messages".into());
         }
-        self.send(&Post::Delete { id, author: Key(author) })
+        self.send_in(channel, &Post::Delete { id, author: Key(author) })
     }
 
     pub fn share_file(&mut self, post: Post) -> Result<Vec<Out>, String> {
-        self.send(&post)
+        let channel = match &post {
+            Post::File { channel, .. } => Some(*channel),
+            _ => None,
+        };
+        if channel.is_some_and(|c| !self.manifest().can_read(c, &self.me)) {
+            return Err("that channel is private and you're not one of its readers".into());
+        }
+        self.send_in(channel, &post)
     }
 
     /// Sends our card again -- after our route list changed.
@@ -1089,6 +1122,12 @@ impl Space {
         }
         match post {
             Post::Message { id, channel, text, reply_to, at_secs } => {
+                // In a private channel, only from a reader, and only if we
+                // are one -- a message there from anyone else is dropped.
+                let private = m.channel(channel).is_some_and(|c| c.readers.is_some());
+                if private && !(m.can_read(channel, &sender) && m.can_read(channel, &self.me)) {
+                    return Ok(());
+                }
                 if m.can(&sender, perm::POST, None) {
                     let channel = if m.channels.iter().any(|c| c.id == channel) { channel } else { m.channels[0].id };
                     let text: String = text.chars().take(4000).collect();
@@ -1102,6 +1141,10 @@ impl Space {
                 }
             }
             Post::File { id, channel, name, size, file_id, key, holders, at_secs } => {
+                let private = m.channel(channel).is_some_and(|c| c.readers.is_some());
+                if private && !(m.can_read(channel, &sender) && m.can_read(channel, &self.me)) {
+                    return Ok(());
+                }
                 if m.can(&sender, perm::POST, None) {
                     h.events.push(Event::File { channel, id, sender, name, size, file_id, key, holders, at_secs });
                 }
@@ -1660,6 +1703,18 @@ impl Store {
         bump();
     }
 
+    /// Which channel of space `id` holds message `message`, from the saved
+    /// history -- so an edit or removal can go only where the message went.
+    pub fn channel_of(&self, id: &Key, message: u64) -> Option<u32> {
+        let space = self.load(id)?;
+        space
+            .manifest()
+            .channels
+            .iter()
+            .map(|c| c.id)
+            .find(|&c| crate::history::load(&self.dir, &channel_log(id, c), &self.key).iter().any(|m| m.id == message))
+    }
+
     pub fn mark_read(&self, id: &Key) {
         let _guard = LOCK.lock().unwrap();
         let mut hub = self.hub();
@@ -2121,6 +2176,35 @@ mod tests {
         let (outs, _) = carol.space().post(0, "a reply", Some(root)).unwrap();
         let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
         assert!(ev[1].iter().any(|e| matches!(e, Event::Message { reply_to: Some(r), .. } if *r == root)));
+    }
+
+    #[test]
+    fn a_private_channel_reaches_only_its_readers() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let bob_key = Key(bob.key());
+        let outs = alice
+            .space()
+            .update(&alice_id, |m| {
+                m.channels.push(antiphon_crypto::community::Channel { id: 1, name: "staff".into(), readers: Some(vec![bob_key]), ..Default::default() });
+            })
+            .unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        let carol_key = carol.key();
+        assert!(!carol.space().manifest().can_read(1, &carol_key));
+
+        // Bob's post goes to Alice (an owner) and not to Carol.
+        let (outs, _) = bob.space().post(1, "staff only", None).unwrap();
+        assert!(outs.iter().all(|o| o.to != carol.key()), "not even sent to her");
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert_eq!(texts(&ev[0]), ["staff only"]);
+        assert!(texts(&ev[2]).is_empty());
+        // Carol can't post there.
+        assert!(carol.space().post(1, "let me in", None).is_err());
+        // And what Bob says in the open channel next still reaches her.
+        let (outs, _) = bob.space().post(0, "hi all", None).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert_eq!(texts(&ev[2]), ["hi all"]);
     }
 
     #[test]

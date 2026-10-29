@@ -77,6 +77,8 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Add channel", Btn::Primary, Some(Msg::ChannelCreate(id.clone())))].spacing(8);
             modal("Add a channel", super::community::add_channel(ui, id), Some(footer.into()), 440.0, close, rise)
         }
+        Dialog::ChannelSettings(id, channel) => modal("Who can read it", super::community::channel_settings(m, id, *channel), None, 480.0, close, rise),
+        Dialog::Roles(id) => modal("Roles", super::community::roles(ui, m, id), None, 560.0, close, rise),
         Dialog::ConfirmLeave(id) => {
             let name = m.communities.iter().find(|c| &c.id == id).map(|c| c.name.as_str()).unwrap_or("it");
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Leave", Btn::DangerSolid, Some(Msg::Do(Action::LeaveSpace(id.clone()))))].spacing(8);

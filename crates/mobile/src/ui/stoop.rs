@@ -553,6 +553,7 @@ impl App {
             | Action::InviteToSpace { .. }
             | Action::AddChannel { .. }
             | Action::SpaceNotify { .. }
+            | Action::ManageSpace { .. }
             | Action::LeaveSpace(_) => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),

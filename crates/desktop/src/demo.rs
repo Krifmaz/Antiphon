@@ -387,8 +387,8 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
 
 /// The made-up group chats and communities.
 fn communities() -> Vec<ui::Community> {
-    let member = |id: &str, name: &str, role: &str, status: &str| ui::Member { id: id.into(), name: name.into(), status: status.into(), role: role.into(), me: id == ME };
-    let channel = |id: u32, name: &str, topic: &str| ui::Channel { id, name: name.into(), topic: topic.into(), notify: None };
+    let member = |id: &str, name: &str, role: &str, status: &str| ui::Member { id: id.into(), name: name.into(), status: status.into(), role: role.into(), me: id == ME, plain: role == "Member", role_index: (role != "Owner").then_some(0), ..Default::default() };
+    let channel = |id: u32, name: &str, topic: &str| ui::Channel { id, name: name.into(), topic: topic.into(), ..Default::default() };
     vec![
         ui::Community {
             id: "5a7c0000000000000000000000000000000000000000000000000000000000a7".into(),
