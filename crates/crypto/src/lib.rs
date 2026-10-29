@@ -55,6 +55,7 @@
 //! key on disk becomes unreadable. A rename touches what people see. These
 //! are not that.
 
+pub mod account_seal;
 pub mod backup;
 mod contact;
 mod device;

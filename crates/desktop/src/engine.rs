@@ -82,6 +82,8 @@ pub enum Out {
     AddFailed(String),
     /// Put this text on the clipboard.
     Copy(String),
+    /// A restore rewrote the account on disk: restart to load it.
+    Relaunch,
 }
 
 /// Whether the background task is placing a call or waiting for one.
@@ -187,6 +189,8 @@ pub struct Engine {
     /// each was built from: a tile is rebuilt (and its picture uploaded
     /// again) only when a newer frame has come.
     tiles: HashMap<String, (u64, ui::VideoTile)>,
+    /// Settings > Account & backup: phrase, backup files, moving devices.
+    account: crate::account::AccountState,
 }
 
 impl Engine {
@@ -223,6 +227,7 @@ impl Engine {
             their_level: 0.0,
             checking: false,
             tiles: HashMap::new(),
+            account: Default::default(),
         };
         engine.load_previews();
         engine.refresh_invite();
@@ -258,6 +263,8 @@ impl Engine {
     /// Catches up with everything that happened since the last tick.
     /// `open` is the conversation on screen, which counts as read.
     pub fn tick(&mut self, open: Option<&str>) {
+        let outcomes = self.account.tick();
+        self.account_outcomes(outcomes);
         let events = std::mem::take(&mut *self.events.lock().unwrap());
         for e in events {
             self.on_event(e);
@@ -1184,9 +1191,19 @@ impl Engine {
             | A::DataSaver(_)
             | A::CellularLimit(_)
             | A::KeepListening(_)
-            | A::ListenOnSaver(_)
-            | A::ShowPhrase(_)
-            | A::Restore(_) => {}
+            | A::ListenOnSaver(_) => {}
+            a @ (A::ShowPhrase(_)
+            | A::Restore(_)
+            | A::BackupSave { .. }
+            | A::BackupOpen { .. }
+            | A::MoveStart { .. }
+            | A::MoveStop
+            | A::MoveReceive(_)) => {
+                let in_call = self.busy();
+                let ctx = crate::account::Ctx { dir: self.dir.as_deref(), identity: &self.state.identity, key: self.key.as_ref(), in_call };
+                let outcomes = self.account.act(a, ctx);
+                self.account_outcomes(outcomes);
+            }
         }
         let _ = open;
     }
@@ -1387,6 +1404,17 @@ impl Engine {
             first_run: self.cfg.profile.display_name.trim().is_empty(),
             device: ui::Device { phone: false, files: true, ptt_keys: true },
             phone: None,
+            account: self.account.model(&self.state.identity),
+        }
+    }
+
+    /// Carries out what the account section asked for.
+    fn account_outcomes(&mut self, outcomes: Vec<crate::account::Outcome>) {
+        for o in outcomes {
+            match o {
+                crate::account::Outcome::Toast(text, kind) => self.toast(text, kind),
+                crate::account::Outcome::Relaunch => self.out.push(Out::Relaunch),
+            }
         }
     }
 

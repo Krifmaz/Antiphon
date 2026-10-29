@@ -80,6 +80,7 @@ impl Demo {
             first_run: false,
             device: ui::Device { phone: false, files: true, ptt_keys: true },
             phone: None,
+            account: ui::Account { can_pick_file: true, ..Default::default() },
         };
         // Chosen colours, as the engine registers saved ones.
         ui::avatars::set(&model.me.id, "", &model.me.color, |_| None);
@@ -134,7 +135,6 @@ impl Demo {
             cellular_used: "Used this month: 38 MB.".into(),
             keep_listening: true,
             listen_on_saver: false,
-            phrase: None,
             talking: false,
         });
     }

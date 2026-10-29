@@ -38,6 +38,8 @@ pub mod fling;
 pub mod queue;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
+mod account;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod call;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod call_log;
@@ -61,6 +63,10 @@ mod ui;
 // The desktop's wire-level modules, shared by path. Each is used only in
 // part here (the desktop has screens for things a phone does not offer
 // yet), hence `dead_code`; none of them is edited for the phone's sake.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/account_backup.rs"]
+mod account_backup;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/content_store.rs"]

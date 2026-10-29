@@ -7,6 +7,7 @@
 //! and the Slint one run the same code, and so the phone app can keep
 //! compiling the wire-level modules in by path from one place.
 
+pub mod account_backup;
 pub mod anonymity;
 pub mod captions;
 pub mod caps_lock;

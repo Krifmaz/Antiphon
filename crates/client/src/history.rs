@@ -187,8 +187,9 @@ pub fn load_or_create_backup_key(config_dir: &Path) -> std::io::Result<BackupKey
     }
 }
 
-/// Writes the backup key, sealed where the platform allows it.
-fn save_backup_key(path: &Path, key: &BackupKey) -> std::io::Result<()> {
+/// Writes the backup key, sealed where the platform allows it. Public for
+/// `account_backup`, which puts a restored account's key back in place.
+pub fn save_backup_key(path: &Path, key: &BackupKey) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

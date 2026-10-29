@@ -1,6 +1,7 @@
 //! The window: picks the wide or narrow layout and lays dialogs, toasts and
 //! the notice over it.
 
+mod account;
 mod call;
 mod conversation;
 mod dialogs;

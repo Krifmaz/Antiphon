@@ -374,6 +374,11 @@ pub struct App {
     connected_at: Option<Instant>,
     /// The window's logical size as last told to the interface.
     size: Size,
+    /// How the call engine wakes the runner; kept so the app can be
+    /// rebuilt from disk after an account restore.
+    wake: Waker,
+    /// Settings > Account & backup: backup files and moving devices.
+    account: crate::account::PhoneAccount,
 }
 
 /// The profile card the saved settings describe, as sent to contacts.
@@ -395,7 +400,7 @@ impl App {
     pub fn new(dir: PathBuf, wake: Waker) -> Result<Self, String> {
         let settings = Settings::load(&dir);
         let identity = load_identity(&dir);
-        let engine = CallEngine::new(settings.chain.clone(), settings.open_mic, settings.speaker, wake)
+        let engine = CallEngine::new(settings.chain.clone(), settings.open_mic, settings.speaker, wake.clone())
             .map_err(|e| format!("could not start the call engine: {e}"))?;
         engine.set_display_name(&settings.display_name);
         engine.set_profile(&settings.status_message, card_of(&settings));
@@ -462,6 +467,8 @@ impl App {
             talking: false,
             connected_at: None,
             size: Size::new(0.0, 0.0),
+            wake,
+            account: Default::default(),
         };
         app.refresh();
         Ok(app)
@@ -474,6 +481,29 @@ impl App {
         self.engine.mic_test_running()
             || matches!(self.engine.phase(), Phase::Connected { .. } | Phase::Dialing { .. })
             || self.stoop.needs_frames()
+            // A backup being sealed or a move offer open: its result is
+            // collected in `poll`, which runs on each frame.
+            || self.account.active()
+    }
+
+    /// Rebuilds the whole app from what is on disk, after a restore wrote
+    /// a different account there. Everything in memory -- identity,
+    /// contacts, history, settings -- belonged to the old account.
+    fn reload_account(&mut self, said: String) {
+        if self.engine.is_busy() {
+            self.engine.stop();
+        }
+        match App::new(self.dir.clone(), self.wake.clone()) {
+            Ok(fresh) => {
+                let (size, foreground) = (self.size, self.foreground);
+                *self = fresh;
+                self.foreground = foreground;
+                self.resized(size);
+                self.stoop.toast(said, antiphon_ui::ToastKind::Ok);
+                self.refresh();
+            }
+            Err(e) => self.notice = Some(format!("{said} Close and reopen Stoop to finish: {e}")),
+        }
     }
 
     /// The activity came back to the front, possibly from the permission
@@ -534,6 +564,8 @@ impl App {
                     Err(why) => self.stoop.toast(why, antiphon_ui::ToastKind::Err),
                 }
             }
+            // A backup file chosen in Settings, not a file for the call.
+            PlatformEvent::FilePicked(picked) if self.account.picked(&self.dir, Some(&picked.handle)) => {}
             PlatformEvent::FilePicked(picked) => {
                 let Some(peer) = self.live_peer.clone() else {
                     self.notice = Some("The call ended before the file was picked. Send it during your next call.".into());
@@ -543,7 +575,10 @@ impl App {
                     self.notice = Some(e);
                 }
             }
-            PlatformEvent::FilePickCancelled => self.picking_avatar = false,
+            PlatformEvent::FilePickCancelled => {
+                self.picking_avatar = false;
+                self.account.picked(&self.dir, None);
+            }
             PlatformEvent::NetworkChanged(network) => self.network = network,
             PlatformEvent::CallAction(CallAction::Answer) => platform::ring(None),
             PlatformEvent::CallAction(CallAction::HangUp | CallAction::Decline) => {
@@ -628,6 +663,17 @@ impl App {
     /// nothing happened.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
+
+        for outcome in self.account.poll() {
+            match outcome {
+                crate::account::Outcome::Toast(text, kind) => self.stoop.toast(text, kind),
+                crate::account::Outcome::Reload(said) => {
+                    self.reload_account(said);
+                    return true;
+                }
+            }
+            changed = true;
+        }
 
         for summary in self.engine.take_finished() {
             if let Ok(key) = &self.backup_key {
@@ -1173,14 +1219,14 @@ impl App {
             self.notice = Some("Hang up before restoring an identity.".into());
             return;
         }
-        let seed = match antiphon_crypto::mnemonic::seed_from_phrase(self.restore_text.trim()) {
-            Ok(seed) => seed,
+        // The phrase, or recovery shares (see `account_backup`).
+        let restored = match crate::account_backup::identity_from_words(&self.restore_text) {
+            Ok(identity) => identity,
             Err(e) => {
-                self.notice = Some(format!("That phrase is not valid: {e}"));
+                self.notice = Some(e);
                 return;
             }
         };
-        let restored = IdentityKeyPair::from_master_seed(seed);
         if let Ok(current) = &self.identity {
             if current.public().identity_key == restored.public().identity_key {
                 self.notice = Some("That phrase already matches this phone's identity. Nothing to do.".into());
@@ -1192,9 +1238,10 @@ impl App {
                 return;
             }
         }
-        let path = antiphon_crypto::store::identity_path(&self.dir);
-        match antiphon_crypto::store::save(&path, &restored) {
-            Ok(()) => {
+        // The old identity is moved aside rather than overwritten, so a
+        // mistaken restore can still be undone by hand.
+        match crate::account_backup::replace_identity(&self.dir, &restored) {
+            Ok(_) => {
                 self.identity = Ok(restored);
                 self.notice = Some("Identity restored.".into());
                 self.restore_text.clear();

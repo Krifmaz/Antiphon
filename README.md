@@ -122,6 +122,22 @@ share your invite from the Invite button, and add people from theirs.
 Settings -- devices, how your voice is sent, processing, theme and accent
 -- apply live to a running call and persist across restarts.
 
+**Keeping your account.** There is no server holding it, so Settings >
+Account & backup is where you make sure a lost or replaced device doesn't
+cost you anything:
+
+- *Send this account to a device* shows a link and QR code; open it on
+  the new computer or phone (same Wi-Fi) and it takes the whole account.
+- *Back up to a file* saves identity, contacts, profile and settings
+  (and history, if you like) in one `.stoopbackup` file locked with a
+  passphrase. *Restore from a backup file* brings it back on any device.
+- The 24-word *recovery phrase* (or Shamir shares) is the last resort: it
+  restores who you are, so contacts still recognise you, but not your
+  contacts list.
+
+A restore never deletes the account it replaces; that goes into a
+`replaced-<time>` folder in the app's data folder.
+
 - `--profile <name>` keeps a separate identity and settings directory.
 - `--demo` shows the interface with made-up people and a call, nothing
   on the network.

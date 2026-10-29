@@ -33,9 +33,39 @@ pub struct Model {
     pub first_run: bool,
     /// What this device can do.
     pub device: Device,
-    /// What only a phone has: the loudspeaker, battery and data rules, the
-    /// recovery phrase. `None` on a desktop, which hides all of it.
+    /// What only a phone has: the loudspeaker, battery and data rules.
+    /// `None` on a desktop, which hides all of it.
     pub phone: Option<Phone>,
+    /// Keeping the account: the recovery phrase, backups, moving devices.
+    pub account: Account,
+}
+
+/// Settings > Account: everything about not losing the account.
+#[derive(Clone, Default)]
+pub struct Account {
+    /// The recovery phrase, while it is shown; `None` while hidden.
+    pub phrase: Option<String>,
+    /// A slow job is running ("Sealing your backup…"); the buttons that
+    /// would start another wait until it is done.
+    pub busy: Option<String>,
+    /// An open offer to move this account to another device.
+    pub moving: Option<Moving>,
+    /// Whether this device can show a save or open dialog for a backup
+    /// file. A phone without one still saves to Downloads.
+    pub can_pick_file: bool,
+}
+
+/// An open offer to move the account to another device.
+#[derive(Clone)]
+pub struct Moving {
+    /// The link the new device opens.
+    pub link: String,
+    /// The same link as a QR code, for a phone's camera.
+    pub qr: Option<std::sync::Arc<qr_code::Data>>,
+    /// Where it stands, in words ("Waiting for your other device").
+    pub status: String,
+    /// The account has arrived on the other device.
+    pub done: bool,
 }
 
 /// The phone's own settings and state.
@@ -57,8 +87,6 @@ pub struct Phone {
     pub keep_listening: bool,
     /// Keep listening in the background even on battery saver.
     pub listen_on_saver: bool,
-    /// The recovery phrase, while it is shown; `None` while hidden.
-    pub phrase: Option<String>,
     /// The push-to-talk pad is held.
     pub talking: bool,
 }

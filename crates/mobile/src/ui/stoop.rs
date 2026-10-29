@@ -196,11 +196,11 @@ impl App {
                 cellular_used: format!("Used this month: {}.", data_rules::size(self.meter.used(now))),
                 keep_listening: self.settings.keep_listening_in_background,
                 listen_on_saver: self.settings.listen_on_battery_saver,
-                phrase: match (&self.identity, self.phrase_visible) {
-                    (Ok(identity), true) => Some(antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed())),
-                    _ => None,
-                },
                 talking: self.talking,
+            }),
+            account: self.account.model(match (&self.identity, self.phrase_visible) {
+                (Ok(identity), true) => Some(antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed())),
+                _ => None,
             }),
         }
     }
@@ -382,6 +382,16 @@ impl App {
         t
     }
 
+    /// Shows what an account action said straight away. (A reload only
+    /// ever comes later, from `poll`.)
+    fn account_toasts(&mut self, outcomes: Vec<crate::account::Outcome>) {
+        for o in outcomes {
+            if let crate::account::Outcome::Toast(text, kind) = o {
+                self.stoop.toast(text, kind);
+            }
+        }
+    }
+
     /// Carries out one thing the interface asked for.
     pub(super) fn act(&mut self, action: Action) {
         match action {
@@ -467,6 +477,8 @@ impl App {
                 self.profile_changed();
             }
             Action::PickAvatar => {
+                // Drops any backup still waiting on the picker: this pick is the picture's.
+                self.account.picked(&self.dir, None);
                 self.picking_avatar = true;
                 crate::platform::pick_file();
             }
@@ -532,6 +544,35 @@ impl App {
                 self.restore_text = phrase;
                 self.restore_armed = true;
                 self.update(Message::Restore);
+            }
+            Action::BackupSave { passphrase, history } => match (&self.identity, &self.backup_key) {
+                (Ok(identity), Ok(key)) => self.account.save(&self.dir, identity, key, passphrase, history),
+                _ => self.stoop.toast("Your identity or history key didn't load, so a backup can't be made yet.", ToastKind::Err),
+            },
+            Action::BackupOpen { passphrase } => {
+                if self.engine.is_busy() {
+                    self.stoop.toast("Hang up before restoring an account.", ToastKind::Warn);
+                } else {
+                    // This pick is the backup's, not a new profile picture's.
+                    self.picking_avatar = false;
+                    self.account.choose_file(passphrase);
+                }
+            }
+            Action::MoveStart { history } => match (&self.identity, &self.backup_key) {
+                (Ok(identity), Ok(key)) => {
+                    let outcomes = self.account.start_move(&self.dir, identity, key, history);
+                    self.account_toasts(outcomes);
+                }
+                _ => self.stoop.toast("Your identity or history key didn't load, so the account can't be sent yet.", ToastKind::Err),
+            },
+            Action::MoveStop => self.account.stop_move(),
+            Action::MoveReceive(link) => {
+                if self.engine.is_busy() {
+                    self.stoop.toast("Hang up before bringing an account here.", ToastKind::Warn);
+                } else {
+                    let outcomes = self.account.receive(&self.dir, &link);
+                    self.account_toasts(outcomes);
+                }
             }
         }
     }

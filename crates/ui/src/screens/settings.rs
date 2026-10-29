@@ -46,6 +46,7 @@ fn shown(m: &Model, s: Section) -> bool {
 fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     let body = match section {
         Section::Profile => profile(ui, m),
+        Section::Account => super::account::view(ui, m),
         Section::Appearance => appearance(m),
         Section::Voice => voice(m),
         Section::Network => network(ui, m),
@@ -366,9 +367,8 @@ fn about<'a>(m: &'a Model) -> El<'a, Msg> {
 }
 
 /// The phone's own settings: the microphone permission, listening in the
-/// background, mobile data, and the recovery phrase.
+/// background and mobile data. (The recovery phrase is under Account.)
 fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let p = theme::look();
     let Some(ph) = m.phone.as_ref() else { return column![].into() };
     let mut cards = column![].spacing(14);
     if !ph.mic_allowed {
@@ -408,33 +408,8 @@ fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         setting("Monthly limit for files", Some(ph.cellular_used.as_str()), limit),
     ]
     .spacing(12);
-    let phrase: El<'a, Msg> = match ph.phrase.as_deref() {
-        Some(words) => column![
-            container(t(words).size(13.5).font(theme::mono()).color(p.text)).padding([10, 12]).width(Length::Fill).style(theme::inset),
-            row![
-                btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Msg::Copy(words.to_string(), "Recovery phrase"))),
-                btn("Hide", Btn::Ghost, Some(Msg::Do(Action::ShowPhrase(false)))),
-            ]
-            .spacing(8),
-        ]
-        .spacing(10)
-        .into(),
-        None => row![btn_icon(Icon::Lock, "Show my recovery phrase", Btn::Default, Some(Msg::Do(Action::ShowPhrase(true))))].into(),
-    };
-    let ready = !ui.restore_edit.trim().is_empty();
-    let restore = column![
-        text_input("The 24 words, in order", &ui.restore_edit).on_input(Msg::RestoreEdit).padding([10, 12]).size(14).style(theme::input),
-        row![btn("Restore", Btn::Danger, ready.then_some(Msg::Dialog(Some(Dialog::ConfirmRestore))))],
-    ]
-    .spacing(10);
     cards
         .push(titled_card("In the background", None, background))
         .push(titled_card("Mobile data", None, data))
-        .push(titled_card(
-            "Recovery phrase",
-            Some("These words bring your identity back on a new phone. Anyone who has them can be you, so keep them somewhere only you can reach."),
-            phrase,
-        ))
-        .push(titled_card("Restore from a phrase", Some("Moving from another device? Type its phrase here."), restore))
         .into()
 }

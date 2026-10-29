@@ -122,6 +122,7 @@ const TOUR: &[Step] = &[
     Step { name: "settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Appearance)) },
     Step { name: "profile", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Profile)) },
     Step { name: "voice", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Voice)) },
+    Step { name: "account", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Account)) },
     Step {
         name: "invite",
         size: (1280.0, 820.0),
@@ -243,6 +244,13 @@ impl App {
             match out {
                 Out::Toast(text, kind) => self.ui.toast(text, kind),
                 Out::Copy(text) => tasks.push(iced::clipboard::write(text)),
+                Out::Relaunch => {
+                    // The toast saying so was queued just before; the new
+                    // copy shows the restored account.
+                    engine.shutdown();
+                    crate::account::relaunch();
+                    tasks.push(iced::exit());
+                }
                 Out::AddFailed(why) => self.ui.add_failed(why),
                 Out::Show(route) => {
                     for a in self.ui.show(route) {

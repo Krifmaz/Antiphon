@@ -20,6 +20,12 @@ pub enum CryptoError {
     NotEnoughShares,
     #[error("these shares are from different splits, or some are missing")]
     SharesDoNotMatch,
+    #[error("a passphrase needs at least {min} characters")]
+    PassphraseTooShort { min: usize },
+    #[error("that is not a Stoop account backup")]
+    NotAnAccountBackup,
+    #[error("that passphrase does not open this backup")]
+    WrongPassphrase,
     #[error("this backup key was sealed for a different device")]
     BackupNotSealedForThisDevice,
     #[error("DHT record is malformed, too large, or not filed under its own key")]
