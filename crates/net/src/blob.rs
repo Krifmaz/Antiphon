@@ -64,7 +64,8 @@ pub enum Refusal {
     NoLongerShared,
     /// Wrong or missing read token.
     Forbidden,
-    /// Shared with contacts only, and you haven't shown you're one.
+    /// Shared with contacts (or a community) only, and you haven't shown
+    /// you're one.
     NotAContact,
     TooBig,
     Full,
@@ -94,7 +95,7 @@ impl Refusal {
             Refusal::NotHere => "they don't have that file",
             Refusal::NoLongerShared => "that file is no longer shared",
             Refusal::Forbidden => "that file isn't shared with you",
-            Refusal::NotAContact => "that file is shared with their contacts only",
+            Refusal::NotAContact => "that file is shared with their contacts or community only",
             Refusal::TooBig => "the file is bigger than this node allows",
             Refusal::Full => "the node is full",
             Refusal::OverQuota => "your storage on this node is used up",

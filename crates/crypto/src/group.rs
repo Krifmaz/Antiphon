@@ -46,6 +46,23 @@
 //!   [`sframe_base_key`](GroupMember::sframe_base_key) give per-epoch keys
 //!   for anything else (SFrame media, [`crate::sframe`]).
 //!
+//! # Keeping a group across restarts
+//!
+//! Group chats and communities (spec §9) outlive any one run of the app,
+//! so a member's whole MLS state -- the group, its epoch secrets, and the
+//! private halves of KeyPackages still waiting for a Welcome -- can be
+//! [`save`](GroupMember::save)d to bytes and
+//! [`restore`](GroupMember::restore)d. Those bytes are as secret as the
+//! identity key: the caller seals them (the app does so under the backup
+//! key, like history). openmls keeps all of it in its storage provider;
+//! this crate gives it a storage of its own ([`MemoryStorage`]) rather
+//! than `OpenMlsRustCrypto`'s, precisely so the map can be read out.
+//!
+//! [`process_checked`](GroupMember::process_checked) lets a caller look at
+//! who a commit adds and removes *before* it is merged, and refuse it --
+//! how a community's signed member list, not whoever happens to commit,
+//! decides who is in the group.
+//!
 //! MLS needs commits applied in one order by everyone. There is no
 //! delivery service here, so the *caller* must make sure only one member
 //! commits at a time -- group calls pick the member at the lowest leaf
@@ -56,7 +73,8 @@
 
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::*;
-use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_memory_storage::MemoryStorage;
+use openmls_rust_crypto::RustCrypto;
 use openmls_traits::signatures::{Signer, SignerError};
 use openmls_traits::types::SignatureScheme;
 use openmls_traits::OpenMlsProvider;
@@ -80,6 +98,8 @@ pub enum GroupError {
     CredentialMismatch,
     #[error("that person is not in the group")]
     NotAMember,
+    #[error("this change to the group is not allowed")]
+    Refused,
     #[error("MLS: {0}")]
     Mls(String),
 }
@@ -87,6 +107,44 @@ pub enum GroupError {
 fn mls<E: std::fmt::Debug>(e: E) -> GroupError {
     GroupError::Mls(format!("{e:?}"))
 }
+
+/// openmls's crypto with a storage this crate can read out and put back,
+/// for [`GroupMember::save`].
+#[derive(Default)]
+struct Provider {
+    crypto: RustCrypto,
+    storage: MemoryStorage,
+}
+
+impl OpenMlsProvider for Provider {
+    type CryptoProvider = RustCrypto;
+    type RandProvider = RustCrypto;
+    type StorageProvider = MemoryStorage;
+
+    fn storage(&self) -> &MemoryStorage {
+        &self.storage
+    }
+
+    fn crypto(&self) -> &RustCrypto {
+        &self.crypto
+    }
+
+    fn rand(&self) -> &RustCrypto {
+        &self.crypto
+    }
+}
+
+/// Start of [`GroupMember::save`]'s output, so anything else is refused.
+const SAVE_MAGIC: &[u8; 6] = b"AMLS1\n";
+
+/// How many epochs back an application message still opens. Mail can
+/// arrive a while after it was sealed (spec §8), and a commit sent in the
+/// meantime must not make it unreadable for people who were there.
+const PAST_EPOCHS: usize = 5;
+
+/// How far out of order a member's messages may arrive within an epoch.
+/// A live call keeps order; mailboxes and fan-out need not.
+const OUT_OF_ORDER: u32 = 64;
 
 /// Signs for MLS with the identity's Ed25519 key.
 struct IdentitySigner(IdentityKeyPair);
@@ -123,10 +181,20 @@ pub enum Processed {
     Proposal,
 }
 
+/// Who a commit adds and removes, shown to
+/// [`GroupMember::process_checked`]'s check before it is merged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    /// The identity that made the commit.
+    pub committer: [u8; 32],
+    pub added: Vec<[u8; 32]>,
+    pub removed: Vec<[u8; 32]>,
+}
+
 /// One identity's MLS state: its key-package secrets and, once created
 /// or joined, the group.
 pub struct GroupMember {
-    provider: OpenMlsRustCrypto,
+    provider: Provider,
     signer: IdentitySigner,
     identity_key: [u8; 32],
     group: Option<MlsGroup>,
@@ -135,7 +203,7 @@ pub struct GroupMember {
 impl GroupMember {
     pub fn new(identity: &IdentityKeyPair) -> Self {
         Self {
-            provider: OpenMlsRustCrypto::default(),
+            provider: Provider::default(),
             signer: IdentitySigner(IdentityKeyPair::from_master_seed(identity.master_seed())),
             identity_key: identity.public().identity_key,
             group: None,
@@ -157,6 +225,8 @@ impl GroupMember {
             // Handshake messages encrypted too: a relay forwarding them
             // learns nothing about who added or removed whom.
             .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+            .max_past_epochs(PAST_EPOCHS)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(OUT_OF_ORDER, 1000))
             .build()
     }
 
@@ -164,7 +234,75 @@ impl GroupMember {
         MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
             .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+            .max_past_epochs(PAST_EPOCHS)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(OUT_OF_ORDER, 1000))
             .build()
+    }
+
+    /// Everything this member holds -- the group and any KeyPackage
+    /// secrets still waiting for a Welcome -- as bytes for
+    /// [`restore`](Self::restore). As secret as the identity key; seal it.
+    pub fn save(&self) -> Vec<u8> {
+        let mut out = SAVE_MAGIC.to_vec();
+        let id = self.group.as_ref().map(|g| g.group_id().as_slice().to_vec()).unwrap_or_default();
+        out.extend_from_slice(&(id.len() as u32).to_be_bytes());
+        out.extend_from_slice(&id);
+        let values = self.provider.storage.values.read().expect("MLS storage lock poisoned");
+        // Sorted, so the same state always saves to the same bytes.
+        let mut entries: Vec<_> = values.iter().collect();
+        entries.sort();
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (k, v) in entries {
+            out.extend_from_slice(&(k.len() as u32).to_be_bytes());
+            out.extend_from_slice(k);
+            out.extend_from_slice(&(v.len() as u32).to_be_bytes());
+            out.extend_from_slice(v);
+        }
+        out
+    }
+
+    /// A member from [`save`](Self::save)'s bytes, for this identity.
+    pub fn restore(identity: &IdentityKeyPair, saved: &[u8]) -> Result<Self, GroupError> {
+        let mut member = Self::new(identity);
+        let rest = saved.strip_prefix(SAVE_MAGIC.as_slice()).ok_or(GroupError::Malformed)?;
+        let mut r = Reader(rest);
+        let id = r.chunk()?.to_vec();
+        let count = r.u32()?;
+        {
+            let mut values = member.provider.storage.values.write().expect("MLS storage lock poisoned");
+            for _ in 0..count {
+                let k = r.chunk()?.to_vec();
+                let v = r.chunk()?.to_vec();
+                values.insert(k, v);
+            }
+        }
+        if !r.0.is_empty() {
+            return Err(GroupError::Malformed);
+        }
+        if !id.is_empty() {
+            let group = MlsGroup::load(&member.provider.storage, &GroupId::from_slice(&id))
+                .map_err(mls)?
+                .ok_or(GroupError::Malformed)?;
+            // Its own identity, or someone else's state under our key.
+            if group.own_leaf().is_none_or(|l| l.signature_key().as_slice() != member.identity_key) {
+                return Err(GroupError::CredentialMismatch);
+            }
+            member.group = Some(group);
+        }
+        Ok(member)
+    }
+
+    /// The MLS group id, while in a group.
+    pub fn group_id(&self) -> Result<Vec<u8>, GroupError> {
+        Ok(self.group()?.group_id().as_slice().to_vec())
+    }
+
+    /// The epoch an MLS commit or application message was made in,
+    /// without processing it: how a caller tells a message from the
+    /// future (hold it) from one competing with a commit already applied.
+    pub fn message_epoch(message: &[u8]) -> Option<u64> {
+        let message = MlsMessageIn::tls_deserialize_exact(message).ok()?;
+        Some(message.try_into_protocol_message().ok()?.epoch().as_u64())
     }
 
     /// A fresh KeyPackage (MLS wire encoding) for someone to add us with.
@@ -276,6 +414,37 @@ impl GroupMember {
 
     /// Processes a commit or an application message from another member.
     pub fn process(&mut self, message: &[u8]) -> Result<Processed, GroupError> {
+        self.process_checked(message, |_| true)
+    }
+
+    /// [`process`](Self::process), but a commit is shown to `allow` before
+    /// it is merged, and refused ([`GroupError::Refused`]) -- the group
+    /// left exactly as it was -- if `allow` says no. Any other failure
+    /// leaves it as it was too.
+    pub fn process_checked(
+        &mut self,
+        message: &[u8],
+        allow: impl FnOnce(&CommitInfo) -> bool,
+    ) -> Result<Processed, GroupError> {
+        // openmls spends the sender's ratchet key while decrypting, before
+        // we see the commit; a refusal has to put that back too, or the
+        // same commit could never be processed later.
+        let snapshot = self.provider.storage.values.read().expect("MLS storage lock poisoned").clone();
+        let result = self.process_inner(message, allow);
+        if result.is_err() {
+            *self.provider.storage.values.write().expect("MLS storage lock poisoned") = snapshot;
+            if let Some(id) = self.group.as_ref().map(|g| g.group_id().clone()) {
+                self.group = MlsGroup::load(&self.provider.storage, &id).ok().flatten();
+            }
+        }
+        result
+    }
+
+    fn process_inner(
+        &mut self,
+        message: &[u8],
+        allow: impl FnOnce(&CommitInfo) -> bool,
+    ) -> Result<Processed, GroupError> {
         let message = MlsMessageIn::tls_deserialize_exact(message).map_err(|_| GroupError::Malformed)?;
         let message = message.try_into_protocol_message().map_err(|_| GroupError::Malformed)?;
         let provider = &self.provider;
@@ -287,8 +456,16 @@ impl GroupMember {
                 Ok(Processed::Application { sender, data: app.into_bytes() })
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                let mut info = CommitInfo { committer: sender, added: Vec::new(), removed: Vec::new() };
                 for add in staged.add_proposals() {
-                    leaf_identity(add.add_proposal().key_package().leaf_node())?;
+                    info.added.push(leaf_identity(add.add_proposal().key_package().leaf_node())?);
+                }
+                for remove in staged.remove_proposals() {
+                    let leaf = group.member_at(remove.remove_proposal().removed()).ok_or(GroupError::Malformed)?;
+                    info.removed.push(member_identity(&leaf)?);
+                }
+                if !allow(&info) {
+                    return Err(GroupError::Refused);
                 }
                 let removed_self = staged.self_removed();
                 group.merge_staged_commit(provider, *staged).map_err(mls)?;
@@ -349,6 +526,26 @@ impl GroupMember {
     pub fn update_sframe(&self, ctx: &mut crate::sframe::SframeContext) -> Result<(), GroupError> {
         ctx.install_epoch(self.epoch()?, self.own_index()?, &self.sframe_base_key()?);
         Ok(())
+    }
+}
+
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn u32(&mut self) -> Result<u32, GroupError> {
+        let (head, rest) = self.0.split_first_chunk::<4>().ok_or(GroupError::Malformed)?;
+        self.0 = rest;
+        Ok(u32::from_be_bytes(*head))
+    }
+
+    fn chunk(&mut self) -> Result<&'a [u8], GroupError> {
+        let len = self.u32()? as usize;
+        if self.0.len() < len {
+            return Err(GroupError::Malformed);
+        }
+        let (head, rest) = self.0.split_at(len);
+        self.0 = rest;
+        Ok(head)
     }
 }
 
@@ -478,7 +675,7 @@ mod tests {
         // Mallory signs a KeyPackage with her own key but names Bob.
         let mallory = IdentityKeyPair::generate();
         let bob = IdentityKeyPair::generate();
-        let provider = OpenMlsRustCrypto::default();
+        let provider = Provider::default();
         let signer = IdentitySigner(IdentityKeyPair::from_master_seed(mallory.master_seed()));
         let forged = CredentialWithKey {
             credential: BasicCredential::new(bob.public().identity_key.to_vec()).into(),
@@ -492,6 +689,58 @@ mod tests {
         assert!(matches!(alice.mls.key_package_identity(&bytes), Err(GroupError::CredentialMismatch)));
         assert!(matches!(alice.mls.add(&[&bytes]), Err(GroupError::CredentialMismatch)));
         assert_eq!(alice.mls.epoch().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_group_survives_save_and_restore() {
+        let alice_id = IdentityKeyPair::generate();
+        let bob_id = IdentityKeyPair::generate();
+        let mut alice = GroupMember::new(&alice_id);
+        let mut bob = GroupMember::new(&bob_id);
+        alice.create().unwrap();
+        // Bob's KeyPackage secret has to survive a restart too: the
+        // Welcome may arrive by mail days later.
+        let kp = bob.key_package().unwrap();
+        let mut bob = GroupMember::restore(&bob_id, &bob.save()).unwrap();
+        assert!(!bob.in_group());
+        let c = alice.add(&[&kp]).unwrap();
+        bob.join(c.welcome.as_ref().unwrap()).unwrap();
+
+        // Both restart.
+        let saved = alice.save();
+        assert_eq!(saved, alice.save(), "saving is deterministic");
+        let mut alice = GroupMember::restore(&alice_id, &saved).unwrap();
+        let mut bob = GroupMember::restore(&bob_id, &bob.save()).unwrap();
+        assert_eq!(alice.epoch().unwrap(), 1);
+        assert_eq!(alice.group_id().unwrap(), bob.group_id().unwrap());
+        let m = alice.encrypt(b"after a restart").unwrap();
+        assert_eq!(GroupMember::message_epoch(&m), Some(1));
+        assert_eq!(bob.process(&m).unwrap(), Processed::Application { sender: alice_id.public().identity_key, data: b"after a restart".to_vec() });
+
+        // Someone else's identity can't load it, nor can junk.
+        assert!(GroupMember::restore(&bob_id, &alice.save()).is_err());
+        assert!(GroupMember::restore(&bob_id, b"AMLS1\n\0\0").is_err());
+    }
+
+    #[test]
+    fn a_commit_can_be_inspected_and_refused_before_it_is_merged() {
+        let (mut alice, mut bob, mut carol) = (person(), person(), person());
+        alice.mls.create().unwrap();
+        let c1 = alice.mls.add(&[&bob.mls.key_package().unwrap()]).unwrap();
+        bob.mls.join(c1.welcome.as_ref().unwrap()).unwrap();
+        let c2 = alice.mls.add(&[&carol.mls.key_package().unwrap()]).unwrap();
+        let mut seen = None;
+        let refused = bob.mls.process_checked(&c2.commit, |info| {
+            seen = Some(info.clone());
+            false
+        });
+        assert!(matches!(refused, Err(GroupError::Refused)));
+        assert_eq!(seen.unwrap(), CommitInfo { committer: alice.key, added: vec![carol.key], removed: vec![] });
+        assert_eq!(bob.mls.epoch().unwrap(), 1, "left as it was");
+        // Allowed the second time round.
+        assert!(bob.mls.process(&c2.commit).is_ok());
+        let c3 = alice.mls.remove(&[carol.key]).unwrap();
+        bob.mls.process_checked(&c3.commit, |info| info.removed == vec![carol.key]).unwrap();
     }
 
     #[test]

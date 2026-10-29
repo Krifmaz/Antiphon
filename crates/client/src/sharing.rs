@@ -138,7 +138,10 @@ fn host() -> Option<Arc<Mutex<FileHost>>> {
         crate::config::load().contacts.iter().any(|c| c.identity_key.eq_ignore_ascii_case(&wanted))
     });
     let policy = HostPolicy { accept_uploads: false, ..Default::default() };
-    let _ = HOST.set(Arc::new(Mutex::new(FileHost::new(store, policy, contacts))));
+    // "This community" scope: a member by our copy of its signed member
+    // list, read fresh, so a ban stops serving them at once.
+    let members: antiphon_relay::files::MemberCheck = Arc::new(crate::community::is_member);
+    let _ = HOST.set(Arc::new(Mutex::new(FileHost::new(store, policy, contacts).with_members(members))));
     HOST.get().cloned()
 }
 
@@ -305,6 +308,63 @@ pub fn share(runtime: &tokio::runtime::Handle, path: &Path, name: &str, with: &s
     })
 }
 
+/// Shares a file in a community channel (spec §5 "this community",
+/// "server-hosted mode -- per-community toggle"). Seeded, if seeding is
+/// on, to members only -- or to anyone, if that is your seeding scope --
+/// and pinned to your own pin nodes and, when the community has switched
+/// server-hosted mode on, to its file nodes with its members code.
+/// Returns the link's parts: name, size, id, key, holders.
+pub fn share_in_community(
+    runtime: &tokio::runtime::Handle,
+    path: &Path,
+    name: &str,
+    community: &antiphon_crypto::community::Manifest,
+) -> Result<(String, u64, String, String, Vec<String>), String> {
+    let config = crate::config::load();
+    let hosted: Vec<&antiphon_crypto::community::NodeRef> =
+        if community.server_hosted_files { community.nodes.files.iter().collect() } else { Vec::new() };
+    if !config.seeding && config.pin_nodes.is_empty() && hosted.is_empty() {
+        return Err("Nothing would hold it: turn on seeding or add a pin node under Shared files.".into());
+    }
+    let key = file_seal::new_key();
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let scope = if config.seed_scope == 2 { Scope::Anyone } else { Scope::Community(community.id.0) };
+    let id = if config.seeding {
+        seed(path, &key, scope)?.0
+    } else {
+        file_seal::file_id(size, &hashes_of(path, &key).map_err(|e| e.to_string())?.1)
+    };
+    let mut holders = Vec::new();
+    let mut problems = Vec::new();
+    if !config.pin_nodes.is_empty() {
+        let (took, p) = runtime.block_on(pin(path, &key, &config.pin_nodes, &config.pin_code));
+        holders.extend(took);
+        problems.extend(p);
+    }
+    for node in hosted {
+        let (took, p) = runtime.block_on(pin(path, &key, std::slice::from_ref(&node.addr), &node.code));
+        holders.extend(took);
+        problems.extend(p);
+    }
+    if !problems.is_empty() {
+        set_status(&hex(&id), format!("Not pinned everywhere: {}", problems.join("; ")));
+    }
+    if !config.seeding && holders.is_empty() {
+        return Err(format!("No node took it: {}", problems.join("; ")));
+    }
+    remember(SharedFile {
+        name: name.to_string(),
+        size,
+        file_id: hex(&id),
+        key: hex(&key),
+        holders: holders.clone(),
+        with: format!("community:{}", hex(&community.id.0)),
+        at_secs: now_secs(),
+        mine: true,
+    });
+    Ok((name.to_string(), size, hex(&id), hex(&key), holders))
+}
+
 /// A link arrived. `seeder` is the sender's own address, when they're
 /// seeding and the call is direct.
 pub fn receive_link(name: String, size: u64, file_id: String, key: String, mut holders: Vec<String>, seeder: Option<SocketAddr>, with: String) {
@@ -357,7 +417,11 @@ pub fn download(runtime: &tokio::runtime::Handle, file_id: &str, dest: PathBuf) 
                 }
             })
         };
-        let result = swarm::download(&addrs(&file), id, key, crate::delivery::identity(), &dest, progress).await;
+        // A file from a community you're in under a separate identity is
+        // claimed as that identity: the seeder is a member, and your main
+        // key would tell them who you are (spec §7).
+        let me = crate::community::identity_for_link(&file.with).or_else(crate::delivery::identity);
+        let result = swarm::download(&addrs(&file), id, key, me, &dest, progress).await;
         watch.abort();
         match result {
             Ok(()) => {

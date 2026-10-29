@@ -51,13 +51,14 @@ The short version of [`FEATURES.md`](FEATURES.md):
   an outbox and offline delivery through mailbox nodes on your own
   route list, contacts found again through a DHT when their address
   changes, an in-app WireGuard tunnel with per-mode routing and a kill
-  switch, QR / link invites, verification codes, key-change warnings, the UI editor and
+  switch, MLS group chats and communities with roles, threads and ban
+  lists, QR / link invites, verification codes, key-change warnings, the UI editor and
   theming, presence, notification rules, data export, reproducible
   build configuration with a CI pipeline for all three desktop targets.
 - **Reduced:** Caps Lock as push-to-talk works on Windows and X11 but
   not yet on macOS or Wayland; no project-run mailbox node ships as a
   default.
-- **Not built yet:** communities and group chats, large group calls
+- **Not built yet:** voice channels inside communities, large group calls
   through an SFU (small mesh group calls are keyed with MLS and SFrame
   already), mobile clients, push notifications, packaging. Each is
   listed as such in FEATURES.md.
@@ -144,6 +145,7 @@ phrase.
 ```bash
 cargo run -p antiphon-relay -- --listen 0.0.0.0:3479
 # or: docker build -f crates/relay/Dockerfile -t antiphon-relay . && docker run -p 3479:3479/udp antiphon-relay
+# or the published image: docker run -p 3479:3479/udp ghcr.io/krifmaz/antiphon-relay:latest
 ```
 
 Put its `host:port` in Settings > Call > Relay server. While listening,
@@ -176,6 +178,13 @@ records under keys that change daily, and can't tell whose they are.
 per line as `name | description | invite link`. In the app: Settings >
 Call > Finding contacts -- switch the DHT on and add bootstrap nodes
 (none are built in), or add a directory and press Browse.
+
+### Test peer
+
+`antiphon-cli echo --port 5000` is a headless peer that answers every call
+and sends your audio back, so a client has someone to call without a
+second person. [`docker/README.md`](docker/README.md) runs it in Docker;
+the image is published as `ghcr.io/krifmaz/antiphon-echo`.
 
 ## Layout
 
