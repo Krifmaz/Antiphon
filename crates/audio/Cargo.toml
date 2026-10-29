@@ -10,5 +10,29 @@ ringbuf = "0.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 
+# cpal's PipeWire host, preferred over ALSA when a PipeWire daemon is running
+# (see `AudioBackend` in device.rs). It links libpipewire-0.3, which the
+# desktop binary already does for screen capture (xcap, through
+# antiphon-video), so this adds no build dependency and no new library the
+# binary needs at run time. The host only connects when the daemon's socket
+# exists, so a system that has the library but runs PulseAudio or bare ALSA
+# falls back to ALSA.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["pipewire"] }
+
+# Call audio on Android goes through AAudio directly (see aaudio.rs), to set
+# the voice-communication preset and usage cpal leaves out. ndk-sys and the
+# rest are what cpal's own AAudio backend already pulls in, at the same
+# versions, so they add nothing to the build.
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = { version = "0.6.0", features = ["audio"] }
+# dlopen and dlsym, for the AAudio functions newer than the app's minimum
+# API level.
+libc = "0.2"
+# The Java AcousticEchoCanceler and NoiseSuppressor; the same jni version
+# antiphon-android uses.
+jni = "0.21"
+ndk-context = "0.1.1"
+
 [dev-dependencies]
 approx = "0.5.1"

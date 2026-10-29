@@ -29,6 +29,19 @@ sudo apt-get install libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-
     libpipewire-0.3-dev libspa-0.2-dev libgbm-dev libxcb1-dev libclang-dev
 ```
 
+PipeWire's headers and libclang (which `bindgen` uses to read them) serve
+two things: screen capture, and the PipeWire audio host that `antiphon-audio`
+prefers over ALSA (see `AudioBackend` in
+[`crates/audio/src/device.rs`](crates/audio/src/device.rs)). Both go through
+the same `pipewire` crate, so the binary links `libpipewire-0.3.so.0` once.
+That library is all it needs at run time: without a running PipeWire daemon
+the audio host is never connected and ALSA is used, and
+`ANTIPHON_AUDIO_BACKEND=alsa` forces ALSA even when the daemon is running.
+The bindings are generated from the installed headers at build time, so
+reproducing a Linux binary means using the same PipeWire headers as well as
+the same compiler. That was already true for screen capture; the audio host
+adds no new dependency to the build or to the reproducibility check.
+
 There is deliberately **no `rust-toolchain.toml`**, and the reason is worth
 recording because adding one looks obviously correct:
 
@@ -87,12 +100,16 @@ Push wake-ups use [UnifiedPush](https://unifiedpush.org): install a
 distributor such as ntfy on the phone and the app registers with it. There
 is no FCM build; see [`docs/mobile-push.md`](docs/mobile-push.md).
 
-Audio needs nothing Android-specific: cpal's Android backend is AAudio,
-through the `ndk` crate, so there is no C++ runtime (`libc++_shared.so`) to
-ship. The script checks, and adds it if a dependency ever starts needing
-it. cpal does not set AAudio's voice-communication input preset, so the
-platform's own echo canceller is not guaranteed to engage; the app's own
-echo canceller in `antiphon-audio` is what a call relies on.
+Audio needs nothing Android-specific to build: it is AAudio, a C API in
+the NDK, so there is no C++ runtime (`libc++_shared.so`) to ship. The script
+checks, and adds it if a dependency ever starts needing it. On Android 9
+and later a call's microphone and speaker are opened through AAudio
+directly ([`crates/audio/src/aaudio.rs`](crates/audio/src/aaudio.rs)) with
+the voice-communication input preset and usage that cpal does not set, so
+the phone's own echo canceller and noise suppressor run and the earpiece
+and speakerphone routing applies. The functions for those arrived in API
+level 28, above the app's minimum of 26, so they are looked up at run time;
+Android 8 falls back to cpal, as before.
 
 ## iOS
 
