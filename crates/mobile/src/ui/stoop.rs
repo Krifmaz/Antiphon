@@ -505,6 +505,9 @@ impl App {
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
             // A phone lends no relay; it has none of its own to lend.
             Action::LendRelay(_) => {}
+            // Anonymity mode runs on the desktop's call path; the phone
+            // doesn't offer it yet.
+            Action::Anonymity(_) | Action::AnonymityHops(_) => {}
             // Hidden on the phone (`Device::communities` is off), so these
             // never come.
             Action::OpenChannel { .. }
