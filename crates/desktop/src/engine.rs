@@ -1814,7 +1814,12 @@ impl Engine {
             network: self.network(),
             settings: self.settings(),
             notice: None,
-            first_run: self.cfg.profile.display_name.trim().is_empty(),
+            // A fresh install's name is the placeholder "You", not empty,
+            // so first run is also anyone never welcomed who still has it.
+            first_run: {
+                let name = self.cfg.profile.display_name.trim();
+                name.is_empty() || (!self.cfg.first_run.welcomed && name == config::ProfileData::default().display_name)
+            },
             device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true, voice_messages: true },
             phone: None,
             account: self.account.model(&self.state.identity),

@@ -28,7 +28,7 @@ pub fn view<'a>(ui: &'a Ui, _m: &'a Model) -> El<'a, Msg> {
             column![
                 point(Icon::Lock, "No accounts, no middleman", "Your identity is a key made on this device."),
                 point(Icon::DoorOpen, "Your door, your rules", "Open it to take calls; close it and nobody rings."),
-                point(Icon::ShieldCheck, "Know it's them", "Compare three words on your first call."),
+                point(Icon::ShieldCheck, "Know it's them", "Compare a short code on your first call."),
             ]
             .spacing(12),
             field(
