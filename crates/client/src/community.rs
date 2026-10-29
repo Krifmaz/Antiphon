@@ -262,6 +262,9 @@ pub enum Post {
     Manifest { manifest: String },
     /// Messages reported to the moderators, sent only to them.
     Report { id: u64, channel: u32, reason: String, excerpts: Vec<Excerpt>, at_secs: u64 },
+    /// "I'm in this voice channel" (`here`), or "I've left it", with how
+    /// to reach me for the call. Sent to the channel's readers.
+    Voice { channel: u32, here: bool, invite: String, at_secs: u64 },
 }
 
 /// Something to send: `wire` to the member `to`.
@@ -403,6 +406,26 @@ pub struct Excerpt {
     pub at_secs: u64,
 }
 
+/// Someone in a voice channel, by their last word on it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Presence {
+    /// The voice channel.
+    pub channel: u32,
+    /// Who (their key in the space).
+    pub key: Key,
+    /// How to reach them for the call: their invite link, which carries
+    /// their main identity key and their relay.
+    pub invite: String,
+    /// When they last said they were there, by their clock.
+    pub at_secs: u64,
+}
+
+/// How often someone in a voice channel says they still are.
+pub const VOICE_HEARTBEAT_SECS: u64 = 120;
+/// How long after their last word someone counts as still there: two
+/// heartbeats and a little, so one lost one doesn't drop them.
+pub const VOICE_TTL_SECS: u64 = 2 * VOICE_HEARTBEAT_SECS + 30;
+
 /// Most messages in one report.
 pub const MAX_EXCERPTS: usize = 10;
 /// Most reports a moderator keeps waiting.
@@ -431,6 +454,8 @@ struct Saved {
     pace: Vec<Pace>,
     #[serde(default)]
     reports: Vec<Report>,
+    #[serde(default)]
+    voice: Vec<Presence>,
 }
 
 pub struct Space {
@@ -452,6 +477,8 @@ pub struct Space {
     pace: Vec<Pace>,
     /// Reports moderators were sent and haven't dealt with, newest last.
     reports: Vec<Report>,
+    /// Who said they are in which voice channel, and when.
+    voice: Vec<Presence>,
 }
 
 /// The identity to act as in a space: `main`, or the separate one derived
@@ -485,6 +512,7 @@ impl Space {
             offers: Vec::new(),
             pace: Vec::new(),
             reports: Vec::new(),
+            voice: Vec::new(),
         })
     }
 
@@ -529,6 +557,7 @@ impl Space {
             offers: Vec::new(),
             pace: Vec::new(),
             reports: Vec::new(),
+            voice: Vec::new(),
         };
         space.learn(invite.card.clone());
         let out = Out { to: invite.from.0, wire: Wire::Join { community, key_package: b64(&key_package), card } };
@@ -548,6 +577,7 @@ impl Space {
             offers: self.offers.clone(),
             pace: self.pace.clone(),
             reports: self.reports.clone(),
+            voice: self.voice.clone(),
         };
         serde_json::to_vec(&saved).expect("a space always serializes")
     }
@@ -581,6 +611,7 @@ impl Space {
             offers: saved.offers,
             pace: saved.pace,
             reports: saved.reports,
+            voice: saved.voice,
         })
     }
 
@@ -880,6 +911,49 @@ impl Space {
         }
         self.pace_mine(now_secs())?;
         self.send_in(channel, &post)
+    }
+
+    // ---- voice channels ----
+
+    /// Says we are in voice channel `channel` (or still are): everyone who
+    /// can read it learns how to reach us for the call. `invite` is our
+    /// invite link. Not under a separate identity, since the call itself
+    /// is made with the main key and would tie the two together.
+    pub fn voice_join(&mut self, channel: u32, invite: &str) -> Result<Vec<Out>, String> {
+        if self.persona {
+            return Err("Voice channels aren't available while you're here under a separate identity: the call would show who you are".into());
+        }
+        let m = self.manifest();
+        if !m.channel(channel).is_some_and(|c| c.voice) {
+            return Err("that isn't a voice channel".into());
+        }
+        if !m.can_read(channel, &self.me) {
+            return Err("that channel is private and you're not one of its readers".into());
+        }
+        let at_secs = now_secs();
+        let me = Key(self.me);
+        self.voice.retain(|p| p.key != me);
+        self.voice.push(Presence { channel, key: me, invite: invite.to_string(), at_secs });
+        self.send_in(Some(channel), &Post::Voice { channel, here: true, invite: invite.to_string(), at_secs })
+    }
+
+    /// Says we left voice channel `channel`.
+    pub fn voice_leave(&mut self, channel: u32) -> Result<Vec<Out>, String> {
+        let me = Key(self.me);
+        self.voice.retain(|p| p.key != me);
+        self.send_in(Some(channel), &Post::Voice { channel, here: false, invite: String::new(), at_secs: now_secs() })
+    }
+
+    /// Who is in voice channel `channel` now, ourselves included, by when
+    /// each last said so.
+    pub fn voice_here(&self, channel: u32) -> Vec<Presence> {
+        let now = now_secs();
+        let m = self.manifest();
+        self.voice
+            .iter()
+            .filter(|p| p.channel == channel && now.saturating_sub(p.at_secs) <= VOICE_TTL_SECS && m.can_read(channel, &p.key.0))
+            .cloned()
+            .collect()
     }
 
     // ---- moderation without reading anything ----
@@ -1388,6 +1462,24 @@ impl Space {
             Post::Manifest { manifest } => {
                 self.take_manifest(identity, sender, &manifest, h)?;
                 h.outs.extend(self.converge(false));
+            }
+            Post::Voice { channel, here, invite, at_secs } => {
+                // Stale ones (mail that waited while we were away) say
+                // nothing about now; one from the future is a lie.
+                let now = now_secs();
+                if !m.channel(channel).is_some_and(|c| c.voice) || !m.can_read(channel, &sender) || at_secs > now + FUTURE_SLACK_SECS {
+                    return Ok(());
+                }
+                let key = Key(sender);
+                if self.voice.iter().any(|p| p.key == key && p.at_secs > at_secs) {
+                    return Ok(());
+                }
+                self.voice.retain(|p| p.key != key);
+                if here && now.saturating_sub(at_secs) <= VOICE_TTL_SECS && invite.len() <= 2048 {
+                    self.voice.push(Presence { channel, key, invite, at_secs });
+                }
+                self.voice.retain(|p| now.saturating_sub(p.at_secs) <= VOICE_TTL_SECS);
+                h.events.push(Event::Changed);
             }
             Post::Report { id, channel, reason, excerpts, at_secs } => {
                 // Only a moderator keeps it; and a flood of reports is still
@@ -2572,6 +2664,31 @@ mod tests {
         let bob_key = bob.key();
         run(&mut [&mut alice, &mut bob, &mut carol], vec![(2, Out { to: bob_key, wire: post })]);
         assert!(bob.space().reports().is_empty());
+    }
+
+    #[test]
+    fn a_voice_channel_says_who_is_in_it() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice
+            .space()
+            .update(&alice_id, |m| m.channels.push(antiphon_crypto::community::Channel { id: 1, name: "lounge".into(), voice: true, ..Default::default() }))
+            .unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert!(bob.space().voice_join(0, "stoop://x").is_err(), "a text channel has no call");
+        let outs = bob.space().voice_join(1, "stoop://bob").unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        let here = alice.space().voice_here(1);
+        assert_eq!(here.len(), 1);
+        assert_eq!((here[0].key.0, here[0].invite.as_str()), (bob.key(), "stoop://bob"));
+        // Word that waited in a mailbox says nothing about now.
+        let stale = carol.space().encrypt(&Post::Voice { channel: 1, here: true, invite: "stoop://carol".into(), at_secs: now_secs() - VOICE_TTL_SECS - 5 }).unwrap();
+        let alice_key = alice.key();
+        run(&mut [&mut alice, &mut bob, &mut carol], vec![(2, Out { to: alice_key, wire: stale })]);
+        assert_eq!(alice.space().voice_here(1).len(), 1);
+        let outs = bob.space().voice_leave(1).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert!(alice.space().voice_here(1).is_empty());
     }
 
     #[test]

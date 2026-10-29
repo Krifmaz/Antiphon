@@ -44,7 +44,15 @@ pub fn header<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -> 
     r = r.push(avatar_dot(&person.name, &person.id, 34.0, super::presence_color(person.presence), p.panel));
     r = r.push(column![title, faint(sub).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill));
     let on_this_call = m.call.with(&person.id);
-    if !on_this_call {
+    if !on_this_call && m.call.phase == crate::Phase::Connected {
+        // On a call with someone else: this one can be brought into it.
+        let add = Some(Msg::Do(Action::AddToCall(person.id.clone())));
+        if phone {
+            r = r.push(icon_btn(Icon::UserPlus, "Add to call", add));
+        } else {
+            r = r.push(btn_icon(Icon::UserPlus, "Add to call", Btn::Primary, add));
+        }
+    } else if !on_this_call {
         let can_call = !m.call.active();
         if phone {
             r = r.push(icon_btn(Icon::Phone, "Call", can_call.then(|| Msg::Do(Action::Call(person.id.clone())))));

@@ -132,7 +132,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, M
     let main = column![
         header(c, ch, false),
         divider(),
-        voice_bar(m, c),
+        voice_bar(c, ch),
         container(messages(ui, m, c, ch, false)).height(Length::Fill),
         container(composer(ui, c, ch)).padding(pad(4.0, 20.0, 18.0, 20.0)),
     ]
@@ -166,7 +166,7 @@ pub fn phone<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, 
         }
         col = col.push(scrollable(container(chips).padding([8, 10])).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0))));
     }
-    col = col.push(voice_bar(m, c));
+    col = col.push(voice_bar(c, ch));
     col = col.push(container(messages(ui, m, c, ch, true)).height(Length::Fill));
     col = col.push(container(composer(ui, c, ch)).padding(pad(4.0, 10.0, 12.0, 10.0)));
     col.into()
@@ -243,7 +243,13 @@ fn side<'a>(ui: &'a Ui, c: &'a Community, channel: u32) -> El<'a, Msg> {
         for x in &c.channels {
             let on = x.id == channel;
             // A private channel shows a lock where the others show a hash.
-            let mark = if x.private { Icon::Lock } else { Icon::Hash };
+            let mark = if x.voice {
+                Icon::Volume
+            } else if x.private {
+                Icon::Lock
+            } else {
+                Icon::Hash
+            };
             let name = if x.private { format!("#{}, private", x.name) } else { format!("#{}", x.name) };
             let entry = pressable(
                 row![icon(mark, 15.0, if on { p.text } else { p.faint }), t(clip(&x.name, 20)).size(13.5).font(theme::semibold()).color(if on { p.text } else { p.muted })]
@@ -293,9 +299,32 @@ fn member_row<'a>(member: &'a Member) -> El<'a, Msg> {
     .into()
 }
 
-/// Where a community's voice room goes, above its messages. Nothing yet.
-pub fn voice_bar<'a>(_m: &'a Model, _c: &'a Community) -> El<'a, Msg> {
-    space().height(0).into()
+/// Over a voice channel's messages: who is in it ("Voice active · 3
+/// people"), and Join or Leave. Nothing over a text channel.
+pub fn voice_bar<'a>(c: &'a Community, ch: Option<&'a Channel>) -> El<'a, Msg> {
+    let p = theme::look();
+    let Some(ch) = ch.filter(|x| x.voice) else { return space().height(0).into() };
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let n = ch.in_voice.len();
+    let (title, names) = if n == 0 {
+        ("Nobody's here yet".to_string(), "Join, and whoever joins next is put through to you.".to_string())
+    } else {
+        (format!("Voice active · {n} {}", if n == 1 { "person" } else { "people" }), clip(&ch.in_voice.join(", "), 80))
+    };
+    let here = c.voice_room == Some(ch.id);
+    let action = if here {
+        btn_icon(Icon::PhoneOff, "Leave", Btn::Danger, Some(change(SpaceChange::LeaveVoice(ch.id))))
+    } else {
+        btn_icon(Icon::Phone, "Join", Btn::Primary, (c.waiting.is_none()).then(|| change(SpaceChange::JoinVoice(ch.id))))
+    };
+    let bar = row![
+        icon(Icon::Volume, 18.0, if n > 0 { p.ok } else { p.faint }),
+        column![t(title).size(13.5).font(theme::semibold()), faint(names).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill),
+        action,
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    column![container(bar).padding([10, 20]).width(Length::Fill).style(theme::inset), divider()].into()
 }
 
 /// A member's role, after their name, unless it is the plain one
@@ -647,6 +676,7 @@ pub fn emoji_manager<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
 pub fn add_channel<'a>(ui: &'a Ui, id: &'a str) -> El<'a, Msg> {
     column![
         muted("Everyone in the community can read and post in it. You can make it private afterwards, from its gear.").size(13.5),
+        setting("Voice channel", Some("A standing call people drop in and out of, as well as messages."), switch("Voice channel", ui.channel_voice, Msg::ChannelVoice)),
         field(
             "Name",
             input("Channel name", "stoop-channel-name", "band-practice", &ui.channel_name).on_input(Msg::ChannelName).on_submit(Msg::ChannelCreate(id.to_string())).padding([10, 12]).size(14)

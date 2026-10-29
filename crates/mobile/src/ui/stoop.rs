@@ -438,6 +438,8 @@ impl App {
                 }
             }
             Action::Call(id) => self.update(Message::CallContact(id)),
+            // Bringing someone into a call isn't on the phone yet.
+            Action::AddToCall(_) => {}
             Action::CallAddress(address) => self.start_call(address.trim()),
             Action::Hangup => self.update(Message::Stop),
             Action::Mute(on) => {

@@ -207,6 +207,8 @@ pub enum Action {
     Door(bool),
     /// Call a contact.
     Call(String),
+    /// Bring a contact into the call that is running (spec §3 group calls).
+    AddToCall(String),
     /// Call an address that is not a contact.
     CallAddress(String),
     /// Leave the call, or stop placing it.
@@ -510,6 +512,8 @@ pub enum Action {
         community: String,
         /// Its name, without the hash.
         name: String,
+        /// A voice channel rather than a text one.
+        voice: bool,
     },
     /// Leave a group chat or community (the dialog already asked).
     LeaveSpace(String),
@@ -597,6 +601,11 @@ pub enum SpaceChange {
         /// Ban rather than only remove.
         ban: bool,
     },
+    /// Join a voice channel: say you're there, and be connected to the
+    /// call of whoever else is.
+    JoinVoice(u32),
+    /// Leave the voice channel you are in.
+    LeaveVoice(u32),
     /// Report messages in a channel to the moderators.
     Report {
         /// The channel.
@@ -708,6 +717,8 @@ pub enum Msg {
     ChannelName(String),
     /// Add the channel named in the box to this community (by id).
     ChannelCreate(String),
+    /// Make the new channel a voice channel, or a text one.
+    ChannelVoice(bool),
     /// Show or hide the files waiting to be sent.
     ToggleQueue,
     /// Put `:name:` (a custom emoji) at the end of the composer's text.
@@ -816,6 +827,8 @@ pub struct Ui {
     space_group: bool,
     /// The new channel's name box.
     channel_name: String,
+    /// The new channel is a voice channel.
+    channel_voice: bool,
     /// The list of files waiting to be sent is open (it starts folded,
     /// so a long queue never pushes the messages off screen).
     queue_open: bool,
@@ -901,6 +914,7 @@ impl Ui {
             space_name: String::new(),
             space_group: false,
             channel_name: String::new(),
+            channel_voice: false,
             queue_open: false,
             role_name: String::new(),
             report_pick: Vec::new(),
@@ -1317,6 +1331,10 @@ impl Ui {
                 }
                 vec![Action::CreateSpace { name, group: self.space_group }]
             }
+            Msg::ChannelVoice(on) => {
+                self.channel_voice = on;
+                Vec::new()
+            }
             Msg::ChannelName(s) => {
                 // Channel names read like words joined by dashes, as people
                 // expect from other apps: no spaces, no hash, short.
@@ -1330,7 +1348,8 @@ impl Ui {
                 }
                 self.channel_name.clear();
                 self.set_dialog(None);
-                vec![Action::AddChannel { community, name }]
+                let voice = std::mem::take(&mut self.channel_voice);
+                vec![Action::AddChannel { community, name, voice }]
             }
             Msg::InsertEmoji(name) => {
                 if let Some(key) = self.draft_key() {
@@ -1438,7 +1457,7 @@ impl Ui {
             }
             Msg::Do(action) => {
                 match &action {
-                    Action::Call(_) => self.menu = None,
+                    Action::Call(_) | Action::AddToCall(_) => self.menu = None,
                     Action::Remove(_) | Action::Block(_) => {
                         self.set_dialog(None);
                         self.route = Route::Home;
@@ -1624,7 +1643,7 @@ mod tests {
         let mut ui = Ui::new();
         let m = Model::default();
         ui.update(Msg::ChannelName("#Band Practice".into()), &m);
-        assert_eq!(ui.update(Msg::ChannelCreate("c1".into()), &m), vec![Action::AddChannel { community: "c1".into(), name: "band-practice".into() }]);
+        assert_eq!(ui.update(Msg::ChannelCreate("c1".into()), &m), vec![Action::AddChannel { community: "c1".into(), name: "band-practice".into(), voice: false }]);
         assert!(ui.update(Msg::ChannelCreate("c1".into()), &m).is_empty(), "the box is cleared once used");
         ui.update(Msg::RoleName("  Helper ".into()), &m);
         let add = Action::ManageSpace { community: "c1".into(), change: SpaceChange::AddRole("Helper".into()) };

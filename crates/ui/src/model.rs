@@ -599,6 +599,8 @@ pub struct Community {
     pub reports: Vec<Report>,
     /// Invitations you sent that haven't been answered.
     pub pending_invites: Vec<PendingInvite>,
+    /// The voice channel of this community you are in, if any.
+    pub voice_room: Option<u32>,
     /// Which of its messages notify you.
     pub notify: Notify,
     /// Its custom emoji's names, written `:name:`; their pictures are
@@ -699,6 +701,10 @@ pub struct Channel {
     /// Who can read a private channel, by member id (hex); empty for an
     /// open one.
     pub readers: Vec<String>,
+    /// A voice channel: a standing call people drop into.
+    pub voice: bool,
+    /// Who is in it now, by name, for a voice channel.
+    pub in_voice: Vec<String>,
 }
 
 /// Someone in a group chat or community.

@@ -29,6 +29,8 @@ pub struct Spaces {
     invites: Vec<ui::SpaceInvite>,
     /// The open channel's messages.
     channel: Option<ui::ChannelView>,
+    /// The voice channel we are in, as (space id, channel).
+    voice_room: Option<(String, u32)>,
 }
 
 impl Spaces {
@@ -43,6 +45,33 @@ impl Spaces {
             self.built_for = viewing_owned;
         }
         (self.communities.clone(), self.invites.clone(), self.channel.clone())
+    }
+
+    /// Notes which voice channel we are in, for the screens.
+    pub fn set_voice_room(&mut self, room: Option<(String, u32)>) {
+        if self.voice_room != room {
+            self.voice_room = room;
+            self.built_at = None;
+        }
+    }
+
+    /// Says we are in voice channel `channel` of `community`, with our
+    /// invite link to be reached by.
+    pub fn voice_join(&mut self, community: &str, channel: u32, invite: &str) -> Result<(), String> {
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        store.with_space(&key(community)?, |space, _| Ok(((), space.voice_join(channel, invite)?, Vec::new())))
+    }
+
+    /// Says we left voice channel `channel` of `community`.
+    pub fn voice_leave(&mut self, community: &str, channel: u32) -> Result<(), String> {
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        store.with_space(&key(community)?, |space, _| Ok(((), space.voice_leave(channel)?, Vec::new())))
+    }
+
+    /// Who is in voice channel `channel` of `community` now, us included.
+    pub fn voice_here(&self, community: &str, channel: u32) -> Vec<community::Presence> {
+        let (Some(store), Ok(id)) = (Store::app(), key(community)) else { return Vec::new() };
+        store.load(&id).map(|s| s.voice_here(channel)).unwrap_or_default()
     }
 
     /// Reads every space again from disk.
@@ -67,7 +96,7 @@ impl Spaces {
                 } else {
                     store.unread(&s.id())
                 };
-                community_model(&store, s, unread)
+                community_model(&store, s, unread, self.voice_room.as_ref())
             })
             .collect();
         self.invites = store
@@ -136,14 +165,14 @@ impl Spaces {
                 let name = contact.name.clone();
                 store.with_space(&id, |space, identity| Ok(((), space.invite(identity, who, &name)?, vec![Event::Changed])))?;
             }
-            A::AddChannel { community, name } => {
+            A::AddChannel { community, name, voice } => {
                 let id = key(&community)?;
                 store.with_space(&id, |space, identity| {
                     let outs = space.update(identity, |m| {
                         // One past the highest, so a removed channel's
                         // number is never reused for a different one.
                         let next = m.channels.iter().map(|c| c.id).max().map_or(0, |n| n + 1);
-                        m.channels.push(antiphon_crypto::community::Channel { id: next, name: name.clone(), ..Default::default() });
+                        m.channels.push(antiphon_crypto::community::Channel { id: next, name: name.clone(), voice, ..Default::default() });
                     })?;
                     Ok(((), outs, vec![Event::Changed]))
                 })?;
@@ -333,6 +362,8 @@ fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyP
         }
         // Built from history before the space is opened (see `act`).
         C::Report { .. } => Ok(Vec::new()),
+        // The engine's, which also puts the call through.
+        C::JoinVoice(_) | C::LeaveVoice(_) => Ok(Vec::new()),
         C::MemberRole { member, role } => {
             let who = member_key(&member)?;
             space.update(identity, |m| {
@@ -368,7 +399,7 @@ fn from_ui(n: ui::Notify) -> community::Notify {
 }
 
 /// One space as the screens show it.
-fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Community {
+fn community_model(store: &Store, s: &community::Space, unread: u32, voice_room: Option<&(String, u32)>) -> ui::Community {
     let m = s.manifest();
     let me = s.me();
     let joined = s.joining.is_none() && !s.removed;
@@ -431,6 +462,8 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
                 topic: c.topic.clone(),
                 private: c.readers.is_some(),
                 readers: c.readers.iter().flatten().map(|k| delivery::hex(&k.0)).collect(),
+                voice: c.voice,
+                in_voice: if c.voice { s.voice_here(c.id).iter().map(|p| s.name_of(&p.key.0)).collect() } else { Vec::new() },
                 notify: store.notify_setting(&s.id(), Some(c.id)).map(to_ui),
             })
             .collect(),
@@ -496,6 +529,7 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
                     .collect(),
             })
             .collect(),
+        voice_room: voice_room.filter(|(id, _)| *id == delivery::hex(&s.id().0)).map(|(_, ch)| *ch),
         pending_invites: s
             .pending_invites()
             .into_iter()

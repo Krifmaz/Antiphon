@@ -399,6 +399,11 @@ impl SfuCall {
         self.members.lock().unwrap().len() + 1
     }
 
+    /// The identity keys of everyone else heard in the room.
+    pub fn member_keys(&self) -> Vec<[u8; 32]> {
+        self.members.lock().unwrap().values().map(|m| m.identity_key).collect()
+    }
+
     /// Each member's mixer source id and jitter buffer.
     pub fn audio(&self) -> Vec<(u64, Arc<Mutex<JitterBuffer>>)> {
         self.members.lock().unwrap().values().map(|m| (SOURCE_BASE + m.id, m.jitter.clone())).collect()
