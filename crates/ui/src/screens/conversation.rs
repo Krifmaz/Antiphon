@@ -118,7 +118,18 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 
 /// One message: theirs on the left with their avatar, mine on the right
 /// in a tinted bubble. Actions appear under the pointer.
-fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, first: bool) -> El<'a, Msg> {
+fn message<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line, first: bool) -> El<'a, Msg> {
+    // Everything this message registers belongs to it, so focus on any of
+    // it keeps its tools within the keyboard's reach (see `a11y::group`).
+    crate::a11y::group(Some(line.id));
+    let el = message_body(ui, m, person, line, first);
+    crate::a11y::pause(false);
+    crate::a11y::group(None);
+    el
+}
+
+/// [`message`]'s drawing, inside its keyboard group.
+fn message_body<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, first: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
     // Read out as "who: what", in the order the conversation runs.
@@ -133,11 +144,14 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         Some((name, size)) => format!("{who} sent a file: {name}, {size}"),
         None => format!("{who}: {}", line.text),
     };
-    let _ = crate::a11y::Spec::new(crate::a11y::Role::Text, said).add();
+    // One stop per message; while it (or one of its tools) has focus, its
+    // tools follow it in the keyboard's list and stay on screen.
+    let focused = crate::a11y::Spec::new(crate::a11y::Role::Message, said).add();
+    let active = ui.active_message == Some(line.id);
 
     let content: El<'a, Msg> = if let Some((_, draft)) = editing {
         column![
-            input("Edit message", "stoop-edit", "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
+            input("Edit message", crate::EDIT_BOX, "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
             row![faint("Enter to save · Esc to cancel").size(11), fill(), btn_sm("Cancel", Btn::Ghost, Some(Msg::EditCancel)), btn_sm("Save", Btn::Primary, Some(Msg::EditSave))]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -239,16 +253,15 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
         return container(body).padding([2, 0]).into();
     }
     // The actions float over the far side of the row while the pointer is
-    // on it. They are built for every message, so they stay out of the
-    // keyboard's list: Tab would otherwise stop seven times per message.
-    crate::a11y::pause(true);
+    // on it. They are built for every message, so they join the keyboard's
+    // list only for the message with focus: Tab would otherwise stop seven
+    // times per message.
+    crate::a11y::pause(!active);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
     for e in QUICK {
         tools = tools.push(
-            button(t(e).size(14))
-                .padding([3, 6])
-                .style(theme::btn(Btn::Ghost))
-                .on_press(Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: e.to_string() })),
+            pressable(t(e).size(14), crate::a11y::Role::Button, &format!("React {e}"), false, Btn::Ghost, Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: e.to_string() }))
+                .padding([3, 6]),
         );
     }
     tools = tools.push(icon_btn(Icon::Sparkle, if line.pinned { "Unpin" } else { "Pin" }, Some(Msg::Do(Action::Pin { to: person.id.clone(), id: line.id, pinned: !line.pinned }))));
@@ -260,7 +273,13 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
     crate::a11y::pause(false);
     let bar = container(tools).padding(3).style(theme::menu_pop);
     let overlay = container(bar).width(Length::Fill).align_x(if line.mine { Alignment::Start } else { Alignment::End }).padding([0, 6]);
-    hover(container(body).padding([2, 0]).width(Length::Fill), overlay)
+    let row_el = crate::a11y::ring(container(body).padding([2, 0]).width(Length::Fill), focused, 10.0);
+    if active {
+        // Reached by keyboard: the tools stay up while focus is here.
+        iced_widget::stack![row_el, overlay].into()
+    } else {
+        hover(row_el, overlay)
+    }
 }
 
 /// A file they offered, files on their way, and those waiting their turn.
@@ -311,7 +330,8 @@ pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     }
     if !m.transfers.queued.is_empty() {
         let n = m.transfers.queued.len();
-        let head = button(
+        let focused = crate::a11y::Spec::new(crate::a11y::Role::Toggle, format!("Up next, {n} files")).checked(ui.queue_open).on(Some(&Msg::ToggleQueue)).add();
+        let head = button(crate::a11y::mark(
             row![
                 label("Up next"),
                 faint(n.to_string()).size(11),
@@ -321,13 +341,11 @@ pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             ]
             .spacing(8)
             .align_y(Alignment::Center),
-        )
+            focused,
+        ))
         .width(Length::Fill)
         .padding(0)
-        .style(focus_style(
-            |_, _| iced_widget::button::Style::default(),
-            crate::a11y::Spec::new(crate::a11y::Role::Toggle, format!("Up next, {n} files")).checked(ui.queue_open).on(Some(&Msg::ToggleQueue)).add(),
-        ))
+        .style(focus_style(|_, _| iced_widget::button::Style::default(), focused))
         .on_press(Msg::ToggleQueue);
         let mut rows = column![head].spacing(4);
         let last = n - 1;

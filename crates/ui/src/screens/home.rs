@@ -93,7 +93,7 @@ pub fn starts<'a>(m: &'a Model, stacked: bool) -> El<'a, Msg> {
             column![badge, words].spacing(14).into()
         };
         let focused = crate::widgets::reg_button(crate::a11y::Role::Button, title, Some(&msg));
-        button(face)
+        button(crate::a11y::mark(face, focused))
         .width(Length::Fill)
         .padding(if stacked { 14 } else { 18 })
         .style(focus_style(
@@ -134,7 +134,7 @@ fn people<'a>(m: &'a Model) -> El<'a, Msg> {
         let menu = Msg::Menu(Some(person.id.clone()));
         let name = if person.unread > 0 { format!("{}, {} unread", person.name, person.unread) } else { person.name.clone() };
         let focused = crate::a11y::Spec::new(crate::a11y::Role::Button, name).on(Some(&open)).menu(Some(&menu)).add();
-        let card = button(
+        let card = button(crate::a11y::mark(
             column![
                 row![avatar_dot(&person.name, &person.id, 40.0, super::presence_color(person.presence), p.panel2), fill(), {
                     let e: El<'a, Msg> = if person.unread > 0 {
@@ -148,7 +148,8 @@ fn people<'a>(m: &'a Model) -> El<'a, Msg> {
                 column![t(clip(&person.name, 18)).size(14).font(theme::semibold()).wrapping(Wrapping::None), faint(line).size(12).wrapping(Wrapping::None)].spacing(2),
             ]
             .spacing(12),
-        )
+            focused,
+        ))
         .width(Length::Fill)
         .padding(16)
         .style(focus_style(

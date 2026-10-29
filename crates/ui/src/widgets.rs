@@ -79,7 +79,7 @@ pub fn focus_style(
 pub fn btn<'a, M: Clone + 'static>(label: impl IntoFragment<'a>, kind: Btn, on: Option<M>) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
     let label = label.into_fragment();
     let focused = reg_button(Role::Button, &label, on.as_ref());
-    button(t(label).size(14).font(theme::semibold()))
+    button(a11y::mark(t(label).size(14).font(theme::semibold()), focused))
         .padding([9, 16])
         .style(focus_style(theme::btn(kind), focused))
         .on_press_maybe(on)
@@ -89,7 +89,7 @@ pub fn btn<'a, M: Clone + 'static>(label: impl IntoFragment<'a>, kind: Btn, on: 
 pub fn btn_sm<'a, M: Clone + 'static>(label: impl IntoFragment<'a>, kind: Btn, on: Option<M>) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
     let label = label.into_fragment();
     let focused = reg_button(Role::Button, &label, on.as_ref());
-    button(t(label).size(13).font(theme::semibold()))
+    button(a11y::mark(t(label).size(13).font(theme::semibold()), focused))
         .padding([6, 12])
         .style(focus_style(theme::btn(kind), focused))
         .on_press_maybe(on)
@@ -106,7 +106,7 @@ pub fn btn_icon<'a, M: Clone + 'static>(
     let focused = reg_button(Role::Button, &label, on.as_ref());
     let color = theme::btn_fg(kind, false);
     let color = if on.is_some() { color } else { color.scale_alpha(0.45) };
-    button(row![icon(i, 16.0, color), t(label).size(14).font(theme::semibold())].spacing(8).align_y(Alignment::Center))
+    button(a11y::mark(row![icon(i, 16.0, color), t(label).size(14).font(theme::semibold())].spacing(8).align_y(Alignment::Center), focused))
         .padding([9, 14])
         .style(focus_style(theme::btn(kind), focused))
         .on_press_maybe(on)
@@ -133,7 +133,7 @@ pub fn icon_btn_named<'a, M: Clone + 'static>(i: Icon, name: &str, tip: &'a str,
         _ => p.faint.scale_alpha(0.6),
     };
     let focused = reg_button(Role::Button, name, on.as_ref());
-    let b = button(icon(i, 18.0, color)).padding(7).style(focus_style(theme::btn(kind), focused)).on_press_maybe(on);
+    let b = button(a11y::mark(icon(i, 18.0, color), focused)).padding(7).style(focus_style(theme::btn(kind), focused)).on_press_maybe(on);
     with_tip(b, tip, tooltip::Position::Top)
 }
 
@@ -146,7 +146,7 @@ pub fn round_btn<'a, M: Clone + 'static>(i: Icon, tip: &'a str, kind: Btn, on: O
         Btn::DangerSolid | Btn::Ok => theme::hex("#16161f"),
         _ => p.text,
     };
-    let b = button(container(icon(i, size * 0.42, color)).center(Length::Fill))
+    let b = button(a11y::mark(container(icon(i, size * 0.42, color)).center(Length::Fill), focused))
         .width(size)
         .height(size)
         .padding(0)
@@ -316,14 +316,16 @@ pub fn secret_input<'a, M: Clone + 'static>(name: &str, id: &'static str, placeh
 }
 
 /// A drop-down named `name`: pick one of `options`. The arrow keys step
-/// to the next or previous option without opening it.
+/// to the next or previous option without opening it. `shape` sets its
+/// size and padding.
 pub fn choice<'a, M: Clone + 'static>(
     name: &str,
     options: &'a [String],
     selected: Option<String>,
     placeholder: &'a str,
     on: impl Fn(String) -> M + 'a,
-) -> iced_widget::PickList<'a, String, &'a [String], String, M, iced_core::Theme, iced_widget::Renderer> {
+    shape: impl FnOnce(PickList<'a, M>) -> PickList<'a, M>,
+) -> El<'a, M> {
     let at = selected.as_ref().and_then(|s| options.iter().position(|o| o == s));
     let pick = |i: Option<usize>| i.and_then(|i| options.get(i)).map(|o| on(o.clone()));
     let next = pick(Some(at.map_or(0, |i| i + 1)));
@@ -338,14 +340,18 @@ pub fn choice<'a, M: Clone + 'static>(
         }
         s
     };
-    iced_widget::pick_list(options, selected, on).placeholder(placeholder).font(theme::font()).style(style).menu_style(theme::pick_menu)
+    let pick = iced_widget::pick_list(options, selected, on).placeholder(placeholder).font(theme::font()).style(style).menu_style(theme::pick_menu);
+    a11y::mark(shape(pick), focused)
 }
+
+/// The drop-down [`choice`] builds, for its `shape` argument.
+pub type PickList<'a, M> = iced_widget::PickList<'a, String, &'a [String], String, M, iced_core::Theme, iced_widget::Renderer>;
 
 /// A button around any content, named `name` for the keyboard and screen
 /// readers, in the style of `kind`. For rows, tiles and navigation.
 pub fn pressable<'a, M: Clone + 'static>(content: impl Into<El<'a, M>>, role: Role, name: &str, selected: bool, kind: Btn, on: M) -> button::Button<'a, M, iced_core::Theme, iced_widget::Renderer> {
     let focused = Spec::new(role, name).selected(selected).on(Some(&on)).add();
-    button(content).style(focus_style(theme::btn(kind), focused)).on_press(on)
+    button(a11y::mark(content, focused)).style(focus_style(theme::btn(kind), focused)).on_press(on)
 }
 
 /// A row of tabs; `on` is the index of the selected one.
@@ -354,7 +360,7 @@ pub fn tabs<'a, M: Clone + 'static>(items: Vec<(&'a str, M)>, on: usize) -> El<'
     for (i, (label, msg)) in items.into_iter().enumerate() {
         let kind = if i == on { Btn::TabOn } else { Btn::Tab };
         let focused = Spec::new(Role::Tab, label).selected(i == on).on(Some(&msg)).add();
-        r = r.push(button(t(label).size(13).font(theme::semibold())).padding([6, 14]).style(focus_style(theme::btn(kind), focused)).on_press(msg));
+        r = r.push(button(a11y::mark(t(label).size(13).font(theme::semibold()), focused)).padding([6, 14]).style(focus_style(theme::btn(kind), focused)).on_press(msg));
     }
     container(r).padding(4).style(theme::tabs_frame).into()
 }
@@ -409,7 +415,7 @@ pub fn swatch<'a, M: Clone + 'static>(a: Color, b: Color, selected: bool, tip: &
     });
     let ring = if selected { p.text } else { Color::TRANSPARENT };
     let ring = if focused { p.accent2 } else { ring };
-    let b = button(container(fill).padding(3).style(theme::ring(ring, 2.0))).padding(0).style(theme::btn(Btn::Ghost)).on_press(on);
+    let b = button(a11y::mark(container(fill).padding(3).style(theme::ring(ring, 2.0)), focused)).padding(0).style(theme::btn(Btn::Ghost)).on_press(on);
     with_tip(b, tip, tooltip::Position::Top)
 }
 

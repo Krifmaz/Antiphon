@@ -1358,7 +1358,7 @@ impl Engine {
             A::ExportTheme => self.export_theme(),
             A::ImportTheme => self.import_theme(),
             // Moving the typing cursor is the window's job; the app does it.
-            A::FocusInput(_) => {}
+            A::FocusInput(_) | A::RevealFocus(_) => {}
             A::Input(name) => {
                 let device = (!name.is_empty()).then_some(name);
                 if let Some(Err(e)) = self.with_call(|a| a.swap_input_device(device.as_deref())) {

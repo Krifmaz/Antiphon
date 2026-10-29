@@ -354,15 +354,26 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 /// One message, everyone's on the left: the author's avatar and name on
 /// the first of a run, then the words. Actions appear under the pointer.
 fn message<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first: bool, phone: bool) -> El<'a, Msg> {
+    // Its own keyboard group, as in a conversation (see `a11y::group`).
+    crate::a11y::group(Some(line.id));
+    let el = message_body(ui, c, channel, line, first, phone);
+    crate::a11y::pause(false);
+    crate::a11y::group(None);
+    el
+}
+
+/// [`message`]'s drawing, inside its keyboard group.
+fn message_body<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first: bool, phone: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
     // Read out as "who: what", in the order the channel runs.
     let who = if line.mine { "You" } else { line.author.as_str() };
     let said = if line.deleted { format!("{who}: message deleted") } else { format!("{who}: {}", line.text) };
-    let _ = Spec::new(Role::Text, said).add();
+    let focused = Spec::new(Role::Message, said).add();
+    let active = ui.active_message == Some(line.id);
     let content: El<'a, Msg> = if let Some((_, draft)) = editing {
         column![
-            input("Edit message", "stoop-edit", "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
+            input("Edit message", crate::EDIT_BOX, "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
             row![faint("Enter to save · Esc to cancel").size(11), fill(), btn_sm("Cancel", Btn::Ghost, Some(Msg::EditCancel)), btn_sm("Save", Btn::Primary, Some(Msg::EditSave))]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -389,9 +400,9 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first
     if editing.is_some() || phone || line.deleted {
         return row_el.into();
     }
-    // Pointer-only tools, built for every message: kept out of the
-    // keyboard's list, as in a conversation.
-    crate::a11y::pause(true);
+    // Tools built for every message: in the keyboard's list only for the
+    // message with focus, as in a conversation.
+    crate::a11y::pause(!active);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
     tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
     if !line.mine && c.waiting.is_none() && !c.group {
@@ -408,7 +419,12 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first
     crate::a11y::pause(false);
     let bar = container(tools).padding(3).style(theme::menu_pop);
     let overlay = container(bar).width(Length::Fill).align_x(Alignment::End).padding([0, 6]);
-    hover(row_el, overlay)
+    let row_el = crate::a11y::ring(row_el, focused, 10.0);
+    if active {
+        iced_widget::stack![row_el, overlay].into()
+    } else {
+        hover(row_el, overlay)
+    }
 }
 
 /// Where a channel's messages are typed.

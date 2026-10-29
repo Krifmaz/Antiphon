@@ -19,6 +19,12 @@
 //!   the reader asks for come back as [`crate::Msg::Reader`] and are
 //!   carried out exactly as the keyboard would.
 //!
+//! Two things make a long screen workable from the keyboard: the focused
+//! control is marked in the widget tree ([`mark`]) so [`reveal`] can
+//! scroll whatever holds it until it is in view, and a message in a
+//! conversation is one stop whose hover tools (react, edit, delete) join
+//! the list only while focus is on that message ([`group`]).
+//!
 //! The list lives in a thread local because the helpers that fill it are
 //! plain functions deep in the view; iced builds the view and handles
 //! updates on one thread, so the list read by an update is always the one
@@ -30,7 +36,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use accesskit::{Live, NodeId, Toggled, Tree, TreeId, TreeUpdate};
-use iced_core::{Background, Border, Color, Length};
+use iced_core::widget::operation::{Operation, Outcome, Scrollable};
+use iced_core::widget::Id;
+use iced_core::{Background, Border, Color, Length, Rectangle, Vector};
 use iced_widget::{container, space, stack};
 
 use crate::{theme, El, Msg};
@@ -56,6 +64,9 @@ pub enum Role {
     Text,
     /// A short notice that appeared (a toast); read out when it appears.
     Alert,
+    /// A message in a conversation: a stop of its own, whose tools come
+    /// after it while it (or one of them) has focus.
+    Message,
 }
 
 impl Role {
@@ -96,6 +107,9 @@ pub struct Node {
     pub menu: Option<Msg>,
     /// The iced widget id of a text box, so focus can move the cursor there.
     pub input: Option<&'static str>,
+    /// The message this node belongs to (the message itself or one of its
+    /// tools), set by [`group`].
+    pub group: Option<u64>,
 }
 
 impl Node {
@@ -144,6 +158,7 @@ impl Spec {
                 decrease: None,
                 menu: None,
                 input: None,
+                group: None,
             },
         }
     }
@@ -224,6 +239,7 @@ impl Spec {
             node.key = format!("{:?}|{}|{}", node.role, node.label, n);
             *n += 1;
             node.layer = f.layer;
+            node.group = f.group;
             let focused = node.role.focusable() && f.focus.as_deref() == Some(node.key.as_str());
             f.nodes.push(node);
             focused
@@ -249,6 +265,8 @@ struct Frame {
     counts: HashMap<(Role, String), usize>,
     /// While set, nothing registers (see [`pause`]).
     paused: bool,
+    /// The message the nodes added now belong to (see [`group`]).
+    group: Option<u64>,
 }
 
 thread_local! {
@@ -265,6 +283,13 @@ pub fn begin(focus: Option<&str>) {
 /// dialog or a menu, which takes the keyboard while it is up.
 pub fn layer() {
     FRAME.with(|f| f.borrow_mut().layer += 1);
+}
+
+/// Marks the nodes added from now on as belonging to message `id`, or to
+/// no message (`None`). Focus on any of them keeps that message's tools
+/// in the keyboard's list.
+pub fn group(id: Option<u64>) {
+    FRAME.with(|f| f.borrow_mut().group = id);
 }
 
 /// Stops (`true`) or restarts registering: for controls drawn only under
@@ -302,6 +327,137 @@ pub fn next_stop(nodes: &[Node], from: Option<&str>, step: i32) -> Option<String
     Some(stops[i as usize].key.clone())
 }
 
+/// The widget id the focused control is marked with (see [`mark`]).
+pub const FOCUS_MARK: &str = "stoop-keyboard-focus";
+
+/// Wraps `content` in a marker [`reveal`] can find when `focused`; leaves
+/// it as it is otherwise. The marker is a plain container of the content's
+/// own size, so nothing moves.
+pub fn mark<'a, M: 'a>(content: impl Into<El<'a, M>>, focused: bool) -> El<'a, M> {
+    let content = content.into();
+    if focused {
+        container(content).id(Id::new(FOCUS_MARK)).into()
+    } else {
+        content
+    }
+}
+
+/// An operation that scrolls the scrollables holding the focused control
+/// (the [`mark`]ed one, or the text box with id `input`) just far enough
+/// to show it, with a little room around it.
+pub fn reveal<T>(input: Option<&'static str>) -> impl Operation<T> {
+    Reveal { input, pending: None, stack: Vec::new(), done: false }
+}
+
+/// A scrollable seen on the way down: where it shows, how far it is
+/// scrolled, and its state to scroll.
+struct Holder<'s> {
+    /// The visible area, in window coordinates.
+    bounds: Rectangle,
+    /// How far its content is scrolled.
+    translation: Vector,
+    /// Its state, through which it is scrolled.
+    state: &'s mut dyn Scrollable,
+}
+
+/// The state of [`reveal`] as it walks the widget tree.
+struct Reveal {
+    /// The text box to reveal instead of a marker, if focus is in one.
+    input: Option<&'static str>,
+    /// A scrollable just met whose content is walked next: (bounds,
+    /// translation, its state as a raw pointer, valid until that walk ends).
+    pending: Option<(Rectangle, Vector, *mut dyn Scrollable)>,
+    /// The scrollables around the widget being visited, outermost first.
+    stack: Vec<(Rectangle, Vector, *mut dyn Scrollable)>,
+    /// Set once the target was found and shown.
+    done: bool,
+}
+
+// SAFETY: the raw pointers are only held during one synchronous walk of
+// the tree, on the thread doing it; `Operation` asks for `Send` only so an
+// operation can be built on one thread and run on another before it starts.
+unsafe impl Send for Reveal {}
+
+/// How far to scroll one axis so `[start, end)` shows inside a view of
+/// `[view, view + len)` already scrolled by `offset`: `None` when it is in
+/// view already. `margin` is the room left around it.
+fn scroll_axis(start: f32, end: f32, view: f32, len: f32, offset: f32, margin: f32) -> Option<f32> {
+    let (top, bottom) = (view + offset, view + offset + len);
+    if start - margin < top {
+        Some((start - margin - view).max(0.0))
+    } else if end + margin > bottom {
+        Some((end + margin - view - len).max(0.0))
+    } else {
+        None
+    }
+}
+
+impl Reveal {
+    /// The target is at `target` (untranslated layout coordinates): scroll
+    /// the innermost scrollable holding it.
+    fn show(&mut self, target: Rectangle) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let Some(&(bounds, translation, state)) = self.stack.last() else { return };
+        let holder = Holder {
+            bounds,
+            translation,
+            // SAFETY: the scrollable is an ancestor of the widget being
+            // visited, so its state outlives this call (see `pending`).
+            state: unsafe { &mut *state },
+        };
+        let y = scroll_axis(target.y, target.y + target.height, holder.bounds.y, holder.bounds.height, holder.translation.y, 12.0);
+        let x = scroll_axis(target.x, target.x + target.width, holder.bounds.x, holder.bounds.width, holder.translation.x, 12.0);
+        if x.is_some() || y.is_some() {
+            holder.state.scroll_to(iced_core::widget::operation::scrollable::AbsoluteOffset { x, y });
+        }
+    }
+}
+
+impl<T> Operation<T> for Reveal {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+        if self.done {
+            return;
+        }
+        // A scrollable walks its content right after reporting itself.
+        let held = self.pending.take();
+        if let Some(h) = held {
+            self.stack.push(h);
+        }
+        operate(self);
+        if held.is_some() {
+            self.stack.pop();
+        }
+    }
+
+    fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+        if self.input.is_none() && id == Some(&Id::new(FOCUS_MARK)) {
+            self.show(bounds);
+        }
+    }
+
+    fn scrollable(&mut self, _id: Option<&Id>, bounds: Rectangle, _content: Rectangle, translation: Vector, state: &mut dyn Scrollable) {
+        // SAFETY: only dereferenced while this scrollable's content is
+        // being walked, which `traverse` brackets.
+        let state: *mut (dyn Scrollable + '_) = state;
+        self.pending = Some((bounds, translation, unsafe { std::mem::transmute::<*mut (dyn Scrollable + '_), *mut dyn Scrollable>(state) }));
+    }
+
+    fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, _state: &mut dyn iced_core::widget::operation::TextInput) {
+        if let (Some(want), Some(id)) = (self.input, id) {
+            if id == &Id::new(want) {
+                self.show(bounds);
+            }
+        }
+    }
+
+    fn finish(&self) -> Outcome<T> {
+        Outcome::None
+    }
+}
+
 /// Draws a focus ring around `content` when `focused`: a two-pixel line in
 /// the second accent colour, laid over it so the layout doesn't move.
 pub fn ring<'a, M: 'a>(content: impl Into<El<'a, M>>, focused: bool, radius: f32) -> El<'a, M> {
@@ -310,7 +466,7 @@ pub fn ring<'a, M: 'a>(content: impl Into<El<'a, M>>, focused: bool, radius: f32
     }
     let p = theme::look();
     stack![
-        content.into(),
+        mark(content, true),
         container(space()).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
             background: Some(Background::Color(Color::TRANSPARENT)),
             border: Border { color: p.accent2, width: 2.0, radius: radius.into() },
@@ -360,6 +516,7 @@ fn to_accesskit(n: &Node) -> accesskit::Node {
         Role::Heading => R::Heading,
         Role::Text => R::Label,
         Role::Alert => R::Alert,
+        Role::Message => R::ListItem,
     };
     let mut node = accesskit::Node::new(role);
     node.set_label(n.label.clone());
@@ -491,6 +648,29 @@ mod tests {
         assert_eq!(t.nodes[2].1.role(), accesskit::Role::Switch);
         assert_eq!(t.nodes[2].1.toggled(), Some(Toggled::True));
         assert_eq!(t.focus, t.nodes[2].0);
+    }
+
+    #[test]
+    fn scrolling_moves_just_enough_to_show_it() {
+        // A view of 0..100, not scrolled: something at 150..170 needs 82.
+        assert_eq!(scroll_axis(150.0, 170.0, 0.0, 100.0, 0.0, 12.0), Some(82.0));
+        // Already in view: no scroll.
+        assert_eq!(scroll_axis(40.0, 60.0, 0.0, 100.0, 0.0, 12.0), None);
+        // Scrolled past it: back up to just above it, never below zero.
+        assert_eq!(scroll_axis(20.0, 40.0, 0.0, 100.0, 200.0, 12.0), Some(8.0));
+        assert_eq!(scroll_axis(5.0, 20.0, 0.0, 100.0, 200.0, 12.0), Some(0.0));
+    }
+
+    #[test]
+    fn nodes_carry_their_message() {
+        begin(None);
+        group(Some(7));
+        Spec::new(Role::Message, "You: hi").add();
+        button("Edit");
+        group(None);
+        button("Send");
+        let n = nodes();
+        assert_eq!((n[0].group, n[1].group, n[2].group), (Some(7), Some(7), None));
     }
 
     #[test]

@@ -40,6 +40,8 @@ pub type El<'a, M> = iced_core::Element<'a, M, iced_core::Theme, iced_widget::Re
 
 /// The composer's widget id, so an app can focus it when a conversation opens.
 pub const COMPOSER: &str = "stoop-composer";
+/// The message edit box's widget id, focused when an edit starts.
+pub const EDIT_BOX: &str = "stoop-edit";
 /// The people search box's widget id, for a find shortcut.
 pub const SEARCH: &str = "stoop-search";
 
@@ -349,6 +351,9 @@ pub enum Action {
     /// Put the typing cursor in the text box with this widget id, or take
     /// it out of every box (`None`): keyboard focus moved.
     FocusInput(Option<&'static str>),
+    /// Scroll the focused control into view: the one marked by
+    /// [`a11y::mark`], or the text box with this widget id.
+    RevealFocus(Option<&'static str>),
     /// Use this microphone; empty is the system default.
     Input(String),
     /// Use these speakers or headphones; empty is the system default.
@@ -849,6 +854,9 @@ pub struct Ui {
     /// The key of the control with keyboard focus (see [`a11y`]); `None`
     /// until Tab is first pressed.
     focus: Option<String>,
+    /// The message (by id) whose tools are in the keyboard's list, because
+    /// focus is on it or on one of them.
+    active_message: Option<u64>,
 }
 
 impl Default for Ui {
@@ -909,6 +917,7 @@ impl Ui {
             insets: (0.0, 0.0),
             accent_edit: None,
             focus: None,
+            active_message: None,
         }
     }
 
@@ -1109,7 +1118,9 @@ impl Ui {
             }
             Msg::EditStart(id, text) => {
                 self.editing = Some((id, text));
-                Vec::new()
+                // Straight into the box, whether Edit was clicked or pressed.
+                self.focus = Some(format!("{:?}|Edit message|0", a11y::Role::Input));
+                vec![Action::FocusInput(Some(EDIT_BOX))]
             }
             Msg::EditDraft(s) => {
                 if let Some((_, text)) = self.editing.as_mut() {
@@ -1392,9 +1403,8 @@ impl Ui {
             },
             Msg::Focus(step) => {
                 let nodes = a11y::nodes();
-                self.focus = a11y::next_stop(&nodes, self.focus.as_deref(), step);
-                let input = self.focus.as_deref().and_then(|k| nodes.iter().find(|n| n.key == k)).and_then(|n| n.input);
-                vec![Action::FocusInput(input)]
+                let next = a11y::next_stop(&nodes, self.focus.as_deref(), step);
+                self.move_focus(next, &nodes)
             }
             Msg::Activate => match self.focused().and_then(|n| n.activate) {
                 Some(msg) => self.update(msg, model),
@@ -1412,8 +1422,7 @@ impl Ui {
                 let Some(node) = a11y::nodes().into_iter().find(|n| n.id().0 == id) else { return vec![] };
                 let mut actions = Vec::new();
                 if node.role.focusable() {
-                    self.focus = Some(node.key.clone());
-                    actions.push(Action::FocusInput(node.input));
+                    actions.extend(self.move_focus(Some(node.key.clone()), &a11y::nodes()));
                 }
                 let msg = match act {
                     a11y::ReaderAction::Focus => None,
@@ -1464,6 +1473,18 @@ impl Ui {
         // The controls register themselves as the view is built; see `a11y`.
         a11y::begin(self.focus.as_deref());
         screens::view(self, model)
+    }
+
+    /// Puts keyboard focus on the node with key `key` (or nowhere): the
+    /// typing cursor follows into or out of text boxes, the control is
+    /// scrolled into view, and a message keeps its tools while focus is on
+    /// it or them.
+    fn move_focus(&mut self, key: Option<String>, nodes: &[a11y::Node]) -> Vec<Action> {
+        let node = key.as_deref().and_then(|k| nodes.iter().find(|n| n.key == k));
+        let input = node.and_then(|n| n.input);
+        self.active_message = node.and_then(|n| n.group);
+        self.focus = key;
+        vec![Action::FocusInput(input), Action::RevealFocus(input)]
     }
 
     /// The control with keyboard focus, as the last frame drew it.
@@ -1636,6 +1657,35 @@ mod tests {
         assert_eq!(layer, Some(1), "focus moved into the dialog, away from {behind:?}");
         ui.update(Msg::Back, &m);
         assert_eq!(ui.dialog, None);
+    }
+
+    #[test]
+    fn focusing_a_message_brings_its_tools_into_reach() {
+        let mut m = Model::default();
+        m.people.push(Person { id: "ab".into(), name: "Robin".into(), ..Default::default() });
+        m.conversation = Some(Conversation {
+            person: "ab".into(),
+            lines: vec![Line { id: 5, mine: true, text: "hello".into(), ..Default::default() }],
+            ..Default::default()
+        });
+        let mut ui = Ui::new();
+        ui.update(Msg::Nav(Route::Person("ab".into())), &m);
+        let _ = ui.view(&m);
+        let has_edit = |ui: &Ui| a11y::tab_stops(&a11y::nodes()).iter().any(|n| n.label == "Edit" && n.group == Some(5)) && ui.focus_key().is_some();
+        assert!(!a11y::nodes().iter().any(|n| n.label == "Edit"), "tools stay out until the message has focus");
+        let at = a11y::tab_stops(&a11y::nodes()).iter().position(|n| n.role == a11y::Role::Message).expect("the message is a stop");
+        for _ in 0..=at {
+            ui.update(Msg::Focus(1), &m);
+        }
+        let actions = ui.update(Msg::Focus(0), &m);
+        assert!(actions.contains(&Action::RevealFocus(None)), "a focus move scrolls it into view");
+        let _ = ui.view(&m);
+        assert!(has_edit(&ui), "its tools follow it");
+        // Tab to Edit and press it: editing starts with the cursor in the box.
+        while !ui.focus_key().is_some_and(|k| k.contains("|Edit|")) {
+            ui.update(Msg::Focus(1), &m);
+        }
+        assert_eq!(ui.update(Msg::Activate, &m), vec![Action::FocusInput(Some(EDIT_BOX))]);
     }
 
     #[test]

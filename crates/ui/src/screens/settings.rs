@@ -155,7 +155,7 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             .width(Length::Fill),
         ]
         .spacing(8);
-        let tile = button(
+        let tile = button(crate::a11y::mark(
             column![
                 container(preview).padding(10).width(Length::Fill).style(move |_| iced_widget::container::Style {
                     background: Some(iced_core::Background::Color(look.panel)),
@@ -166,7 +166,8 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             ]
             .spacing(8)
             .align_x(Alignment::Center),
-        )
+            focused,
+        ))
         .width(Length::Fill)
         .padding(8)
         .style(move |th, st| {
@@ -252,7 +253,7 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     let s = &m.settings;
     let device = |label: &'a str, list: &'a [String], chosen: &'a str, f: fn(String) -> Action| -> El<'a, Msg> {
         let selected = if chosen.is_empty() { None } else { Some(chosen.to_string()) };
-        field(label, choice(label, list, selected, "System default", move |v| Msg::Do(f(v))).width(Length::Fill).padding([9, 12]).text_size(14))
+        field(label, choice(label, list, selected, "System default", move |v| Msg::Do(f(v)), |p| p.width(Length::Fill).padding([9, 12]).text_size(14)))
     };
     let devices = column![
         row![device("Microphone", &s.inputs, &s.input, Action::Input), device("Speakers or headphones", &s.outputs, &s.output, Action::Output)].spacing(14),
@@ -321,7 +322,7 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         processing = processing.push(setting(
             "Voice preset",
             Some("A starting point for the whole chain."),
-            choice("Voice preset", s.presets.as_slice(), (!s.preset.is_empty()).then(|| s.preset.clone()), "Custom", |v| Msg::Do(Action::Preset(v))).padding([8, 12]).text_size(13.5),
+            choice("Voice preset", s.presets.as_slice(), (!s.preset.is_empty()).then(|| s.preset.clone()), "Custom", |v| Msg::Do(Action::Preset(v)), |p| p.padding([8, 12]).text_size(13.5)),
         ));
     }
 

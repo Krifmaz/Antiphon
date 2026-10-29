@@ -604,7 +604,7 @@ impl App {
             },
             // A phone moves the typing cursor with touch; keyboard focus is
             // a desktop matter.
-            Action::FocusInput(_) => {}
+            Action::FocusInput(_) | Action::RevealFocus(_) => {}
             Action::ReducedMotion(on) => {
                 self.settings.reduced_motion = on;
                 self.save();

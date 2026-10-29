@@ -50,10 +50,11 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     // Group chats and communities sit above people, in the same scroll.
     if m.device.communities {
         let spaces_on = ui.route == Route::Spaces;
+        let spaces_focused = Spec::new(Role::Tab, "Spaces").selected(spaces_on).on(Some(&Msg::Nav(Route::Spaces))).add();
         let mut head = row![
-            button(row![label("Spaces"), faint(m.communities.len().to_string()).size(11)].spacing(8).align_y(Alignment::Center))
+            button(crate::a11y::mark(row![label("Spaces"), faint(m.communities.len().to_string()).size(11)].spacing(8).align_y(Alignment::Center), spaces_focused))
                 .padding(0)
-                .style(focus_style(move |_, _| button::Style::default(), Spec::new(Role::Tab, "Spaces").selected(spaces_on).on(Some(&Msg::Nav(Route::Spaces))).add()))
+                .style(focus_style(move |_, _| button::Style::default(), spaces_focused))
                 .on_press(Msg::Nav(Route::Spaces)),
             fill(),
         ]
@@ -189,7 +190,7 @@ pub fn person_row<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Ms
     let open = Msg::Nav(Route::Person(person.id.clone()));
     let menu = Msg::Menu(Some(person.id.clone()));
     let focused = Spec::new(Role::Tab, name).selected(selected).on(Some(&open)).menu(Some(&menu)).add();
-    let row = button(container(body).clip(true))
+    let row = button(crate::a11y::mark(container(body).clip(true), focused))
         .width(Length::Fill)
         .padding([7, 10])
         .style(focus_style(theme::btn(if selected { Btn::RowOn } else { Btn::Row }), focused))
@@ -216,16 +217,18 @@ pub fn call_strip<'a>(m: &'a Model) -> El<'a, Msg> {
         Some(id) => Route::Person(id.clone()),
         None => Route::Home,
     };
-    let who = button(
+    let who_focused = reg_button(Role::Button, &format!("Go to the call with {}", c.peer_name), Some(&Msg::Nav(target.clone())));
+    let who = button(crate::a11y::mark(
         column![
             row![icon(Icon::Phone, 13.0, color), t(title).size(12.5).font(theme::semibold()).color(color)].spacing(6).align_y(Alignment::Center),
             t(clip(&c.peer_name, 24)).size(13).color(p.text).wrapping(Wrapping::None),
         ]
         .spacing(2),
-    )
+        who_focused,
+    ))
     .padding(0)
     .width(Length::Fill)
-    .style(focus_style(|_, _| button::Style::default(), reg_button(Role::Button, &format!("Go to the call with {}", c.peer_name), Some(&Msg::Nav(target.clone())))))
+    .style(focus_style(|_, _| button::Style::default(), who_focused))
     .on_press(Msg::Nav(target));
     container(
         row![
@@ -250,19 +253,18 @@ pub fn call_strip<'a>(m: &'a Model) -> El<'a, Msg> {
 fn me_bar<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let open = m.me.door_open;
-    let door = button(
+    let door_focused = Spec::new(Role::Toggle, "Door open").checked(open).on(Some(&Msg::Do(Action::Door(!open)))).add();
+    let door = button(crate::a11y::mark(
         row![
             icon(if open { Icon::DoorOpen } else { Icon::Door }, 13.0, if open { p.ok } else { p.faint }),
             t(if open { "Door open" } else { "Door closed" }).size(12).color(if open { p.ok } else { p.faint }),
         ]
         .spacing(5)
         .align_y(Alignment::Center),
-    )
-    .padding(0)
-    .style(focus_style(
-        |_, _| button::Style::default(),
-        Spec::new(Role::Toggle, "Door open").checked(open).on(Some(&Msg::Do(Action::Door(!open)))).add(),
+        door_focused,
     ))
+    .padding(0)
+    .style(focus_style(|_, _| button::Style::default(), door_focused))
     .on_press(Msg::Do(Action::Door(!open)));
     let door = with_tip(door, if open { "People can call you. Click to close your door." } else { "Click to open your door and take calls." }, iced_widget::tooltip::Position::Top);
     let settings_on = matches!(ui.route, Route::Settings(_));
