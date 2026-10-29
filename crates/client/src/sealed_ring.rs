@@ -32,6 +32,9 @@ pub struct SealedRing {
     /// The block still filling, plaintext until it reaches [`BLOCK`].
     tail: Vec<f32>,
     sealed_len: usize,
+    /// Samples that have rolled off the front since the call began, so a
+    /// position counted from the start of the call can still be found.
+    dropped: usize,
 }
 
 impl SealedRing {
@@ -62,6 +65,47 @@ impl SealedRing {
         while self.len() > cap {
             let Some(front) = self.blocks.pop_front() else { break };
             self.sealed_len -= front.samples;
+            self.dropped += front.samples;
+        }
+    }
+
+    /// Samples pushed since the call began, including those rolled off:
+    /// the position, counted from the start of the call, that the next
+    /// push lands at.
+    pub fn end(&self) -> usize {
+        self.dropped + self.len()
+    }
+
+    /// Writes `samples` over what was pushed at `position` (counted from
+    /// the start of the call, as [`SealedRing::end`] is), resealing the
+    /// blocks it touches. Whatever part has already rolled off, or was
+    /// never pushed, is skipped. This is how the real audio of a concealed
+    /// moment is put back once a late copy of it arrives (spec §2
+    /// "Replay").
+    pub fn overwrite(&mut self, position: usize, samples: &[f32]) {
+        let start = position.max(self.dropped);
+        let end = (position + samples.len()).min(self.end());
+        if start >= end {
+            return;
+        }
+        let source = |at: usize| samples[at - position];
+        let mut at = self.dropped;
+        let mut blocks = std::mem::take(&mut self.blocks);
+        for block in blocks.iter_mut() {
+            let block_end = at + block.samples;
+            if block_end > start && at < end {
+                let mut audio = self.open(block).unwrap_or_else(|| vec![0.0; block.samples]);
+                for i in start.max(at)..end.min(block_end) {
+                    audio[i - at] = source(i);
+                }
+                *block = self.seal(&audio);
+                audio.iter_mut().for_each(|s| *s = 0.0);
+            }
+            at = block_end;
+        }
+        self.blocks = blocks;
+        for i in start.max(at)..end {
+            self.tail[i - at] = source(i);
         }
     }
 
@@ -120,6 +164,29 @@ mod tests {
 
     fn ramp(n: usize, from: usize) -> Vec<f32> {
         (from..from + n).map(|i| i as f32).collect()
+    }
+
+    #[test]
+    fn a_late_frame_can_be_written_back_over_its_stand_in() {
+        let mut ring = SealedRing::default();
+        ring.push(&ramp(BLOCK * 3 + 100, 0), BLOCK * 2);
+        // The first block rolled off; positions still count from the start.
+        assert_eq!(ring.end(), BLOCK * 3 + 100);
+        // Spanning a sealed block boundary and into the plaintext tail.
+        let patch = vec![-1.0; BLOCK + 150];
+        let at = BLOCK * 2 - 50;
+        ring.overwrite(at, &patch);
+        let all = ring.snapshot();
+        let offset = ring.end() - all.len();
+        for (i, v) in all.iter().enumerate() {
+            let pos = i + offset;
+            let expect = if (at..at + patch.len()).contains(&pos) { -1.0 } else { pos as f32 };
+            assert_eq!(*v, expect, "at {pos}");
+        }
+        // Positions that rolled off, or are still to come, are skipped.
+        ring.overwrite(0, &[5.0; 10]);
+        ring.overwrite(ring.end() + 10, &[5.0; 10]);
+        assert!(!ring.snapshot().contains(&5.0));
     }
 
     #[test]

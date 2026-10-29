@@ -392,23 +392,21 @@ pub(crate) async fn run_call(
     let send_peer = peer.clone();
     let send_ptt = ptt_active.clone();
     let send_task = tokio::spawn(async move {
-        // The last frame transmitted, carried as a backup copy on the next
-        // one (spec section 2 forward error correction).
-        let mut previous_frame: Option<Vec<f32>> = None;
-        // Application frame sequence, independent of the crypto counter --
+        // Opus with in-band FEC (spec §2), at the top tier: the CLI
+        // neither sends nor reads link reports, so it does not adapt. It
+        // numbers packets itself, independently of the crypto counter --
         // see `antiphon_net::fec` for why they must not be the same number.
-        let mut sequence: u32 = 0;
+        let mut voice = antiphon_net::voice::VoiceSender::new(sample_rate);
         while let Some(mut samples) = rx.recv().await {
             chain.process(&mut samples);
             if send_ptt.load(Ordering::Relaxed) {
-                let bytes = antiphon_net::fec::encode(sequence, &samples, previous_frame.as_deref());
-                previous_frame = Some(samples.clone());
-                sequence = sequence.wrapping_add(1);
-                if let Err(e) = send_peer.send_audio(&bytes).await {
-                    eprintln!("[net] send error: {e}");
+                for (_, bytes) in voice.push(&samples) {
+                    if let Err(e) = send_peer.send_audio(&bytes).await {
+                        eprintln!("[net] send error: {e}");
+                    }
                 }
             } else {
-                previous_frame = None;
+                voice.pause();
             }
         }
     });
@@ -423,11 +421,12 @@ pub(crate) async fn run_call(
 
     let recv_peer = peer.clone();
     let recv_jitter = jitter.clone();
+    let mut recv_voice = antiphon_net::voice::VoiceReceiver::new(sample_rate);
     let recv_task = tokio::spawn(async move {
         let result = recv_peer
             .recv_loop(move |msg| match msg {
                 antiphon_net::Received::Audio { counter: _, plaintext } => {
-                    if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
+                    if let Some(decoded) = recv_voice.decode(&plaintext) {
                         recv_jitter.lock().unwrap().push_with_backup(
                             decoded.sequence as u64,
                             decoded.primary,

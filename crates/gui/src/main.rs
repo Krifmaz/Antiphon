@@ -161,7 +161,10 @@ fn main() -> anyhow::Result<()> {
         replay_seconds: Arc::new(std::sync::atomic::AtomicU32::new(loaded.replay_seconds)),
         duck_db: Arc::new(std::sync::atomic::AtomicU32::new(loaded.duck_db)),
         peer_eq: Arc::new(Mutex::new(None)),
-        echo_cancel: Arc::new(std::sync::atomic::AtomicBool::new(loaded.echo_cancel)),
+        echo_cancel: {
+            antiphon_client::link_quality::set_low_data(loaded.low_data_calls);
+            Arc::new(std::sync::atomic::AtomicBool::new(loaded.echo_cancel))
+        },
         // Built once for the process, not once per call: the filter it
         // learns describes this room and these speakers, which do not
         // change between calls (spec §1's "survives device hot-swap").
@@ -704,6 +707,7 @@ fn local_hello(app: &MainWindow) -> Hello {
         // answering is not something you do quietly.
         wants_silent: app.get_start_call_silently(),
         relay: network_ui::effective_relay(app),
+        lends_relay: false,
         routes: delivery::my_record_hex(),
     }
 }
@@ -5084,11 +5088,16 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 prekey: previous.map(|p| p.prekey.clone()).unwrap_or_default(),
                 relay: previous.map(|p| p.relay.clone()).unwrap_or_default(),
                 relay_secret: previous.map(|p| p.relay_secret.clone()).unwrap_or_default(),
+                lends_relay: previous.is_some_and(|p| p.lends_relay),
                 connection_mode: c.connection_mode,
                 route_record: previous.map(|p| p.route_record.clone()).unwrap_or_default(),
                 route_sequence: previous.and_then(|p| p.route_sequence),
                 message_route: c.message_route,
                 dht_sequence: previous.and_then(|p| p.dht_sequence),
+                // What they sent about themselves; this app has no screen for it.
+                bio: previous.map(|p| p.bio.clone()).unwrap_or_default(),
+                color: previous.map(|p| p.color.clone()).unwrap_or_default(),
+                avatar: previous.map(|p| p.avatar.clone()).unwrap_or_default(),
             }
         })
         .collect()
@@ -5826,6 +5835,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         profile: config::ProfileData {
             display_name: app.get_display_name().to_string(),
             status_message: app.get_status_message().to_string(),
+            // Picture, About and colour are set in the iced app; carried over.
+            ..previous.profile.clone()
         },
         chain: read_chain_config(app),
         input_device: input,
@@ -5879,6 +5890,9 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         relay_invite_secret: previous.relay_invite_secret.clone(),
         fallback_relays: fallback_relay::parse_list(&app.get_fallback_relays_text()),
         use_project_relays: app.get_use_project_relays(),
+        // Carried forward from the iced app, which is where they are set.
+        lend_relay: previous.lend_relay,
+        mesh_relays: previous.mesh_relays.clone(),
         anonymity_mode: app.get_anonymity_mode(),
         anonymity_hops: fallback_relay::parse_list(&app.get_anonymity_hops_text()),
         routes: previous.routes.clone(),
@@ -5950,6 +5964,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         silent_call_mode: app.get_silent_call_mode(),
         start_call_silently: app.get_start_call_silently(),
         echo_cancel: app.get_echo_cancel(),
+        // The classic window has no switch for it; kept as stored.
+        low_data_calls: previous.low_data_calls,
         duck_db: app.get_duck_db().max(0) as u32,
         presence: app.get_my_presence(),
         crash_reporting: app.get_crash_reporting(),

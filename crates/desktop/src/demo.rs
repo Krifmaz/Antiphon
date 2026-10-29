@@ -6,6 +6,10 @@ use iced::widget::qr_code;
 
 /// Robin's made-up id: the contact the demo call is with.
 const ROBIN: &str = "7f3a9c21d4e8b6f0a1c2e3d4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4";
+/// The made-up community's id.
+const CLUB: &str = "c1ab0000000000000000000000000000000000000000000000000000000000c1";
+/// My made-up id, as in the model.
+const ME: &str = "4be1c07d9f2a83e6b5d4c3f2a1908e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7";
 
 /// The demo's whole state: just a model the actions edit.
 pub struct Demo {
@@ -30,6 +34,9 @@ impl Demo {
             me: ui::Me {
                 name: "Azule".into(),
                 status: "Around this evening".into(),
+                bio: "Synths, long walks, terrible puns.".into(),
+                color: "sky".into(),
+                has_picture: false,
                 id: "4be1c07d9f2a83e6b5d4c3f2a1908e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7".into(),
                 fingerprint: "4b:e1:c0:7d:9f:2a:83:e6".into(),
                 qr: qr_code::Data::new(invite.as_bytes()).ok().map(std::sync::Arc::new),
@@ -42,7 +49,14 @@ impl Demo {
             people,
             call: ui::Call::default(),
             conversation: None,
-            transfers: ui::Transfers::default(),
+            transfers: ui::Transfers {
+                active: vec![ui::Transfer { name: "porch-photos.zip".into(), incoming: false, progress: 0.42, detail: "18 MB of 43 MB".into(), paused: false }],
+                queued: vec![
+                    ui::QueuedFile { id: 1, name: "kind-of-blue-liner-notes.pdf".into(), detail: "2.4 MB".into(), held: false },
+                    ui::QueuedFile { id: 2, name: "setlist.txt".into(), detail: "3 KB".into(), held: true },
+                ],
+                ..ui::Transfers::default()
+            },
             network: ui::Network {
                 checks: vec![
                     check("Calling out", CheckState::Good, "Connections you start are what every home router already allows."),
@@ -51,6 +65,7 @@ impl Demo {
                 ],
                 port: 6002,
                 relay: String::new(),
+                ..Default::default()
             },
             settings: ui::Settings {
                 theme: "stoop".into(),
@@ -63,6 +78,7 @@ impl Demo {
                 ptt_key: "Caps Lock".into(),
                 noise_suppression: true,
                 echo_cancel: true,
+                low_data: false,
                 auto_gain: true,
                 preset: "Natural".into(),
                 presets: ["Natural", "Warm", "Clear", "Broadcast", "Thin Mic Rescue"].map(String::from).to_vec(),
@@ -75,9 +91,16 @@ impl Demo {
             },
             notice: None,
             first_run: false,
-            device: ui::Device { phone: false, files: true, ptt_keys: true },
+            device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true },
             phone: None,
+            account: ui::Account { can_pick_file: true, ..Default::default() },
+            communities: communities(),
+            space_invites: vec![ui::SpaceInvite { name: "Bass players".into(), detail: "Community · from June Alvarez · Mon".into() }],
+            channel: None,
         };
+        // Chosen colours, as the engine registers saved ones.
+        ui::avatars::set(&model.me.id, "", &model.me.color, |_| None);
+        ui::avatars::set(ROBIN, "", "sage", |_| None);
         Demo { model, next_id: 100 }
     }
 
@@ -128,9 +151,42 @@ impl Demo {
             cellular_used: "Used this month: 38 MB.".into(),
             keep_listening: true,
             listen_on_saver: false,
-            phrase: None,
             talking: false,
         });
+    }
+
+    /// The made-up community's id, for the tour to open it.
+    pub fn club() -> String {
+        CLUB.into()
+    }
+
+    /// A channel's made-up messages: #general of the club has some.
+    fn open_channel(&mut self, community: &str, channel: u32) {
+        let post = |id: u64, who: (&str, &str), text: &str, time: &str, day: Option<&str>| Line {
+            mine: who.0 == ME,
+            author: who.1.into(),
+            author_id: who.0.into(),
+            ..line(id, false, text, time, day)
+        };
+        let mara = ("c0ffee00112233445566778899aabbccddeeff00112233445566778899aabbcc", "Mara Lindqvist");
+        let theo = ("a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9", "Theo Park");
+        let lines = if community == CLUB && channel == 0 {
+            vec![
+                post(1, (ROBIN, "Robin Okafor"), "welcome everyone! this is the place for the thursday listening nights", "18:02", Some("Yesterday")),
+                post(2, mara, "so glad this exists", "18:05", None),
+                post(3, mara, "who's picking the record this week?", "18:05", None),
+                post(4, (ME, "Azule"), "I can bring Kind of Blue, the old pressing", "18:11", None),
+                Line { edited: true, ..post(5, theo, "yes please. I'll do snacks", "18:14", None) },
+                post(6, (ROBIN, "Robin Okafor"), "porch opens at 8. bring a chair if you have one", "09:30", Some("Today")),
+                Line { deleted: true, ..post(7, theo, "", "09:41", None) },
+            ]
+        } else {
+            Vec::new()
+        };
+        if let Some(c) = self.model.communities.iter_mut().find(|c| c.id == community) {
+            c.unread = 0;
+        }
+        self.model.channel = Some(ui::ChannelView { community: community.into(), channel, lines });
     }
 
     /// Robin's id, for the tour to open their conversation.
@@ -197,6 +253,28 @@ impl Demo {
                     c.lines.push(Line { delivery, ..line(self.next_id, true, &text, "now", None) });
                 }
             }
+            Action::OpenChannel { community, channel } => self.open_channel(&community, channel),
+            Action::QueueMove { id, up } => {
+                let q = &mut self.model.transfers.queued;
+                if let Some(at) = q.iter().position(|f| f.id == id) {
+                    let to = if up { at.checked_sub(1) } else { (at + 1 < q.len()).then_some(at + 1) };
+                    if let Some(to) = to {
+                        q.swap(at, to);
+                    }
+                }
+            }
+            Action::QueueHold { id, held } => {
+                if let Some(f) = self.model.transfers.queued.iter_mut().find(|f| f.id == id) {
+                    f.held = held;
+                }
+            }
+            Action::QueueRemove(id) => self.model.transfers.queued.retain(|f| f.id != id),
+            Action::Post { community, channel, text } => {
+                self.next_id += 1;
+                if let Some(v) = self.model.channel.as_mut().filter(|v| v.community == community && v.channel == channel) {
+                    v.lines.push(Line { author: "Azule".into(), author_id: ME.into(), ..line(self.next_id, true, &text, "now", None) });
+                }
+            }
             Action::Verify(id, on) => {
                 if let Some(p) = self.model.people.iter_mut().find(|p| p.id == id) {
                     p.verified = on;
@@ -208,6 +286,7 @@ impl Demo {
             Action::NoiseSuppression(on) => self.model.settings.noise_suppression = on,
             Action::EchoCancel(on) => self.model.settings.echo_cancel = on,
             Action::AutoGain(on) => self.model.settings.auto_gain = on,
+            Action::LowData(on) => self.model.settings.low_data = on,
             Action::ReducedMotion(on) => self.model.settings.reduced_motion = on,
             Action::SetName(n) => self.model.me.name = n,
             Action::SetStatus(s) => self.model.me.status = s,
@@ -228,6 +307,11 @@ impl Demo {
                 if on {
                     self.model.call.video.push(mine("my-camera", "You", &fake_face(480, 360, [190, 140, 105], [140, 58, 64], [200, 214, 228])));
                 }
+            }
+            Action::SetBio(bio) => self.model.me.bio = bio,
+            Action::ProfileColor(color) => {
+                ui::avatars::set(&self.model.me.id, "", &color, |_| None);
+                self.model.me.color = color;
             }
             Action::ShareScreen(on) => {
                 self.model.call.sharing = on;
@@ -265,7 +349,46 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
         route: "Automatic".into(),
         volume_db: 0.0,
         muted: false,
+        bio: if id == ROBIN { "Bass, coffee, records. Usually around after eight.".into() } else { String::new() },
     }
+}
+
+/// The made-up group chats and communities.
+fn communities() -> Vec<ui::Community> {
+    let member = |id: &str, name: &str, role: &str, status: &str| ui::Member { id: id.into(), name: name.into(), status: status.into(), role: role.into(), me: id == ME };
+    let channel = |id: u32, name: &str, topic: &str| ui::Channel { id, name: name.into(), topic: topic.into() };
+    vec![
+        ui::Community {
+            id: "5a7c0000000000000000000000000000000000000000000000000000000000a7".into(),
+            name: "Saturday crew".into(),
+            group: true,
+            detail: "Group chat · 3 members".into(),
+            channels: vec![channel(0, "general", "")],
+            members: vec![member(ME, "Azule", "Member", ""), member(ROBIN, "Robin Okafor", "Member", ""), member("deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb", "June Alvarez", "Member", "")],
+            unread: 0,
+            can_post: true,
+            can_invite: true,
+            ..ui::Community::default()
+        },
+        ui::Community {
+            id: CLUB.into(),
+            name: "The listening club".into(),
+            group: false,
+            detail: "Community · 4 members".into(),
+            channels: vec![channel(0, "general", "Thursday nights on the porch"), channel(1, "records", "What's on the turntable"), channel(2, "gigs", "Shows worth going to")],
+            members: vec![
+                member(ROBIN, "Robin Okafor", "Owner", "Hosting thursday"),
+                member(ME, "Azule", "Moderator", "Around this evening"),
+                member("c0ffee00112233445566778899aabbccddeeff00112233445566778899aabbcc", "Mara Lindqvist", "Member", ""),
+                member("a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9", "Theo Park", "Member", "snacks guy"),
+            ],
+            unread: 3,
+            can_post: true,
+            can_invite: true,
+            can_manage_channels: true,
+            ..ui::Community::default()
+        },
+    ]
 }
 
 /// A made-up message; `day` starts a new day above it.

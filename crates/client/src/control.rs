@@ -30,6 +30,11 @@ pub struct Hello {
     /// exchanging another link. Defaulted for peers on older builds.
     #[serde(default)]
     pub relay: String,
+    /// Whether this person lets contacts with no relay of their own listen
+    /// at `relay` (spec §8 "Server-side opt-in"). Defaulted to no for peers
+    /// on older builds.
+    #[serde(default)]
+    pub lends_relay: bool,
     /// This person's signed route list (spec §8), hex: where to leave
     /// mail for them while they're offline. Defaulted for older builds.
     #[serde(default)]
@@ -109,6 +114,20 @@ pub enum ControlMessage {
     /// getting a fresh crypto counter, because reusing an AEAD nonce would
     /// be catastrophic. See `antiphon_net::fec`.
     AudioMissing { sequences: Vec<u32> },
+    /// How our voice is reaching the person who sent this (spec §2,
+    /// automatic bandwidth), about once a second: the share of our voice
+    /// packets they lost since their last report (`None` when they heard
+    /// none, e.g. while we were quiet), their clock's `sent_ms`, and the
+    /// echo of our last report's `sent_ms` with how long they held it, for
+    /// the round trip. See `crate::link_quality`.
+    LinkReport {
+        loss_pct: Option<u8>,
+        sent_ms: u32,
+        #[serde(default)]
+        echo_ms: Option<u32>,
+        #[serde(default)]
+        held_ms: u32,
+    },
     /// "I am here if you want to talk" -- a silent call (spec §9).
     ///
     /// A *request* for less attention, never more: the receiver's own
@@ -208,6 +227,28 @@ pub enum ControlMessage {
     /// person at the other end, base64 -- the same fragments that would
     /// otherwise go to their mailbox. See `crate::community`.
     Community { data: String },
+    /// The rest of the sender's profile (spec §1 profile info): picture,
+    /// About line and colour. Its own message rather than more `Hello`
+    /// fields, so the picture never pushes `Hello` past one datagram, and
+    /// a peer from before profiles drops it as unknown. Sent after
+    /// `Hello` when a call opens and again whenever it changes.
+    Profile(ProfileCard),
+}
+
+/// What [`ControlMessage::Profile`] carries. Every field defaults, so a
+/// card from a newer build with more in it still reads.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProfileCard {
+    /// A line or two about them ("Plays bass. Usually up late."), at most
+    /// `crate::profile::MAX_BIO` characters.
+    pub bio: String,
+    /// The colour they picked for their avatar, an id from
+    /// `antiphon_ui::PROFILE_COLORS`, or empty for the automatic one.
+    pub color: String,
+    /// Their picture: a small square JPEG, base64 (`crate::profile`), or
+    /// empty for none.
+    pub avatar: String,
 }
 
 /// One piece of an MLS message. A Welcome carries the whole ratchet tree
@@ -244,6 +285,7 @@ mod tests {
             presence: Some(1),
             wants_silent: true,
             relay: "relay.example:3479".to_string(),
+            lends_relay: true,
             routes: String::new(),
         });
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();

@@ -120,7 +120,11 @@ const TOUR: &[Step] = &[
         },
     },
     Step { name: "settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Appearance)) },
+    Step { name: "profile", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Profile)) },
     Step { name: "voice", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Voice)) },
+    Step { name: "account", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Account)) },
+    Step { name: "community", size: (1280.0, 820.0), setup: |app| app.go(Route::Community(Demo::club(), 0)) },
+    Step { name: "spaces", size: (1280.0, 820.0), setup: |app| app.go(Route::Spaces) },
     Step {
         name: "invite",
         size: (1280.0, 820.0),
@@ -142,6 +146,8 @@ const TOUR: &[Step] = &[
         },
     },
     Step { name: "phone-call", size: (400.0, 820.0), setup: |app| app.go(Route::Person(Demo::robin())) },
+    Step { name: "phone-spaces", size: (400.0, 820.0), setup: |app| app.go(Route::Spaces) },
+    Step { name: "phone-community", size: (400.0, 820.0), setup: |app| app.go(Route::Community(Demo::club(), 0)) },
     Step { name: "phone-settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Phone)) },
     Step {
         name: "light",
@@ -242,6 +248,13 @@ impl App {
             match out {
                 Out::Toast(text, kind) => self.ui.toast(text, kind),
                 Out::Copy(text) => tasks.push(iced::clipboard::write(text)),
+                Out::Relaunch => {
+                    // The toast saying so was queued just before; the new
+                    // copy shows the restored account.
+                    engine.shutdown();
+                    crate::account::relaunch();
+                    tasks.push(iced::exit());
+                }
                 Out::AddFailed(why) => self.ui.add_failed(why),
                 Out::Show(route) => {
                     for a in self.ui.show(route) {
@@ -255,9 +268,16 @@ impl App {
                         engine.act(a, open.as_deref());
                     }
                 }
+                Out::SpaceCreated(id) => {
+                    for a in self.ui.space_created(id) {
+                        let open = self.ui.open_person().map(str::to_string);
+                        engine.act(a, open.as_deref());
+                    }
+                }
             }
         }
         let open = self.ui.open_person().map(str::to_string);
+        engine.set_viewing(self.ui.open_channel());
         **model = engine.model(open.as_deref());
         if !engine.out.is_empty() {
             tasks.push(Task::done(Message::Tick(Instant::now())));
@@ -269,6 +289,7 @@ impl App {
     fn refresh(&mut self) {
         let open = self.ui.open_person().map(str::to_string);
         if let Source::Live { engine, model } = &mut self.source {
+            engine.set_viewing(self.ui.open_channel());
             **model = engine.model(open.as_deref());
         }
         self.apply_look();

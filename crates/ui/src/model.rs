@@ -33,9 +33,47 @@ pub struct Model {
     pub first_run: bool,
     /// What this device can do.
     pub device: Device,
-    /// What only a phone has: the loudspeaker, battery and data rules, the
-    /// recovery phrase. `None` on a desktop, which hides all of it.
+    /// What only a phone has: the loudspeaker, battery and data rules.
+    /// `None` on a desktop, which hides all of it.
     pub phone: Option<Phone>,
+    /// Keeping the account: the recovery phrase, backups, moving devices.
+    pub account: Account,
+    /// Group chats and communities you are in (or waiting to be let into),
+    /// in the order the list shows them.
+    pub communities: Vec<Community>,
+    /// Invitations to group chats and communities, waiting for an answer.
+    pub space_invites: Vec<SpaceInvite>,
+    /// The channel on screen, once the app has loaded it (after
+    /// [`crate::Action::OpenChannel`]).
+    pub channel: Option<ChannelView>,
+}
+
+/// Settings > Account: everything about not losing the account.
+#[derive(Clone, Default)]
+pub struct Account {
+    /// The recovery phrase, while it is shown; `None` while hidden.
+    pub phrase: Option<String>,
+    /// A slow job is running ("Sealing your backup…"); the buttons that
+    /// would start another wait until it is done.
+    pub busy: Option<String>,
+    /// An open offer to move this account to another device.
+    pub moving: Option<Moving>,
+    /// Whether this device can show a save or open dialog for a backup
+    /// file. A phone without one still saves to Downloads.
+    pub can_pick_file: bool,
+}
+
+/// An open offer to move the account to another device.
+#[derive(Clone)]
+pub struct Moving {
+    /// The link the new device opens.
+    pub link: String,
+    /// The same link as a QR code, for a phone's camera.
+    pub qr: Option<std::sync::Arc<qr_code::Data>>,
+    /// Where it stands, in words ("Waiting for your other device").
+    pub status: String,
+    /// The account has arrived on the other device.
+    pub done: bool,
 }
 
 /// The phone's own settings and state.
@@ -57,8 +95,6 @@ pub struct Phone {
     pub keep_listening: bool,
     /// Keep listening in the background even on battery saver.
     pub listen_on_saver: bool,
-    /// The recovery phrase, while it is shown; `None` while hidden.
-    pub phrase: Option<String>,
     /// The push-to-talk pad is held.
     pub talking: bool,
 }
@@ -72,6 +108,9 @@ pub struct Device {
     pub files: bool,
     /// A push-to-talk key can be bound (desktop keyboards).
     pub ptt_keys: bool,
+    /// Group chats and communities work on this device; without them the
+    /// screens for them are not offered.
+    pub communities: bool,
 }
 
 /// The person using the app.
@@ -81,6 +120,12 @@ pub struct Me {
     pub name: String,
     /// Status line ("Around this evening").
     pub status: String,
+    /// A line or two about me, shown to contacts.
+    pub bio: String,
+    /// My avatar colour's id ([`crate::PROFILE_COLORS`]); empty for automatic.
+    pub color: String,
+    /// Whether I have a profile picture (registered in [`crate::avatars`]).
+    pub has_picture: bool,
     /// Their identity key, hex: the avatar colour seed.
     pub id: String,
     /// The key's fingerprint in groups, for reading aloud.
@@ -130,6 +175,8 @@ pub struct Person {
     pub volume_db: f32,
     /// Silenced for you only; they are not told.
     pub muted: bool,
+    /// What they say about themselves, as they last sent it.
+    pub bio: String,
 }
 
 /// What a person last said about being around.
@@ -267,6 +314,10 @@ pub struct Line {
     pub mine: bool,
     /// Who wrote it; empty means the conversation's person (or me).
     pub author: String,
+    /// The author's id (identity key, hex) where a conversation has more
+    /// than two people in it; their avatar and taking a message down use
+    /// it. Empty in a conversation with one person.
+    pub author_id: String,
     /// What it says.
     pub text: String,
     /// "14:02".
@@ -279,6 +330,8 @@ pub struct Line {
     pub edited: bool,
     /// Kept at hand (pinned on this device only).
     pub pinned: bool,
+    /// Taken down by its author or a moderator; drawn as a faint note.
+    pub deleted: bool,
     /// (emoji, how many).
     pub reactions: Vec<(String, u32)>,
     /// A file instead of text: (name, size).
@@ -312,24 +365,23 @@ pub struct Transfers {
     pub offer_thumbnail: Option<iced_core::image::Handle>,
     /// Transfers under way.
     pub active: Vec<Transfer>,
-    /// Files chosen for someone and waiting for a call with them, shown in
-    /// their conversation and taken out with [`Action::Unqueue`].
-    pub waiting: Vec<Waiting>,
-    /// Files can be chosen for a person with no call up: they wait in
-    /// [`waiting`](Self::waiting) and go at the next call. The phone app
-    /// keeps such a queue; the desktop offers files only during a call.
-    pub pick_anytime: bool,
+    /// Files waiting their turn, in the order they will go. One goes at a
+    /// time: the call and the files share one connection.
+    pub queued: Vec<QueuedFile>,
 }
 
-/// A file waiting for the next call with the person it is for.
+/// A file waiting to be sent.
 #[derive(Clone, Debug, Default)]
-pub struct Waiting {
-    /// The app's id for it, handed back in [`Action::Unqueue`].
+pub struct QueuedFile {
+    /// Its place in the queue, stable while it waits.
     pub id: u64,
-    /// Who it is for: the person's id.
-    pub person: String,
     /// The file's name.
     pub name: String,
+    /// Its size, and who it is for when that isn't the person on screen
+    /// ("4.2 MB · for Robin, on your next call").
+    pub detail: String,
+    /// Held back: skipped until let go, without losing its place.
+    pub held: bool,
 }
 
 /// A file on its way.
@@ -356,6 +408,15 @@ pub struct Network {
     pub port: u16,
     /// The relay to be reachable through; empty for none.
     pub relay: String,
+    /// A line on the relay actually in use when it is not simply yours
+    /// (a fallback, the mesh's, a contact's); empty when there is nothing to say.
+    pub relay_note: String,
+    /// Whether contacts with no relay may listen at yours.
+    pub lend_relay: bool,
+    /// Whether anonymity mode is on.
+    pub anonymity: bool,
+    /// Its hops, comma-separated `host:port[#key]`.
+    pub hops: String,
 }
 
 /// One line of the reachability check.
@@ -408,6 +469,9 @@ pub struct Settings {
     pub noise_suppression: bool,
     /// Echo cancellation is on.
     pub echo_cancel: bool,
+    /// "Low data" calls (spec §2 automatic bandwidth): voice held at
+    /// 8 kbit/s and no video. On a phone, the data saver.
+    pub low_data: bool,
     /// Automatic level is on.
     pub auto_gain: bool,
     /// The voice preset in use ("Natural", "Broadcast", ...).
@@ -460,4 +524,80 @@ impl std::fmt::Display for Transmit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }
+}
+
+/// A group chat or a community, as the list and its screen show it.
+#[derive(Clone, Debug, Default)]
+pub struct Community {
+    /// Its id (hex), stable for its whole life.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// A group chat (one conversation, anyone may invite) rather than a
+    /// community (channels and roles).
+    pub group: bool,
+    /// A line under the name ("Community · 6 members").
+    pub detail: String,
+    /// Its channels, in order; a group chat has the one.
+    pub channels: Vec<Channel>,
+    /// Who is in it.
+    pub members: Vec<Member>,
+    /// Messages from others not read yet.
+    pub unread: u32,
+    /// Why it can't be used yet, or any more ("Waiting to be let in",
+    /// "You're no longer in this"); `None` while you're in it.
+    pub waiting: Option<String>,
+    /// You may post in it.
+    pub can_post: bool,
+    /// You may invite people.
+    pub can_invite: bool,
+    /// You may add channels.
+    pub can_manage_channels: bool,
+}
+
+/// One channel of a community.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Channel {
+    /// Its number within the community.
+    pub id: u32,
+    /// Its name, without the hash.
+    pub name: String,
+    /// What it is for, if anyone said.
+    pub topic: String,
+}
+
+/// Someone in a group chat or community.
+#[derive(Clone, Debug, Default)]
+pub struct Member {
+    /// Their key there (hex): their avatar seed.
+    pub id: String,
+    /// The name they go by there.
+    pub name: String,
+    /// Their status line there.
+    pub status: String,
+    /// Their role ("Owner", "Moderator", "Member").
+    pub role: String,
+    /// It is me.
+    pub me: bool,
+}
+
+/// An invitation to a group chat or community.
+#[derive(Clone, Debug, Default)]
+pub struct SpaceInvite {
+    /// What it is called.
+    pub name: String,
+    /// Who invited you, and when ("Community · from Robin · 2 h ago").
+    pub detail: String,
+}
+
+/// The messages of one channel.
+#[derive(Clone, Debug, Default)]
+pub struct ChannelView {
+    /// The community's id.
+    pub community: String,
+    /// The channel's number.
+    pub channel: u32,
+    /// The messages, oldest first; [`Line::author`] and
+    /// [`Line::author_id`] say who wrote each.
+    pub lines: Vec<Line>,
 }

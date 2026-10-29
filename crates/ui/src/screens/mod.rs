@@ -1,7 +1,9 @@
 //! The window: picks the wide or narrow layout and lays dialogs, toasts and
 //! the notice over it.
 
+mod account;
 mod call;
+mod community;
 mod conversation;
 mod dialogs;
 mod first_run;
@@ -52,6 +54,8 @@ fn wide<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Route::Home => home::view(ui, m),
         Route::Person(id) => conversation::view(ui, m, id),
         Route::Settings(section) => settings::view(ui, m, *section),
+        Route::Spaces => community::list(ui, m, false),
+        Route::Community(id, channel) => community::view(ui, m, id, *channel),
     };
     let main = match m.notice.as_deref() {
         Some(n) => column![notice(n), main].into(),

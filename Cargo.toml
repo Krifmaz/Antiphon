@@ -65,6 +65,13 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.hkdf]
 opt-level = 3
+# Argon2id is built to be slow; unoptimised it is slow enough (seconds per
+# backup at the real cost) that a debug build looks hung when it saves or
+# opens an account backup.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 # Live captions (spec §7): the speech model is matrix multiplication all
 # the way down, and unoptimised it runs tens of times slower than real
@@ -82,6 +89,15 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.gemm-f32]
 opt-level = 3
+
+# The voice codec, for the same reason: every packet of every call is
+# encoded and decoded through it. Its debug assertions are off as well:
+# one of them, in the fullband path the app never selects (see
+# `antiphon_net::voice`), fires on ordinary speech, and a release build
+# never checks it anyway.
+[profile.dev.package.mousiki]
+opt-level = 3
+debug-assertions = false
 
 [profile.release]
 lto = true

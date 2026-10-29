@@ -23,6 +23,9 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 futures = { version = "0.3", features = ["executor"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Wipes the identity seed in an account backup when it is dropped
+# (`account_backup.rs`, shared with the desktop).
+zeroize = "1.9.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }

@@ -31,6 +31,12 @@ pub struct Contact {
     /// to keep them. Per contact, as on the desktop: how long a
     /// conversation should linger depends on who it is with.
     pub expire_after_secs: Option<u64>,
+    /// What they say about themselves, as they last sent it.
+    pub bio: String,
+    /// Their chosen avatar colour's id, or empty for the automatic one.
+    pub color: String,
+    /// Their profile picture as they last sent it (small JPEG, base64).
+    pub avatar: String,
 }
 
 impl Contact {
@@ -159,6 +165,7 @@ impl Contacts {
             verified: false,
             first_seen_secs: now_secs,
             expire_after_secs: None,
+            ..Contact::default()
         });
         self.sort();
         Ok(format!("Added {name}."))
@@ -183,6 +190,7 @@ impl Contacts {
             verified: false,
             first_seen_secs: now_secs,
             expire_after_secs: None,
+            ..Contact::default()
         });
         self.sort();
     }

@@ -225,9 +225,8 @@ fn message<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, fi
     hover(container(body).padding([2, 0]).width(Length::Fill), overlay)
 }
 
-/// A file they offered, files on their way, and files waiting for the
-/// next call with `person`.
-pub fn transfers<'a>(m: &'a Model, person: &'a str) -> El<'a, Msg> {
+/// A file they offered, files on their way, and those waiting their turn.
+pub fn transfers<'a>(m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut col = column![].spacing(8).padding([0, 20]);
     if let Some((name, size)) = m.transfers.offer.as_ref() {
@@ -272,24 +271,31 @@ pub fn transfers<'a>(m: &'a Model, person: &'a str) -> El<'a, Msg> {
             .style(theme::card_raised),
         );
     }
-    // On a call with them, a waiting file is only waiting its turn behind
-    // the one being sent.
-    let when = if m.call.with(person) { "Waiting its turn" } else { "Goes on your next call" };
-    for w in m.transfers.waiting.iter().filter(|w| w.person == person) {
-        col = col.push(
-            container(
+    if !m.transfers.queued.is_empty() {
+        let mut rows = column![row![label("Up next"), faint(m.transfers.queued.len().to_string()).size(11)].spacing(8).align_y(Alignment::Center)].spacing(4);
+        let last = m.transfers.queued.len() - 1;
+        for (i, q) in m.transfers.queued.iter().enumerate() {
+            let name = t(q.name.as_str()).size(13).font(theme::semibold()).color(if q.held { p.faint } else { p.text }).wrapping(Wrapping::None);
+            let detail = if q.held { format!("{} · held", q.detail) } else { q.detail.clone() };
+            rows = rows.push(
                 row![
                     icon(Icon::File, 14.0, p.muted),
-                    t(w.name.as_str()).size(13).font(theme::semibold()).width(Length::Fill),
-                    faint(when).size(11.5),
-                    icon_btn(Icon::X, "Don't send", Some(Msg::Do(Action::Unqueue(w.id)))),
+                    column![name, faint(detail).size(11.5).wrapping(Wrapping::None)].spacing(1).width(Length::Fill),
+                    icon_btn(Icon::Up, "Sooner", (i > 0).then_some(Msg::Do(Action::QueueMove { id: q.id, up: true }))),
+                    icon_btn(Icon::Down, "Later", (i < last).then_some(Msg::Do(Action::QueueMove { id: q.id, up: false }))),
+                    icon_btn_kind(
+                        Icon::Clock,
+                        if q.held { "Let it go" } else { "Hold it back" },
+                        if q.held { Btn::IconOn } else { Btn::Icon },
+                        Some(Msg::Do(Action::QueueHold { id: q.id, held: !q.held }))
+                    ),
+                    icon_btn(Icon::X, "Remove", Some(Msg::Do(Action::QueueRemove(q.id)))),
                 ]
-                .spacing(8)
+                .spacing(6)
                 .align_y(Alignment::Center),
-            )
-            .padding([8, 14])
-            .style(theme::card_raised),
-        );
+            );
+        }
+        col = col.push(container(rows).padding([8, 14]).style(theme::card_raised));
     }
     col.into()
 }

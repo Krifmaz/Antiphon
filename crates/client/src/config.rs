@@ -5,11 +5,28 @@ use antiphon_audio::ChainConfig;
 pub struct ProfileData {
     pub display_name: String,
     pub status_message: String,
+    /// A line or two about you, shown to contacts (`crate::profile`).
+    #[serde(default)]
+    pub bio: String,
+    /// Your avatar colour's id (`antiphon_ui::PROFILE_COLORS`), or empty
+    /// for the one picked from your key.
+    #[serde(default)]
+    pub color: String,
+    /// Your picture as sent to contacts: a small JPEG, base64, or empty.
+    /// Kept here, in the config file, so a backup of the config carries it.
+    #[serde(default)]
+    pub avatar: String,
 }
 
 impl Default for ProfileData {
     fn default() -> Self {
-        Self { display_name: "You".to_string(), status_message: "Online".to_string() }
+        Self {
+            display_name: "You".to_string(),
+            status_message: "Online".to_string(),
+            bio: String::new(),
+            color: String::new(),
+            avatar: String::new(),
+        }
     }
 }
 
@@ -101,6 +118,16 @@ pub struct AppConfig {
     /// Whether the project's own relays are tried after yours.
     #[serde(default = "default_true")]
     pub use_project_relays: bool,
+    /// Let contacts with no relay of their own listen at `relay_server`,
+    /// so they can be rung too (spec §8 "Server-side opt-in": off by
+    /// default). Said in invite links and at the start of every call.
+    #[serde(default)]
+    pub lend_relay: bool,
+    /// Relays that relays you used said they peer with, kept so they are
+    /// there to fall back on when those relays are down. Learned, never
+    /// typed; see `crate::fallback_relay`.
+    #[serde(default)]
+    pub mesh_relays: Vec<String>,
     /// Anonymity mode (spec §3): relays to route calls through, `host:port`
     /// each, in order. Two or more turn it on. See `crate::anonymity`.
     #[serde(default)]
@@ -418,6 +445,11 @@ pub struct AppConfig {
     /// spec's default too.
     #[serde(default = "default_true")]
     pub echo_cancel: bool,
+    /// "Low data" calls (spec §2 automatic bandwidth): voice held at
+    /// 8 kbit/s in 60 ms packets and no video, for metered or poor links.
+    /// Off by default -- calls adapt by themselves anyway.
+    #[serde(default)]
+    pub low_data_calls: bool,
     /// How far to lower the other side while you talk, in dB (spec §1
     /// "Ducking"). Zero is off.
     #[serde(default)]
@@ -593,6 +625,10 @@ pub struct Contact {
     /// their relay before you have ever spoken.
     #[serde(default)]
     pub relay_secret: String,
+    /// They let contacts with no relay of their own listen at `relay`, as
+    /// their invite or their last call said. See `crate::fallback_relay`.
+    #[serde(default)]
+    pub lends_relay: bool,
     /// Per-conversation override (spec §3): 0 automatic, 1 direct, 2 relay.
     /// See `crate::connection_mode`.
     #[serde(default)]
@@ -612,6 +648,15 @@ pub struct Contact {
     /// replayed older record can't move them back.
     #[serde(default)]
     pub dht_sequence: Option<u64>,
+    /// Their About line, as they last sent it (`ControlMessage::Profile`).
+    #[serde(default)]
+    pub bio: String,
+    /// Their avatar colour's id, as they last sent it; empty for automatic.
+    #[serde(default)]
+    pub color: String,
+    /// Their picture, as they last sent it: a small JPEG, base64.
+    #[serde(default)]
+    pub avatar: String,
 }
 
 /// A freeform panel's position and size in logical pixels, relative to its
@@ -816,6 +861,7 @@ impl Default for AppConfig {
             silent_call_mode: 0,
             start_call_silently: false,
             echo_cancel: true,
+            low_data_calls: false,
             duck_db: 0,
             presence: 0,
             crash_reporting: false,
@@ -827,6 +873,8 @@ impl Default for AppConfig {
             relay_invite_secret: String::new(),
             fallback_relays: Vec::new(),
             use_project_relays: true,
+            lend_relay: false,
+            mesh_relays: Vec::new(),
             anonymity_hops: Vec::new(),
             anonymity_mode: false,
             routes: crate::delivery::default_routes(),

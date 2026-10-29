@@ -1,0 +1,244 @@
+//! Group chats and communities for the desktop's engine: what the screens
+//! show of them, and carrying out what the person does in them.
+//!
+//! Everything about a space -- its signed manifest, its MLS group, the
+//! queue of what is waiting to go out, the history of each channel -- is
+//! `antiphon_client::community`'s, sealed on disk. Reading all of that is
+//! too slow to do every frame, so the screens' copy is rebuilt only when
+//! the community module says something changed (its revision moves) or a
+//! different channel comes on screen.
+
+use antiphon_client::community::{self, Event, Store};
+use antiphon_client::{config, connection_mode, delivery, history};
+use antiphon_crypto::community::{perm, Key, Kind};
+use antiphon_ui as ui;
+
+use crate::engine::{clock_time, day_label, short_time};
+
+/// The screens' copy of every space, kept between frames.
+#[derive(Default)]
+pub struct Spaces {
+    /// The community module's revision the copy was built at; `None`
+    /// before the first build.
+    built_at: Option<u64>,
+    /// The channel the copy of messages is for.
+    built_for: Option<(String, u32)>,
+    /// Every space, as the list shows them.
+    communities: Vec<ui::Community>,
+    /// Invitations waiting for an answer.
+    invites: Vec<ui::SpaceInvite>,
+    /// The open channel's messages.
+    channel: Option<ui::ChannelView>,
+}
+
+impl Spaces {
+    /// What the screens show: every space, the invitations, and the
+    /// messages of `viewing` (the channel on screen, which counts as read).
+    pub fn model(&mut self, viewing: Option<(&str, u32)>) -> (Vec<ui::Community>, Vec<ui::SpaceInvite>, Option<ui::ChannelView>) {
+        let revision = community::revision();
+        let viewing_owned = viewing.map(|(id, ch)| (id.to_string(), ch));
+        if self.built_at != Some(revision) || self.built_for != viewing_owned {
+            self.rebuild(viewing);
+            self.built_at = Some(revision);
+            self.built_for = viewing_owned;
+        }
+        (self.communities.clone(), self.invites.clone(), self.channel.clone())
+    }
+
+    /// Reads every space again from disk.
+    fn rebuild(&mut self, viewing: Option<(&str, u32)>) {
+        let Some(store) = Store::app() else {
+            self.communities.clear();
+            self.invites.clear();
+            self.channel = None;
+            return;
+        };
+        let cfg = config::load();
+        let mut spaces: Vec<community::Space> = store.ids().iter().filter_map(|id| store.load(id)).collect();
+        spaces.sort_by_key(|s| s.manifest().name.to_lowercase());
+        self.communities = spaces
+            .iter()
+            .map(|s| {
+                let id = delivery::hex(&s.id().0);
+                // The one on screen is read as it arrives.
+                let unread = if viewing.is_some_and(|(v, _)| v == id) {
+                    store.mark_read(&s.id());
+                    0
+                } else {
+                    store.unread(&s.id())
+                };
+                community_model(s, unread)
+            })
+            .collect();
+        self.invites = store
+            .invites()
+            .into_iter()
+            .map(|i| {
+                let from = cfg
+                    .contacts
+                    .iter()
+                    .find(|c| c.identity_key.eq_ignore_ascii_case(&delivery::hex(&i.from.0)))
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| i.card.name.clone());
+                let kind = if i.kind == Kind::Group { "Group chat" } else { "Community" };
+                ui::SpaceInvite { name: i.name.clone(), detail: format!("{kind} · from {from} · {}", short_time(i.at_secs)) }
+            })
+            .collect();
+        self.channel = viewing.and_then(|(id, channel)| {
+            let space = spaces.iter().find(|s| delivery::hex(&s.id().0) == id)?;
+            Some(channel_model(&store, space, channel))
+        });
+    }
+
+    /// Carries out one of the space actions. Returns the id of a space just
+    /// made (for the screen to open), or why the action failed.
+    pub fn act(&mut self, action: ui::Action) -> Result<Option<String>, String> {
+        use ui::Action as A;
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        match action {
+            A::CreateSpace { name, group } => {
+                let kind = if group { Kind::Group } else { Kind::Community };
+                let id = store.create(kind, &name, false)?;
+                return Ok(Some(delivery::hex(&id.0)));
+            }
+            A::AcceptSpaceInvite(index) => {
+                let id = store.accept_invite(index, false)?;
+                return Ok(Some(delivery::hex(&id.0)));
+            }
+            A::DeclineSpaceInvite(index) => store.decline_invite(index),
+            A::Post { community, channel, text } => {
+                let id = key(&community)?;
+                store.with_space(&id, |space, _| {
+                    let (outs, event) = space.post(channel, &text, None)?;
+                    Ok(((), outs, vec![event]))
+                })?;
+            }
+            A::EditPost { community, id: message, text } => {
+                let id = key(&community)?;
+                store.with_space(&id, |space, identity| {
+                    let me = identity.public().identity_key;
+                    let outs = space.edit(message, &text)?;
+                    Ok(((), outs, vec![Event::Edited { id: message, sender: me, text: text.trim().to_string() }]))
+                })?;
+            }
+            A::DeletePost { community, id: message, author } => {
+                let id = key(&community)?;
+                let author = connection_mode::decode_hex32(&author).ok_or("whose message that is isn't known")?;
+                store.with_space(&id, |space, _| Ok(((), space.delete(message, author)?, vec![Event::Deleted { id: message, author }])))?;
+            }
+            A::InviteToSpace { community, person } => {
+                let id = key(&community)?;
+                let cfg = config::load();
+                let contact = cfg.contacts.iter().find(|c| c.identity_key.eq_ignore_ascii_case(&person)).ok_or("They aren't one of your people")?;
+                let who = connection_mode::decode_hex32(&contact.identity_key).ok_or("They have no key saved yet; call them once first")?;
+                let name = contact.name.clone();
+                store.with_space(&id, |space, identity| Ok(((), space.invite(identity, who, &name)?, vec![Event::Changed])))?;
+            }
+            A::AddChannel { community, name } => {
+                let id = key(&community)?;
+                store.with_space(&id, |space, identity| {
+                    let outs = space.update(identity, |m| {
+                        // One past the highest, so a removed channel's
+                        // number is never reused for a different one.
+                        let next = m.channels.iter().map(|c| c.id).max().map_or(0, |n| n + 1);
+                        m.channels.push(antiphon_crypto::community::Channel { id: next, name: name.clone(), topic: String::new() });
+                    })?;
+                    Ok(((), outs, vec![Event::Changed]))
+                })?;
+            }
+            A::LeaveSpace(community) => {
+                let id = key(&community)?;
+                // A space you were never let into has nobody to tell.
+                let left = store.with_space(&id, |space, identity| {
+                    if space.removed || space.joining.is_some() {
+                        return Ok(((), Vec::new(), Vec::new()));
+                    }
+                    Ok(((), space.leave(identity)?, vec![Event::Changed]))
+                });
+                left?;
+                store.forget(&id);
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+}
+
+/// A space's id from its hex.
+fn key(hex: &str) -> Result<Key, String> {
+    connection_mode::decode_hex32(hex).map(Key).ok_or_else(|| "That isn't one of yours".to_string())
+}
+
+/// One space as the screens show it.
+fn community_model(s: &community::Space, unread: u32) -> ui::Community {
+    let m = s.manifest();
+    let me = s.me();
+    let joined = s.joining.is_none() && !s.removed;
+    let group = m.kind == Kind::Group;
+    let members = m
+        .members
+        .iter()
+        .map(|x| {
+            let k = x.key.0;
+            let role = if m.is_owner(&k) { "Owner".to_string() } else { m.roles.get(x.role as usize).map(|r| r.name.clone()).unwrap_or_default() };
+            ui::Member {
+                id: delivery::hex(&k),
+                name: s.name_of(&k),
+                status: s.card(&k).map(|c| c.status.clone()).unwrap_or_default(),
+                role,
+                me: k == me,
+            }
+        })
+        .collect::<Vec<_>>();
+    let count = members.len();
+    ui::Community {
+        id: delivery::hex(&s.id().0),
+        name: m.name.clone(),
+        group,
+        detail: format!("{} · {count} {}", if group { "Group chat" } else { "Community" }, if count == 1 { "member" } else { "members" }),
+        channels: m.channels.iter().map(|c| ui::Channel { id: c.id, name: c.name.clone(), topic: c.topic.clone() }).collect(),
+        members,
+        unread,
+        waiting: if s.joining.is_some() {
+            Some("Waiting to be let in: whoever invited you adds you when their app next hears from yours".into())
+        } else if s.removed {
+            Some("You're no longer in this".into())
+        } else {
+            None
+        },
+        can_post: joined && m.can(&me, perm::POST, None),
+        can_invite: joined && m.can(&me, perm::INVITE, None),
+        can_manage_channels: joined && !group && m.can(&me, perm::MANAGE_CHANNELS, None),
+    }
+}
+
+/// A channel's messages from its history, oldest first, with who wrote
+/// each and a day rule where the day changes. Replies show in the channel
+/// with the rest; threads are not shown apart yet.
+fn channel_model(store: &Store, space: &community::Space, channel: u32) -> ui::ChannelView {
+    let me = space.me();
+    let log = history::load(&store.dir, &community::channel_log(&space.id(), channel), &store.key);
+    let mut last_day = None;
+    let lines = log
+        .iter()
+        .map(|msg| {
+            let sender = msg.sender.as_deref().and_then(connection_mode::decode_hex32).unwrap_or(me);
+            let day = day_label(msg.at_secs);
+            let line = ui::Line {
+                id: msg.id,
+                mine: sender == me,
+                author: space.name_of(&sender),
+                author_id: delivery::hex(&sender),
+                text: if msg.deleted { String::new() } else { msg.text.clone() },
+                deleted: msg.deleted,
+                time: clock_time(msg.at_secs),
+                day: (last_day.as_ref() != Some(&day)).then(|| day.clone()),
+                edited: msg.edited,
+                ..ui::Line::default()
+            };
+            last_day = Some(day);
+            line
+        })
+        .collect();
+    ui::ChannelView { community: delivery::hex(&space.id().0), channel, lines }
+}

@@ -11,7 +11,7 @@
 //! the app's business (`crate::video_capture` on desktops).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -63,18 +63,106 @@ impl Drop for Sender {
 }
 
 /// Everything video on one call.
-#[derive(Default)]
 pub struct CallVideo {
     /// The other side's pictures.
     remote: Mutex<Decoder>,
     /// Our streams being sent.
     senders: Mutex<HashMap<Stream, Sender>>,
+    /// Percent of each stream's byte budget to use, from the call's
+    /// automatic bandwidth (spec §2); 0 pauses sending. Shared with every
+    /// sender thread.
+    share: Arc<AtomicU8>,
+    /// Everyone else in a mesh group call, who gets the same datagrams as
+    /// the primary connection. Shared with every sender thread.
+    extra: Arc<Mutex<Vec<Arc<PeerConnection>>>>,
+    /// Their pictures, by group leg id.
+    legs: Mutex<HashMap<u64, Decoder>>,
+    /// Once a group call moves to a group relay's room, datagrams go here
+    /// instead (sealed and sent once, for everyone, by the room) and no
+    /// longer to the primary connection or the legs.
+    room: Arc<Mutex<Option<Room>>>,
+    /// Asks every sender for a whole picture with its next frame.
+    keyframe: Arc<AtomicBool>,
+}
+
+/// Where a group relay's room takes our video datagrams.
+pub type Room = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
+
+impl Default for CallVideo {
+    fn default() -> Self {
+        Self {
+            remote: Mutex::default(),
+            senders: Mutex::default(),
+            share: Arc::new(AtomicU8::new(100)),
+            extra: Arc::default(),
+            legs: Mutex::default(),
+            room: Arc::default(),
+            keyframe: Arc::default(),
+        }
+    }
 }
 
 impl CallVideo {
     /// Video for a call with nothing on yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets how much of its usual budget video may use, in percent: video
+    /// gives way first when the link struggles, and at 0 it pauses (the
+    /// other side's tile goes away) until the link recovers.
+    pub fn set_share(&self, percent: u8) {
+        self.share.store(percent.min(100), Ordering::Relaxed);
+    }
+
+    /// Sets who else in a group call our video goes to, besides the
+    /// primary connection (spec §3 group calls). Called as people come
+    /// and go; a newcomer gets a whole picture straight away.
+    pub fn set_group_peers(&self, peers: Vec<Arc<PeerConnection>>) {
+        *self.extra.lock().unwrap() = peers;
+    }
+
+    /// Sends our video into a group relay's room from now on (spec §3
+    /// past the mesh), or stops doing so with `None`.
+    pub fn set_room(&self, room: Option<Room>) {
+        *self.room.lock().unwrap() = room;
+        self.request_keyframe();
+    }
+
+    /// Has every stream send a whole picture with its next frame, for
+    /// someone who has just arrived.
+    pub fn request_keyframe(&self) {
+        self.keyframe.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes one video datagram from group leg `leg`.
+    pub fn receive_from(&self, leg: u64, datagram: &[u8]) {
+        self.legs.lock().unwrap().entry(leg).or_default().push(datagram);
+    }
+
+    /// The group's pictures now showing, as `(leg, stream, version)`.
+    /// Pictures that went quiet are dropped, and so are people with none.
+    pub fn leg_versions(&self) -> Vec<(u64, Stream, u64)> {
+        let mut legs = self.legs.lock().unwrap();
+        let mut out = Vec::new();
+        legs.retain(|id, d| {
+            d.expire();
+            let v = d.versions();
+            out.extend(v.iter().map(|(s, n)| (*id, *s, *n)));
+            !v.is_empty()
+        });
+        out.sort_by_key(|(id, s, _)| (*id, *s == Stream::Screen));
+        out
+    }
+
+    /// A copy of one of group leg `leg`'s pictures.
+    pub fn leg_picture(&self, leg: u64, stream: Stream) -> Option<Picture> {
+        self.legs.lock().unwrap().get(&leg)?.picture(stream)
+    }
+
+    /// Whether video is paused for the link's sake.
+    pub fn paused_for_bandwidth(&self) -> bool {
+        self.share.load(Ordering::Relaxed) == 0
     }
 
     /// Takes one video datagram from the receive loop.
@@ -127,6 +215,9 @@ impl CallVideo {
         let preview = Arc::new(Mutex::new(None));
         let failed = Arc::new(Mutex::new(None));
         let (t_stop, t_preview, t_failed) = (stop.clone(), preview.clone(), failed.clone());
+        let t_share = self.share.clone();
+        let t_extra = self.extra.clone();
+        let (t_room, t_keyframe) = (self.room.clone(), self.keyframe.clone());
         let thread = std::thread::Builder::new()
             .name(format!("{stream:?} sender"))
             .spawn(move || {
@@ -136,22 +227,62 @@ impl CallVideo {
                 };
                 let period = Duration::from_secs(1) / encoder.fps();
                 let mut last = None;
+                let mut paused = false;
+                // How many group legs got the last frame: one more means a
+                // newcomer, who needs a whole picture rather than patches.
+                let mut sent_to = 0;
                 while !t_stop.load(Ordering::Relaxed) {
                     let started = Instant::now();
                     if let Some(why) = source.failed() {
                         *t_failed.lock().unwrap() = Some(why);
                         break;
                     }
+                    // Spec §3 group calls: the same datagrams to everyone
+                    // in the mesh, or once into the group relay's room.
+                    let room = t_room.lock().unwrap().clone();
+                    let extra: Vec<Arc<PeerConnection>> =
+                        if room.is_some() { Vec::new() } else { t_extra.lock().unwrap().clone() };
+                    if extra.len() > sent_to || t_keyframe.swap(false, Ordering::Relaxed) {
+                        encoder.request_keyframe();
+                    }
+                    sent_to = extra.len();
+                    let send_all = |datagrams: &[Vec<u8>]| match &room {
+                        Some(room) => {
+                            for d in datagrams {
+                                let _ = room.send(d.clone());
+                            }
+                        }
+                        None => runtime.block_on(async {
+                            for to in std::iter::once(&peer).chain(&extra) {
+                                for d in datagrams {
+                                    let _ = to.send_video(d).await;
+                                }
+                            }
+                        }),
+                    };
+                    // Spec §2 automatic bandwidth: pausing tells the other
+                    // side once, as stopping does; resuming starts with a
+                    // whole picture, since theirs was cleared.
+                    let share = t_share.load(Ordering::Relaxed);
+                    if share == 0 {
+                        if !paused {
+                            paused = true;
+                            let stop = encoder.stop();
+                            send_all(&[stop.clone(), stop.clone(), stop]);
+                        }
+                    } else if paused {
+                        paused = false;
+                        encoder.request_keyframe();
+                    }
+                    // Every person in a mesh is another upload of the same
+                    // datagrams, so the budget is split between them.
+                    encoder.set_budget_percent((share as usize / (1 + extra.len())).max(1) as u8);
                     if let Some((n, frame)) = source.latest().filter(|(n, _)| Some(*n) != last) {
                         last = Some(n);
                         *t_preview.lock().unwrap() = Some((n, Arc::new(preview_of(&frame, stream))));
-                        let datagrams = encoder.encode(&frame);
+                        let datagrams = if paused { Vec::new() } else { encoder.encode(&frame) };
                         if !datagrams.is_empty() {
-                            runtime.block_on(async {
-                                for d in &datagrams {
-                                    let _ = peer.send_video(d).await;
-                                }
-                            });
+                            send_all(&datagrams);
                         }
                     }
                     std::thread::sleep(period.saturating_sub(started.elapsed()));
@@ -160,11 +291,23 @@ impl CallVideo {
                 // would leave our last picture frozen on their side until
                 // it times out.
                 let stop = encoder.stop();
-                runtime.block_on(async {
-                    for _ in 0..3 {
-                        let _ = peer.send_video(&stop).await;
+                match t_room.lock().unwrap().clone() {
+                    Some(room) => {
+                        for _ in 0..3 {
+                            let _ = room.send(stop.clone());
+                        }
                     }
-                });
+                    None => {
+                        let extra: Vec<Arc<PeerConnection>> = t_extra.lock().unwrap().clone();
+                        runtime.block_on(async {
+                            for to in std::iter::once(&peer).chain(&extra) {
+                                for _ in 0..3 {
+                                    let _ = to.send_video(&stop).await;
+                                }
+                            }
+                        });
+                    }
+                }
             });
         let Ok(thread) = thread else { return };
         let sender = Sender { stop, thread: Some(thread), preview, failed };
@@ -186,6 +329,7 @@ impl CallVideo {
         let old: Vec<Sender> = self.senders.lock().unwrap().drain().map(|(_, s)| s).collect();
         drop(old);
         self.remote.lock().unwrap().clear();
+        self.legs.lock().unwrap().clear();
     }
 }
 

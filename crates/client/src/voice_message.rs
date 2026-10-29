@@ -13,12 +13,17 @@
 //! - recording through the *same* mic chain a call uses, so what people
 //!   hear matches what they hear from you live
 //!
-//! "Async" in the spec's sense — leave one for someone who is offline —
-//! is **not** possible yet: with no mailbox or relay, nothing can hold a
-//! message for a peer who is not there. Today a voice message is a clip
-//! you send during a call. The transport underneath is the one that will
-//! gain offline delivery when §8's routes exist, so this does not have to
-//! be rebuilt when it does.
+//! **Leaving one for someone who is offline** ([`leave`]) goes the way an
+//! offline file does: the recording is compressed with Opus (about 2 KB a
+//! second, so the two-minute cap is ~240 KB), sealed and pinned to your
+//! pin nodes ([`crate::sharing::share`]), and a short text carrying its
+//! link goes through your message routes (§8) like any other message. The
+//! receiver's app recognises the link ([`parse_link`]), fetches the clip
+//! from the pin node ([`fetch`]) and plays it ([`load_fetched`]). A
+//! client that doesn't know the format still shows readable text.
+//!
+//! Without a pin node nothing could hold the clip while they're away, so
+//! [`leave`] says so instead of sending a link to nothing.
 
 use antiphon_audio::{AudioChain, ChainConfig};
 
@@ -102,6 +107,112 @@ pub fn encode_wav(sample_rate: u32, samples: &[f32]) -> Vec<u8> {
     out
 }
 
+/// The line that marks a message as an offline voice message; the link
+/// follows it as JSON.
+pub const LINK_MARKER: &str = "stoop-voice-message:";
+
+/// An offline voice message's link: everything needed to fetch and open
+/// the clip, and its length for the player.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct VoiceLink {
+    pub name: String,
+    pub size: u64,
+    pub file_id: String,
+    pub key: String,
+    /// Pin nodes holding it, `host:port`.
+    pub holders: Vec<String>,
+    /// Length, in seconds.
+    pub seconds: u32,
+}
+
+/// The message text carrying `link`: a human line first, for any client
+/// that doesn't know the format, then the marker and the link.
+pub fn link_text(link: &VoiceLink) -> String {
+    let json = serde_json::to_string(link).unwrap_or_default();
+    format!("Voice message ({}:{:02})\n{LINK_MARKER}{json}", link.seconds / 60, link.seconds % 60)
+}
+
+/// The voice message in a message's text, if it carries one.
+pub fn parse_link(text: &str) -> Option<VoiceLink> {
+    let json = text.lines().find_map(|l| l.strip_prefix(LINK_MARKER))?;
+    serde_json::from_str(json).ok()
+}
+
+/// Where fetched and outgoing clips are kept: under the config directory,
+/// sealed copies only travel.
+fn clip_dir() -> Option<std::path::PathBuf> {
+    Some(crate::config::config_dir()?.join("voice-messages"))
+}
+
+/// Leaves a voice message for a contact who may be offline (spec §13
+/// "short async audio clips"): compresses `samples`, pins the clip to
+/// your pin nodes and queues its link through your message routes.
+/// Recorded in your history as sent, like a text.
+pub fn leave(
+    runtime: &tokio::runtime::Handle,
+    contact_key_hex: &str,
+    samples: &[f32],
+    sample_rate: u32,
+) -> Result<VoiceLink, String> {
+    let max = MAX_SECONDS as usize * sample_rate as usize;
+    let samples = &samples[..samples.len().min(max)];
+    if samples.is_empty() {
+        return Err("Nothing was recorded.".into());
+    }
+    let clip = antiphon_net::voice::encode_clip(samples, sample_rate);
+    let dir = clip_dir().ok_or("no config directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let name = format!("voice-message-{at}.voice");
+    let path = dir.join(&name);
+    std::fs::write(&path, &clip).map_err(|e| e.to_string())?;
+    let Some(crate::control::ControlMessage::FileLink { size, file_id, key, holders, .. }) =
+        crate::sharing::share(runtime, &path, &name, contact_key_hex)
+    else {
+        return Err("Add a pin node under Shared files first: it holds the message until they're back online.".into());
+    };
+    if holders.is_empty() {
+        // Seeded from here only: no use to someone who comes online
+        // after this device has gone.
+        return Err("No pin node took the message. Check your pin nodes under Shared files.".into());
+    }
+    let seconds = duration_secs(samples, sample_rate).round() as u32;
+    let link = VoiceLink { name, size, file_id, key, holders, seconds };
+    crate::delivery::leave_message(contact_key_hex, &link_text(&link), None)?;
+    Ok(link)
+}
+
+/// Starts fetching a received voice message from its pin nodes, in the
+/// background. [`load_fetched`] has it once it has arrived;
+/// [`crate::sharing::status`] with its `file_id` says how it is going.
+pub fn fetch(runtime: &tokio::runtime::Handle, link: &VoiceLink, from_key_hex: &str) {
+    let Some(dir) = clip_dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    crate::sharing::receive_link(
+        link.name.clone(),
+        link.size,
+        link.file_id.clone(),
+        link.key.clone(),
+        link.holders.clone(),
+        None,
+        from_key_hex.to_string(),
+    );
+    crate::sharing::download(runtime, &link.file_id, dir.join(fetched_name(link)));
+}
+
+/// The fetched clip, decoded at `sample_rate`, once it has arrived.
+pub fn load_fetched(link: &VoiceLink, sample_rate: u32) -> Option<Vec<f32>> {
+    let bytes = std::fs::read(clip_dir()?.join(fetched_name(link))).ok()?;
+    antiphon_net::voice::decode_clip(&bytes, sample_rate)
+}
+
+/// The local name a fetched clip is saved under: its id, so a hostile
+/// name in the link can't choose a path.
+fn fetched_name(link: &VoiceLink) -> String {
+    let id: String = link.file_id.chars().filter(char::is_ascii_hexdigit).take(64).collect();
+    format!("received-{id}.voice")
+}
+
 /// How long a recording is, for the UI's counter.
 pub fn duration_secs(samples: &[f32], sample_rate: u32) -> f32 {
     samples.len() as f32 / sample_rate.max(1) as f32
@@ -110,6 +221,36 @@ pub fn duration_secs(samples: &[f32], sample_rate: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offline_voice_message_link_survives_the_message_text() {
+        let link = VoiceLink {
+            name: "voice-message-1.voice".into(),
+            size: 12_345,
+            file_id: "ab".repeat(32),
+            key: "cd".repeat(32),
+            holders: vec!["10.0.0.1:3479".into()],
+            seconds: 75,
+        };
+        let text = link_text(&link);
+        assert!(text.starts_with("Voice message (1:15)"), "{text}");
+        assert_eq!(parse_link(&text), Some(link));
+        assert_eq!(parse_link("just words"), None);
+        assert_eq!(parse_link(&format!("{LINK_MARKER}{{broken")), None);
+    }
+
+    #[test]
+    fn a_fetched_clip_is_saved_under_its_id_not_its_name() {
+        let link = VoiceLink {
+            name: "../../evil".into(),
+            size: 1,
+            file_id: "ab".repeat(32),
+            key: String::new(),
+            holders: vec![],
+            seconds: 1,
+        };
+        assert_eq!(fetched_name(&link), format!("received-{}.voice", "ab".repeat(32)));
+    }
 
     #[test]
     fn a_voice_message_name_is_recognisable() {

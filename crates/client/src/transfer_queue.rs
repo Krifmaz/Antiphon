@@ -4,7 +4,7 @@
 //! and two transfers would only make both slower while the voice suffers
 //! -- so everything else waits here, in an order the user can change.
 //! Generic over what is queued so the ordering rules are testable without
-//! a phone, a peer or a file.
+//! a phone, a peer or a file. The desktop and the phone both use it.
 
 /// A queued item and the id the interface names it by.
 #[derive(Clone, Debug, PartialEq, Eq)]

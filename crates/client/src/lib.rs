@@ -7,6 +7,7 @@
 //! and the Slint one run the same code, and so the phone app can keep
 //! compiling the wire-level modules in by path from one place.
 
+pub mod account_backup;
 pub mod anonymity;
 pub mod captions;
 pub mod caps_lock;
@@ -30,6 +31,7 @@ pub mod history;
 pub mod introduction;
 pub mod key_capture;
 pub mod link_preview;
+pub mod link_quality;
 pub mod mixer;
 pub mod moderation;
 pub mod notify;
@@ -47,7 +49,9 @@ pub mod sfu_call;
 pub mod state;
 pub mod swarm;
 pub mod theme_presets;
+pub mod profile;
 pub mod transfer_limits;
+pub mod transfer_queue;
 pub mod video;
 pub mod video_capture;
 pub mod voice_message;

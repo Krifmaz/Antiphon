@@ -3,9 +3,9 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, row, scrollable, text_input};
+use iced_widget::{button, column, container, row, scrollable, space, text_input};
 
-use super::{clip, clock, fill, presence_color};
+use super::{clip, clock, community, fill, presence_color};
 use crate::icons::{icon, logo, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
@@ -43,6 +43,42 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         .align_y(Alignment::Center);
 
     let mut list = column![].spacing(2);
+    // Group chats and communities sit above people, in the same scroll.
+    if m.device.communities {
+        let spaces_on = ui.route == Route::Spaces;
+        let mut head = row![
+            button(row![label("Spaces"), faint(m.communities.len().to_string()).size(11)].spacing(8).align_y(Alignment::Center))
+                .padding(0)
+                .style(move |_, _| button::Style::default())
+                .on_press(Msg::Nav(Route::Spaces)),
+            fill(),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        head = head.push(icon_btn(Icon::Plus, "Start a group chat or community", Some(Msg::Dialog(Some(Dialog::NewSpace)))));
+        list = list.push(container(head).padding(pad(2.0, 0.0, 2.0, 10.0)));
+        if !m.space_invites.is_empty() {
+            let n = m.space_invites.len();
+            list = list.push(
+                button(
+                    row![icon(Icon::Sparkle, 15.0, p.accent2), t(if n == 1 { "1 invitation".to_string() } else { format!("{n} invitations") }).size(13.5).font(theme::semibold())]
+                        .spacing(10)
+                        .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([7, 12])
+                .style(theme::btn(if spaces_on { Btn::RowOn } else { Btn::Row }))
+                .on_press(Msg::Nav(Route::Spaces)),
+            );
+        }
+        for c in &m.communities {
+            list = list.push(community::space_row(ui, c, false));
+        }
+        if m.communities.is_empty() && m.space_invites.is_empty() {
+            list = list.push(container(faint("Start one for a few friends, or a community with channels.").size(12.5)).padding([4, 12]));
+        }
+        list = list.push(container(head_people(m, &shown)).padding(pad(14.0, 0.0, 2.0, 10.0)));
+    }
     for person in &shown {
         list = list.push(person_row(ui, m, person));
     }
@@ -56,14 +92,29 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         container(brand).padding(pad(16.0, 12.0, 10.0, 16.0)),
         container(search(ui)).padding([0, 12]),
         container(home).padding(pad(10.0, 8.0, 4.0, 8.0)),
-        container(head).padding(pad(10.0, 8.0, 2.0, 18.0)),
-        scrollable(container(list).padding([0, 8])).height(Length::Fill).style(theme::scroll),
     ];
+    // With spaces, the people heading scrolls with the list under them.
+    if !m.device.communities {
+        col = col.push(container(head).padding(pad(10.0, 8.0, 2.0, 18.0)));
+    } else {
+        col = col.push(space().height(8));
+    }
+    let mut col = col.push(scrollable(container(list).padding([0, 8])).height(Length::Fill).style(theme::scroll));
     if m.call.active() && !on_call_screen(ui, m) {
         col = col.push(container(call_strip(m)).padding([6, 8]));
     }
     col = col.push(me_bar(ui, m));
     container(col).width(theme::SIDEBAR).height(Length::Fill).style(theme::sidebar).into()
+}
+
+/// The people heading inside the scrolling list (when spaces sit above
+/// it): the count, and adding someone.
+fn head_people<'a>(m: &'a Model, shown: &[&'a Person]) -> El<'a, Msg> {
+    let count = if shown.len() == m.people.len() { format!("{}", m.people.len()) } else { format!("{} of {}", shown.len(), m.people.len()) };
+    row![label("People"), faint(count).size(11), fill(), icon_btn(Icon::Plus, "Add someone", Some(Msg::Dialog(Some(Dialog::AddPerson))))]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// The search box, with its magnifier.

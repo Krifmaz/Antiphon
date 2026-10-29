@@ -55,6 +55,51 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
                 rise,
             )
         }
+        Dialog::ConfirmImport => {
+            let open = Action::BackupOpen { passphrase: ui.import_pass.clone() };
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Choose file and replace", Btn::DangerSolid, Some(Msg::Do(open)))].spacing(8);
+            modal(
+                "Replace this account?",
+                muted("This device becomes the account in the backup: its identity, contacts, profile and settings. What is here now is moved into a \"replaced\" folder beside the app's data, not deleted. Stoop restarts when it's done.").size(14),
+                Some(footer.into()),
+                480.0,
+                close,
+                rise,
+            )
+        }
+        Dialog::NewSpace => {
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Start it", Btn::Primary, (!ui.space_name.trim().is_empty()).then_some(Msg::SpaceCreate))].spacing(8);
+            modal(if ui.space_group { "Start a group chat" } else { "Start a community" }, super::community::new_space(ui), Some(footer.into()), 480.0, close, rise)
+        }
+        Dialog::InviteToSpace(id) => modal("Invite someone", super::community::invite(m, id), None, 460.0, close, rise),
+        Dialog::AddChannel(id) => {
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Add channel", Btn::Primary, Some(Msg::ChannelCreate(id.clone())))].spacing(8);
+            modal("Add a channel", super::community::add_channel(ui, id), Some(footer.into()), 440.0, close, rise)
+        }
+        Dialog::ConfirmLeave(id) => {
+            let name = m.communities.iter().find(|c| &c.id == id).map(|c| c.name.as_str()).unwrap_or("it");
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Leave", Btn::DangerSolid, Some(Msg::Do(Action::LeaveSpace(id.clone()))))].spacing(8);
+            modal(
+                "Leave?",
+                muted(format!("You stop getting {name}'s messages, and its history leaves this device. Someone in it can invite you back.")).size(14),
+                Some(footer.into()),
+                460.0,
+                close,
+                rise,
+            )
+        }
+        Dialog::ConfirmReceive => {
+            let receive = Action::MoveReceive(ui.receive_link.trim().to_string());
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Receive and replace", Btn::DangerSolid, Some(Msg::Do(receive)))].spacing(8);
+            modal(
+                "Bring your account here?",
+                muted("This device becomes the account your other device is sending: its identity, contacts, profile and settings. What is here now is moved into a \"replaced\" folder, not deleted. Stoop restarts when it's done.").size(14),
+                Some(footer.into()),
+                480.0,
+                close,
+                rise,
+            )
+        }
     }
 }
 

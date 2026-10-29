@@ -11,9 +11,11 @@
 //! - `--screenshot-tour <dir>`: the demo, walked through each screen, saved
 //!   as PNGs in `dir`, then exits.
 
+mod account;
 mod app;
 mod demo;
 mod engine;
+mod spaces;
 
 use std::path::PathBuf;
 

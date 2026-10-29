@@ -27,11 +27,20 @@
 //!    and "corrects" for it -- destroying a filter that was working and
 //!    chewing up your own voice. Adaptation freezes while you talk.
 //!
-//! What this does *not* do: no residual/non-linear suppressor, so a
-//! speaker driven into distortion leaves something behind, and no
-//! frequency-domain partitioning, so the tail it can cover is bounded by
-//! what a time-domain filter can afford. Both are real limits and are why
-//! this ships switched off rather than on -- see [`EchoCanceller`].
+//! 4. **Residual suppression.** A linear filter can only remove the part
+//!    of the echo that is a filtered copy of the far end. A small speaker
+//!    driven hard distorts, and that distortion is echo no linear filter
+//!    can model. After the filter, a gain follows how much of what is left
+//!    is still echo -- learned, while only the far end is talking, as a
+//!    fraction of the far end's energy -- and turns the block down by that
+//!    much (to at most [`SUPPRESSION_FLOOR`]). While you talk your voice
+//!    dominates what is left, so the gain stays near one and your words go
+//!    through.
+//!
+//! What this does *not* do: frequency-domain partitioning, so the tail it
+//! can cover is bounded by what a time-domain filter can afford, and the
+//! suppressor works on the whole band at once rather than per frequency,
+//! so during double-talk the echo that remains is not removed.
 
 /// Taps in the adaptive filter.
 ///
@@ -78,6 +87,15 @@ const REGULARISATION: f32 = 1e-6;
 /// rather than merely present.
 const DOUBLE_TALK_RATIO: f32 = 2.0;
 
+/// The most the residual suppressor turns a block down: about -30 dB.
+/// Not to zero, so the line never sounds dead while the other side talks.
+pub const SUPPRESSION_FLOOR: f32 = 0.03;
+
+/// How much the residual echo estimate is trusted over the signal: above
+/// one, so a block that is mostly echo is pushed all the way to the floor
+/// rather than halfway there.
+const SUPPRESSION_OVERESTIMATE: f32 = 2.0;
+
 /// Energy below which a block is treated as silence and skipped.
 ///
 /// Adapting on silence learns nothing and drifts.
@@ -85,12 +103,9 @@ const SILENCE_ENERGY: f32 = 1e-7;
 
 /// Removes the echo of the far end from the near-end microphone signal.
 ///
-/// **Ships switched off.** The spec asks for on by default; that is right
-/// for an AEC proven against real rooms and hardware, and this one has
-/// been proven against synthetic echo paths in tests. An echo canceller
-/// that misbehaves damages the user's own voice, which is worse than the
-/// echo it was fixing, so the default waits on real-world evidence rather
-/// than on the code existing.
+/// **On by default**, as spec §1 asks, with the manual off switch for
+/// people on headphones who want the least processing (the app's
+/// `echo_cancel` setting).
 pub struct EchoCanceller {
     sample_rate: u32,
     /// Far-end history as a ring, stored twice over so any window of up
@@ -120,6 +135,13 @@ pub struct EchoCanceller {
     since_estimate: usize,
     /// How well it is working, in dB, for the UI to show.
     erle_db: f32,
+    /// What fraction of the far end's energy is left in the microphone
+    /// after the filter while only the far end talks: the residual echo
+    /// the suppressor expects.
+    residual_ratio: f32,
+    /// The suppressor's gain at the end of the last block, ramped from in
+    /// the next one so a change never clicks.
+    suppress_gain: f32,
 }
 
 impl EchoCanceller {
@@ -140,6 +162,8 @@ impl EchoCanceller {
             accum_count: 0,
             since_estimate: 0,
             erle_db: 0.0,
+            residual_ratio: 0.0,
+            suppress_gain: 1.0,
         }
     }
 
@@ -183,6 +207,8 @@ impl EchoCanceller {
         self.weights.fill(0.0);
         self.delay = 0;
         self.erle_db = 0.0;
+        self.residual_ratio = 0.0;
+        self.suppress_gain = 1.0;
         self.device_changed();
     }
 
@@ -252,6 +278,38 @@ impl EchoCanceller {
             // Smoothed, because a per-block number jumps around too much
             // to read on a meter.
             self.erle_db = self.erle_db * 0.9 + instant.clamp(0.0, 60.0) * 0.1;
+        }
+
+        self.suppress_residual(near_end, far_energy, residual_energy, may_adapt);
+    }
+
+    /// Spec §1, the non-linear part: turns down what the filter left
+    /// behind, by however much of it is still echo.
+    fn suppress_residual(&mut self, block: &mut [f32], far_energy: f32, residual_energy: f32, far_only: bool) {
+        let target = if far_energy <= SILENCE_ENERGY {
+            1.0
+        } else {
+            if far_only {
+                // Learned only while the far end talks alone, when all
+                // that is left really is echo. Capped, so a burst of room
+                // noise cannot teach it to silence everything.
+                let ratio = (residual_energy / far_energy).min(1.0);
+                self.residual_ratio = self.residual_ratio * 0.9 + ratio * 0.1;
+            }
+            let expected_echo = self.residual_ratio * far_energy * SUPPRESSION_OVERESTIMATE;
+            (1.0 - expected_echo / residual_energy.max(SILENCE_ENERGY)).clamp(SUPPRESSION_FLOOR, 1.0)
+        };
+        // Down at once (an echo let through is heard), up gently (a gain
+        // that snaps back pumps).
+        let next = if target < self.suppress_gain { target } else { self.suppress_gain + (target - self.suppress_gain) * 0.3 };
+        let from = self.suppress_gain;
+        self.suppress_gain = next;
+        if from == 1.0 && next == 1.0 {
+            return; // a true passthrough
+        }
+        let n = block.len().max(1) as f32;
+        for (i, sample) in block.iter_mut().enumerate() {
+            *sample *= from + (next - from) * (i + 1) as f32 / n;
         }
     }
 
@@ -474,6 +532,58 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .sum();
         assert!(drift < 0.5, "the filter moved {drift:.3} during double-talk");
+    }
+
+    /// A small speaker driven into distortion: the echo is a soft-clipped
+    /// copy of the far end, which no linear filter can fully model.
+    fn distorted_echo_of(far: &[f32]) -> Vec<f32> {
+        echo_of(far, 0).iter().map(|e| (e * 4.0).tanh() * 0.4).collect()
+    }
+
+    #[test]
+    fn distortion_the_filter_cannot_model_is_suppressed() {
+        let mut aec = EchoCanceller::new(RATE);
+        let far_all = noise(BLOCK * 150, 41);
+        let echo_all = distorted_echo_of(&far_all);
+        let (mut echo_in, mut out) = (0.0, 0.0);
+        for b in 0..150 {
+            let range = b * BLOCK..(b + 1) * BLOCK;
+            let mut near = echo_all[range.clone()].to_vec();
+            let before = energy(&near);
+            aec.process(&mut near, &far_all[range]);
+            if b >= 100 {
+                echo_in += before;
+                out += energy(&near);
+            }
+        }
+        let removed = 10.0 * (echo_in / out.max(1e-12)).log10();
+        assert!(removed > 25.0, "only {removed:.1} dB of distorted echo removed");
+    }
+
+    #[test]
+    fn your_voice_survives_the_suppressor_while_both_talk() {
+        let mut aec = EchoCanceller::new(RATE);
+        let far_all = noise(BLOCK * 200, 43);
+        let echo_all = distorted_echo_of(&far_all);
+        for b in 0..150 {
+            let range = b * BLOCK..(b + 1) * BLOCK;
+            let mut near = echo_all[range.clone()].to_vec();
+            aec.process(&mut near, &far_all[range]);
+        }
+        let my_voice = noise(BLOCK * 50, 99);
+        let (mut voice_in, mut out) = (0.0, 0.0);
+        for b in 150..200 {
+            let range = b * BLOCK..(b + 1) * BLOCK;
+            let voice: Vec<f32> = my_voice[(b - 150) * BLOCK..(b - 149) * BLOCK].iter().map(|v| v * 1.5).collect();
+            let mut near: Vec<f32> = echo_all[range.clone()].iter().zip(&voice).map(|(e, v)| e + v).collect();
+            aec.process(&mut near, &far_all[range]);
+            if b >= 155 {
+                voice_in += energy(&voice);
+                out += energy(&near);
+            }
+        }
+        let change = 10.0 * (out / voice_in).log10();
+        assert!(change > -3.0, "your voice came through {change:.1} dB down");
     }
 
     #[test]
