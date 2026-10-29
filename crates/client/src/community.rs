@@ -1231,6 +1231,32 @@ pub struct Invite {
     pub at_secs: u64,
 }
 
+/// Which messages in a space or channel notify you. Unread counts go up
+/// either way: this is about being interrupted, not about what you see.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Notify {
+    /// Every message from someone else.
+    #[default]
+    All,
+    /// Only messages that name you (`@` and the name you go by there).
+    Mentions,
+    /// None.
+    Nothing,
+}
+
+/// Whether `text` names `name` the way people mention someone: `@name`,
+/// in any case, not followed by more letters (so `@sam` doesn't match
+/// `@samantha`).
+pub fn mentions(text: &str, name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let needle = format!("@{name}");
+    text.match_indices(&needle).any(|(at, _)| !text[at + needle.len()..].chars().next().is_some_and(char::is_alphanumeric))
+}
+
 /// One fragment waiting to leave.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Queued {
@@ -1279,6 +1305,13 @@ struct Hub {
     /// How you appear in each, by id hex. Yours alone, like `ring`.
     #[serde(default)]
     appear: HashMap<String, Appearance>,
+    /// Which messages notify you (spec §13 "per-community and per-channel
+    /// notification settings"): by id hex for a whole space, and by
+    /// `"<id hex>/<channel>"` for one channel, overriding its space's.
+    /// Absent means the default ([`Notify::All`], or the space's for a
+    /// channel). Yours alone, like `ring`.
+    #[serde(default)]
+    notify: HashMap<String, Notify>,
 }
 
 const MAX_OUTBOX: usize = 20_000;
@@ -1298,6 +1331,31 @@ fn bump() {
 
 fn dir(config_dir: &Path) -> PathBuf {
     config_dir.join("communities")
+}
+
+/// Where a space's (or one channel's) notification setting is kept in
+/// the hub.
+fn notify_key(id: &Key, channel: Option<u32>) -> String {
+    match channel {
+        Some(c) => format!("{}/{c}", hex(&id.0)),
+        None => hex(&id.0),
+    }
+}
+
+/// Which messages in this channel notify you: its own setting, else its
+/// space's. A space muted with the older ring rule "Never" (before these
+/// settings existed) stays quiet.
+fn notify_level(hub: &Hub, id: &Key, channel: u32) -> Notify {
+    if let Some(l) = hub.notify.get(&notify_key(id, Some(channel))) {
+        return *l;
+    }
+    if let Some(l) = hub.notify.get(&notify_key(id, None)) {
+        return *l;
+    }
+    if hub.ring.get(&hex(&id.0)).copied() == Some(crate::notify::RingRule::Never.to_i32()) {
+        return Notify::Nothing;
+    }
+    Notify::All
 }
 
 fn space_path(config_dir: &Path, id: &Key) -> PathBuf {
@@ -1451,8 +1509,15 @@ impl Store {
                     let _ = crate::history::save(&self.dir, &log, &self.key, &all);
                     if *sender != me {
                         *hub.unread.entry(hex(&id.0)).or_default() += 1;
-                        // Never is a mute: counted, but no notice.
-                        if hub.ring.get(&hex(&id.0)).copied() != Some(crate::notify::RingRule::Never.to_i32()) {
+                        // Counted either way; whether it interrupts is the
+                        // channel's setting, or the space's.
+                        let level = notify_level(hub, &id, *channel);
+                        let wanted = match level {
+                            Notify::All => true,
+                            Notify::Mentions => mentions(text, &space.name_of(&me)),
+                            Notify::Nothing => false,
+                        };
+                        if wanted {
                             crate::delivery::notice(format!("New message in {} from {}.", space.manifest().name, space.name_of(sender)));
                         }
                     }
@@ -1629,6 +1694,24 @@ impl Store {
             .filter(|(_, id)| self.load(id).is_some_and(|s| !s.removed && s.manifest().is_member(key)))
             .map(|(r, _)| crate::notify::RingRule::from_i32(r))
             .collect()
+    }
+
+    /// Your notification setting for a space (`channel` `None`) or one of
+    /// its channels, as set; `None` means the default.
+    pub fn notify_setting(&self, id: &Key, channel: Option<u32>) -> Option<Notify> {
+        self.hub().notify.get(&notify_key(id, channel)).copied()
+    }
+
+    /// Changes it; `None` goes back to the default.
+    pub fn set_notify(&self, id: &Key, channel: Option<u32>, level: Option<Notify>) {
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        match level {
+            Some(l) => hub.notify.insert(notify_key(id, channel), l),
+            None => hub.notify.remove(&notify_key(id, channel)),
+        };
+        self.save_hub(&hub);
+        bump();
     }
 
     pub fn unread(&self, id: &Key) -> u32 {
@@ -1879,6 +1962,30 @@ pub fn is_member(community: &[u8; 32], key: &[u8; 32]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mention_is_the_whole_name_after_an_at() {
+        assert!(mentions("hey @Sam, you in?", "sam"));
+        assert!(mentions("@sam", "Sam"));
+        assert!(!mentions("hey @samantha", "Sam"), "a longer name isn't a mention");
+        assert!(!mentions("hey sam", "Sam"), "no at, no mention");
+        assert!(!mentions("@", ""));
+        assert!(mentions("@Robin Okafor are you coming", "Robin Okafor"));
+    }
+
+    #[test]
+    fn a_channel_setting_beats_its_space_and_the_old_mute_is_kept() {
+        let id = Key([7; 32]);
+        let mut hub = Hub::default();
+        assert_eq!(notify_level(&hub, &id, 0), Notify::All);
+        hub.ring.insert(hex(&id.0), crate::notify::RingRule::Never.to_i32());
+        assert_eq!(notify_level(&hub, &id, 0), Notify::Nothing, "a space muted before still is");
+        hub.notify.insert(notify_key(&id, None), Notify::Mentions);
+        assert_eq!(notify_level(&hub, &id, 0), Notify::Mentions);
+        hub.notify.insert(notify_key(&id, Some(2)), Notify::All);
+        assert_eq!(notify_level(&hub, &id, 2), Notify::All);
+        assert_eq!(notify_level(&hub, &id, 0), Notify::Mentions, "other channels follow the space");
+    }
 
     struct Person {
         id: IdentityKeyPair,

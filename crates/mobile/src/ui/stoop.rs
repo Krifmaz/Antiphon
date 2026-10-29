@@ -552,6 +552,7 @@ impl App {
             | Action::DeletePost { .. }
             | Action::InviteToSpace { .. }
             | Action::AddChannel { .. }
+            | Action::SpaceNotify { .. }
             | Action::LeaveSpace(_) => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),

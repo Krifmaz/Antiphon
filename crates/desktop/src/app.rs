@@ -124,7 +124,20 @@ const TOUR: &[Step] = &[
     Step { name: "voice", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Voice)) },
     Step { name: "account", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Account)) },
     Step { name: "community", size: (1280.0, 820.0), setup: |app| app.go(Route::Community(Demo::club(), 0)) },
-    Step { name: "spaces", size: (1280.0, 820.0), setup: |app| app.go(Route::Spaces) },
+    Step {
+        name: "community-notify",
+        size: (1280.0, 820.0),
+        setup: |app| {
+            app.go(Route::Community(Demo::club(), 0));
+            app.demo().act(Action::SpaceNotify { community: Demo::club(), channel: None, level: Some(ui::Notify::Mentions) });
+            app.demo().act(Action::SpaceNotify { community: Demo::club(), channel: Some(1), level: Some(ui::Notify::All) });
+            let _ = app.send(Msg::Dialog(Some(ui::Dialog::SpaceNotify(Demo::club()))));
+        },
+    },
+    Step { name: "spaces", size: (1280.0, 820.0), setup: |app| {
+            let _ = app.send(Msg::Dialog(None));
+            app.go(Route::Spaces);
+        } },
     Step {
         name: "invite",
         size: (1280.0, 820.0),

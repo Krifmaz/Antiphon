@@ -140,6 +140,8 @@ pub enum Dialog {
     AddChannel(String),
     /// Are you sure: leave this group chat or community (by id).
     ConfirmLeave(String),
+    /// Which messages notify you in this group chat or community (by id).
+    SpaceNotify(String),
 }
 
 /// How a toast is coloured.
@@ -475,6 +477,15 @@ pub enum Action {
     },
     /// Leave a group chat or community (the dialog already asked).
     LeaveSpace(String),
+    /// Choose which messages notify me in a space or one of its channels.
+    SpaceNotify {
+        /// The group chat or community's id.
+        community: String,
+        /// One channel, or `None` for the whole space.
+        channel: Option<u32>,
+        /// The setting; `None` for a channel follows the space's.
+        level: Option<Notify>,
+    },
 }
 
 /// Everything that can happen in the interface.

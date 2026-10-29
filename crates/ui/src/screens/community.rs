@@ -16,7 +16,7 @@ use super::{clip, fill};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
-use crate::{Action, Channel, Community, Dialog, El, Line, Member, Model, Msg, Route, Ui};
+use crate::{Action, Channel, Community, Dialog, El, Line, Member, Model, Msg, Notify, Route, Ui};
 
 /// How wide the channel column beside a channel is.
 const CHANNELS_W: f32 = 232.0;
@@ -195,6 +195,13 @@ fn header<'a>(c: &'a Community, ch: Option<&'a Channel>, phone: bool) -> El<'a, 
     } else {
         r = r.push(btn_icon(Icon::UserPlus, "Invite", Btn::Default, invite));
     }
+    let quiet = c.notify != Notify::All;
+    r = r.push(icon_btn_kind(
+        if c.notify == Notify::Nothing { Icon::BellOff } else { Icon::Bell },
+        "Notifications",
+        if quiet { Btn::IconOn } else { Btn::Icon },
+        Some(Msg::Dialog(Some(Dialog::SpaceNotify(c.id.clone())))),
+    ));
     r = r.push(icon_btn(Icon::LogOut, "Leave", Some(Msg::Dialog(Some(Dialog::ConfirmLeave(c.id.clone()))))));
     container(r).height(theme::HEADER_H).padding([0, if phone { 8 } else { 20 }]).align_y(Alignment::Center).into()
 }
@@ -445,6 +452,51 @@ pub fn invite<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         col = col.push(faint("Everyone you know is in it already, or you haven't added anyone yet.").size(12.5));
     }
     scrollable(col).height(Length::Shrink).style(theme::scroll).into()
+}
+
+/// Which messages notify you: for the whole space, then (in a community)
+/// for each channel, which can follow the space or choose for itself.
+pub fn notify<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let level = |l: Notify| match l {
+        Notify::All => 0,
+        Notify::Mentions => 1,
+        Notify::Nothing => 2,
+    };
+    let set = |channel: Option<u32>, l: Option<Notify>| Msg::Do(Action::SpaceNotify { community: c.id.clone(), channel, level: l });
+    let whole = tabs(
+        vec![("Every message", set(None, Some(Notify::All))), ("Mentions only", set(None, Some(Notify::Mentions))), ("Nothing", set(None, Some(Notify::Nothing)))],
+        level(c.notify),
+    );
+    let mut col = column![
+        muted(format!("A mention is your name in {} after an @. Unread counts go up either way.", c.name)).size(13.5),
+        field(if c.group { "Notify me about" } else { "For the whole community" }, whole),
+    ]
+    .spacing(14);
+    if !c.group && !c.channels.is_empty() {
+        let mut rows = column![label("Channels")].spacing(8);
+        for ch in &c.channels {
+            let on = ch.notify.map_or(0, |l| level(l) + 1);
+            rows = rows.push(
+                row![
+                    row![icon(Icon::Hash, 14.0, theme::look().muted), t(clip(&ch.name, 18)).size(13.5).font(theme::semibold())].spacing(4).align_y(Alignment::Center).width(Length::Fill),
+                    tabs(
+                        vec![
+                            ("Same", set(Some(ch.id), None)),
+                            ("All", set(Some(ch.id), Some(Notify::All))),
+                            ("Mentions", set(Some(ch.id), Some(Notify::Mentions))),
+                            ("Off", set(Some(ch.id), Some(Notify::Nothing))),
+                        ],
+                        on
+                    ),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(rows);
+    }
+    col.into()
 }
 
 /// Name a new channel.

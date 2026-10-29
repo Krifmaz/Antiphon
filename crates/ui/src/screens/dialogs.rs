@@ -71,6 +71,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Start it", Btn::Primary, (!ui.space_name.trim().is_empty()).then_some(Msg::SpaceCreate))].spacing(8);
             modal(if ui.space_group { "Start a group chat" } else { "Start a community" }, super::community::new_space(ui), Some(footer.into()), 480.0, close, rise)
         }
+        Dialog::SpaceNotify(id) => modal("Notifications", super::community::notify(m, id), None, 520.0, close, rise),
         Dialog::InviteToSpace(id) => modal("Invite someone", super::community::invite(m, id), None, 460.0, close, rise),
         Dialog::AddChannel(id) => {
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Add channel", Btn::Primary, Some(Msg::ChannelCreate(id.clone())))].spacing(8);

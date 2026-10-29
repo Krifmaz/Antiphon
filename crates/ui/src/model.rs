@@ -566,6 +566,20 @@ pub struct Community {
     pub can_invite: bool,
     /// You may add channels.
     pub can_manage_channels: bool,
+    /// Which of its messages notify you.
+    pub notify: Notify,
+}
+
+/// Which messages notify you, in a space or one channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Notify {
+    /// Every message.
+    #[default]
+    All,
+    /// Only those that mention you by name.
+    Mentions,
+    /// None (they are still counted as unread).
+    Nothing,
 }
 
 /// One channel of a community.
@@ -577,6 +591,8 @@ pub struct Channel {
     pub name: String,
     /// What it is for, if anyone said.
     pub topic: String,
+    /// Its own notification setting; `None` follows the space's.
+    pub notify: Option<Notify>,
 }
 
 /// Someone in a group chat or community.

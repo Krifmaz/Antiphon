@@ -67,7 +67,7 @@ impl Spaces {
                 } else {
                     store.unread(&s.id())
                 };
-                community_model(s, unread)
+                community_model(&store, s, unread)
             })
             .collect();
         self.invites = store
@@ -146,6 +146,12 @@ impl Spaces {
                     Ok(((), outs, vec![Event::Changed]))
                 })?;
             }
+            A::SpaceNotify { community, channel, level } => {
+                let id = key(&community)?;
+                // The whole space has no "follow" setting: it is the default.
+                let level = level.or(channel.is_none().then_some(ui::Notify::All)).map(from_ui);
+                store.set_notify(&id, channel, level);
+            }
             A::LeaveSpace(community) => {
                 let id = key(&community)?;
                 // A space you were never let into has nobody to tell.
@@ -169,8 +175,26 @@ fn key(hex: &str) -> Result<Key, String> {
     connection_mode::decode_hex32(hex).map(Key).ok_or_else(|| "That isn't one of yours".to_string())
 }
 
+/// The store's notification setting as the screens name it.
+fn to_ui(n: community::Notify) -> ui::Notify {
+    match n {
+        community::Notify::All => ui::Notify::All,
+        community::Notify::Mentions => ui::Notify::Mentions,
+        community::Notify::Nothing => ui::Notify::Nothing,
+    }
+}
+
+/// The screens' notification setting as the store keeps it.
+fn from_ui(n: ui::Notify) -> community::Notify {
+    match n {
+        ui::Notify::All => community::Notify::All,
+        ui::Notify::Mentions => community::Notify::Mentions,
+        ui::Notify::Nothing => community::Notify::Nothing,
+    }
+}
+
 /// One space as the screens show it.
-fn community_model(s: &community::Space, unread: u32) -> ui::Community {
+fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Community {
     let m = s.manifest();
     let me = s.me();
     let joined = s.joining.is_none() && !s.removed;
@@ -196,7 +220,17 @@ fn community_model(s: &community::Space, unread: u32) -> ui::Community {
         name: m.name.clone(),
         group,
         detail: format!("{} · {count} {}", if group { "Group chat" } else { "Community" }, if count == 1 { "member" } else { "members" }),
-        channels: m.channels.iter().map(|c| ui::Channel { id: c.id, name: c.name.clone(), topic: c.topic.clone() }).collect(),
+        channels: m
+            .channels
+            .iter()
+            .map(|c| ui::Channel { id: c.id, name: c.name.clone(), topic: c.topic.clone(), notify: store.notify_setting(&s.id(), Some(c.id)).map(to_ui) })
+            .collect(),
+        // A space muted with the older ring rule shows as muted here too.
+        notify: match store.notify_setting(&s.id(), None) {
+            Some(n) => to_ui(n),
+            None if store.ring_rule(&s.id()) == Some(antiphon_client::notify::RingRule::Never) => ui::Notify::Nothing,
+            None => ui::Notify::All,
+        },
         members,
         unread,
         waiting: if s.joining.is_some() {

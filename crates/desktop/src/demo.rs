@@ -274,6 +274,18 @@ impl Demo {
                     c.recording = None;
                 }
             }
+            Action::SpaceNotify { community, channel, level } => {
+                if let Some(c) = self.model.communities.iter_mut().find(|c| c.id == community) {
+                    match channel {
+                        None => c.notify = level.unwrap_or_default(),
+                        Some(ch) => {
+                            if let Some(x) = c.channels.iter_mut().find(|x| x.id == ch) {
+                                x.notify = level;
+                            }
+                        }
+                    }
+                }
+            }
             Action::QueueMove { id, up } => {
                 let q = &mut self.model.transfers.queued;
                 if let Some(at) = q.iter().position(|f| f.id == id) {
@@ -376,7 +388,7 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
 /// The made-up group chats and communities.
 fn communities() -> Vec<ui::Community> {
     let member = |id: &str, name: &str, role: &str, status: &str| ui::Member { id: id.into(), name: name.into(), status: status.into(), role: role.into(), me: id == ME };
-    let channel = |id: u32, name: &str, topic: &str| ui::Channel { id, name: name.into(), topic: topic.into() };
+    let channel = |id: u32, name: &str, topic: &str| ui::Channel { id, name: name.into(), topic: topic.into(), notify: None };
     vec![
         ui::Community {
             id: "5a7c0000000000000000000000000000000000000000000000000000000000a7".into(),

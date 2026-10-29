@@ -1407,6 +1407,7 @@ impl Engine {
             | A::DeletePost { .. }
             | A::InviteToSpace { .. }
             | A::AddChannel { .. }
+            | A::SpaceNotify { .. }
             | A::LeaveSpace(_)) => {
                 let invite = matches!(a, A::InviteToSpace { .. });
                 match self.spaces.act(a) {
