@@ -12,7 +12,7 @@ are clean on Linux and Windows.
 | `[~]` | **Partial** — a real but reduced version exists; the gap is stated on the line |
 | `[ ]` | **Not started** — no code for it |
 
-**Score: 184 done · 27 partial · 21 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
+**Score: 184 done · 28 partial · 20 not started** (232 checklist lines in §0–§13, counted by their mark; the 8 items under *Not in the spec, but built* are extra)
 
 **§0 Core Principles: 6 of 6 done.**
 
@@ -343,7 +343,7 @@ mobile, packaging, SFU forwarding, and voice channels inside communities.
 - [x] **Slint declarative UI** for desktop ([`crates/gui/ui/app.slint`](crates/gui/ui/app.slint))
 - [~] Slint markup doubling as the theme format — theming is JSON config, not the markup itself
 - [~] **Desktop UI (Linux, Windows, macOS)** — one Slint UI. Builds, passes the full test suite and is clippy-clean on **Linux** and **Windows**; the [CI pipeline](.github/workflows/ci.yml) builds and tests all three on every push. **Not done:** the window has been opened by hand only on Windows — the Linux and macOS GUI have been compiled and tested, not sat in front of
-- [ ] **Mobile UI (Android, iOS)** — Compose / SwiftUI calling the core over FFI
+- [~] **Mobile UI (Android, iOS)** — **Android** is an iced app in Rust ([`crates/android`](crates/android)), not the Compose-over-FFI the spec suggests: no Java or Kotlin at all, the activity is the platform's own NativeActivity, and the call runs the same crypto, audio and net crates as desktop, so a phone and a desktop call each other. Call (listen, or dial `ip:port` or an invite link; verification code; hold-to-talk or open mic; speaker), Voice (every chain stage and EQ preset, applied live, with a hear-yourself test) and Identity (key, invite, recovery phrase, restore). CI builds a signed APK on every push and releases attach it. **Not done:** chat, files, contacts and history have no Android screens yet; no background call service, so a call lasts only while the app is open; **iOS** not started
 - [~] **Audio backends** — `cpal` abstracts WASAPI / CoreAudio / ALSA, but PipeWire and AAudio are not specifically addressed
 - [ ] **Push notifications** — FCM, APNs / PushKit, persistent socket on desktop
 - [ ] **Packaging** — Flatpak / AppImage / deb, APK, MSI, dmg. The pipeline below produces bare binaries with checksums, not installers

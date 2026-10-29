@@ -43,6 +43,29 @@ A release build must use the stated version: rustc's output changes between
 releases, and two people on different compilers cannot produce the same
 bytes no matter what else they do.
 
+## Android
+
+The Android app is [`crates/android`](crates/android): Rust and iced, no
+Java. It is part of the workspace but compiles to nothing on a desktop, so
+`cargo build` above is unaffected. To build the APK you need the Android
+SDK (a platform matching `target_sdk_version` in its `Cargo.toml`, and
+build-tools), an NDK, and `cargo-apk`:
+
+```bash
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-apk --version 0.10.0 --locked
+export ANDROID_HOME=~/Android/Sdk ANDROID_NDK_ROOT=~/Android/Sdk/ndk/<version>
+cargo apk build -p antiphon-android            # debug, signed with the SDK's debug key
+cargo apk run   -p antiphon-android            # installs and starts it on a connected phone
+```
+
+A `--release` build must be signed: set `CARGO_APK_RELEASE_KEYSTORE` and
+`CARGO_APK_RELEASE_KEYSTORE_PASSWORD`. CI does this from the
+`ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD` repository
+secrets, or with a throwaway key when they are not set -- that APK
+installs, but the next one will not install over it. Logs go to logcat
+under the tag `antiphon`.
+
 ## Verifying a release binary
 
 The goal is that you can build the published source yourself and get a
