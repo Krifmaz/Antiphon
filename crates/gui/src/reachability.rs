@@ -107,19 +107,19 @@ impl Reachability {
 
 /// How a call is currently carried (spec §3).
 ///
-/// One variant today, and that is the honest shape: there is no relay, so
-/// every call is direct. Written as an enum rather than a hardcoded string
-/// because the *point* of showing it is that it will one day differ, and a
-/// UI that only ever says one thing teaches people not to read it.
+/// Anonymity mode (multi-hop) is deferred by the spec itself (§11), so it
+/// has no variant until it exists.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Direct,
+    Relayed,
 }
 
 impl Mode {
     pub fn label(&self) -> &'static str {
         match self {
             Mode::Direct => "Direct",
+            Mode::Relayed => "Relayed",
         }
     }
 
@@ -129,6 +129,11 @@ impl Mode {
             Mode::Direct => {
                 "Connected straight to them, with nothing in between -- which also means \
                  you can each see the other's IP address."
+            }
+            Mode::Relayed => {
+                "Going through a relay that passes along encrypted data -- neither of you \
+                 learns the other's IP address, and the relay can't read or hear anything. \
+                 Slightly slower."
             }
         }
     }

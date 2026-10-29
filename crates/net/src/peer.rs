@@ -2,13 +2,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 use antiphon_crypto::{HandshakeInit, HandshakeMessage, IdentityKeyPair, PublicIdentity, Session};
 use antiphon_protocol::{decode, encode, FrameType};
 
 use crate::error::NetError;
+use crate::socket::AppSocket;
 
 const MAX_DATAGRAM: usize = 4096;
 
@@ -27,8 +27,11 @@ const MAX_DATAGRAM: usize = 4096;
 /// not an error.
 const RECEIVE_BUFFER: usize = 1024 * 1024;
 
-fn widen_receive_buffer(socket: &UdpSocket) {
-    let _ = socket2::SockRef::from(socket).set_recv_buffer_size(RECEIVE_BUFFER);
+fn widen_receive_buffer(socket: &AppSocket) {
+    // A tunneled socket's queue is the tunnel's own, already sized for this.
+    if let Some(socket) = socket.as_udp() {
+        let _ = socket2::SockRef::from(socket).set_recv_buffer_size(RECEIVE_BUFFER);
+    }
 }
 
 /// A "known contact -> direct P2P" connection (spec §3): one UDP socket
@@ -43,7 +46,7 @@ fn widen_receive_buffer(socket: &UdpSocket) {
 /// and nothing about *who*, which made contact pinning and verification
 /// codes impossible to build on top.
 pub struct PeerConnection {
-    socket: Arc<UdpSocket>,
+    socket: Arc<AppSocket>,
     remote: SocketAddr,
     session: Mutex<Session>,
     peer: PublicIdentity,
@@ -67,7 +70,7 @@ impl PeerConnection {
     /// Initiates a handshake to `remote` and blocks (resending every 300ms)
     /// until the peer responds. Call this on the side placing the call.
     pub async fn connect(
-        socket: Arc<UdpSocket>,
+        socket: Arc<AppSocket>,
         remote: SocketAddr,
         identity: &IdentityKeyPair,
     ) -> Result<Self, NetError> {
@@ -117,7 +120,7 @@ impl PeerConnection {
     /// mean both generated the same X25519 keypair, which does not
     /// happen; the connection would be broken anyway if it did.)
     pub async fn punch(
-        socket: Arc<UdpSocket>,
+        socket: Arc<AppSocket>,
         remote: SocketAddr,
         timeout: Duration,
         identity: &IdentityKeyPair,
@@ -171,7 +174,7 @@ impl PeerConnection {
     /// Waits for an incoming handshake from any peer on `socket` and
     /// completes it. Call this on the side receiving the call.
     pub async fn listen(
-        socket: Arc<UdpSocket>,
+        socket: Arc<AppSocket>,
         identity: &IdentityKeyPair,
     ) -> Result<Self, NetError> {
         widen_receive_buffer(&socket);

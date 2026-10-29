@@ -418,7 +418,7 @@ impl App {
                 }
                 if let Ok(identity) = &self.identity {
                     let address = public.unwrap_or(local);
-                    let link = Invite { identity_key: identity.public().identity_key, address }.to_link();
+                    let link = Invite { identity_key: identity.public().identity_key, address, relay: String::new(), relay_secret: None }.to_link();
                     content = content.push(text("Send them this invite. It carries your address and who you are, so nobody else can answer in your place."));
                     content = content.push(text(link.clone()).size(13).wrapping(Wrapping::Glyph));
                     content = content.push(button("Copy invite").on_press(Message::Copy(link)));
@@ -629,7 +629,7 @@ impl App {
         match &self.identity {
             Ok(identity) => {
                 let key = hex(&identity.public().identity_key);
-                let link = Invite { identity_key: identity.public().identity_key, address: String::new() }.to_link();
+                let link = Invite { identity_key: identity.public().identity_key, address: String::new(), relay: String::new(), relay_secret: None }.to_link();
                 content = content
                     .push(text(key.clone()).size(14).wrapping(Wrapping::Glyph))
                     .push(

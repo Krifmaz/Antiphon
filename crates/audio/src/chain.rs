@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::stages::{BandType,
-    AutoGain, Compressor, DeEsser, Gain, HighPassFilter, Limiter, LowPassFilter, NoiseGate, NoiseSuppressor, PeakingEq, PitchShift, Reverb, Stage,
+    AutoGain, Compressor, DeEsser, Gain, HighPassFilter, Limiter, LowPassFilter, NoiseGate, NeuralSuppressor, NoiseSuppressor, PeakingEq, PitchShift, Reverb, Stage,
 };
 
 struct ChainStage {
@@ -12,9 +12,8 @@ struct ChainStage {
 /// The full mic processing chain (spec §1): an ordered list of independently
 /// toggleable stages, run in sequence, in spec order -- Cleanup (gate,
 /// filters, de-esser), Tone (EQ, compressor, limiter, gain), Creative
-/// (pitch shift, reverb). Not yet in this chain: ML noise suppression and
-/// echo cancellation -- both need real-time adaptive/ML techniques well
-/// beyond the other stages here (see the repo README).
+/// (pitch shift, reverb). Noise suppression runs first of all; echo
+/// cancellation lives outside the chain because it needs the far end.
 pub struct AudioChain {
     stages: Vec<ChainStage>,
 }
@@ -29,7 +28,11 @@ impl AudioChain {
         let ns = &config.noise_suppress;
         stages.push(ChainStage {
             enabled: ns.enabled,
-            stage: Box::new(NoiseSuppressor::new(ns.enabled, ns.strength)),
+            stage: if ns.neural && NeuralSuppressor::supports(sample_rate) {
+                Box::new(NeuralSuppressor::new(ns.strength))
+            } else {
+                Box::new(NoiseSuppressor::new(ns.enabled, ns.strength))
+            },
         });
 
         let g = &config.noise_gate;
@@ -233,16 +236,24 @@ pub struct NoiseSuppressConfig {
     pub enabled: bool,
     /// 0..1. Zero is a passthrough; one is severe enough to thin a voice.
     pub strength: f32,
+    /// Use the RNNoise voice model (spec §1) rather than spectral
+    /// subtraction. Falls back to spectral when the device isn't running
+    /// at 48 kHz, the only rate the model knows. Defaulted on, so a config
+    /// saved before the model existed gets it.
+    #[serde(default = "default_true")]
+    pub neural: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for NoiseSuppressConfig {
     fn default() -> Self {
-        // Off, with a moderate strength ready for whoever turns it on.
-        // Off because it is spectral subtraction rather than the trained
-        // model the spec names, and it is better to have someone switch
-        // on something that helps than to have everyone wondering why
-        // their voice sounds processed.
-        Self { enabled: false, strength: 0.4 }
+        // On, with the voice model: it removes background without the
+        // thinning spectral subtraction causes, so there is no reason to
+        // make everyone find the switch.
+        Self { enabled: true, strength: 1.0, neural: true }
     }
 }
 

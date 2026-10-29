@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use antiphon_audio::{start_capture, start_playback, AudioChain, ChainConfig, PlaybackSink};
 use antiphon_crypto::{verification_code, IdentityKeyPair, Invite};
-use antiphon_net::{JitterBuffer, PeerConnection, PopResult};
+use antiphon_net::{AppSocket, JitterBuffer, PeerConnection, PopResult};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -312,9 +312,11 @@ async fn run(
 ) -> Result<String, String> {
     let (peer, expected) = match mode {
         Mode::Listen { port } => {
-            let socket = Arc::new(
+            // AppSocket rather than a bare UdpSocket: it is what the net
+            // crate's handshake takes, so a tunnel can be slotted in later.
+            let socket = Arc::new(AppSocket::from(
                 UdpSocket::bind(("0.0.0.0", port)).await.map_err(|e| format!("Could not open port {port}: {e}"))?,
-            );
+            ));
             let local = format!("{}:{port}", local_ip().unwrap_or_else(|| "0.0.0.0".into()));
             shared.set_phase(generation, Phase::Listening { local: local.clone(), public: None });
             wake();
@@ -331,7 +333,9 @@ async fn run(
             shared.set_phase(generation, Phase::Dialing { remote: target.clone() });
             wake();
             let (remote, expected) = resolve(&target).await?;
-            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await.map_err(|e| format!("Could not open a socket: {e}"))?);
+            let socket = Arc::new(AppSocket::from(
+                UdpSocket::bind(("0.0.0.0", 0)).await.map_err(|e| format!("Could not open a socket: {e}"))?,
+            ));
             tokio::select! {
                 _ = &mut stop => return Ok("Call cancelled.".into()),
                 peer = PeerConnection::connect(socket, remote, &identity) => (peer.map_err(|e| format!("Could not reach {remote}: {e}"))?, expected),

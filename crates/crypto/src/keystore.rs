@@ -16,11 +16,17 @@
 //! same user and finds the file: it has to know this constant too. That is
 //! a speed bump, not a boundary, and is described as one.
 //!
-//! Elsewhere (Linux, macOS) [`available`] returns false and the caller
-//! falls back to a plain file, exactly as before. A fallback that silently
-//! pretended to protect the key would be worse than one that says it did
-//! not: Keychain and libsecret are real work, and claiming them without
-//! doing them is the failure mode this module is here to avoid.
+//! On macOS and Linux the OS keystore -- Keychain, or the Secret Service
+//! (GNOME Keyring, KWallet) -- holds a random 32-byte storage key, and the
+//! blob is sealed with ChaCha20-Poly1305 under it. The keystores are built
+//! for small secrets, so the key lives there and the sealed file stays a
+//! file; the effect is the same as DPAPI: the bytes on disk are useless
+//! without the logged-in user's keyring.
+//!
+//! Where there is no keystore -- a headless Linux box with no Secret
+//! Service running -- [`available`] returns false and the caller falls
+//! back to a plain file, and says so. A fallback that silently pretended
+//! to protect the key would be worse than one that admits it did not.
 
 /// Marks a file whose contents this module sealed.
 ///
@@ -44,7 +50,10 @@ const ENTROPY: &[u8] = b"voip-app identity seed v1";
 
 /// Whether this platform can seal a key.
 pub fn available() -> bool {
-    cfg!(windows)
+    #[cfg(windows)]
+    return true;
+    #[cfg(not(windows))]
+    return keyring_key::get().is_some();
 }
 
 /// Seals `plaintext`, returning a blob that starts with [`MAGIC`].
@@ -162,13 +171,81 @@ fn take_blob(
 }
 
 #[cfg(not(windows))]
-fn platform_wrap(_plaintext: &[u8]) -> Option<Vec<u8>> {
-    None
+fn platform_wrap(plaintext: &[u8]) -> Option<Vec<u8>> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
+    let key = keyring_key::get()?;
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).ok()?;
+    let cipher = ChaCha20Poly1305::new(&Key::from(**key));
+    let sealed = cipher.encrypt(&Nonce::from(nonce), plaintext).ok()?;
+    let mut out = nonce.to_vec();
+    out.extend_from_slice(&sealed);
+    Some(out)
 }
 
 #[cfg(not(windows))]
-fn platform_unwrap(_sealed: &[u8]) -> Option<Vec<u8>> {
-    None
+fn platform_unwrap(sealed: &[u8]) -> Option<Vec<u8>> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
+    if sealed.len() < 12 {
+        return None;
+    }
+    let key = keyring_key::get()?;
+    let (nonce, body) = sealed.split_at(12);
+    let nonce: [u8; 12] = nonce.try_into().ok()?;
+    let cipher = ChaCha20Poly1305::new(&Key::from(**key));
+    cipher.decrypt(&Nonce::from(nonce), body).ok()
+}
+
+/// The storage key kept in the OS keystore on macOS and Linux.
+#[cfg(not(windows))]
+mod keyring_key {
+    use std::sync::OnceLock;
+    use zeroize::Zeroizing;
+
+    /// Frozen: renaming either would orphan every sealed file.
+    const SERVICE: &str = "antiphon";
+    const ACCOUNT: &str = "storage-key";
+
+    /// Looked up once per run. Asking the keystore on every read would
+    /// mean a D-Bus round trip, and on some desktops an unlock prompt,
+    /// each time.
+    static KEY: OnceLock<Option<Zeroizing<[u8; 32]>>> = OnceLock::new();
+
+    pub fn get() -> Option<&'static Zeroizing<[u8; 32]>> {
+        KEY.get_or_init(load_or_create).as_ref()
+    }
+
+    fn load_or_create() -> Option<Zeroizing<[u8; 32]>> {
+        if std::env::var_os("ANTIPHON_NO_KEYSTORE").is_some() {
+            return None;
+        }
+        let entry = keyring::Entry::new(SERVICE, ACCOUNT).ok()?;
+        match entry.get_secret() {
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                let key: [u8; 32] = bytes.as_slice().try_into().ok()?;
+                Some(Zeroizing::new(key))
+            }
+            // Only a definite "not there" creates one. Any other error --
+            // the keyring is locked, the service went away -- must not
+            // mint a new key, or every file sealed under the old one would
+            // become unreadable the next time it worked.
+            Err(keyring::Error::NoEntry) => {
+                let mut key = Zeroizing::new([0u8; 32]);
+                getrandom::fill(&mut key[..]).ok()?;
+                entry.set_secret(&key[..]).ok()?;
+                // Read it back: a store that accepts writes and forgets
+                // them would otherwise seal files nobody can open.
+                let check = Zeroizing::new(entry.get_secret().ok()?);
+                (check.as_slice() == &key[..]).then_some(key)
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -191,32 +268,38 @@ mod tests {
         assert!(unwrap(b"VOIPKEY").is_none(), "a truncated magic must not match");
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_seed_survives_a_round_trip_through_the_keystore() {
+        if !available() {
+            return;
+        }
         let seed = [7u8; 32];
-        let sealed = wrap(&seed).expect("DPAPI is available on Windows");
+        let sealed = wrap(&seed).expect("keystore is available");
         assert!(is_wrapped(&sealed));
         assert_eq!(unwrap(&sealed).as_deref(), Some(&seed[..]));
     }
 
-    #[cfg(windows)]
     #[test]
     fn the_sealed_blob_does_not_contain_the_seed() {
+        if !available() {
+            return;
+        }
         // The whole point. A blob that still had the bytes in it would be
         // a plaintext file with a header.
         let seed = [0xAB; 32];
-        let sealed = wrap(&seed).expect("DPAPI is available on Windows");
+        let sealed = wrap(&seed).expect("keystore is available");
         assert!(
             !sealed.windows(seed.len()).any(|w| w == seed),
             "the seed is sitting in the sealed blob"
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_damaged_blob_is_refused_rather_than_half_read() {
-        let mut sealed = wrap(&[1u8; 32]).expect("DPAPI is available on Windows");
+        if !available() {
+            return;
+        }
+        let mut sealed = wrap(&[1u8; 32]).expect("keystore is available");
         let last = sealed.len() - 1;
         sealed[last] ^= 0xff;
         assert!(unwrap(&sealed).is_none());
@@ -230,10 +313,9 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn a_platform_without_a_keystore_says_so_rather_than_pretending() {
+    fn without_a_keystore_it_says_so_rather_than_pretending() {
         // A fallback that silently claimed to protect the key would be
         // worse than one that admits it did not.
-        assert!(!available());
-        assert!(wrap(&[0u8; 32]).is_none());
+        assert_eq!(available(), wrap(&[0u8; 32]).is_some());
     }
 }

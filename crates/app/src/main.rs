@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use antiphon_audio::{list_input_devices, list_output_devices, start_capture, start_playback, AudioChain, ChainConfig};
 use antiphon_crypto::{verification_code, IdentityKeyPair};
-use antiphon_net::{JitterBuffer, PeerConnection, PopResult};
+use antiphon_net::{AppSocket, JitterBuffer, PeerConnection, PopResult};
 
 /// Loads this machine's long-term identity, generating one on first run
 /// (spec §4). Shared by every call path so both the CLI and the
@@ -40,6 +40,54 @@ enum IdentityAction {
         #[arg(long)]
         force: bool,
     },
+    /// Split the recovery phrase into shares for trusted friends or
+    /// devices; any `--need` of them rebuild it, fewer reveal nothing.
+    Split {
+        #[arg(long, default_value_t = 2)]
+        need: u8,
+        #[arg(long, default_value_t = 3)]
+        of: u8,
+    },
+    /// Restore an identity from recovery shares, each one quoted.
+    RestoreShares {
+        shares: Vec<String>,
+        /// Replace an existing, different identity.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// Saves a restored identity, refusing to silently replace a different one.
+fn restore_identity(seed: [u8; 32], force: bool) -> Result<()> {
+    let restored = antiphon_crypto::IdentityKeyPair::from_master_seed(seed);
+
+    let dir = dirs_config_dir().ok_or_else(|| anyhow::anyhow!("no config directory"))?;
+    let path = antiphon_crypto::store::identity_path(&dir);
+
+    // Overwriting an identity makes you a different person to
+    // every contact who pinned the old key, so it takes an
+    // explicit --force rather than happening because someone
+    // pasted a phrase to see what it did.
+    if path.exists() && !force {
+        let existing = antiphon_crypto::store::load_or_create(&path)?;
+        if existing.public().identity_key == restored.public().identity_key {
+            println!("That already matches this profile's identity. Nothing to do.");
+            return Ok(());
+        }
+        anyhow::bail!(
+            "{} already holds a different identity ({}).
+             Restoring would replace it, and every contact who pinned the old key
+             would see a key-change warning. Re-run with --force if that is what you want,
+             or use --profile <name> to restore into a separate profile instead.",
+            path.display(),
+            hex(&existing.public().identity_key)
+        );
+    }
+
+    antiphon_crypto::store::save(&path, &restored)?;
+    println!("Restored identity {}", hex(&restored.public().identity_key));
+    println!("Saved to {}", path.display());
+    Ok(())
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
@@ -162,6 +210,20 @@ enum Command {
         #[arg(long)]
         output_device: Option<String>,
     },
+    /// Headless test peer: answer every call and send its audio straight
+    /// back, one call at a time, forever. No microphone, speaker or
+    /// keyboard is touched, so it runs on a server or in a container
+    /// (see docker/README.md).
+    Echo {
+        /// UDP port to answer on, on every interface.
+        #[arg(long, default_value_t = 5000)]
+        port: u16,
+        /// Seconds without a frame before a call counts as hung up and the
+        /// next one is answered. The wire has no hang-up message, so
+        /// silence is the only signal.
+        #[arg(long, default_value_t = 5)]
+        idle_secs: u64,
+    },
     /// List available audio input/output devices.
     Devices,
     /// Print (or save) the default audio chain preset as JSON, so it can be
@@ -186,10 +248,7 @@ async fn main() -> Result<()> {
             IdentityAction::Show => {
                 let identity = load_identity()?;
                 println!("Identity: {}", hex(&identity.public().identity_key));
-                println!("Invite:   {}", antiphon_crypto::Invite {
-                    identity_key: identity.public().identity_key,
-                    address: String::new(),
-                }.to_link());
+                println!("Invite:   {}", antiphon_crypto::Invite::new(identity.public().identity_key, "").to_link());
             }
             IdentityAction::ShowPhrase => {
                 let identity = load_identity()?;
@@ -202,34 +261,29 @@ async fn main() -> Result<()> {
             IdentityAction::Restore { phrase, force } => {
                 let seed = antiphon_crypto::mnemonic::seed_from_phrase(&phrase)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let restored = antiphon_crypto::IdentityKeyPair::from_master_seed(seed);
-
-                let dir = dirs_config_dir().ok_or_else(|| anyhow::anyhow!("no config directory"))?;
-                let path = antiphon_crypto::store::identity_path(&dir);
-
-                // Overwriting an identity makes you a different person to
-                // every contact who pinned the old key, so it takes an
-                // explicit --force rather than happening because someone
-                // pasted a phrase to see what it did.
-                if path.exists() && !force {
-                    let existing = antiphon_crypto::store::load_or_create(&path)?;
-                    if existing.public().identity_key == restored.public().identity_key {
-                        println!("That phrase already matches this profile's identity. Nothing to do.");
-                        return Ok(());
-                    }
-                    anyhow::bail!(
-                        "{} already holds a different identity ({}).
-                         Restoring would replace it, and every contact who pinned the old key
-                         would see a key-change warning. Re-run with --force if that is what you want,
-                         or use --profile <name> to restore into a separate profile instead.",
-                        path.display(),
-                        hex(&existing.public().identity_key)
-                    );
+                restore_identity(seed, force)?;
+            }
+            IdentityAction::Split { need, of } => {
+                let identity = load_identity()?;
+                let shares = antiphon_crypto::shamir::split(&identity.master_seed(), need, of)
+                    .map_err(|_| anyhow::anyhow!("--need must be at least 2 and no more than --of"))?;
+                println!("Give each share to a different person or device. Any {need} of these {of}");
+                println!("rebuild your identity; fewer reveal nothing about it.\n");
+                for share in shares {
+                    println!("{}\n", share.to_text());
                 }
-
-                antiphon_crypto::store::save(&path, &restored)?;
-                println!("Restored identity {}", hex(&restored.public().identity_key));
-                println!("Saved to {}", path.display());
+            }
+            IdentityAction::RestoreShares { shares, force } => {
+                let parsed = shares
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        antiphon_crypto::shamir::Share::parse(s)
+                            .map_err(|e| anyhow::anyhow!("share {}: {e}", i + 1))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let seed = antiphon_crypto::shamir::combine(&parsed).map_err(|e| anyhow::anyhow!("{e}"))?;
+                restore_identity(seed, force)?;
             }
         },
         Command::Devices => {
@@ -254,7 +308,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Listen { port, preset, ptt_key, no_ptt, input_device, output_device } => {
-            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
             println!("Listening on {}", socket.local_addr()?);
             let identity = load_identity()?;
             let peer = PeerConnection::listen(socket, &identity).await?;
@@ -262,8 +316,18 @@ async fn main() -> Result<()> {
             announce_peer(&identity, &peer.peer_identity());
             run_call(peer, preset, &ptt_key, no_ptt, input_device, output_device).await?;
         }
+        Command::Echo { port, idle_secs } => {
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
+            let identity = load_identity()?;
+            println!("Echo peer on {}", socket.local_addr()?);
+            println!("Identity: {}", hex(&identity.public().identity_key));
+            tokio::select! {
+                result = run_echo(socket, &identity, Duration::from_secs(idle_secs)) => result?,
+                _ = tokio::signal::ctrl_c() => println!("Shutting down."),
+            }
+        }
         Command::Call { remote, port, preset, ptt_key, no_ptt, input_device, output_device } => {
-            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
             println!("Calling {remote} from {}...", socket.local_addr()?);
             let identity = load_identity()?;
             let peer = PeerConnection::connect(socket, remote, &identity).await?;
@@ -413,6 +477,42 @@ pub(crate) async fn run_call(
     Ok(())
 }
 
+/// Answers calls on `socket` one after another, echoing each caller's
+/// audio frames back unchanged. The FEC payload is returned as is, so the
+/// caller's own sequence numbers and backup copies survive the round trip
+/// and its jitter buffer sees an ordinary stream. Control messages and
+/// file chunks are dropped, as `run_call` drops them.
+async fn run_echo(socket: Arc<AppSocket>, identity: &IdentityKeyPair, idle: Duration) -> Result<()> {
+    loop {
+        let peer = Arc::new(PeerConnection::listen(socket.clone(), identity).await?);
+        println!("Call from {}", peer.remote_addr());
+        announce_peer(identity, &peer.peer_identity());
+
+        // The receive loop's callback is synchronous, so frames are handed
+        // to this task through a channel and sent back from here.
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let recv_task = tokio::spawn(peer.clone().recv_loop(move |msg| {
+            if let antiphon_net::Received::Audio { plaintext, .. } = msg {
+                let _ = tx.send(plaintext);
+            }
+        }));
+
+        // Ends when no frame arrives within `idle`: the caller hung up or
+        // went away.
+        let mut frames: u64 = 0;
+        while let Ok(Some(frame)) = tokio::time::timeout(idle, rx.recv()).await {
+            if let Err(e) = peer.send_audio(&frame).await {
+                eprintln!("[net] send error: {e}");
+            }
+            frames += 1;
+        }
+        // Stops the receive loop before the next listen reads the socket.
+        recv_task.abort();
+        let _ = recv_task.await;
+        println!("Call from {} ended after {frames} frames.", peer.remote_addr());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +526,34 @@ mod tests {
     fn every_ptt_key_choice_parses() {
         for choice in PTT_KEY_CHOICES {
             assert!(ptt::parse_key(choice).is_ok(), "PTT_KEY_CHOICES entry '{choice}' doesn't parse");
+        }
+    }
+
+    /// The echo peer hands a caller's frame back byte for byte, and after
+    /// the idle timeout answers a fresh call on the same socket.
+    #[tokio::test]
+    async fn echo_returns_audio_and_answers_the_next_call() {
+        let server = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
+        let addr = server.local_addr().unwrap();
+        let echo_identity = IdentityKeyPair::generate();
+        tokio::spawn(async move { run_echo(server, &echo_identity, Duration::from_millis(200)).await });
+
+        for round in 0..2u8 {
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
+            let caller = Arc::new(PeerConnection::connect(socket, addr, &IdentityKeyPair::generate()).await.unwrap());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let recv = tokio::spawn(caller.clone().recv_loop(move |msg| {
+                if let antiphon_net::Received::Audio { plaintext, .. } = msg {
+                    let _ = tx.send(plaintext);
+                }
+            }));
+            let frame = vec![round, 1, 2, 3];
+            caller.send_audio(&frame).await.unwrap();
+            let echoed = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+            assert_eq!(echoed, frame);
+            recv.abort();
+            // Let the echo peer time the call out before the next one.
+            tokio::time::sleep(Duration::from_millis(400)).await;
         }
     }
 }

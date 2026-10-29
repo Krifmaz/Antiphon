@@ -14,6 +14,22 @@ pub enum NetError {
     PunchTimeout,
     #[error("no router on this network answered a NAT-PMP request")]
     PortMapUnavailable,
+    #[error("the relay has nobody waiting under that token -- they are not listening, or use a different relay")]
+    RelayNotFound,
+    #[error("the relay did not answer")]
+    RelayTimeout,
+    #[error("the mailbox refused: {}", .0.describe())]
+    MailboxRefused(crate::mailbox::Refusal),
+    #[error("the mailbox did not answer")]
+    MailboxTimeout,
+    #[error("{}", .0.describe())]
+    FileRefused(crate::blob::Refusal),
+    #[error("nobody holding that file answered")]
+    FileHolderTimeout,
+    #[error("the VPN is down and the kill switch is on, so this was not sent over your real connection")]
+    KillSwitch,
+    #[error("none of the DHT bootstrap nodes answered")]
+    DhtUnreachable,
     #[error("{}", .0.explain())]
     PortMapRefused(crate::port_map::ResultCode),
 }

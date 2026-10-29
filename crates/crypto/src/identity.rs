@@ -191,6 +191,13 @@ impl IdentityKeyPair {
         self.signing.sign(message).to_bytes()
     }
 
+    /// The Ed25519 secret, for deriving the per-day blinded signer in
+    /// `dht_record`. Crate-private: nothing outside should sign with
+    /// anything but [`Self::sign`].
+    pub(crate) fn signing_seed(&self) -> [u8; 32] {
+        self.signing.to_bytes()
+    }
+
     pub(crate) fn prekey_secret(&self) -> &StaticSecret {
         &self.prekey_secret
     }

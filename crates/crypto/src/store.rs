@@ -7,15 +7,14 @@
 //! recovery story when someone loses every device?") is exactly this
 //! problem, and it is not answered here.
 //!
-//! **Storage, and what is still missing.** Spec §6 requires private keys
-//! in the OS keystore, never in plaintext. Where a keystore is available
-//! ([`crate::keystore`] -- today, DPAPI on Windows) the seed is sealed
-//! under the logged-in user and the file is no longer readable bytes. An
-//! existing plaintext file is migrated in place the first time it is read,
-//! so nobody has to do anything. Elsewhere -- Linux, macOS -- there is
-//! still no keystore integration and the seed is still written plain;
-//! Keychain and libsecret are separate work, and pretending otherwise
-//! would be worse than saying so.
+//! **Storage.** Spec §6 requires private keys in the OS keystore, never
+//! in plaintext. Where a keystore is available ([`crate::keystore`]: DPAPI
+//! on Windows, Keychain on macOS, the Secret Service on Linux) the seed is
+//! sealed under the logged-in user and the file is no longer readable
+//! bytes. An existing plaintext file is migrated in place the first time
+//! it is read, so nobody has to do anything. Where none is running -- a
+//! headless Linux box -- the seed is still written plain, and the code
+//! says so rather than pretending.
 //!
 //! Sealing is user-scoped, which is its real limit: it stops another
 //! account, or the file copied elsewhere, but not code running as the same

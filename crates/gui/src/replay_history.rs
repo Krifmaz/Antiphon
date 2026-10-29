@@ -14,7 +14,8 @@
 //! - A clip is cut *after* the damage settles, not when it starts. The
 //!   useful clip includes what came after -- a sentence cut off at the
 //!   moment it broke is not something you can make sense of.
-//! - Clips are capped and in memory only, like the ring they come from.
+//! - Clips are capped, in memory only and sealed under the call's key,
+//!   like the ring they come from.
 //!   Writing them to disk would turn a repair aid into a call recording,
 //!   which is a different feature with different consent implications.
 
@@ -60,7 +61,8 @@ pub struct Clip {
     /// How many frames were repaired or concealed.
     pub damaged_frames: u32,
     pub sample_rate: u32,
-    pub samples: Vec<f32>,
+    /// Sealed under the call's replay key ([`crate::sealed_ring`]).
+    pub audio: crate::sealed_ring::SealedAudio,
 }
 
 impl Clip {
@@ -134,11 +136,15 @@ pub fn clip_bounds(
 #[derive(Default, Debug)]
 pub struct ReplayHistory {
     clips: VecDeque<Clip>,
+    /// Clips ever kept on this call, including ones since dropped. The
+    /// replay modes watch this move to know a new moment needs offering.
+    cut: u64,
 }
 
 impl ReplayHistory {
     pub fn push(&mut self, clip: Clip) {
         self.clips.push_front(clip);
+        self.cut += 1;
         while self.clips.len() > MAX_CLIPS {
             self.clips.pop_back();
         }
@@ -150,6 +156,10 @@ impl ReplayHistory {
 
     pub fn get(&self, index: usize) -> Option<&Clip> {
         self.clips.get(index)
+    }
+
+    pub fn cut(&self) -> u64 {
+        self.cut
     }
 
     pub fn clear(&mut self) {
@@ -257,7 +267,7 @@ mod tests {
                 at_seconds: i,
                 damaged_frames: 2,
                 sample_rate: 48_000,
-                samples: vec![],
+                audio: crate::sealed_ring::SealedRing::default().seal(&[]),
             });
         }
         assert_eq!(history.clips().count(), MAX_CLIPS);
@@ -270,7 +280,7 @@ mod tests {
     #[test]
     fn a_label_says_when_and_how_much() {
         let clip =
-            Clip { at_seconds: 125, damaged_frames: 5, sample_rate: 48_000, samples: vec![] };
+            Clip { at_seconds: 125, damaged_frames: 5, sample_rate: 48_000, audio: crate::sealed_ring::SealedRing::default().seal(&[]) };
         let label = clip.label();
         assert!(label.contains("2:05"), "{label}");
         assert!(label.contains("100 ms"), "{label}");
@@ -279,7 +289,19 @@ mod tests {
     #[test]
     fn seconds_under_ten_are_padded_so_labels_line_up() {
         let clip =
-            Clip { at_seconds: 65, damaged_frames: 2, sample_rate: 48_000, samples: vec![] };
+            Clip { at_seconds: 65, damaged_frames: 2, sample_rate: 48_000, audio: crate::sealed_ring::SealedRing::default().seal(&[]) };
         assert!(clip.label().contains("1:05"), "{}", clip.label());
+    }
+
+    #[test]
+    fn the_cut_count_keeps_moving_after_old_clips_drop_off() {
+        // The replay modes watch this to offer a new clip; it must keep
+        // rising once the list is full, or Auto-play would stop at eight.
+        let mut history = ReplayHistory::default();
+        for i in 0..(MAX_CLIPS as u32 + 3) {
+            history.push(Clip { at_seconds: i, damaged_frames: 2, sample_rate: 48_000, audio: crate::sealed_ring::SealedRing::default().seal(&[]) });
+        }
+        assert_eq!(history.cut(), MAX_CLIPS as u64 + 3);
+        assert_eq!(history.clips().count(), MAX_CLIPS);
     }
 }
