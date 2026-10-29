@@ -27,6 +27,9 @@ pub struct Wake;
 
 /// Redraw rate while a level meter is moving.
 const ANIMATION_FRAME: Duration = Duration::from_millis(50);
+/// Redraw rate while a list is gliding after a swipe: the display's own
+/// rate, near enough, since anything less shows as judder.
+const FLING_FRAME: Duration = Duration::from_millis(16);
 /// How often to re-read the insets while the keyboard is up, since it
 /// slides in over several frames and reports no event when it settles.
 const KEYBOARD_POLL: Duration = Duration::from_millis(200);
@@ -110,6 +113,8 @@ pub struct Runner {
     /// Whether the soft keyboard has been asked for, so it is requested or
     /// dismissed only when a text field gains or loses focus.
     keyboard_shown: bool,
+    /// Keeps a swiped list moving after the finger lifts.
+    fling: crate::fling::Fling,
 }
 
 impl Runner {
@@ -128,6 +133,7 @@ impl Runner {
             fingers: 0,
             insets: (0.0, 0.0),
             keyboard_shown: false,
+            fling: crate::fling::Fling::new(),
         }
     }
 
@@ -247,8 +253,9 @@ impl Runner {
         }
         let scale = graphics.viewport.scale_factor();
         let (top, bottom) = (self.insets.0 / scale, self.insets.1 / scale);
+        app.set_insets(top, bottom);
         let mut interface = UserInterface::build(
-            app.view(top, bottom),
+            app.view(),
             graphics.viewport.logical_size(),
             std::mem::take(&mut self.cache),
             &mut graphics.renderer,
@@ -313,8 +320,9 @@ impl Runner {
         app.frame();
         let scale = graphics.viewport.scale_factor();
         let (top, bottom) = (self.insets.0 / scale, self.insets.1 / scale);
+        app.set_insets(top, bottom);
         let mut interface = UserInterface::build(
-            app.view(top, bottom),
+            app.view(),
             graphics.viewport.logical_size(),
             std::mem::take(&mut self.cache),
             &mut graphics.renderer,
@@ -409,18 +417,37 @@ impl ApplicationHandler<Wake> for Runner {
                     graphics.window.request_redraw();
                 }
             }
-            WindowEvent::Touch(touch) => match touch.phase {
-                TouchPhase::Started => self.fingers += 1,
-                TouchPhase::Ended | TouchPhase::Cancelled => {
-                    self.fingers = self.fingers.saturating_sub(1);
-                    if self.fingers == 0 {
-                        if let Some(app) = self.app.as_mut() {
-                            app.touch_ended();
+            WindowEvent::Touch(touch) => {
+                let logical = touch.location.to_logical::<f32>(self.scale());
+                let at = crate::fling::Point { x: logical.x, y: logical.y };
+                let now = Instant::now();
+                match touch.phase {
+                    TouchPhase::Started => {
+                        self.fingers += 1;
+                        if self.fingers == 1 {
+                            self.fling.pressed(now, at);
+                        } else {
+                            self.fling.cancel();
+                        }
+                    }
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        self.fingers = self.fingers.saturating_sub(1);
+                        if self.fingers == 0 {
+                            if touch.phase == TouchPhase::Ended {
+                                self.fling.lifted(now, at);
+                            }
+                            if let Some(app) = self.app.as_mut() {
+                                app.touch_ended();
+                            }
+                        }
+                    }
+                    TouchPhase::Moved => {
+                        if self.fingers == 1 {
+                            self.fling.moved(now, at);
                         }
                     }
                 }
-                TouchPhase::Moved => {}
-            },
+            }
             WindowEvent::CloseRequested => {
                 event_loop.exit();
                 return;
@@ -447,9 +474,21 @@ impl ApplicationHandler<Wake> for Runner {
                 }
             }
         }
+        // A swiped list glides on: each frame scrolls by what friction
+        // leaves of the swipe's speed, as a wheel scroll where the finger
+        // left, which is what iced's scrollables move for.
+        if let Some((at, distance)) = self.fling.step(Instant::now()) {
+            if distance != 0.0 {
+                self.cursor = mouse::Cursor::Available(iced_core::Point::new(at.x, at.y));
+                self.events.push(Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Pixels { x: 0.0, y: distance } }));
+                self.process_events();
+            }
+        }
         let animating = self.app.as_ref().is_some_and(App::is_animating);
         let flow = if self.graphics.is_none() {
             ControlFlow::Wait
+        } else if self.fling.active() {
+            ControlFlow::WaitUntil(Instant::now() + FLING_FRAME)
         } else if animating {
             ControlFlow::WaitUntil(Instant::now() + ANIMATION_FRAME)
         } else if self.keyboard_shown {

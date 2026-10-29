@@ -22,22 +22,26 @@ use crate::{El, Model, Msg, Presence, Route, ToastKind, Ui};
 
 /// The whole window.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    // Everything but the phone layout's own bars keeps clear of the
+    // system's strips; the phone layout runs its bar colours under them.
+    let (top, bottom) = ui.insets;
+    let inset = iced_core::Padding { top, bottom, ..iced_core::Padding::ZERO };
     if m.first_run {
-        return container(first_run::view(ui, m)).width(Length::Fill).height(Length::Fill).style(theme::app_bg).into();
+        return container(first_run::view(ui, m)).padding(inset).width(Length::Fill).height(Length::Fill).style(theme::app_bg).into();
     }
-    let base = if ui.narrow() { phone::view(ui, m) } else { wide(ui, m) };
+    let base = if ui.narrow() { phone::view(ui, m) } else { container(wide(ui, m)).padding(inset).into() };
     let mut layers = stack![container(base).width(Length::Fill).height(Length::Fill).style(theme::app_bg)];
     if let Some(d) = ui.dialog_shown.as_ref() {
         let rise = ui.dialog_rise();
         if rise > 0.001 {
-            layers = layers.push(dialogs::view(ui, m, d, rise));
+            layers = layers.push(container(dialogs::view(ui, m, d, rise)).padding(inset));
         }
     }
     if let Some(layer) = menu::layer(ui, m) {
         layers = layers.push(layer);
     }
     if !ui.toasts.is_empty() {
-        layers = layers.push(toasts(ui));
+        layers = layers.push(container(toasts(ui)).padding(inset));
     }
     layers.into()
 }

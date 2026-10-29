@@ -82,16 +82,19 @@ pub fn starts<'a>(m: &'a Model, stacked: bool) -> El<'a, Msg> {
         (_, CheckState::Warn) => "Reachable, with a catch",
         (_, CheckState::Bad) => "People may not reach you",
     };
+    // Stacked (a phone): icon beside the words, so three fit in a third
+    // of the screen. Side by side (a desktop): icon above.
     let tile = |i: Icon, title: &'a str, line: &'a str, msg: Msg| -> El<'a, Msg> {
-        button(
-            column![
-                container(icon(i, 20.0, p.accent2)).center(40).style(theme::inset),
-                column![t(title).size(14.5).font(theme::semibold()), faint(line).size(12.5)].spacing(3),
-            ]
-            .spacing(14),
-        )
+        let badge = container(icon(i, 20.0, p.accent2)).center(40).style(theme::inset);
+        let words = column![t(title).size(14.5).font(theme::semibold()), faint(line).size(12.5)].spacing(3);
+        let face: El<'a, Msg> = if stacked {
+            row![badge, container(words).width(Length::Fill), icon(Icon::Chevron, 16.0, p.faint)].spacing(14).align_y(Alignment::Center).into()
+        } else {
+            column![badge, words].spacing(14).into()
+        };
+        button(face)
         .width(Length::Fill)
-        .padding(18)
+        .padding(if stacked { 14 } else { 18 })
         .style(move |th, st| {
             let mut s = theme::btn(Btn::Default)(th, st);
             s.border.radius = theme::RADIUS.into();

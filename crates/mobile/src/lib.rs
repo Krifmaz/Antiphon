@@ -34,6 +34,7 @@
 #![warn(missing_docs, clippy::missing_docs_in_private_items)]
 
 pub mod data_rules;
+pub mod fling;
 pub mod queue;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
