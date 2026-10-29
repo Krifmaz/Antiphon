@@ -71,6 +71,7 @@ pub mod mail;
 pub mod memory_seal;
 pub mod mnemonic;
 pub mod push;
+pub mod onion;
 pub mod persona;
 mod ratchet;
 pub mod relay_token;

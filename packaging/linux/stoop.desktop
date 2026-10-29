@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Stoop
+GenericName=Voice chat
+Comment=Direct, end-to-end encrypted voice calls and chat
+Exec=@APP_BIN@
+Icon=stoop
+Terminal=false
+Categories=Network;InstantMessaging;Telephony;AudioVideo;
+Keywords=voice;call;chat;encrypted;voip;
+StartupNotify=true
+StartupWMClass=@APP_BIN@

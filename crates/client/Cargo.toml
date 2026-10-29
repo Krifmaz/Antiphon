@@ -10,6 +10,8 @@ version.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+# Seals what the SFU room relays between members (sfu_call.rs).
+chacha20poly1305 = "0.11.0"
 device_query = "4.0.1"
 dirs = "6.0.0"
 getrandom = "0.4.3"

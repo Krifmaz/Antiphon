@@ -1,4 +1,4 @@
-import { Button, LineEdit, ComboBox, VerticalBox, HorizontalBox, GroupBox, ScrollView, Palette } from "std-widgets.slint";
+import { Button, LineEdit, ComboBox, VerticalBox, HorizontalBox, GroupBox, ScrollView, Palette, TextEdit } from "std-widgets.slint";
 
 // Shared theme tokens so custom-drawn elements (everything below that isn't
 // a plain std-widget) actually follow the Appearance tab's choices instead
@@ -1900,6 +1900,18 @@ export component MainWindow inherits Window {
     // Spec §3: the relay this machine listens at, "" for none.
     in-out property <string> relay-server: "";
     callback new-invite-secret();
+    // Spec §3 fallback relays and §6 reachability line. `active-relay` is
+    // the relay actually in use: yours, or the first fallback that answered.
+    in-out property <string> fallback-relays-text: "";
+    in-out property <bool> use-project-relays: true;
+    in-out property <string> active-relay: "";
+    in-out property <string> network-status: "Checking your connection...";
+    in-out property <string> network-status-explanation: "";
+    in-out property <bool> network-status-ok: true;
+    callback recheck-network();
+    // Spec §3 anonymity mode: calls through several relays.
+    in-out property <bool> anonymity-mode: false;
+    in-out property <string> anonymity-hops-text: "";
     /// Ring rules (spec §9 "Receiver settings always win", §13 schedules).
     /// Getting-started prompt (spec §13). Empty title means nothing to
     /// show, so the banner disappears entirely rather than sitting blank.
@@ -2380,6 +2392,46 @@ export component MainWindow inherits Window {
         width: 100%;
         height: 100%;
         spacing: 0px;
+        // Spec §6: a slim strip so reachability is always on screen.
+        if !server-mode : HorizontalLayout {
+            height: 28px;
+            padding-left: 8px;
+            padding-right: 8px;
+            padding-top: 3px;
+            padding-bottom: 3px;
+            Rectangle { horizontal-stretch: 1; }
+            // Spec §6: reachability is always visible, never discovered
+            // through a call that failed. Click to check again.
+            Rectangle {
+                border-radius: 10px;
+                background: network-status-ok ? Theme.panel-hover : #6b2a2a;
+                width: net-chip.preferred-width + 16px;
+                height: 22px;
+                accessible-role: button;
+                accessible-label: "Connection: " + network-status;
+                net-chip := Text {
+                    text: network-status;
+                    font-size: 10px * text-scale;
+                    vertical-alignment: center;
+                    color: network-status-ok ? Theme.muted-text : #ffd0d0;
+                }
+                net-touch := TouchArea { clicked => { recheck-network(); } }
+                if net-touch.has-hover && network-status-explanation != "" : Rectangle {
+                    y: parent.height + 4px;
+                    x: parent.width - 320px;
+                    width: 320px;
+                    height: net-tip.preferred-height + 12px;
+                    background: Palette.background; border-width: 1px; border-color: Theme.divider;
+                    border-radius: 6px;
+                    net-tip := Text {
+                        x: 6px; y: 6px; width: parent.width - 12px;
+                        text: network-status-explanation + (active-relay != "" ? "\nRelay in use: " + active-relay : "");
+                        wrap: word-wrap;
+                        font-size: 10px * text-scale;
+                    }
+                }
+            }
+        }
 
         // Server mode replaces the whole widget UI with a console -- the
         // profile widget/settings/canvas are all deliberately unreachable
@@ -5929,6 +5981,42 @@ export component MainWindow inherits Window {
                                     LineEdit {
                                         text <=> relay-server;
                                         placeholder-text: "relay.example.org:3479";
+                                        edited(t) => { settings-changed(); }
+                                    }
+                                    SettingLabel {
+                                        text: "Fallback relays";
+                                        help: "Tried in order, only when your own relay above is empty or not answering. Each is checked before it is used, so a dead one is skipped instead of found out by a call that never connects. A fallback relay sees what any relay sees -- rotating tokens and the addresses of a live call -- and can't read or hear anything. One per line.";
+                                        text-scale: text-scale;
+                                    }
+                                    TextEdit {
+                                        text <=> fallback-relays-text;
+                                        height: 52px;
+                                        wrap: no-wrap;
+                                        edited(t) => { settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Also try the project's relays";
+                                        checked <=> use-project-relays;
+                                        text-scale: text-scale;
+                                        help: "After yours, fall back on relays the project runs. They hold no more than any other relay. Infrastructure is fallback, not foundation: if they disappear, your contacts keep working.";
+                                        toggled => { settings-changed(); recheck-network(); }
+                                    }
+                                    Text {
+                                        text: active-relay != "" ? "Relay in use: " + active-relay : "No relay is answering.";
+                                        color: Theme.muted-text;
+                                        font-size: 10px * text-scale;
+                                    }
+                                    ToggleSwitch {
+                                        text: "Anonymity mode";
+                                        checked <=> anonymity-mode;
+                                        text-scale: text-scale;
+                                        help: "Routes your calls through several relays, each one only knowing the step before and after it. The strongest privacy available, at the cost of noticeable delay. Needs at least two relays below that offer hops (antiphon-relay --hops).";
+                                        toggled => { settings-changed(); }
+                                    }
+                                    if anonymity-mode : TextEdit {
+                                        text <=> anonymity-hops-text;
+                                        height: 52px;
+                                        wrap: no-wrap;
                                         edited(t) => { settings-changed(); }
                                     }
                                     Button {
