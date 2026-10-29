@@ -1,5 +1,7 @@
-# Builds the headless echo peer image (docker/README.md) on every pull
-# request, and publishes it to GHCR from main and from release tags.
+# Builds the two server images on every pull request, and publishes them
+# to GHCR from main and from release tags:
+#   antiphon-echo   headless test peer that echoes calls (docker/README.md)
+#   antiphon-relay  self-hosted relay / mailbox / DHT node (crates/relay)
 name: Docker
 
 on:
@@ -15,7 +17,16 @@ permissions:
 
 jobs:
   image:
+    name: image (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: antiphon-echo
+            dockerfile: Dockerfile
+          - name: antiphon-relay
+            dockerfile: crates/relay/Dockerfile
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -28,7 +39,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/antiphon-echo
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -38,8 +49,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # One cache per image, so the two builds don't evict each other.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

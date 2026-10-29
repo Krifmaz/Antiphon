@@ -317,7 +317,7 @@ async fn main() -> Result<()> {
             run_call(peer, preset, &ptt_key, no_ptt, input_device, output_device).await?;
         }
         Command::Echo { port, idle_secs } => {
-            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind(("0.0.0.0", port)).await?));
             let identity = load_identity()?;
             println!("Echo peer on {}", socket.local_addr()?);
             println!("Identity: {}", hex(&identity.public().identity_key));
@@ -482,7 +482,7 @@ pub(crate) async fn run_call(
 /// caller's own sequence numbers and backup copies survive the round trip
 /// and its jitter buffer sees an ordinary stream. Control messages and
 /// file chunks are dropped, as `run_call` drops them.
-async fn run_echo(socket: Arc<UdpSocket>, identity: &IdentityKeyPair, idle: Duration) -> Result<()> {
+async fn run_echo(socket: Arc<AppSocket>, identity: &IdentityKeyPair, idle: Duration) -> Result<()> {
     loop {
         let peer = Arc::new(PeerConnection::listen(socket.clone(), identity).await?);
         println!("Call from {}", peer.remote_addr());
@@ -533,13 +533,13 @@ mod tests {
     /// the idle timeout answers a fresh call on the same socket.
     #[tokio::test]
     async fn echo_returns_audio_and_answers_the_next_call() {
-        let server = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
         let addr = server.local_addr().unwrap();
         let echo_identity = IdentityKeyPair::generate();
         tokio::spawn(async move { run_echo(server, &echo_identity, Duration::from_millis(200)).await });
 
         for round in 0..2u8 {
-            let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let socket = Arc::new(AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
             let caller = Arc::new(PeerConnection::connect(socket, addr, &IdentityKeyPair::generate()).await.unwrap());
             let (tx, mut rx) = mpsc::unbounded_channel();
             let recv = tokio::spawn(caller.clone().recv_loop(move |msg| {

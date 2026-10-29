@@ -13,7 +13,9 @@ docker run -d --name antiphon-echo -p 5000:5000/udp -v antiphon-data:/data \
   ghcr.io/krifmaz/antiphon-echo:latest
 ```
 
-Or build it from this checkout with Compose:
+Or build it from this checkout with Compose, which also starts a relay
+on UDP 3479 (`ghcr.io/krifmaz/antiphon-relay`, see the Relay section of
+the top-level README):
 
 ```bash
 docker compose -f docker/compose.yaml up -d

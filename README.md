@@ -125,6 +125,7 @@ phrase.
 ```bash
 cargo run -p antiphon-relay -- --listen 0.0.0.0:3479
 # or: docker build -f crates/relay/Dockerfile -t antiphon-relay . && docker run -p 3479:3479/udp antiphon-relay
+# or the published image: docker run -p 3479:3479/udp ghcr.io/krifmaz/antiphon-relay:latest
 ```
 
 Put its `host:port` in Settings > Call > Relay server. While listening,
