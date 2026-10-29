@@ -69,15 +69,41 @@ fn edit_box<'a>(placeholder: &'a str, edited: &'a Option<String>, saved: &'a str
 /// Your name, status, and the key that proves who you are.
 fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
+    let mut picture_buttons = row![btn_icon(Icon::Edit, if m.me.has_picture { "Change picture" } else { "Add a picture" }, Btn::Default, Some(Msg::Do(Action::PickAvatar)))].spacing(8);
+    if m.me.has_picture {
+        picture_buttons = picture_buttons.push(btn_icon(Icon::Trash, "Remove", Btn::Ghost, Some(Msg::Do(Action::RemoveAvatar))));
+    }
     let me = row![
-        avatar(&m.me.name, &m.me.id, 64.0),
-        column![t(m.me.name.as_str()).size(18).font(theme::bold()), faint(if m.me.status.is_empty() { "No status" } else { m.me.status.as_str() }).size(13)].spacing(3),
+        avatar(&m.me.name, &m.me.id, 72.0),
+        column![
+            t(m.me.name.as_str()).size(18).font(theme::bold()),
+            faint(if m.me.status.is_empty() { "No status" } else { m.me.status.as_str() }).size(13),
+            picture_buttons,
+        ]
+        .spacing(6),
     ]
     .spacing(16)
     .align_y(Alignment::Center);
+    // The colour behind your initial when there is no picture, here and
+    // on your contacts' screens: automatic, or one of the set.
+    // The automatic swatch carries a sparkle, so it does not read as one
+    // more fixed colour when the key's colour happens to match one.
+    let auto = theme::avatar_color(&m.me.id);
+    let automatic = iced_widget::stack![
+        swatch(auto, auto, m.me.color.is_empty(), "Automatic", Msg::Do(Action::ProfileColor(String::new()))),
+        container(icon(Icon::Sparkle, 14.0, theme::hex("#16161f"))).center(34),
+    ];
+    let mut colors = row![automatic].spacing(8);
+    for (id, name, hex) in crate::PROFILE_COLORS {
+        let c = theme::hex(hex);
+        colors = colors.push(swatch(c, c, m.me.color == id, name, Msg::Do(Action::ProfileColor(id.to_string()))));
+    }
     let fields = column![
         field("Name", edit_box("What people see", &ui.name_edit, &m.me.name, Msg::NameEdit, Msg::NameSave)),
         field("Status", edit_box("Around after six", &ui.status_edit, &m.me.status, Msg::StatusEdit, Msg::StatusSave)),
+        field("About you", edit_box("A line or two people see in your details", &ui.bio_edit, &m.me.bio, Msg::BioEdit, Msg::BioSave)),
+        field("Colour", colors),
+        faint("Your picture, About line and colour go to the people you call. They stay on your devices and theirs.").size(12),
     ]
     .spacing(14);
     let identity = column![

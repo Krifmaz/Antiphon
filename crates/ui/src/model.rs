@@ -81,6 +81,12 @@ pub struct Me {
     pub name: String,
     /// Status line ("Around this evening").
     pub status: String,
+    /// A line or two about me, shown to contacts.
+    pub bio: String,
+    /// My avatar colour's id ([`crate::PROFILE_COLORS`]); empty for automatic.
+    pub color: String,
+    /// Whether I have a profile picture (registered in [`crate::avatars`]).
+    pub has_picture: bool,
     /// Their identity key, hex: the avatar colour seed.
     pub id: String,
     /// The key's fingerprint in groups, for reading aloud.
@@ -130,6 +136,8 @@ pub struct Person {
     pub volume_db: f32,
     /// Silenced for you only; they are not told.
     pub muted: bool,
+    /// What they say about themselves, as they last sent it.
+    pub bio: String,
 }
 
 /// What a person last said about being around.

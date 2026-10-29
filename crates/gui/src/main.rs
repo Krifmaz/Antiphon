@@ -5089,6 +5089,10 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 route_sequence: previous.and_then(|p| p.route_sequence),
                 message_route: c.message_route,
                 dht_sequence: previous.and_then(|p| p.dht_sequence),
+                // What they sent about themselves; this app has no screen for it.
+                bio: previous.map(|p| p.bio.clone()).unwrap_or_default(),
+                color: previous.map(|p| p.color.clone()).unwrap_or_default(),
+                avatar: previous.map(|p| p.avatar.clone()).unwrap_or_default(),
             }
         })
         .collect()
@@ -5826,6 +5830,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         profile: config::ProfileData {
             display_name: app.get_display_name().to_string(),
             status_message: app.get_status_message().to_string(),
+            // Picture, About and colour are set in the iced app; carried over.
+            ..previous.profile.clone()
         },
         chain: read_chain_config(app),
         input_device: input,

@@ -199,7 +199,12 @@ pub fn initial(name: &str) -> String {
 
 /// A round letter avatar in the person's own colour.
 pub fn avatar<'a, M: 'a>(name: &str, seed: &str, size: f32) -> El<'a, M> {
-    let color = theme::avatar_color(seed);
+    // Their picture when they have one, in a circle; otherwise their
+    // initial on their chosen colour (or one picked from their key).
+    if let Some(picture) = crate::avatars::picture(seed) {
+        return iced_widget::image(picture).width(size).height(size).border_radius(size / 2.0).into();
+    }
+    let color = crate::avatars::color(seed).unwrap_or_else(|| theme::avatar_color(seed));
     container(t(initial(name)).size(size * 0.42).font(theme::bold()).color(theme::hex("#16161f")))
         .width(size)
         .height(size)

@@ -89,9 +89,13 @@ impl App {
         if self.qr.as_ref().is_none_or(|(link, _)| link != &invite) {
             self.qr = qr_code::Data::new(invite.as_bytes()).ok().map(Arc::new).map(|d| (invite.clone(), d));
         }
+        stoop::avatars::set(&id, &self.settings.avatar, &self.settings.color, crate::profile::decode_avatar);
         let me = stoop::Me {
             name: self.settings.display_name.clone(),
-            status: String::new(),
+            status: self.settings.status_message.clone(),
+            bio: self.settings.bio.clone(),
+            color: self.settings.color.clone(),
+            has_picture: !self.settings.avatar.is_empty(),
             fingerprint: id.as_bytes().chunks(4).take(8).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(" "),
             id,
             qr: self.qr.as_ref().map(|(_, d)| d.clone()),
@@ -107,14 +111,18 @@ impl App {
             .contacts
             .list
             .iter()
-            .map(|c| Person { fingerprint: c.fingerprint(), ..self.person(&c.identity_key, c.name.clone(), c.address.clone(), c.verified, live_peer.as_deref(), now) })
+            .map(|c| {
+                stoop::avatars::set(&c.identity_key, &c.avatar, &c.color, crate::profile::decode_avatar);
+                Person { fingerprint: c.fingerprint(), bio: c.bio.clone(), ..self.person(&c.identity_key, c.name.clone(), c.address.clone(), c.verified, live_peer.as_deref(), now) }
+            })
             .collect();
         // Someone not saved can still call: they get a row for the length
         // of the call, so their conversation and the call have a place.
         if let Some(peer) = &live_peer {
             if self.contacts.by_key(peer).is_none() {
                 let name = self.peer_display_name.clone().unwrap_or_else(|| self.contacts.name_for(peer));
-                people.insert(0, self.person(peer, name, String::new(), false, live_peer.as_deref(), now));
+                let bio = self.peer_card.as_ref().map(|c| c.bio.clone()).unwrap_or_default();
+                people.insert(0, Person { bio, ..self.person(peer, name, String::new(), false, live_peer.as_deref(), now) });
             }
         }
         // Most recent conversation first, as on the desktop.
@@ -216,6 +224,7 @@ impl App {
             route: "Direct".into(),
             volume_db: 0.0,
             muted: false,
+            bio: String::new(),
         }
     }
 
@@ -453,7 +462,27 @@ impl App {
                     self.contacts.save(&self.dir);
                 }
             }
-            Action::Note(..) | Action::SetStatus(_) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
+            Action::SetStatus(status) => {
+                self.settings.status_message = status;
+                self.profile_changed();
+            }
+            Action::PickAvatar => {
+                self.picking_avatar = true;
+                crate::platform::pick_file();
+            }
+            Action::RemoveAvatar => {
+                self.settings.avatar.clear();
+                self.profile_changed();
+            }
+            Action::SetBio(bio) => {
+                self.settings.bio = crate::profile::clean_bio(&bio);
+                self.profile_changed();
+            }
+            Action::ProfileColor(color) => {
+                self.settings.color = color;
+                self.profile_changed();
+            }
+            Action::Note(..) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),

@@ -95,6 +95,10 @@ mod outbox;
 mod pacer;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/profile.rs"]
+mod profile;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/reactions.rs"]
 mod reactions;
 #[cfg(any(target_os = "android", target_os = "ios"))]

@@ -15,6 +15,7 @@
 //! window, and one screen at a time with a tab bar on a narrow one
 //! ([`theme::NARROW`]), which is what a phone gets.
 
+pub mod avatars;
 pub mod icons;
 pub mod model;
 pub mod theme;
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant};
 use iced_core::animation::{Animation, Easing};
 use iced_core::{Point, Size};
 
+pub use avatars::PROFILE_COLORS;
 pub use model::*;
 
 /// An element of this interface: the default theme, and whichever renderer
@@ -246,6 +248,15 @@ pub enum Action {
     SetName(String),
     /// My status line, sent at the start of every call.
     SetStatus(String),
+    /// Choose a new profile picture (the app opens a file picker).
+    PickAvatar,
+    /// Go back to the initial-letter avatar.
+    RemoveAvatar,
+    /// Save my About line.
+    SetBio(String),
+    /// Pick my avatar colour, by id from [`PROFILE_COLORS`]; empty for
+    /// the automatic one.
+    ProfileColor(String),
     /// Pick a theme by its id (see [`theme::THEMES`]).
     Theme(String),
     /// Pick an accent by its id (see [`theme::ACCENTS`]).
@@ -360,6 +371,10 @@ pub enum Msg {
     StatusEdit(String),
     /// Save my status.
     StatusSave,
+    /// My About line is being edited in Settings.
+    BioEdit(String),
+    /// Save my About line.
+    BioSave,
     /// The relay box is being edited.
     RelayEdit(String),
     /// Save the relay.
@@ -424,6 +439,8 @@ pub struct Ui {
     name_edit: Option<String>,
     /// My status while it is being edited.
     status_edit: Option<String>,
+    /// My About line while it is being edited.
+    bio_edit: Option<String>,
     /// The relay while it is being edited.
     relay_edit: Option<String>,
     /// The port while it is being edited.
@@ -487,6 +504,7 @@ impl Ui {
             add_error: String::new(),
             name_edit: None,
             status_edit: None,
+            bio_edit: None,
             relay_edit: None,
             port_edit: None,
             note_edit: None,
@@ -725,6 +743,14 @@ impl Ui {
             }
             Msg::StatusSave => match self.status_edit.take() {
                 Some(s) if s.trim() != model.me.status => vec![Action::SetStatus(s.trim().to_string())],
+                _ => Vec::new(),
+            },
+            Msg::BioEdit(s) => {
+                self.bio_edit = Some(s);
+                Vec::new()
+            }
+            Msg::BioSave => match self.bio_edit.take() {
+                Some(s) if s.trim() != model.me.bio => vec![Action::SetBio(s.trim().to_string())],
                 _ => Vec::new(),
             },
             Msg::RelayEdit(s) => {

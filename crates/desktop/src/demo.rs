@@ -30,6 +30,9 @@ impl Demo {
             me: ui::Me {
                 name: "Azule".into(),
                 status: "Around this evening".into(),
+                bio: "Synths, long walks, terrible puns.".into(),
+                color: "sky".into(),
+                has_picture: false,
                 id: "4be1c07d9f2a83e6b5d4c3f2a1908e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7".into(),
                 fingerprint: "4b:e1:c0:7d:9f:2a:83:e6".into(),
                 qr: qr_code::Data::new(invite.as_bytes()).ok().map(std::sync::Arc::new),
@@ -78,6 +81,9 @@ impl Demo {
             device: ui::Device { phone: false, files: true, ptt_keys: true },
             phone: None,
         };
+        // Chosen colours, as the engine registers saved ones.
+        ui::avatars::set(&model.me.id, "", &model.me.color, |_| None);
+        ui::avatars::set(ROBIN, "", "sage", |_| None);
         Demo { model, next_id: 100 }
     }
 
@@ -229,6 +235,11 @@ impl Demo {
                     self.model.call.video.push(mine("my-camera", "You", &fake_face(480, 360, [190, 140, 105], [140, 58, 64], [200, 214, 228])));
                 }
             }
+            Action::SetBio(bio) => self.model.me.bio = bio,
+            Action::ProfileColor(color) => {
+                ui::avatars::set(&self.model.me.id, "", &color, |_| None);
+                self.model.me.color = color;
+            }
             Action::ShareScreen(on) => {
                 self.model.call.sharing = on;
                 self.model.call.video.retain(|t| t.key != "my-screen");
@@ -265,6 +276,7 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
         route: "Automatic".into(),
         volume_db: 0.0,
         muted: false,
+        bio: if id == ROBIN { "Bass, coffee, records. Usually around after eight.".into() } else { String::new() },
     }
 }
 

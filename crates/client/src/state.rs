@@ -171,6 +171,9 @@ pub struct ActiveCall {
     /// arrives (spec §1 profile info isn't guaranteed to arrive instantly
     /// or at all -- older peers, or a lost UDP packet, just leave this `None`).
     pub peer_profile: Arc<Mutex<Option<Hello>>>,
+    /// The rest of their profile (picture, About, colour), once their
+    /// `Profile` message arrives; taken by the UI thread to save it.
+    pub peer_card: Arc<Mutex<Option<crate::control::ProfileCard>>>,
     /// Kept around so the UI thread can re-send an updated `Hello` (e.g.
     /// after the user edits their profile mid-call) via `AppState::runtime`
     /// -- see `main::sync_transmit_from_ui`'s sibling for profile pushes.
@@ -1699,6 +1702,8 @@ pub fn start_pipeline(
     let recv_friend_pending = pending_friend_request.clone();
     let recv_friend_accepted = friend_accepted.clone();
     let video = Arc::new(crate::video::CallVideo::new());
+    let peer_card = Arc::new(Mutex::new(None));
+    let recv_card = peer_card.clone();
     let recv_video = video.clone();
     let recv_task = tokio::spawn(async move {
         let result = recv_peer
@@ -1868,6 +1873,7 @@ pub fn start_pipeline(
                         *recv_friend_accepted.lock().unwrap() = Some(display_name);
                     }
                     Some(ControlMessage::FriendReject) => {}
+                    Some(ControlMessage::Profile(card)) => *recv_card.lock().unwrap() = Some(card),
                     Some(other) => file_transfer::handle_control_message(other, &recv_ft_state, &recv_ft_peer),
                     None => {}
                 },
@@ -2132,6 +2138,7 @@ pub fn start_pipeline(
         ptt_active,
         mic_level,
         peer_profile,
+        peer_card,
         peer,
         monitor_enabled,
         soundboard_queue,

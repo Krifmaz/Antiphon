@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use antiphon_audio::{ChainConfig, GainConfig};
-use antiphon_client::control::Hello;
+use antiphon_client::control::{ControlMessage, Hello, ProfileCard};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
     caps_lock, config, connection_mode, delivery, discovery, file_integrity, file_preview, file_transfer, history, key_capture, moderation,
-    notify, outbox, presence, reachability, reactions, sharing, video_capture, vpn,
+    notify, outbox, presence, profile, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
 use antiphon_ui::{self as ui, ToastKind};
@@ -65,6 +65,9 @@ enum Event {
     Key(Result<String, String>),
     /// A note to show the person.
     Toast(String, ToastKind),
+    /// A picked profile picture, made small: the base64 to save, or why
+    /// the file couldn't be used.
+    Avatar(Result<String, String>),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -337,6 +340,7 @@ impl Engine {
         let mut save_routes = None;
         let mut new_lines = 0usize;
         let ready;
+        let card;
         {
             let call = self.state.call.lock().unwrap();
             let Some(active) = call.as_ref() else {
@@ -364,8 +368,12 @@ impl Engine {
                 self.seen_lines = log.len();
             }
             ready = active.file_transfer.lock().unwrap().ready_to_save.take();
+            card = active.peer_card.lock().unwrap().take();
         }
         let key = self.call.peer.clone();
+        if let Some(card) = card {
+            self.save_card(key.as_deref(), card);
+        }
         if let Some(relay) = save_relay {
             self.peer_relay_saved = relay.clone();
             if let Some(c) = key.as_deref().and_then(|k| self.cfg.contacts.iter_mut().find(|c| c.identity_key == k)) {
@@ -391,6 +399,26 @@ impl Engine {
         }
         if let Some((name, stored)) = ready {
             self.save_received(name, stored);
+        }
+    }
+
+    /// Keeps the card the person on the call sent: saved to their contact
+    /// when they are one (so it shows between calls, and is in backups),
+    /// and shown on the call either way.
+    fn save_card(&mut self, key: Option<&str>, card: ProfileCard) {
+        let avatar = if profile::decode_avatar(&card.avatar).is_some() { card.avatar } else { String::new() };
+        let bio = profile::clean_bio(&card.bio);
+        let color = if ui::avatars::named_color(&card.color).is_some() { card.color } else { String::new() };
+        match key.and_then(|k| contact_mut(&mut self.cfg, k)) {
+            Some(c) => {
+                if (&c.avatar, &c.bio, &c.color) != (&avatar, &bio, &color) {
+                    (c.avatar, c.bio, c.color) = (avatar, bio, color);
+                    self.save();
+                }
+            }
+            // Someone not saved yet: their avatar on the call is keyed by
+            // the name shown.
+            None => ui::avatars::set(&self.call.name, &avatar, &color, profile::decode_avatar),
         }
     }
 
@@ -483,6 +511,9 @@ impl Engine {
                     status: None,
                     ended_at: None,
                 };
+                // Our picture, About line and colour go out at the start
+                // of every call, so they always see the current ones.
+                self.send_card();
                 if incoming {
                     let ring = delivery::unhex32(&peer).map(|k| ring_outcome(&k, false)).unwrap_or(notify::Outcome::Ring);
                     if ring != notify::Outcome::Ignore {
@@ -547,7 +578,62 @@ impl Engine {
                 }
             }
             Event::Toast(text, kind) => self.toast(text, kind),
+            Event::Avatar(Ok(avatar)) => {
+                self.cfg.profile.avatar = avatar;
+                self.profile_changed();
+                self.toast("Picture updated", ToastKind::Ok);
+            }
+            Event::Avatar(Err(why)) => self.toast(why, ToastKind::Err),
         }
+    }
+
+    // ---------------------------------------------------------------- profile
+
+    /// Our profile card as contacts get it.
+    fn card(&self) -> ProfileCard {
+        let p = &self.cfg.profile;
+        ProfileCard { bio: p.bio.clone(), color: p.color.clone(), avatar: p.avatar.clone() }
+    }
+
+    /// Sends our card to the person on the call, if there is one. Said
+    /// three times a little apart: it is one datagram, and a lost one would
+    /// leave them with our old picture until the next call.
+    fn send_card(&self) {
+        let call = self.state.call.lock().unwrap();
+        let Some(a) = call.as_ref() else { return };
+        let (peer, message) = (a.peer.clone(), ControlMessage::Profile(self.card()).encode());
+        self.state.runtime.spawn(async move {
+            for _ in 0..3 {
+                let _ = peer.send_control(&message).await;
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+        });
+    }
+
+    /// Saves a changed profile and tells the person on the call. The name
+    /// and status ride in `Hello`, which goes out again too.
+    fn profile_changed(&mut self) {
+        self.save();
+        self.send_card();
+        let hello = self.hello();
+        self.with_call(|a| a.send_control(&self.state.runtime, ControlMessage::Hello(hello)));
+    }
+
+    /// Asks for a picture file off the window's thread, and makes it small
+    /// there too (decoding a large photo takes a moment).
+    fn pick_avatar(&self) {
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Choose a profile picture")
+                .add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                .pick_file()
+            else {
+                return;
+            };
+            let made = std::fs::read(&path).map_err(|e| format!("Couldn't open that file: {e}")).and_then(|b| profile::avatar_from_image(&b));
+            Engine::push(&events, Event::Avatar(made));
+        });
     }
 
     // ---------------------------------------------------------------- calls
@@ -963,11 +1049,24 @@ impl Engine {
             A::Copy(text) => self.out.push(Out::Copy(text)),
             A::SetName(name) => {
                 self.cfg.profile.display_name = name;
-                self.save();
+                self.profile_changed();
             }
             A::SetStatus(status) => {
                 self.cfg.profile.status_message = status;
-                self.save();
+                self.profile_changed();
+            }
+            A::PickAvatar => self.pick_avatar(),
+            A::RemoveAvatar => {
+                self.cfg.profile.avatar.clear();
+                self.profile_changed();
+            }
+            A::SetBio(bio) => {
+                self.cfg.profile.bio = profile::clean_bio(&bio);
+                self.profile_changed();
+            }
+            A::ProfileColor(color) => {
+                self.cfg.profile.color = color;
+                self.profile_changed();
             }
             A::Theme(theme) => {
                 self.cfg.stoop.theme = theme;
@@ -1302,11 +1401,17 @@ impl Engine {
             _ => "Up late",
         };
         let name = self.cfg.profile.display_name.clone();
+        let id = connection_mode::encode_hex32(&key);
+        let p = &self.cfg.profile;
+        ui::avatars::set(&id, &p.avatar, &p.color, profile::decode_avatar);
         ui::Me {
             greeting: greeting.to_string(),
             name,
             status: self.cfg.profile.status_message.clone(),
-            id: connection_mode::encode_hex32(&key),
+            bio: self.cfg.profile.bio.clone(),
+            color: self.cfg.profile.color.clone(),
+            has_picture: !self.cfg.profile.avatar.is_empty(),
+            id,
             fingerprint: antiphon_crypto::fingerprint(&key),
             invite: self.invite.clone(),
             qr: self.qr.clone(),
@@ -1329,6 +1434,7 @@ impl Engine {
                     None => (None, None),
                 };
                 let presence = if self.call_with(&id) { ui::Presence::Online } else { ui::Presence::Unknown };
+                ui::avatars::set(&id, &c.avatar, &c.color, profile::decode_avatar);
                 ui::Person {
                     name: c.name.clone(),
                     address: c.address.clone(),
@@ -1353,6 +1459,7 @@ impl Engine {
                     .into(),
                     volume_db: c.volume_db,
                     muted: c.muted,
+                    bio: c.bio.clone(),
                     id,
                 }
             })

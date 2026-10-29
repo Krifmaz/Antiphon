@@ -18,7 +18,7 @@ use antiphon_net::{AppSocket, JitterBuffer, PeerConnection, PopResult, Received}
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::control::{ControlMessage, Hello};
+use crate::control::{ControlMessage, Hello, ProfileCard};
 use crate::file_transfer::{self, FileTransferState};
 use crate::platform;
 
@@ -94,6 +94,11 @@ struct Shared {
     finished: Mutex<Vec<CallSummary>>,
     /// The name sent to the other side when a call connects.
     display_name: Mutex<String>,
+    /// The status line sent with it.
+    status_message: Mutex<String>,
+    /// The rest of the profile (picture, About, colour), sent when a call
+    /// connects.
+    card: Mutex<ProfileCard>,
     /// Data saver: send each audio frame without the spare copy of the
     /// previous one. That copy is what lets the other side rebuild a lost
     /// packet, and it is a fifth of the call's data, so on a metered
@@ -266,6 +271,13 @@ impl CallEngine {
     /// Surrounding whitespace is dropped.
     pub fn set_display_name(&self, name: &str) {
         *self.shared.display_name.lock().unwrap() = name.trim().to_string();
+    }
+
+    /// Sets the status line and profile card sent when the next call
+    /// connects. Sending them to a call already up is the interface's job.
+    pub fn set_profile(&self, status: &str, card: ProfileCard) {
+        *self.shared.status_message.lock().unwrap() = status.trim().to_string();
+        *self.shared.card.lock().unwrap() = card;
     }
 
     /// Turns the data saver on or off for the running call and the next
@@ -638,17 +650,21 @@ async fn talk(
     {
         let hello = Hello {
             display_name: shared.display_name.lock().unwrap().clone(),
-            status_message: String::new(),
+            status_message: shared.status_message.lock().unwrap().clone(),
             presence: None,
             wants_silent: false,
             relay: String::new(),
             routes: String::new(),
         };
         let bytes = ControlMessage::Hello(hello).encode();
+        // The picture and About line follow in their own message, which
+        // an older peer that does not know it simply ignores.
+        let card = ControlMessage::Profile(shared.card.lock().unwrap().clone()).encode();
         let peer = peer.clone();
         tokio::spawn(async move {
             for _ in 0..3 {
                 let _ = peer.send_control(&bytes).await;
+                let _ = peer.send_control(&card).await;
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
         });
@@ -700,6 +716,7 @@ async fn talk(
                     // interface, so these wait for it there.
                     Some(
                         message @ (ControlMessage::Hello(_)
+                        | ControlMessage::Profile(_)
                         | ControlMessage::Chat { .. }
                         | ControlMessage::ChatEdit { .. }
                         | ControlMessage::ChatDelete { .. }

@@ -5,11 +5,28 @@ use antiphon_audio::ChainConfig;
 pub struct ProfileData {
     pub display_name: String,
     pub status_message: String,
+    /// A line or two about you, shown to contacts (`crate::profile`).
+    #[serde(default)]
+    pub bio: String,
+    /// Your avatar colour's id (`antiphon_ui::PROFILE_COLORS`), or empty
+    /// for the one picked from your key.
+    #[serde(default)]
+    pub color: String,
+    /// Your picture as sent to contacts: a small JPEG, base64, or empty.
+    /// Kept here, in the config file, so a backup of the config carries it.
+    #[serde(default)]
+    pub avatar: String,
 }
 
 impl Default for ProfileData {
     fn default() -> Self {
-        Self { display_name: "You".to_string(), status_message: "Online".to_string() }
+        Self {
+            display_name: "You".to_string(),
+            status_message: "Online".to_string(),
+            bio: String::new(),
+            color: String::new(),
+            avatar: String::new(),
+        }
     }
 }
 
@@ -612,6 +629,15 @@ pub struct Contact {
     /// replayed older record can't move them back.
     #[serde(default)]
     pub dht_sequence: Option<u64>,
+    /// Their About line, as they last sent it (`ControlMessage::Profile`).
+    #[serde(default)]
+    pub bio: String,
+    /// Their avatar colour's id, as they last sent it; empty for automatic.
+    #[serde(default)]
+    pub color: String,
+    /// Their picture, as they last sent it: a small JPEG, base64.
+    #[serde(default)]
+    pub avatar: String,
 }
 
 /// A freeform panel's position and size in logical pixels, relative to its

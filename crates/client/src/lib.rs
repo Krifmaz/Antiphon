@@ -47,6 +47,7 @@ pub mod sfu_call;
 pub mod state;
 pub mod swarm;
 pub mod theme_presets;
+pub mod profile;
 pub mod transfer_limits;
 pub mod video;
 pub mod video_capture;
