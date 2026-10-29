@@ -48,8 +48,9 @@ pub struct App {
     tour: Option<PathBuf>,
     /// Whether the system asks for a dark look (for the "system" theme).
     system_dark: bool,
-    /// The theme, accent and system tone the palette was last built for.
-    look: (String, String, bool),
+    /// What the look was last built from: theme, accent, custom accent,
+    /// reading font, and whether the system is dark.
+    look: (String, String, String, String, bool),
     /// When the app started, to animate the demo's meters.
     epoch: Instant,
 }
@@ -71,6 +72,11 @@ pub enum Message {
     Find,
     /// The window's close button: hang up, close down, exit.
     Close,
+    /// The window was made, this size: lay out for it, attach the
+    /// screen-reader adapter, then show it.
+    Opened(window::Id, iced::Size),
+    /// The window gained (true) or lost the system's focus.
+    WindowFocus(bool),
     /// Set up tour step `n`.
     TourStep(usize),
     /// Take tour step `n`'s screenshot.
@@ -180,6 +186,18 @@ const TOUR: &[Step] = &[
             app.go(Route::Person(Demo::robin()));
         },
     },
+    Step {
+        name: "reading-font",
+        size: (1280.0, 820.0),
+        setup: |app| {
+            app.demo().act(Action::Theme("stoop".into()));
+            app.demo().act(Action::Font("opendyslexic".into()));
+            app.go(Route::Settings(Section::Appearance));
+            // Two Tabs in: the focus ring on the first section in the list.
+            let _ = app.send(Msg::Focus(1));
+            let _ = app.send(Msg::Focus(1));
+        },
+    },
 ];
 
 impl App {
@@ -225,8 +243,22 @@ impl App {
             Source::Live { model, .. } => model,
             Source::Demo(d) => &d.model,
         };
-        let actions = self.ui.update(msg, model);
-        self.run(actions)
+        let mut actions = self.ui.update(msg, model);
+        // Moving the typing cursor is for the window, not the engine.
+        let mut tasks = Vec::new();
+        actions.retain(|a| match a {
+            Action::FocusInput(Some(id)) => {
+                tasks.push(operation::focus(*id));
+                false
+            }
+            Action::FocusInput(None) => {
+                tasks.push(iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus()));
+                false
+            }
+            _ => true,
+        });
+        tasks.push(self.run(actions));
+        Task::batch(tasks)
     }
 
     /// Moves the interface to `route`.
@@ -316,12 +348,14 @@ impl App {
         self.apply_look();
     }
 
-    /// Repaints the palette when the theme, accent or system tone changed.
+    /// Repaints the palette and switches the reading font when the theme,
+    /// accent, font or system tone changed.
     fn apply_look(&mut self) {
         let s = &self.model().settings;
-        let look = (s.theme.clone(), s.accent.clone(), self.system_dark);
+        let look = (s.theme.clone(), s.accent.clone(), s.custom_accent.clone(), s.font.clone(), self.system_dark);
         if look != self.look {
-            theme::set(theme::palette(&look.0, &look.1, "", look.2));
+            theme::set(theme::palette(&look.0, &look.1, &look.2, look.4));
+            theme::set_font(&look.3);
             self.look = look;
         }
         let reduced = self.model().settings.reduced_motion;
@@ -367,6 +401,20 @@ impl App {
                 Task::none()
             }
             Message::Escape => self.send(Msg::Back),
+            Message::Opened(id, size) => {
+                let _ = self.send(Msg::Resized(size));
+                let attach = window::run(id, crate::a11y::install);
+                if crate::a11y::START_HIDDEN {
+                    // The adapter is in; now the window may be seen.
+                    attach.then(move |_| window::set_mode(id, window::Mode::Windowed))
+                } else {
+                    attach.discard()
+                }
+            }
+            Message::WindowFocus(on) => {
+                crate::a11y::window_focused(on);
+                Task::none()
+            }
             Message::Find => operation::focus(ui::SEARCH),
             Message::Close => {
                 if let Source::Live { engine, .. } = &mut self.source {
@@ -401,7 +449,11 @@ impl App {
 
     /// Draws the interface.
     pub fn view(&self) -> Element<'_, Message> {
-        self.ui.view(self.model()).map(Message::Ui)
+        let view = self.ui.view(self.model()).map(Message::Ui);
+        // The controls registered themselves while the view was built;
+        // pass that list on to a screen reader, if one is listening.
+        crate::a11y::publish(&self.title());
+        view
     }
 
     /// The iced theme built from the current palette.
@@ -426,7 +478,12 @@ impl App {
             Source::Demo(d) => d.model.call.active(),
         };
         let tick = iced::time::every(if busy { Duration::from_millis(50) } else { Duration::from_millis(400) }).map(Message::Tick);
-        let mut subs = vec![tick, event::listen_with(on_event), window::close_requests().map(|_| Message::Close)];
+        let mut subs = vec![
+            tick,
+            event::listen_with(on_event),
+            window::close_requests().map(|_| Message::Close),
+            crate::a11y::requests().map(Message::Ui),
+        ];
         if self.ui.animating() {
             subs.push(window::frames().map(Message::Frame));
         }
@@ -435,11 +492,34 @@ impl App {
 }
 
 /// Window and keyboard events the interface cares about.
-fn on_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
+///
+/// Besides Escape and the find shortcut, these are the keyboard-only keys
+/// (see `antiphon_ui::a11y`): Tab and Shift+Tab move focus, Enter and
+/// Space press, the arrows step a slider or choice, and Shift+F10 or the
+/// menu key open a right-click menu. Each acts only when no widget used
+/// the key first, so typing in a box is never taken over.
+fn on_event(event: Event, status: event::Status, window: window::Id) -> Option<Message> {
+    use key::Named;
+    let free = status == event::Status::Ignored;
     match event {
         Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::Ui(Msg::Cursor(position))),
         Event::Window(window::Event::Resized(size)) => Some(Message::Ui(Msg::Resized(size))),
-        Event::Window(window::Event::Opened { size, .. }) => Some(Message::Ui(Msg::Resized(size))),
+        Event::Window(window::Event::Opened { size, .. }) => Some(Message::Opened(window, size)),
+        Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),
+        Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(false)),
+        Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(named), modifiers, .. }) if free && named != Named::Escape => {
+            let msg = match named {
+                Named::Tab if !modifiers.command() && !modifiers.alt() => Msg::Focus(if modifiers.shift() { -1 } else { 1 }),
+                Named::Enter | Named::Space => Msg::Activate,
+                Named::ArrowUp | Named::ArrowRight => Msg::Adjust(1),
+                Named::ArrowDown | Named::ArrowLeft => Msg::Adjust(-1),
+                Named::F10 if modifiers.shift() => Msg::ContextMenu,
+                Named::ContextMenu => Msg::ContextMenu,
+                _ => return None,
+            };
+            Some(Message::Ui(msg))
+        }
+        Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), .. }) if free && c.as_str() == " " => Some(Message::Ui(Msg::Activate)),
         Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(key::Named::Escape), .. }) => Some(Message::Escape),
         Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), modifiers, .. })
             if modifiers.command() && (c.as_str() == "k" || c.as_str() == "f") && status == event::Status::Ignored =>

@@ -110,10 +110,11 @@ fn tab_bar<'a>(ui: &'a Ui, m: &'a Model, bottom: f32) -> El<'a, Msg> {
             ..container::Style::default()
         });
         let face = column![pill, t(label).size(11.5).font(theme::semibold()).color(color)].spacing(4).align_x(Alignment::Center);
+        let focused = crate::a11y::Spec::new(crate::a11y::Role::Tab, label).selected(on).on(Some(&msg)).add();
         button(container(face).center_x(Length::Fill))
             .width(Length::Fill)
             .padding([8, 0])
-            .style(|_, _| button::Style { background: Some(Background::Color(Color::TRANSPARENT)), ..button::Style::default() })
+            .style(focus_style(|_, _| button::Style { background: Some(Background::Color(Color::TRANSPARENT)), ..button::Style::default() }, focused))
             .on_press(msg)
             .into()
     };

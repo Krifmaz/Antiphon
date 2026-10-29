@@ -27,3 +27,17 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Native file dialogs: choosing a file to send, saving one received.
 rfd = "0.17.2"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+# Screen readers: the interface's tree, handed to each system's API.
+accesskit = "0.24.1"
+
+[target.'cfg(windows)'.dependencies]
+# UI Automation (Narrator, NVDA, JAWS).
+accesskit_windows = "0.34.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSAccessibility (VoiceOver).
+accesskit_macos = "0.26.3"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# AT-SPI over D-Bus (Orca).
+accesskit_unix = "0.22.1"

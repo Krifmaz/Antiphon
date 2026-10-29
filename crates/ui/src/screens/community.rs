@@ -9,9 +9,10 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, hover, row, scrollable, space, text_input};
+use iced_widget::{column, container, hover, row, scrollable, space};
 
 use super::{clip, fill};
+use crate::a11y::{Role, Spec};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
@@ -112,11 +113,10 @@ pub fn space_row<'a>(ui: &'a Ui, c: &'a Community, phone: bool) -> El<'a, Msg> {
     .spacing(11)
     .align_y(Alignment::Center);
     let first = c.channels.first().map(|ch| ch.id).unwrap_or(0);
-    button(container(body).clip(true))
+    let name = if c.unread > 0 { format!("{}, {} unread", c.name, c.unread) } else { c.name.clone() };
+    pressable(container(body).clip(true), Role::Tab, &name, selected, if selected { Btn::RowOn } else { Btn::Row }, Msg::Nav(Route::Community(c.id.clone(), first)))
         .width(Length::Fill)
         .padding(if phone { [10, 10] } else { [6, 10] })
-        .style(theme::btn(if selected { Btn::RowOn } else { Btn::Row }))
-        .on_press(Msg::Nav(Route::Community(c.id.clone(), first)))
         .into()
 }
 
@@ -153,10 +153,15 @@ pub fn phone<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, 
         for x in &c.channels {
             let on = Some(x.id) == ch.map(|h| h.id);
             chips = chips.push(
-                button(row![icon(Icon::Hash, 13.0, if on { theme::look().text } else { theme::look().muted }), t(x.name.as_str()).size(13).font(theme::semibold())].spacing(4).align_y(Alignment::Center))
-                    .padding([6, 12])
-                    .style(theme::btn(if on { Btn::TabOn } else { Btn::Tab }))
-                    .on_press(Msg::Nav(Route::Community(c.id.clone(), x.id))),
+                pressable(
+                    row![icon(Icon::Hash, 13.0, if on { theme::look().text } else { theme::look().muted }), t(x.name.as_str()).size(13).font(theme::semibold())].spacing(4).align_y(Alignment::Center),
+                    Role::Tab,
+                    &format!("#{}", x.name),
+                    on,
+                    if on { Btn::TabOn } else { Btn::Tab },
+                    Msg::Nav(Route::Community(c.id.clone(), x.id)),
+                )
+                .padding([6, 12]),
             );
         }
         col = col.push(scrollable(container(chips).padding([8, 10])).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0))));
@@ -234,15 +239,19 @@ fn side<'a>(ui: &'a Ui, c: &'a Community, channel: u32) -> El<'a, Msg> {
             let on = x.id == channel;
             // A private channel shows a lock where the others show a hash.
             let mark = if x.private { Icon::Lock } else { Icon::Hash };
-            let entry = button(
+            let name = if x.private { format!("#{}, private", x.name) } else { format!("#{}", x.name) };
+            let entry = pressable(
                 row![icon(mark, 15.0, if on { p.text } else { p.faint }), t(clip(&x.name, 20)).size(13.5).font(theme::semibold()).color(if on { p.text } else { p.muted })]
                     .spacing(8)
                     .align_y(Alignment::Center),
+                Role::Tab,
+                &name,
+                on,
+                if on { Btn::RowOn } else { Btn::Row },
+                Msg::Nav(Route::Community(c.id.clone(), x.id)),
             )
             .width(Length::Fill)
-            .padding([6, 10])
-            .style(theme::btn(if on { Btn::RowOn } else { Btn::Row }))
-            .on_press(Msg::Nav(Route::Community(c.id.clone(), x.id)));
+            .padding([6, 10]);
             if c.can_manage_channels {
                 let gear = icon_btn(Icon::Gear, "Who can read it", Some(Msg::Dialog(Some(Dialog::ChannelSettings(c.id.clone(), x.id)))));
                 col = col.push(row![entry, gear].spacing(2).align_y(Alignment::Center));
@@ -342,9 +351,13 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 fn message<'a>(ui: &'a Ui, c: &'a Community, line: &'a Line, first: bool, phone: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
+    // Read out as "who: what", in the order the channel runs.
+    let who = if line.mine { "You" } else { line.author.as_str() };
+    let said = if line.deleted { format!("{who}: message deleted") } else { format!("{who}: {}", line.text) };
+    let _ = Spec::new(Role::Text, said).add();
     let content: El<'a, Msg> = if let Some((_, draft)) = editing {
         column![
-            text_input("", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14).style(theme::input),
+            input("Edit message", "stoop-edit", "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
             row![faint("Enter to save · Esc to cancel").size(11), fill(), btn_sm("Cancel", Btn::Ghost, Some(Msg::EditCancel)), btn_sm("Save", Btn::Primary, Some(Msg::EditSave))]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -371,6 +384,9 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, line: &'a Line, first: bool, phone:
     if editing.is_some() || phone || line.deleted {
         return row_el.into();
     }
+    // Pointer-only tools, built for every message: kept out of the
+    // keyboard's list, as in a conversation.
+    crate::a11y::pause(true);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
     tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
     if line.mine && c.waiting.is_none() {
@@ -381,6 +397,7 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, line: &'a Line, first: bool, phone:
             Some(Msg::Do(Action::DeletePost { community: c.id.clone(), id: line.id, author: line.author_id.clone() })),
         ));
     }
+    crate::a11y::pause(false);
     let bar = container(tools).padding(3).style(theme::menu_pop);
     let overlay = container(bar).width(Length::Fill).align_x(Alignment::End).padding([0, 6]);
     hover(row_el, overlay)
@@ -398,7 +415,7 @@ fn composer<'a>(ui: &'a Ui, c: &'a Community, ch: Option<&'a Channel>) -> El<'a,
     let key = format!("#{}/{}", c.id, ch.map(|x| x.id).unwrap_or(0));
     let draft = ui.drafts.get(&key).map(String::as_str).unwrap_or("");
     let can_send = c.can_post && c.waiting.is_none();
-    let mut input = text_input(&placeholder, draft).id(crate::COMPOSER).size(14).padding([11, 4]).style(theme::input_bare);
+    let mut input = input("Message", crate::COMPOSER, &placeholder, draft).size(14).padding([11, 4]).style(theme::input_bare);
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }
@@ -431,12 +448,11 @@ pub fn new_space<'a>(ui: &'a Ui) -> El<'a, Msg> {
         muted(about).size(13.5),
         field(
             "Name",
-            text_input(if ui.space_group { "Saturday crew" } else { "The listening club" }, &ui.space_name)
+            input("Name", "stoop-space-name", if ui.space_group { "Saturday crew" } else { "The listening club" }, &ui.space_name)
                 .on_input(Msg::SpaceName)
                 .on_submit(Msg::SpaceCreate)
                 .padding([10, 12])
                 .size(14)
-                .style(theme::input)
         ),
         faint("You can invite people from inside once it's made.").size(12),
     ]
@@ -456,15 +472,18 @@ pub fn invite<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         }
         any = true;
         col = col.push(
-            button(
+            pressable(
                 row![avatar(&person.name, &person.id, 32.0), t(person.name.as_str()).size(14).font(theme::semibold()).width(Length::Fill), faint("Invite").size(12.5)]
                     .spacing(10)
                     .align_y(Alignment::Center),
+                Role::Button,
+                &format!("Invite {}", person.name),
+                false,
+                Btn::Row,
+                Msg::Do(Action::InviteToSpace { community: c.id.clone(), person: person.id.clone() }),
             )
             .width(Length::Fill)
-            .padding([6, 8])
-            .style(theme::btn(Btn::Row))
-            .on_press(Msg::Do(Action::InviteToSpace { community: c.id.clone(), person: person.id.clone() })),
+            .padding([6, 8]),
         );
     }
     if !any {
@@ -557,7 +576,7 @@ pub fn emoji_picker<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
             Some(h) => iced_widget::image(h).width(32).height(32).into(),
             None => t(format!(":{name}:")).size(12).into(),
         };
-        let b = button(container(face).center(40)).padding(2).style(theme::btn(Btn::Ghost)).on_press(Msg::InsertEmoji(name.clone()));
+        let b = pressable(container(face).center(40), Role::Button, &format!(":{name}:"), false, Btn::Ghost, Msg::InsertEmoji(name.clone())).padding(2);
         grid = grid.push(with_tip(b, format!(":{name}:"), iced_widget::tooltip::Position::Top));
     }
     let mut col = column![grid.wrap()].spacing(14);
@@ -606,7 +625,7 @@ pub fn add_channel<'a>(ui: &'a Ui, id: &'a str) -> El<'a, Msg> {
         muted("Everyone in the community can read and post in it. You can make it private afterwards, from its gear.").size(13.5),
         field(
             "Name",
-            text_input("band-practice", &ui.channel_name).on_input(Msg::ChannelName).on_submit(Msg::ChannelCreate(id.to_string())).padding([10, 12]).size(14).style(theme::input)
+            input("Channel name", "stoop-channel-name", "band-practice", &ui.channel_name).on_input(Msg::ChannelName).on_submit(Msg::ChannelCreate(id.to_string())).padding([10, 12]).size(14)
         ),
     ]
     .spacing(14)
@@ -623,7 +642,7 @@ pub fn channel_settings<'a>(m: &'a Model, id: &'a str, channel: u32) -> El<'a, M
     let mut col = column![setting(
         "Private",
         Some("Only the people ticked below, and the owners, get its messages. Nobody else sees it at all."),
-        switch(private, move |on| change(SpaceChange::ChannelPrivate { channel, private: on })),
+        switch("Private", private, move |on| change(SpaceChange::ChannelPrivate { channel, private: on })),
     )]
     .spacing(10);
     if private {
@@ -637,7 +656,7 @@ pub fn channel_settings<'a>(m: &'a Model, id: &'a str, channel: u32) -> El<'a, M
                 .align_y(Alignment::Center);
             if !owner {
                 let who = member.id.clone();
-                r = r.push(switch(reads, move |on| change(SpaceChange::ChannelReader { channel, member: who.clone(), on })));
+                r = r.push(switch(&format!("{} can read it", member.name), reads, move |on| change(SpaceChange::ChannelReader { channel, member: who.clone(), on })));
             }
             col = col.push(r);
         }
@@ -663,7 +682,7 @@ pub fn roles<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
         let mut perms = column![].spacing(6);
         for (n, (what, on)) in role.perms.iter().enumerate() {
             let toggle: El<'a, Msg> = if c.can_edit_roles {
-                switch(*on, move |on| change(SpaceChange::RolePerm { role: i, perm: n, on }))
+                switch(&format!("{}: {what}", role.name), *on, move |on| change(SpaceChange::RolePerm { role: i, perm: n, on }))
             } else {
                 faint(if *on { "Yes" } else { "No" }).size(12).into()
             };
@@ -674,7 +693,7 @@ pub fn roles<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
     if c.can_edit_roles {
         col = col.push(
             row![
-                text_input("New role, e.g. Helper", &ui.role_name).on_input(Msg::RoleName).on_submit(Msg::RoleCreate(c.id.clone())).padding([8, 10]).size(13.5).style(theme::input),
+                input("New role name", "stoop-role-name", "New role, e.g. Helper", &ui.role_name).on_input(Msg::RoleName).on_submit(Msg::RoleCreate(c.id.clone())).padding([8, 10]).size(13.5),
                 btn_sm("Add role", Btn::Primary, (!ui.role_name.trim().is_empty()).then(|| Msg::RoleCreate(c.id.clone()))),
             ]
             .spacing(8)

@@ -33,15 +33,66 @@ pub const PANEL_FITS: f32 = 1180.0;
 /// render the same letters whatever the system ships.
 pub const FAMILY: &str = "Inter";
 
-/// The font files to load before the first frame.
-pub const FONT_FILES: [&[u8]; 3] = [
+/// The bundled reading face for dyslexia: OpenDyslexic, whose weighted
+/// bottoms keep letters from flipping and swapping. Licensed under the SIL
+/// OFL like Inter, so it ships with the app (`assets/fonts/OpenDyslexic-OFL.txt`).
+pub const DYSLEXIC_FAMILY: &str = "OpenDyslexic";
+
+/// The font files to load before the first frame: Inter's three weights,
+/// then OpenDyslexic's two (its semibold falls back to the nearest, bold).
+pub const FONT_FILES: [&[u8]; 5] = [
     include_bytes!("../assets/fonts/Inter-Regular.otf"),
     include_bytes!("../assets/fonts/Inter-SemiBold.otf"),
     include_bytes!("../assets/fonts/Inter-Bold.otf"),
+    include_bytes!("../assets/fonts/OpenDyslexic-Regular.otf"),
+    include_bytes!("../assets/fonts/OpenDyslexic-Bold.otf"),
 ];
 
-/// Body text.
+/// Body text in the default face. Text drawn through [`crate::widgets`]
+/// uses [`font`] instead, which follows the reading-font setting.
 pub const FONT: Font = Font::with_name(FAMILY);
+
+/// `(id, name)` of the reading fonts Settings offers, in its order.
+pub const FONTS: [(&str, &str); 2] = [("inter", "Inter"), ("opendyslexic", "OpenDyslexic")];
+
+/// The face for a reading-font id (see [`FONTS`]); Inter for anything unknown.
+pub fn font_for(id: &str) -> Font {
+    match id {
+        "opendyslexic" => Font::with_name(DYSLEXIC_FAMILY),
+        _ => FONT,
+    }
+}
+
+/// `face` at `weight`, moved onto a weight the face actually ships.
+///
+/// The text engine only picks a face from the requested family when the
+/// weight matches exactly; otherwise it falls back to another family. Inter
+/// ships 400, 600 and 700, so it is asked for as is. OpenDyslexic ships
+/// only 400 and 800 (its "Bold" file is marked extra bold), so anything
+/// heavier than regular is asked for at 800, or the bold text would come
+/// out in Inter.
+pub fn weighted(face: Font, weight: font::Weight) -> Font {
+    let weight = match face.family {
+        font::Family::Name(DYSLEXIC_FAMILY) if weight != font::Weight::Normal => font::Weight::ExtraBold,
+        _ => weight,
+    };
+    Font { weight, ..face }
+}
+
+/// The reading face every text helper reads, set by [`set_font`]. Kept
+/// beside [`LOOK`] for the same reason: style and text helpers take no
+/// settings argument.
+static FACE: RwLock<Font> = RwLock::new(FONT);
+
+/// Makes the reading font with this id (see [`FONTS`]) the one all text uses.
+pub fn set_font(id: &str) {
+    *FACE.write().unwrap_or_else(|e| e.into_inner()) = font_for(id);
+}
+
+/// The reading face in use: Inter until [`set_font`] picks another.
+pub fn font() -> Font {
+    *FACE.read().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The colour tokens of one theme with one accent.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -105,14 +156,21 @@ pub const ACCENTS: [(&str, &str, &str, &str); 10] = [
     ("red", "Red", "#ef4444", "#ec4899"),
 ];
 
+/// `#rrggbb` (or `#rgb`, `#` optional) to a colour; `None` when it is not one.
+pub fn parse_hex(s: &str) -> Option<Color> {
+    let h = s.trim().trim_start_matches('#');
+    // Expand `#rgb` to `#rrggbb`.
+    let h: String = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { h.to_string() };
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let n = u32::from_str_radix(&h, 16).ok()?;
+    Some(Color::from_rgb8((n >> 16) as u8, (n >> 8) as u8, n as u8))
+}
+
 /// `#rrggbb` (or `#rgb`) to a colour; grey when it does not parse.
 pub fn hex(s: &str) -> Color {
-    let h = s.trim().trim_start_matches('#');
-    let h: String = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { h.to_string() };
-    match u32::from_str_radix(&h, 16) {
-        Ok(n) if h.len() == 6 => Color::from_rgb8((n >> 16) as u8, (n >> 8) as u8, n as u8),
-        _ => Color::from_rgb8(128, 128, 128),
-    }
+    parse_hex(s).unwrap_or(Color::from_rgb8(128, 128, 128))
 }
 
 /// A colour back to `#rrggbb`.
@@ -185,7 +243,7 @@ pub fn palette(theme: &str, accent: &str, custom: &str, system_dark: bool) -> Pa
     let (a, b) = match ACCENTS.iter().find(|x| x.0 == accent) {
         Some(x) => (hex(x.2), hex(x.3)),
         None => {
-            let a = hex(if custom.trim().is_empty() { "#f0ead6" } else { custom });
+            let a = parse_hex(custom).unwrap_or_else(|| hex("#f0ead6"));
             (a, partner(a))
         }
     };
@@ -255,12 +313,12 @@ pub fn avatar_color(seed: &str) -> Color {
 
 /// Semibold text, for buttons and small titles.
 pub fn semibold() -> Font {
-    Font { weight: font::Weight::Semibold, ..FONT }
+    weighted(font(), font::Weight::Semibold)
 }
 
 /// Bold text, for headings.
 pub fn bold() -> Font {
-    Font { weight: font::Weight::Bold, ..FONT }
+    weighted(font(), font::Weight::Bold)
 }
 
 /// Monospace, for fingerprints and addresses.
@@ -860,6 +918,24 @@ pub fn badge(kind: Badge) -> impl Fn(&Theme) -> container::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bold_reading_text_stays_in_its_own_face() {
+        let d = font_for("opendyslexic");
+        assert_eq!(weighted(d, font::Weight::Semibold).weight, font::Weight::ExtraBold, "OpenDyslexic ships only 400 and 800");
+        assert_eq!(weighted(d, font::Weight::Normal).weight, font::Weight::Normal);
+        assert_eq!(weighted(FONT, font::Weight::Semibold).weight, font::Weight::Semibold, "Inter has its own semibold");
+        assert_eq!(font_for("anything else"), FONT);
+    }
+
+    #[test]
+    fn hex_colours_parse_strictly() {
+        assert_eq!(parse_hex("#fff"), Some(Color::WHITE));
+        assert_eq!(parse_hex("336699").map(to_hex).as_deref(), Some("#336699"));
+        assert_eq!(parse_hex("#33669"), None);
+        assert_eq!(parse_hex("#gg0000"), None);
+        assert_eq!(parse_hex("+12345"), None, "from_str_radix would take a sign; a colour must not");
+    }
 
     #[test]
     fn stoop_is_encore_with_pastel_status() {

@@ -3,7 +3,7 @@
 //! every call with them.
 
 use iced_core::{Alignment, Length, Padding};
-use iced_widget::{button, column, container, mouse_area, row, space, stack};
+use iced_widget::{column, container, mouse_area, row, space, stack};
 
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
@@ -25,11 +25,10 @@ pub fn layer<'a>(ui: &'a Ui, m: &'a Model) -> Option<El<'a, Msg>> {
     let mute_label = if person.muted { format!("Hear {first} again") } else { format!("Mute {first} for me") };
     let item = |i: Icon, label: String, msg: Msg, danger: bool| -> El<'a, Msg> {
         let color = if danger { p.err } else { p.text };
-        button(row![icon(i, 15.0, color), t(label).size(13.5).color(color)].spacing(10).align_y(Alignment::Center))
+        let name = label.clone();
+        pressable(row![icon(i, 15.0, color), t(label).size(13.5).color(color)].spacing(10).align_y(Alignment::Center), crate::a11y::Role::Button, &name, false, Btn::Row, msg)
             .width(Length::Fill)
             .padding([7, 10])
-            .style(theme::btn(Btn::Row))
-            .on_press(msg)
             .into()
     };
 
@@ -37,7 +36,7 @@ pub fn layer<'a>(ui: &'a Ui, m: &'a Model) -> Option<El<'a, Msg>> {
         row![t("Volume").size(12).font(theme::semibold()).color(p.muted), space().width(Length::Fill), faint("Only you hear this").size(11)].align_y(Alignment::Center),
         row![
             icon(if person.muted { Icon::VolumeOff } else { Icon::Volume }, 15.0, p.muted),
-            volume_slider(person.volume_db, Length::Fill, {
+            volume_slider(&format!("Volume for {first}"), person.volume_db, Length::Fill, {
                 let id = id.clone();
                 move |db| Msg::Do(Action::Volume(id.clone(), db))
             }),

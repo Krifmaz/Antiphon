@@ -55,8 +55,12 @@ pub struct Settings {
     pub cellular_used_bytes: u64,
     /// The interface's theme id (`stoop`, `dark`, `oled`, `light`, `system`).
     pub theme: String,
-    /// The interface's accent id.
+    /// The interface's accent id, or `custom`.
     pub accent: String,
+    /// The custom accent as `#rrggbb`, used when `accent` is `custom`.
+    pub custom_accent: String,
+    /// The reading font's id: `inter` (the default) or `opendyslexic`.
+    pub font: String,
     /// Dialogs and panels appear at once instead of sliding.
     pub reduced_motion: bool,
 }
@@ -86,6 +90,8 @@ impl Default for Settings {
             cellular_used_bytes: 0,
             theme: "stoop".into(),
             accent: "logo".into(),
+            custom_accent: String::new(),
+            font: "inter".into(),
             reduced_motion: false,
         }
     }

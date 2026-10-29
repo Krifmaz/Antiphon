@@ -53,7 +53,7 @@ pub fn door_card<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
         }
         words = words.push(addr);
     }
-    let r = row![badge_box, words, switch(open, |on| Msg::Do(Action::Door(on)))].spacing(16).align_y(Alignment::Center);
+    let r = row![badge_box, words, switch("Door open", open, |on| Msg::Do(Action::Door(on)))].spacing(16).align_y(Alignment::Center);
     container(r)
         .padding(if compact { 14 } else { 20 })
         .width(Length::Fill)
@@ -92,14 +92,18 @@ pub fn starts<'a>(m: &'a Model, stacked: bool) -> El<'a, Msg> {
         } else {
             column![badge, words].spacing(14).into()
         };
+        let focused = crate::widgets::reg_button(crate::a11y::Role::Button, title, Some(&msg));
         button(face)
         .width(Length::Fill)
         .padding(if stacked { 14 } else { 18 })
-        .style(move |th, st| {
-            let mut s = theme::btn(Btn::Default)(th, st);
-            s.border.radius = theme::RADIUS.into();
-            s
-        })
+        .style(focus_style(
+            move |th, st| {
+                let mut s = theme::btn(Btn::Default)(th, st);
+                s.border.radius = theme::RADIUS.into();
+                s
+            },
+            focused,
+        ))
         .on_press(msg)
         .into()
     };
@@ -126,6 +130,10 @@ fn people<'a>(m: &'a Model) -> El<'a, Msg> {
     let mut grid = row![].spacing(12);
     for person in m.people.iter().take(4) {
         let line = person.last.as_deref().map(|s| clip(s, 26)).unwrap_or_else(|| "No messages yet".into());
+        let open = Msg::Nav(Route::Person(person.id.clone()));
+        let menu = Msg::Menu(Some(person.id.clone()));
+        let name = if person.unread > 0 { format!("{}, {} unread", person.name, person.unread) } else { person.name.clone() };
+        let focused = crate::a11y::Spec::new(crate::a11y::Role::Button, name).on(Some(&open)).menu(Some(&menu)).add();
         let card = button(
             column![
                 row![avatar_dot(&person.name, &person.id, 40.0, super::presence_color(person.presence), p.panel2), fill(), {
@@ -143,12 +151,15 @@ fn people<'a>(m: &'a Model) -> El<'a, Msg> {
         )
         .width(Length::Fill)
         .padding(16)
-        .style(move |th, st| {
-            let mut s = theme::btn(Btn::Default)(th, st);
-            s.border.radius = theme::RADIUS.into();
-            s
-        })
-        .on_press(Msg::Nav(Route::Person(person.id.clone())));
+        .style(focus_style(
+            move |th, st| {
+                let mut s = theme::btn(Btn::Default)(th, st);
+                s.border.radius = theme::RADIUS.into();
+                s
+            },
+            focused,
+        ))
+        .on_press(open);
         grid = grid.push(iced_widget::mouse_area(card).on_right_press(Msg::Menu(Some(person.id.clone()))));
     }
     for _ in m.people.len()..4 {

@@ -11,6 +11,7 @@
 //! - `--screenshot-tour <dir>`: the demo, walked through each screen, saved
 //!   as PNGs in `dir`, then exits.
 
+mod a11y;
 mod account;
 mod app;
 mod demo;
@@ -100,6 +101,9 @@ fn main() -> anyhow::Result<()> {
             min_size: Some(iced::Size::new(360.0, 560.0)),
             icon: window_icon(),
             exit_on_close_request: false,
+            // On Windows and macOS the screen-reader adapter must hook the
+            // window before it is first shown; the app shows it after.
+            visible: !a11y::START_HIDDEN,
             ..Default::default()
         })
         .antialiasing(true)
