@@ -151,6 +151,11 @@ fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
             size,
         ));
     }
+    // A phone has a camera on each side. The switch shows only while the
+    // camera is on, so it does not crowd the row on a voice call.
+    if c.camera_on && m.phone.is_some() {
+        r = r.push(round_btn(Icon::Refresh, "Switch camera", Btn::Round, Some(Msg::Do(Action::FlipCamera)), size));
+    }
     if c.can_share {
         r = r.push(round_btn(
             if c.sharing { Icon::ScreenOff } else { Icon::Screen },

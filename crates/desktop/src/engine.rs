@@ -1079,6 +1079,7 @@ impl Engine {
             A::ShareScreen(on) => self.set_video(Stream::Screen, on),
             // Only the phone shows the controls that send these.
             A::Speaker(_)
+            | A::FlipCamera
             | A::Talk(_)
             | A::RequestMic
             | A::WifiOnly(_)

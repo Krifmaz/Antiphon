@@ -122,6 +122,7 @@ impl App {
 
         let mut call = self.call_model(&phase);
         call.video = self.video_tiles(live.as_deref());
+        self.camera_model(live.as_deref(), &mut call);
         let conversation = open.as_deref().and_then(|id| self.conversation_model(id, live_peer.as_deref() == Some(id)));
         let transfers = self.transfers_model();
 
@@ -250,9 +251,9 @@ impl App {
         }
     }
 
-    /// The other side's pictures on the call. A picture that has not
-    /// changed since the last frame keeps its handle, so iced keeps the
-    /// texture it already has.
+    /// The other side's pictures on the call, then our own camera. A
+    /// picture that has not changed since the last frame keeps its handle,
+    /// so iced keeps the texture it already has.
     fn video_tiles(&mut self, live: Option<&crate::call::Live>) -> Vec<stoop::VideoTile> {
         let Some(live) = live else {
             self.tiles.clear();
@@ -283,6 +284,7 @@ impl App {
             self.tiles.insert(key.into(), (version, tile.clone()));
             tiles.push(tile);
         }
+        tiles.extend(self.my_camera_tile(live));
         self.tiles.retain(|k, _| tiles.iter().any(|t| &t.key == k));
         tiles
     }
@@ -482,10 +484,12 @@ impl App {
                 self.network = crate::platform::network();
             }
             Action::Speaker(on) => self.update(Message::Speaker(on)),
-            // The phone shows what the other side sends; sending its own
-            // camera and screen needs the OS capture APIs, so the buttons
-            // are not offered yet (`can_camera` and `can_share` stay off).
-            Action::Camera(_) | Action::ShareScreen(_) => self.stoop.toast("Sending video from the phone is coming; you can already see theirs", ToastKind::Info),
+            Action::Camera(on) => self.set_camera(on),
+            Action::FlipCamera => self.flip_camera(),
+            // Sharing a phone's screen needs the system's screen recording
+            // (MediaProjection, ReplayKit), so its button is not offered
+            // (`can_share` stays off).
+            Action::ShareScreen(_) => self.stoop.toast("Sharing a phone's screen is coming; you can already see theirs", ToastKind::Info),
             Action::Talk(on) => {
                 self.talking = on && !self.muted;
                 self.update(if self.talking { Message::PttPressed } else { Message::PttReleased });
