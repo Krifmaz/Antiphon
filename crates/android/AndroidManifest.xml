@@ -75,6 +75,17 @@
             </intent-filter>
         </activity>
 
+        <!-- Reopens the app in a fresh process when an old one is still
+             around that cannot start the Rust app again (winit allows one
+             event loop per process). Its own process, so it survives the
+             app's being killed; no UI of its own. -->
+        <activity
+            android:name=".RestartActivity"
+            android:process=":restart"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:exported="false" />
+
         <service
             android:name=".CallService"
             android:exported="false"
