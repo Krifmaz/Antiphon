@@ -659,6 +659,25 @@ pub struct Community {
     pub emoji: Vec<String>,
     /// You may change its settings, its emoji among them.
     pub can_manage: bool,
+    /// The spaces it shares with other communities.
+    pub shared_spaces: Vec<SharedSpace>,
+    /// On a shared space: how many communities share it; 0 for an
+    /// ordinary community.
+    pub sharing: usize,
+    /// The last link made for another community's admin to bring their
+    /// community into a space this one shares.
+    pub ally_link: Option<String>,
+}
+
+/// A space a community shares with other communities (spec §12 Q4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SharedSpace {
+    /// Its id (hex).
+    pub id: String,
+    /// What it is called.
+    pub name: String,
+    /// You are in it.
+    pub joined: bool,
 }
 
 /// Messages a member reported to the moderators.

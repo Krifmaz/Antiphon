@@ -64,6 +64,12 @@ pub const MAX_EMOJI_IMAGE: usize = 1800;
 /// The longest a custom emoji's name may be.
 pub const MAX_EMOJI_NAME: usize = 24;
 const MAX_TEXT: usize = 500;
+/// Most shared spaces one community belongs to.
+pub const MAX_ALLIES: usize = 16;
+/// Most communities that share one space.
+pub const MAX_ALLIANCE: usize = 8;
+/// Longest join link an ally entry carries.
+pub const MAX_ALLY_LINK: usize = 1024;
 
 /// Permission bits a role carries.
 pub mod perm {
@@ -170,6 +176,21 @@ impl Emoji {
     }
 }
 
+/// A shared space this community belongs to (spec §12 Q4, federation):
+/// a space of its own whose members come from several communities, so
+/// people in different communities can talk and call without joining
+/// each other's.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Ally {
+    /// The shared space's id.
+    pub space: Key,
+    /// What it is called, as shown before joining it.
+    pub name: String,
+    /// Its join link, hosted by a member of this community who is in it
+    /// and so can tell that whoever asks is one of us.
+    pub link: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Ban {
     pub key: Key,
@@ -238,6 +259,14 @@ pub struct Manifest {
     /// without being asked. Off, only invitations bring people in.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub listed: bool,
+    /// The shared spaces this community belongs to: its members may ask
+    /// into any of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allies: Vec<Ally>,
+    /// On a shared space: the communities whose members may ask in.
+    /// Empty for an ordinary community.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alliance: Vec<Key>,
 }
 
 /// The longest slow mode a community can set: six hours.
@@ -363,6 +392,8 @@ impl Manifest {
             emoji: Vec::new(),
             slow_mode_secs: 0,
             listed: false,
+            allies: Vec::new(),
+            alliance: Vec::new(),
         }
     }
 
@@ -517,6 +548,21 @@ impl Manifest {
         if self.slow_mode_secs > MAX_SLOW_MODE_SECS {
             return bad("slow mode is too slow");
         }
+        if self.allies.len() > MAX_ALLIES || self.allies.iter().any(|a| a.name.chars().count() > MAX_NAME || a.link.len() > MAX_ALLY_LINK || a.space == self.id) {
+            return bad("allies");
+        }
+        let mut spaces: Vec<_> = self.allies.iter().map(|a| a.space).collect();
+        spaces.sort();
+        spaces.dedup();
+        if spaces.len() != self.allies.len() {
+            return bad("a shared space is listed twice");
+        }
+        let mut alliance = self.alliance.clone();
+        alliance.sort();
+        alliance.dedup();
+        if alliance.len() != self.alliance.len() || alliance.len() > MAX_ALLIANCE || alliance.contains(&self.id) {
+            return bad("alliance");
+        }
         Ok(())
     }
 }
@@ -576,6 +622,14 @@ pub fn check_transition(old: &Manifest, old_signed: &SignedManifest, new: &Signe
     }
     if n.emoji != old.emoji {
         need(perm::MANAGE_COMMUNITY, "change the community's emoji")?;
+    }
+    if n.allies != old.allies {
+        need(perm::MANAGE_COMMUNITY, "change the community's shared spaces")?;
+    }
+    // Which communities may send their members in is the owners' call:
+    // it decides who can join without being invited one by one.
+    if n.alliance != old.alliance && !old.is_owner(s) {
+        return Err(Denied::NotAllowed("change which communities share this space"));
     }
     if n.channels != old.channels {
         need(perm::MANAGE_CHANNELS, "change channels")?;
@@ -743,6 +797,27 @@ mod tests {
         w.apply(&owner, |m| m.slow_mode_secs = 30).unwrap();
         assert_eq!(w.m.slow_mode_secs, 30);
         assert!(w.apply(&owner, |m| m.slow_mode_secs = MAX_SLOW_MODE_SECS + 1).is_err());
+    }
+
+    #[test]
+    fn shared_spaces_are_for_managers_and_who_shares_is_for_owners() {
+        let mut w = community();
+        let (admin, moder) = (IdentityKeyPair::generate(), IdentityKeyPair::generate());
+        let owner = std::mem::replace(&mut w.owner, IdentityKeyPair::generate());
+        w.apply(&owner, |m| {
+            add(m, &admin, 0);
+            add(m, &moder, 1);
+        })
+        .unwrap();
+        let ally = Ally { space: Key([9; 32]), name: "Choirs together".into(), link: "stoop://join/x".into() };
+        assert!(w.apply(&moder, |m| m.allies.push(ally.clone())).is_err(), "a moderator can't");
+        w.apply(&admin, |m| m.allies.push(ally.clone())).unwrap();
+        assert!(w.apply(&admin, |m| m.allies.push(ally.clone())).is_err(), "not twice");
+        let own = w.m.id;
+        assert!(w.apply(&owner, |m| m.allies.push(Ally { space: own, ..ally.clone() })).is_err(), "not itself");
+        assert!(w.apply(&admin, |m| m.alliance.push(Key([5; 32]))).is_err(), "only an owner says who shares it");
+        w.apply(&owner, |m| m.alliance.push(Key([5; 32]))).unwrap();
+        assert!(w.apply(&owner, |m| m.alliance.push(own)).is_err());
     }
 
     fn add(m: &mut Manifest, who: &IdentityKeyPair, role: u16) {

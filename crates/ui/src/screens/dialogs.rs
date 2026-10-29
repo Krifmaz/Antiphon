@@ -82,6 +82,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
         Dialog::ChannelSettings(id, channel) => modal("Who can read it", super::community::channel_settings(m, id, *channel), None, 480.0, close, rise),
         Dialog::Roles(id) => modal("Roles", super::community::roles(ui, m, id), None, 560.0, close, rise),
         Dialog::Moderation(id) => modal("Moderation", super::community::moderation(ui, m, id), None, 600.0, close, rise),
+        Dialog::SharedSpaces(id) => modal("Shared with other communities", super::community::shared_spaces(ui, m, id), None, 560.0, close, rise),
         Dialog::Directory => modal("Find communities", super::community::directory(ui, m), None, 560.0, close, rise),
         Dialog::Report(id, channel, _) => {
             let send = (!ui.report_pick.is_empty()).then(|| Msg::ReportSend(id.clone(), *channel));

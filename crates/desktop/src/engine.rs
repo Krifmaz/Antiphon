@@ -1890,6 +1890,17 @@ impl Engine {
             A::ManageSpace { community, change: ui::SpaceChange::JoinVoice(channel) } => self.join_voice(community, channel),
             A::ManageSpace { community, change: ui::SpaceChange::SubmitListing { directory, description } } => self.submit_listing(community, directory, Some(description)),
             A::ManageSpace { community, change: ui::SpaceChange::WithdrawListing(directory) } => self.submit_listing(community, directory, None),
+            A::ManageSpace {
+                community,
+                change: change @ (ui::SpaceChange::StartShared(_) | ui::SpaceChange::JoinShared(_) | ui::SpaceChange::AskIntoShared(_) | ui::SpaceChange::UnlistShared(_) | ui::SpaceChange::NewAllyLink),
+            } => {
+                let (text, kind) = match self.spaces.shared(&community, change) {
+                    Ok(said) => (said, ToastKind::Ok),
+                    Err(e) => (e, ToastKind::Warn),
+                };
+                self.toast(text, kind);
+                delivery::kick();
+            }
             A::AddDirectory(address) => {
                 if !self.cfg.directories.iter().any(|d| d.eq_ignore_ascii_case(&address)) {
                     self.cfg.directories.push(address);

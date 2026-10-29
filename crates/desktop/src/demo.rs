@@ -455,6 +455,7 @@ fn communities() -> Vec<ui::Community> {
             can_manage_channels: true,
             can_manage: true,
             emoji: vec!["vinyl".into(), "porch".into(), "yes".into()],
+            shared_spaces: vec![ui::SharedSpace { id: "5ba7ed0000000000000000000000000000000000000000000000000000000000".into(), name: "Porch & Basement shows".into(), joined: false }],
             ..ui::Community::default()
         },
     ]

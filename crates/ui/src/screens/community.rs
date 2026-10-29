@@ -204,6 +204,9 @@ fn header<'a>(c: &'a Community, ch: Option<&'a Channel>, phone: bool) -> El<'a, 
         let kind = if c.reports.is_empty() { Btn::Icon } else { Btn::RowOn };
         r = r.push(icon_btn_kind(Icon::ShieldCheck, tip, kind, Some(Msg::Dialog(Some(Dialog::Moderation(c.id.clone()))))));
     }
+    if !c.group && (c.can_manage || c.sharing > 0 || !c.shared_spaces.is_empty()) {
+        r = r.push(icon_btn(Icon::Globe, "Shared with other communities", Some(Msg::Dialog(Some(Dialog::SharedSpaces(c.id.clone()))))));
+    }
     let invite = c.can_invite.then(|| Msg::Dialog(Some(Dialog::InviteToSpace(c.id.clone()))));
     if phone {
         r = r.push(icon_btn(Icon::UserPlus, "Invite", invite));
@@ -914,6 +917,64 @@ pub fn moderation<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
             );
         }
         col = col.push(invites);
+    }
+    scrollable(col).height(Length::Shrink).style(theme::scroll).into()
+}
+
+/// The spaces a community shares with other communities (spec §12 Q4):
+/// ask into one, and, for whoever manages it, start one or bring it into
+/// another community's.
+pub fn shared_spaces<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let mut col = column![muted("A shared space is a community of its own whose members come from several communities, so you can talk and call with another community without joining it. Its members see your name and picture there, as anywhere.").size(13)].spacing(12);
+    if c.sharing > 0 {
+        col = col.push(faint(format!("This is a shared space: {} communities' members can ask in.", c.sharing)).size(12.5));
+    }
+    let mut list = column![].spacing(6);
+    if c.shared_spaces.is_empty() && c.sharing == 0 {
+        list = list.push(faint("It doesn't share any spaces yet.").size(12.5));
+    }
+    for s in &c.shared_spaces {
+        let ask = if s.joined { btn_sm("You're in it", Btn::Ghost, None) } else { btn_sm("Ask to join", Btn::Primary, Some(change(SpaceChange::AskIntoShared(s.id.clone())))) };
+        let mut r = row![avatar(&s.name, &s.id, 30.0), t(s.name.as_str()).size(13.5).font(theme::semibold()).width(Length::Fill), ask].spacing(10).align_y(Alignment::Center);
+        if c.can_manage {
+            r = r.push(icon_btn(Icon::Trash, "Take it off this community's list", Some(change(SpaceChange::UnlistShared(s.id.clone())))));
+        }
+        list = list.push(r);
+    }
+    col = col.push(list);
+    if c.can_manage && c.sharing == 0 {
+        col = col.push(label("Share a space with another community"));
+        col = col.push(
+            row![
+                input("Name of the shared space", "stoop-shared-name", "Both choirs", &ui.shared_name).on_input(Msg::SharedName).on_submit(Msg::SharedStart(c.id.clone())).padding([8, 10]).size(13),
+                btn_sm("Start it", Btn::Primary, (!ui.shared_name.trim().is_empty()).then(|| Msg::SharedStart(c.id.clone()))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        col = col.push(
+            row![
+                input("Link from the other community", "stoop-shared-link", "stoop://ally/…", &ui.shared_link).on_input(Msg::SharedLink).on_submit(Msg::SharedJoin(c.id.clone())).padding([8, 10]).size(13),
+                btn_sm("Join theirs", Btn::Ghost, (!ui.shared_link.is_empty()).then(|| Msg::SharedJoin(c.id.clone()))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        col = col.push(faint("Starting one gives you a link for the other community's admin; it works once, within a week. Joining theirs needs the link their admin gave you.").size(12));
+    }
+    if c.sharing > 0 && c.can_manage {
+        col = col.push(
+            row![faint("Bring in another community: make a link for its admin.").size(12.5).width(Length::Fill), btn_sm("Make a link", Btn::Ghost, Some(change(SpaceChange::NewAllyLink)))].spacing(8).align_y(Alignment::Center),
+        );
+    }
+    if let Some(link) = &c.ally_link {
+        col = col.push(
+            row![faint(clip(link, 48)).size(12).font(theme::mono()).width(Length::Fill), btn_sm("Copy link", Btn::Ghost, Some(Msg::Copy(link.clone(), "Shared space link")))]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
     }
     scrollable(col).height(Length::Shrink).style(theme::scroll).into()
 }

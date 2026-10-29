@@ -148,6 +148,8 @@ pub enum Dialog {
     Roles(String),
     /// Slow mode, reports and open invitations in this community (by id).
     Moderation(String),
+    /// The spaces this community shares with other communities (by id).
+    SharedSpaces(String),
     /// Find communities in the directories you added.
     Directory,
     /// Report a message (community id, channel, message id) and any others
@@ -619,6 +621,19 @@ pub enum SpaceChange {
     },
     /// Ask a directory to take it off.
     WithdrawListing(String),
+    /// Start a space shared with another community, with this name; a
+    /// link for the other community's admin comes back.
+    StartShared(String),
+    /// Bring this community into the shared space a link from another
+    /// community's admin names.
+    JoinShared(String),
+    /// Ask into a shared space this community lists (its id, hex).
+    AskIntoShared(String),
+    /// Take a shared space off this community's list (its id, hex).
+    UnlistShared(String),
+    /// Make another link for another community's admin to join this
+    /// shared space, which you own.
+    NewAllyLink,
     /// Withdraw the invitation you sent to someone (their id, hex).
     WithdrawInvite(String),
     /// Take a report off the list.
@@ -768,6 +783,14 @@ pub enum Msg {
     ListingDescription(String),
     /// Send the listing typed in the boxes (community id).
     ListingSubmit(String),
+    /// The name box for a new shared space changed.
+    SharedName(String),
+    /// The box for another community's shared space link changed.
+    SharedLink(String),
+    /// Start the shared space named in the box (community id).
+    SharedStart(String),
+    /// Join the shared space whose link is in the box (community id).
+    SharedJoin(String),
     /// Pick or unpick a message to report with the others.
     ReportPick(u64),
     /// The report's reason box changed.
@@ -889,6 +912,10 @@ pub struct Ui {
     listing_directory: String,
     /// What the listing is to say.
     listing_description: String,
+    /// The name for a new shared space.
+    shared_name: String,
+    /// Another community's link for a shared space.
+    shared_link: String,
     /// The messages picked to report.
     report_pick: Vec<u64>,
     /// Why they are being reported.
@@ -977,6 +1004,8 @@ impl Ui {
             node_edit: String::new(),
             directory_address: String::new(),
             listing_directory: String::new(),
+            shared_name: String::new(),
+            shared_link: String::new(),
             listing_description: String::new(),
             report_reason: String::new(),
             toasts: Vec::new(),
@@ -1460,6 +1489,28 @@ impl Ui {
             Msg::ListingDirectory(s) => {
                 self.listing_directory = s.trim().to_string();
                 Vec::new()
+            }
+            Msg::SharedName(s) => {
+                self.shared_name = s.chars().take(80).collect();
+                Vec::new()
+            }
+            Msg::SharedLink(s) => {
+                self.shared_link = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::SharedStart(community) => {
+                let name = std::mem::take(&mut self.shared_name).trim().to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::ManageSpace { community, change: SpaceChange::StartShared(name) }]
+            }
+            Msg::SharedJoin(community) => {
+                let link = std::mem::take(&mut self.shared_link);
+                if link.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::ManageSpace { community, change: SpaceChange::JoinShared(link) }]
             }
             Msg::ListingDescription(s) => {
                 self.listing_description = s.chars().take(240).collect();

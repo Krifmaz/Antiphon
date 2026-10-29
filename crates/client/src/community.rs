@@ -205,6 +205,48 @@ impl Card {
 
 // ---- what travels --------------------------------------------------------
 
+/// That whoever asks into a shared space is a member of one of the
+/// communities sharing it (spec §12 Q4): their key there, and its
+/// signature over the shared space and the key they ask with. The member
+/// it goes to checks that key against their own copy of that community.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Proof {
+    /// The community they come from.
+    pub community: Key,
+    /// Their encoded public identity there, hex.
+    pub public: String,
+    /// Its signature over [`proof_bytes`], hex.
+    pub signature: String,
+}
+
+/// What a [`Proof`] signs: it is for this shared space and this asker
+/// only, so it can't be replayed into another or by someone else.
+fn proof_bytes(shared: &Key, community: &Key, asker: &[u8; 32]) -> Vec<u8> {
+    let mut b = b"stoop-shared-space-v1".to_vec();
+    b.extend_from_slice(&shared.0);
+    b.extend_from_slice(&community.0);
+    b.extend_from_slice(asker);
+    b
+}
+
+impl Proof {
+    /// `home` (as the identity we are in `community` with) vouching that
+    /// `asker` may ask into `shared` on its behalf.
+    pub fn make(home: &IdentityKeyPair, community: Key, shared: &Key, asker: &[u8; 32]) -> Self {
+        let signature = home.sign(&proof_bytes(shared, &community, asker));
+        Self { community, public: hex(&home.public().encode()), signature: hex(&signature) }
+    }
+
+    /// The key it proves membership for, if the signature holds for this
+    /// shared space and asker.
+    pub fn check(&self, shared: &Key, asker: &[u8; 32]) -> Option<[u8; 32]> {
+        let identity = PublicIdentity::decode(&unhex(&self.public)?).ok()?;
+        let signature: [u8; 64] = unhex(&self.signature)?.try_into().ok()?;
+        antiphon_crypto::verify_signature(&identity.identity_key, &proof_bytes(shared, &self.community, asker), &signature).ok()?;
+        Some(identity.identity_key)
+    }
+}
+
 /// One message between members. Byte fields are base64.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "t")]
@@ -222,7 +264,17 @@ pub enum Wire {
     App { community: Key, data: String },
     /// "I'd like to join": a stranger, from a listed community's join
     /// link, to the member who made it. `card` is how to answer them.
-    Knock { community: Key, card: Card },
+    /// Asking into a shared space, `proof` shows which community they
+    /// come from, and a founding community's admin brings the `ticket`
+    /// they were given.
+    Knock {
+        community: Key,
+        card: Card,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof: Option<Proof>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<Key>,
+    },
     /// "I have version `since`; send me what came after."
     ManifestRequest { community: Key, since: u64 },
     Manifests { community: Key, list: Vec<String> },
@@ -341,7 +393,16 @@ struct Offer {
     /// They asked, from the join link, rather than being invited.
     #[serde(default)]
     knocked: bool,
+    /// They brought their community into this shared space with a
+    /// ticket, and become one of its owners when they join.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    founder: Option<Key>,
 }
+
+/// Most tickets for founding a shared space held at once.
+const MAX_TICKETS: usize = 8;
+/// How long a ticket for founding a shared space lasts: a week.
+const TICKET_LIFETIME_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Most open invitations made in answer to strangers asking, so a flood
 /// of them can't push out the ones members sent.
@@ -467,6 +528,8 @@ struct Saved {
     reports: Vec<Report>,
     #[serde(default)]
     voice: Vec<Presence>,
+    #[serde(default)]
+    tickets: Vec<(Key, u64)>,
 }
 
 pub struct Space {
@@ -490,6 +553,9 @@ pub struct Space {
     reports: Vec<Report>,
     /// Who said they are in which voice channel, and when.
     voice: Vec<Presence>,
+    /// Tickets we gave out for another community to join this shared
+    /// space, and when.
+    tickets: Vec<(Key, u64)>,
 }
 
 /// The identity to act as in a space: `main`, or the separate one derived
@@ -524,6 +590,7 @@ impl Space {
             pace: Vec::new(),
             reports: Vec::new(),
             voice: Vec::new(),
+            tickets: Vec::new(),
         })
     }
 
@@ -569,6 +636,7 @@ impl Space {
             pace: Vec::new(),
             reports: Vec::new(),
             voice: Vec::new(),
+            tickets: Vec::new(),
         };
         space.learn(invite.card.clone());
         let out = Out { to: invite.from.0, wire: Wire::Join { community, key_package: b64(&key_package), card } };
@@ -589,6 +657,7 @@ impl Space {
             pace: self.pace.clone(),
             reports: self.reports.clone(),
             voice: self.voice.clone(),
+            tickets: self.tickets.clone(),
         };
         serde_json::to_vec(&saved).expect("a space always serializes")
     }
@@ -623,6 +692,7 @@ impl Space {
             pace: saved.pace,
             reports: saved.reports,
             voice: saved.voice,
+            tickets: saved.tickets,
         })
     }
 
@@ -834,7 +904,7 @@ impl Space {
             if self.offers.len() >= MAX_OFFERS {
                 self.offers.remove(0);
             }
-            self.offers.push(Offer { key: Key(who), name: name.chars().take(80).collect(), at_secs: now_secs(), knocked: false });
+            self.offers.push(Offer { key: Key(who), name: name.chars().take(80).collect(), at_secs: now_secs(), knocked: false, founder: None });
         }
         // Slim: the invitee learns the picture once they are in.
         let card = self.card(&self.me).map(Card::slim).ok_or("no card of your own")?;
@@ -855,9 +925,15 @@ impl Space {
         // for them would say who it is.
         let name = if card.key.0 == from { offer.name } else { card.name.clone() };
         let key = card.key;
+        // A founding community's admin owns the shared space with us; if
+        // we can't make them one, they join as anyone does.
+        let owner = offer.founder.is_some() && self.manifest().is_owner(&self.me);
         self.change(identity, |m| {
             let role = m.default_role();
             m.members.push(cm::Member { key, role, name: name.chars().take(80).collect() });
+            if owner {
+                m.owners.push(key);
+            }
         })?;
         self.offers.retain(|o| o.key.0 != from);
         Ok(())
@@ -992,6 +1068,75 @@ impl Space {
     /// go sealed only to members who can act on them (remove messages,
     /// remove or ban people) and the owners. Nothing goes anywhere else;
     /// there is no one else to send it to.
+    /// A ticket another community's admin brings to join this shared
+    /// space as one of the communities sharing it. Only an owner gives
+    /// them, and each works once, within a week.
+    pub fn new_ticket(&mut self) -> Result<Key, String> {
+        if !self.manifest().is_owner(&self.me) {
+            return Err("only its owners can bring in another community".into());
+        }
+        let mut t = [0u8; 32];
+        getrandom::fill(&mut t).expect("OS randomness is unavailable");
+        let now = now_secs();
+        self.tickets.retain(|(_, at)| now.saturating_sub(*at) <= TICKET_LIFETIME_SECS);
+        if self.tickets.len() >= MAX_TICKETS {
+            self.tickets.remove(0);
+        }
+        self.tickets.push((Key(t), now));
+        Ok(Key(t))
+    }
+
+    /// Someone asking into this shared space with a [`Proof`] of the
+    /// community they come from. `vouched` is whether the app found the
+    /// proved key in its own copy of that community. With a ticket we
+    /// gave out, their community joins the ones sharing this space and
+    /// they become an owner of it once they join; without one, their
+    /// community must be sharing it already. Either way they are invited,
+    /// and accept as anyone does.
+    pub fn ally_knock(&mut self, identity: &IdentityKeyPair, from: [u8; 32], card: &Card, proof: &Proof, ticket: Option<Key>, vouched: bool) -> Result<Vec<Out>, String> {
+        let shared = self.id();
+        // A ticket we gave out is its own authority: whoever brings it
+        // names the community they bring. Otherwise one of that
+        // community's members has to recognise them.
+        if proof.check(&shared, &from).is_none() || (!vouched && ticket.is_none()) {
+            return Err("they couldn't show which community they come from".into());
+        }
+        let m = self.manifest();
+        if m.is_banned(&from) || card.key.0 != from || !card.valid() {
+            return Err("they can't join".into());
+        }
+        if self.readers().contains(&from) {
+            return Ok(Vec::new());
+        }
+        let community = proof.community;
+        let mut outs = Vec::new();
+        let founder = match ticket {
+            Some(t) => {
+                let now = now_secs();
+                let Some(at) = self.tickets.iter().position(|(k, at)| *k == t && now.saturating_sub(*at) <= TICKET_LIFETIME_SECS) else {
+                    return Err("that ticket isn't one of ours, or it ran out".into());
+                };
+                if !m.alliance.contains(&community) {
+                    if m.alliance.len() >= cm::MAX_ALLIANCE {
+                        return Err("as many communities share it as can".into());
+                    }
+                    outs = self.update(identity, |m| m.alliance.push(community))?;
+                }
+                self.tickets.remove(at);
+                Some(community)
+            }
+            None if m.alliance.contains(&community) => None,
+            None => return Err("their community doesn't share this space".into()),
+        };
+        let name: String = card.name.chars().take(80).collect();
+        outs.append(&mut self.invite(identity, from, &name)?);
+        if let Some(o) = self.offers.iter_mut().find(|o| o.key.0 == from) {
+            o.knocked = true;
+            o.founder = founder;
+        }
+        Ok(outs)
+    }
+
     pub fn report(&mut self, channel: u32, reason: &str, excerpts: Vec<Excerpt>) -> Result<Vec<Out>, String> {
         if excerpts.is_empty() {
             return Err("pick at least one message to report".into());
@@ -1168,6 +1313,10 @@ impl Space {
         }
         match wire {
             Wire::Invite { .. } => Ok(()),
+            // Asking into a shared space: only the app can check which
+            // community they come from, against its own copy of it
+            // (`Store::receive`, then `ally_knock`).
+            Wire::Knock { proof: Some(_), .. } => Ok(()),
             Wire::Knock { card, .. } => {
                 // A stranger from the join link: let in only while the
                 // community is listed, by someone allowed to invite, and
@@ -1754,6 +1903,11 @@ struct Hub {
     /// invitation is taken from a stranger for a while.
     #[serde(default)]
     knocked: Vec<(Key, u64)>,
+    /// Shared spaces we asked into for one of our communities with a
+    /// ticket: (shared space, our community). Once we accept its
+    /// invitation, the shared space goes on our community's list.
+    #[serde(default)]
+    allying: Vec<(Key, Key)>,
 }
 
 /// Keeps a stranger's card, newest last, replacing an older one of theirs.
@@ -1783,6 +1937,16 @@ pub struct JoinLink {
 
 /// How a join link starts.
 pub const JOIN_PREFIX: &str = "stoop://join/";
+/// How a link for another community's admin to join a shared space
+/// starts: then the ticket in hex, a dot, and the join link's body.
+pub const ALLY_PREFIX: &str = "stoop://ally/";
+
+/// The ticket and join link in a link for a shared space.
+pub fn parse_ally_link(link: &str) -> Option<(Key, JoinLink)> {
+    let (ticket, body) = link.trim().strip_prefix(ALLY_PREFIX)?.split_once('.')?;
+    let ticket = Key(unhex(ticket)?.try_into().ok()?);
+    Some((ticket, JoinLink::parse(&format!("{JOIN_PREFIX}{body}"))?))
+}
 
 impl JoinLink {
     /// `stoop://join/` and, in URL-safe base64: the community's id, the
@@ -2143,8 +2307,16 @@ impl Store {
         }
         self.save(&space).map_err(|e| e.to_string())?;
         self.queue(&mut hub, vec![out], space.me(), None);
+        let home = hub.allying.iter().find(|(s, _)| *s == id).map(|(_, h)| *h);
+        hub.allying.retain(|(s, _)| *s != id);
         self.save_hub(&hub);
         drop(_guard);
+        // We brought our community into a shared space: list it there.
+        if let Some(home) = home {
+            if let Err(why) = self.list_shared_space(&home, &id) {
+                crate::delivery::notice(format!("Couldn't list the shared space on your community: {why}"));
+            }
+        }
         bump();
         crate::delivery::kick();
         Ok(space.id())
@@ -2300,8 +2472,26 @@ impl Store {
     pub fn receive(&self, from: [u8; 32], wire: Wire) {
         match wire {
             Wire::Invite { manifest, card } => self.receive_invite(from, manifest, card),
-            Wire::Knock { community, card } => {
+            Wire::Knock { community, card, proof, ticket } => {
                 if self.load(&community).is_none() || card.key.0 != from || !card.valid() {
+                    return;
+                }
+                // Into a shared space: checked against our own copy of the
+                // community they say they come from.
+                if let Some(proof) = proof {
+                    let vouched = proof.check(&community, &from).is_some_and(|key| {
+                        self.load(&proof.community).is_some_and(|home| !home.removed && home.joining.is_none() && home.manifest().is_member(&key))
+                    });
+                    {
+                        let _guard = LOCK.lock().unwrap();
+                        let mut hub = self.hub();
+                        remember_card(&mut hub, card.clone());
+                        self.save_hub(&hub);
+                    }
+                    let _ = self.with_space(&community, |space, identity| {
+                        let outs = space.ally_knock(identity, from, &card, &proof, ticket, vouched)?;
+                        Ok(((), outs, vec![Event::Notice(format!("{} asked in from an allied community and was invited", card.name.chars().take(80).collect::<String>()))]))
+                    });
                     return;
                 }
                 // Kept so the invitation that answers them can be mailed.
@@ -2312,7 +2502,7 @@ impl Store {
                     self.save_hub(&hub);
                 }
                 let _ = self.with_space(&community, |space, identity| {
-                    let h = space.handle(identity, from, Wire::Knock { community, card });
+                    let h = space.handle(identity, from, Wire::Knock { community, card, proof: None, ticket: None });
                     Ok(((), h.outs, h.events))
                 });
             }
@@ -2384,9 +2574,23 @@ impl Store {
     /// the others, to accept or not.
     pub fn knock(&self, link: &str) -> Result<(), String> {
         let join = JoinLink::parse(link).ok_or("That isn't a join link")?;
+        self.knock_with(join, None, None)
+    }
+
+    /// Sends a Knock to a join link's host, with a proof of where we come
+    /// from and a ticket when asking into a shared space.
+    fn knock_with(&self, join: JoinLink, from: Option<Key>, ticket: Option<Key>) -> Result<(), String> {
         if self.load(&join.community).is_some_and(|s| !s.removed) {
             return Err("You're already in it".into());
         }
+        let me = self.identity.public().identity_key;
+        let proof = match from {
+            Some(home) => {
+                let space = self.load(&home).ok_or("couldn't open your community")?;
+                Some(Proof::make(&self.identity_in(&space), home, &join.community, &me))
+            }
+            None => None,
+        };
         let card = self.card_for(&join.community, &self.identity);
         let to = join.host.key.0;
         {
@@ -2398,13 +2602,107 @@ impl Store {
             if hub.knocked.len() > MAX_INTRODUCED {
                 hub.knocked.remove(0);
             }
-            let me = self.identity.public().identity_key;
-            self.queue(&mut hub, vec![Out { to, wire: Wire::Knock { community: join.community, card } }], me, None);
+            if let (Some(home), Some(_)) = (from, ticket) {
+                hub.allying.retain(|(s, _)| *s != join.community);
+                hub.allying.push((join.community, home));
+                if hub.allying.len() > MAX_INTRODUCED {
+                    hub.allying.remove(0);
+                }
+            }
+            self.queue(&mut hub, vec![Out { to, wire: Wire::Knock { community: join.community, card, proof, ticket } }], me, None);
             self.save_hub(&hub);
         }
         bump();
         crate::delivery::kick();
         Ok(())
+    }
+
+    // ---- shared spaces (spec §12 Q4, federation) ----
+
+    /// Starts a space shared with another community, for `home` (which we
+    /// must be allowed to manage): a new space that `home`'s members may
+    /// ask into, listed on `home`. Returns the link to give the other
+    /// community's admin; it works once, within a week.
+    pub fn start_shared_space(&self, home: &Key, name: &str) -> Result<String, String> {
+        let space = self.load(home).ok_or("couldn't open it")?;
+        if space.manifest().kind != Kind::Community || !space.manifest().alliance.is_empty() {
+            return Err("Only a community can share a space".into());
+        }
+        if !space.manifest().can(&space.me(), perm::MANAGE_COMMUNITY, None) {
+            return Err("You can't manage this community".into());
+        }
+        if space.manifest().allies.len() >= cm::MAX_ALLIES {
+            return Err("It shares as many spaces as it can".into());
+        }
+        let shared = self.create(Kind::Community, name, space.persona)?;
+        let home_id = *home;
+        let ticket = self.with_space(&shared, |s, identity| {
+            let outs = s.update(identity, |m| m.alliance.push(home_id))?;
+            Ok((s.new_ticket()?, outs, Vec::new()))
+        })?;
+        self.list_shared_space(home, &shared)?;
+        let link = self.shared_space_link(&shared)?;
+        Ok(format!("{ALLY_PREFIX}{}.{}", hex(&ticket.0), link.trim_start_matches(JOIN_PREFIX)))
+    }
+
+    /// Another link for the other community's admin, for a shared space
+    /// we own.
+    pub fn new_ally_link(&self, shared: &Key) -> Result<String, String> {
+        let ticket = self.with_space(shared, |s, _| Ok((s.new_ticket()?, Vec::new(), Vec::new())))?;
+        let link = self.shared_space_link(shared)?;
+        Ok(format!("{ALLY_PREFIX}{}.{}", hex(&ticket.0), link.trim_start_matches(JOIN_PREFIX)))
+    }
+
+    /// Brings `home` into the shared space a link from another
+    /// community's admin names: asks in with its ticket, and once we
+    /// accept the invitation that answers, lists it on `home`.
+    pub fn join_shared_space(&self, home: &Key, link: &str) -> Result<(), String> {
+        let (ticket, join) = parse_ally_link(link).ok_or("That isn't a link for a shared space")?;
+        let space = self.load(home).ok_or("couldn't open it")?;
+        if !space.manifest().can(&space.me(), perm::MANAGE_COMMUNITY, None) {
+            return Err("You can't manage this community".into());
+        }
+        if space.manifest().allies.iter().any(|a| a.space == join.community) {
+            return Err("It already shares that space".into());
+        }
+        self.knock_with(join, Some(*home), Some(ticket))
+    }
+
+    /// Asks into a shared space `home` lists, as one of its members.
+    pub fn ask_into_shared_space(&self, home: &Key, shared: &Key) -> Result<(), String> {
+        let space = self.load(home).ok_or("couldn't open it")?;
+        let ally = space.manifest().allies.iter().find(|a| a.space == *shared).ok_or("It doesn't share that space any more")?;
+        let join = JoinLink::parse(&ally.link).ok_or("Its link is broken; ask an admin to list it again")?;
+        self.knock_with(join, Some(*home), None)
+    }
+
+    /// Takes a shared space off `home`'s list. Members already in it stay.
+    pub fn unlist_shared_space(&self, home: &Key, shared: &Key) -> Result<(), String> {
+        let shared = *shared;
+        self.with_space(home, |s, identity| Ok(((), s.update(identity, |m| m.allies.retain(|a| a.space != shared))?, Vec::new())))
+    }
+
+    /// Lists `shared` (which we are in) on `home`, with a join link we
+    /// host, so `home`'s members ask us and we can tell they are members.
+    fn list_shared_space(&self, home: &Key, shared: &Key) -> Result<(), String> {
+        let space = self.load(shared).ok_or("couldn't open it")?;
+        let name = space.manifest().name.clone();
+        let link = self.shared_space_link(shared)?;
+        let ally = cm::Ally { space: *shared, name, link };
+        self.with_space(home, |s, identity| {
+            let outs = s.update(identity, |m| {
+                m.allies.retain(|a| a.space != ally.space);
+                m.allies.push(ally);
+            })?;
+            Ok(((), outs, Vec::new()))
+        })
+    }
+
+    /// A shared space's join link, hosted by us.
+    fn shared_space_link(&self, shared: &Key) -> Result<String, String> {
+        let space = self.load(shared).ok_or("couldn't open it")?;
+        let identity = self.identity_in(&space);
+        Ok(JoinLink { community: *shared, host: self.card_for(shared, &identity) }.to_link())
     }
 
     /// How to mail a member: a contact's prekey and routes, or their card.
@@ -2873,7 +3171,7 @@ mod tests {
         let (mut alice, mut bob, mut carol) = three();
         let mut dave = person("Dave");
         let community = alice.space().id();
-        let knock = vec![(3, Out { to: alice.key(), wire: Wire::Knock { community, card: dave.card() } })];
+        let knock = vec![(3, Out { to: alice.key(), wire: Wire::Knock { community, card: dave.card(), proof: None, ticket: None } })];
         // Not listed: asking does nothing.
         run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], knock.clone());
         assert!(dave.space.is_none());
@@ -2883,6 +3181,60 @@ mod tests {
         let ev = run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], knock);
         assert!(ev[3].contains(&Event::Joined), "{ev:?}");
         assert!(bob.space().manifest().is_member(&dave.key()));
+    }
+
+    #[test]
+    fn two_communities_meet_in_a_shared_space() {
+        // Alice runs the shared space for her community A; Bob is an
+        // admin of community B, Carol a member of B.
+        let (mut alice, mut bob, mut carol) = (person("Alice"), person("Bob"), person("Carol"));
+        let (a, b, shared) = (Key([1; 32]), Key([2; 32]), Key([4; 32]));
+        alice.space = Some(Space::create(&alice.id, shared, Kind::Community, "A and B", alice.card(), false).unwrap());
+        let alice_id = alice.acting();
+        alice.space().update(&alice_id, |m| m.alliance.push(a)).unwrap();
+        let ticket = alice.space().new_ticket().unwrap();
+        let bob_card = bob.card();
+
+        // Without a ticket or anyone to vouch for them, B can't come in.
+        let proof = Proof::make(&bob.id, b, &shared, &bob.key());
+        assert!(alice.space().ally_knock(&alice_id, bob.key(), &bob_card, &proof, None, false).is_err());
+        // A proof for another space, or by someone else, doesn't hold.
+        let elsewhere = Proof::make(&bob.id, b, &Key([8; 32]), &bob.key());
+        assert!(alice.space().ally_knock(&alice_id, bob.key(), &bob_card, &elsewhere, Some(ticket), false).is_err());
+        // With the ticket, Bob brings B in and becomes an owner.
+        let outs = alice.space().ally_knock(&alice_id, bob.key(), &bob_card, &proof, Some(ticket), false).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert!(ev[1].contains(&Event::Joined), "{ev:?}");
+        assert_eq!(alice.space().manifest().alliance, vec![a, b]);
+        assert!(alice.space().manifest().is_owner(&bob.key()));
+        // The ticket worked once.
+        let again = Proof::make(&carol.id, b, &shared, &carol.key());
+        assert!(alice.space().ally_knock(&alice_id, carol.key(), &carol.card(), &again, Some(ticket), false).is_err());
+
+        // Carol asks Bob, who finds her in B: she's let in, and all three
+        // talk there though she is in neither A nor Alice's contacts.
+        let bob_id = bob.acting();
+        let outs = bob.space().ally_knock(&bob_id, carol.key(), &carol.card(), &again, None, true).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert!(ev[2].contains(&Event::Joined), "{ev:?}");
+        let (outs, _) = carol.space().post(0, "hello from B", None).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
+        assert_eq!(texts(&ev[0]), ["hello from B"]);
+        // A community that doesn't share it gets nowhere, vouched or not.
+        let dave = person("Dave");
+        let outsider = Proof::make(&dave.id, Key([6; 32]), &shared, &dave.key());
+        assert!(bob.space().ally_knock(&bob_id, dave.key(), &dave.card(), &outsider, None, true).is_err());
+        assert!(dave.space.is_none());
+    }
+
+    #[test]
+    fn a_shared_space_link_round_trips() {
+        let alice = person("Alice");
+        let join = JoinLink { community: Key([7; 32]), host: alice.card() };
+        let link = format!("{ALLY_PREFIX}{}.{}", hex(&[5; 32]), join.to_link().trim_start_matches(JOIN_PREFIX));
+        let (ticket, back) = parse_ally_link(&link).unwrap();
+        assert_eq!((ticket, back.community, back.host.key), (Key([5; 32]), join.community, join.host.key));
+        assert!(parse_ally_link(&join.to_link()).is_none());
     }
 
     #[test]
