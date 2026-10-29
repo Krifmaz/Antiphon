@@ -41,7 +41,10 @@ while [ $# -gt 0 ]; do
     *)         die "unknown option $1 (see --help)" ;;
   esac
 done
-[[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--version MAJOR.MINOR.PATCH is required (got '${V}')"
+# a release is MAJOR.MINOR.PATCH, a hotfix has the run number as a fourth part (0.2.1.57); NUM, the first three,
+# goes where a package wants X.Y.Z (Info.plist, the installer's file version)
+[[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || die "--version MAJOR.MINOR.PATCH[.N] is required (got '${V}')"
+NUM=$(echo "$V" | cut -d. -f1-3)
 [ -n "$BIN" ] || die "--bin <dir> is required"
 BIN="$(cd "$BIN" && pwd)"
 
@@ -191,7 +194,7 @@ macos() {
   cp "$APP" "$app/Contents/MacOS/$APP_BIN"
   cp "$CLI" "$app/Contents/MacOS/$CLI_BIN"
   chmod 755 "$app/Contents/MacOS/"*
-  sed -e "s/@VERSION@/$V/g" -e "s/@APP_BIN@/$APP_BIN/g" -e "s/@MIN_MACOS@/${MACOSX_DEPLOYMENT_TARGET:-11.0}/g" \
+  sed -e "s/@VERSION@/$NUM/g" -e "s/@APP_BIN@/$APP_BIN/g" -e "s/@MIN_MACOS@/${MACOSX_DEPLOYMENT_TARGET:-11.0}/g" \
     "$PKG/macos/Info.plist" > "$app/Contents/Info.plist"
   printf 'APPL????' > "$app/Contents/PkgInfo"
   # the .icns from the PNGs: iconutil wants each size and its @2x
@@ -234,7 +237,7 @@ windows() {
     || die "makensis not found: install NSIS (https://nsis.sourceforge.io, or: choco install nsis)"
   rm -f "$out"
   # MSYS2_ARG_CONV_EXCL: Git Bash must not turn the -D values into paths
-  MSYS2_ARG_CONV_EXCL='*' run "$makensis" -V2 "-DVERSION=$V" \
+  MSYS2_ARG_CONV_EXCL='*' run "$makensis" -V2 "-DVERSION=$V" "-DNUMVER=$NUM" \
     "-DAPP_EXE=$(winpath "$APP")" "-DAPP_NAME=$APP_BIN.exe" \
     "-DCLI_EXE=$(winpath "$CLI")" "-DCLI_NAME=$CLI_BIN.exe" \
     "-DREADME=$(winpath "$ROOT/README.md")" "-DICON=$(winpath "$PKG/icons/stoop.ico")" \

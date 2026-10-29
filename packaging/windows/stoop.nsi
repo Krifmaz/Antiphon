@@ -1,7 +1,8 @@
 ; Stoop: the Windows installer (NSIS 3, Unicode).
 ;
 ; Built by packaging/package.sh, which passes:
-;   -DVERSION=<X.Y.Z>                       shown in Apps & features, and the file version
+;   -DVERSION=<X.Y.Z, or X.Y.Z.N for a hotfix> shown in Apps & features
+;   -DNUMVER=<X.Y.Z>                        the file version (numbers only)
 ;   -DAPP_EXE=<path> -DAPP_NAME=<file name> the desktop app
 ;   -DCLI_EXE=<path> -DCLI_NAME=<file name> the command-line tool
 ;   -DREADME=<path> -DICON=<path to stoop.ico> -DOUTFILE=<installer path>
@@ -16,6 +17,9 @@ SetCompressor /SOLID lzma
 
 !ifndef VERSION
   !define VERSION "0.0.0"
+!endif
+!ifndef NUMVER
+  !define NUMVER "0.0.0"
 !endif
 !ifndef APP_EXE
   !error "pass -DAPP_EXE=<path to the desktop app>"
@@ -52,7 +56,7 @@ InstallDir "$LOCALAPPDATA\Stoop"
 InstallDirRegKey HKCU "${UNINSTKEY}" "InstallLocation"
 BrandingText "Stoop ${VERSION}"
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${NUMVER}.0"
 VIAddVersionKey "ProductName" "${NAME}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}"
