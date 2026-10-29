@@ -4,7 +4,7 @@ name: release
 #   Releases: Actions → release → Run workflow. A normal GitHub release tagged v<version>, titled
 #   "Stoop <version>" and marked Latest. Versions are plain MAJOR.MINOR.PATCH: by default the next number
 #   bumps PATCH of the newest v<version> release; pick "minor"/"major" or type the version by hand (e.g.
-#   1.0.0). The first release takes the version in Cargo.toml. The tag is created through the release (the
+#   1.0.0). The first release takes the version in Cargo.toml. The tag is made through the API (the
 #   API may create tags; a git push from the Actions token may not). Untick "publish" to build and package
 #   everything without making a release: the files stay on the run as artifacts, the notes in its summary.
 #   Hotfixes: every push to main. Version <newest release>.<run number> (0.2.1.57), tagged hotfix-<version>,
@@ -120,6 +120,18 @@ jobs:
             [ -x crates/android/build-apk.sh ] && echo "android=true" || echo "android=false"
           } >> "$GITHUB_OUTPUT"
           echo "$CHANNEL: Stoop $V ($TAG)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Tag ${{ steps.v.outputs.tag }}
+        # The tag is made now, not by publish: GitHub refuses (HTTP 403) to let the Actions token create a tag
+        # at a commit whose workflow files differ from main's, and they do differ as soon as anything changes
+        # .github/workflows during the hour of building. Right now this run's commit is main's newest, so the
+        # tag can be made; publish then only attaches the release to it. A re-run moves the tag to this commit.
+        if: steps.v.outputs.channel == 'hotfix' || (steps.v.outputs.channel == 'stable' && inputs.publish)
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
 
   build:
     name: build (${{ matrix.platform }})
@@ -380,8 +392,9 @@ jobs:
         if: env.CHANNEL == 'hotfix' || (env.CHANNEL == 'stable' && inputs.publish)
         run: |
           TITLE="Stoop $V"; [ "$CHANNEL" = hotfix ] && TITLE="Stoop $V (hotfix)"
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" out/* --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA" --latest
+          # the tag stays: the version job made it at this commit (see "Tag" there)
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          gh release create "$TAG" out/* --title "$TITLE" --notes-file notes.md --verify-tag --latest
       - name: Keep only the newest three hotfixes
         if: env.CHANNEL == 'hotfix'
         # a failed clean-up never fails the hotfix: the next one tries again
@@ -389,6 +402,11 @@ jobs:
         run: |
           OLD=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^hotfix-\([0-9.]*\)$/\1/p' | sort -rV | tail -n +4)
           for v in $OLD; do echo "deleting hotfix-$v"; gh release delete "hotfix-$v" --yes --cleanup-tag || true; done
+          # and the tags of hotfix runs that were cancelled (a newer push) or failed before they published
+          KEEP=$(gh release list --limit 200 --json tagName -q '.[].tagName')
+          for t in $(git ls-remote --tags origin 'hotfix-*' | sed -n 's|.*refs/tags/\(hotfix-[0-9.]*\)$|\1|p'); do
+            grep -qx "$t" <<< "$KEEP" || { echo "deleting tag $t"; gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$t" || true; }
+          done
       - name: Not published
         if: env.CHANNEL == 'check' || (env.CHANNEL == 'stable' && !inputs.publish)
         run: echo "Not published (a pull request check, or publish unticked); the files are this run's Stoop-* artifacts" | tee -a "$GITHUB_STEP_SUMMARY"
