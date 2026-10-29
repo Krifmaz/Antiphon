@@ -80,7 +80,7 @@ public class PushReceiver extends BroadcastReceiver {
                 .setPackage(distributor)
                 .putExtra("token", token)
                 .putExtra("application", context.getPackageName())
-                .putExtra("message", "Wakes Antiphon for calls and messages")
+                .putExtra("message", "Wakes Stoop for calls and messages")
                 .putExtra("features", new String[] {FEATURE_BYTES})
                 // Newer distributors identify the app by who created this
                 // PendingIntent, which a spoofed "application" cannot fake.
@@ -164,7 +164,7 @@ public class PushReceiver extends BroadcastReceiver {
                     // Nothing to open the seal with until the app runs, so
                     // say only that something came. The wake-up waits in
                     // the queue for the app.
-                    CallService.notify(context, "Antiphon", "Someone may be trying to reach you. Open Antiphon to answer.");
+                    CallService.notify(context, "Stoop", "Someone may be trying to reach you. Open Stoop to answer.");
                 }
                 break;
             }

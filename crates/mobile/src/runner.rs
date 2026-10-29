@@ -162,7 +162,7 @@ impl Runner {
     fn create_graphics(&mut self, event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("Antiphon"))
+                .create_window(Window::default_attributes().with_title("Stoop"))
                 .map_err(|e| format!("could not create the window: {e}"))?,
         );
 

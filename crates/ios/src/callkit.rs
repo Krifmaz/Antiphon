@@ -37,7 +37,7 @@ use objc2_foundation::{ns_string, NSError, NSNumber, NSSet, NSString, NSUUID, NS
 use objc2_push_kit::{PKPushCredentials, PKPushPayload, PKPushRegistry, PKPushRegistryDelegate, PKPushType, PKPushTypeVoIP};
 
 /// The name a call has before the shared code has opened the push.
-const UNKNOWN_CALLER: &str = "Antiphon";
+const UNKNOWN_CALLER: &str = "Stoop";
 /// Set once the user has turned push on, so later launches register with
 /// PushKit straight away -- including the launch a push itself causes.
 const PUSH_ENABLED_KEY: &str = "antiphon.push.enabled";

@@ -909,7 +909,7 @@ impl App {
     fn call_identity(&mut self) -> Option<IdentityKeyPair> {
         if !self.mic_permission {
             platform::request_mic_permission();
-            self.notice = Some("Antiphon needs the microphone for calls. Allow it, then try again.".into());
+            self.notice = Some("Stoop needs the microphone for calls. Allow it, then try again.".into());
             return None;
         }
         match &self.identity {

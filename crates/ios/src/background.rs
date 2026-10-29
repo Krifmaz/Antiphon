@@ -61,7 +61,7 @@ fn begin_grace(mtm: MainThreadMarker) {
     });
     let app = UIApplication::sharedApplication(mtm);
     let task =
-        app.beginBackgroundTaskWithName_expirationHandler(Some(&NSString::from_str("Antiphon file transfer")), Some(&expired));
+        app.beginBackgroundTaskWithName_expirationHandler(Some(&NSString::from_str("Stoop file transfer")), Some(&expired));
     // SAFETY: reading a constant from UIKit.
     if task != unsafe { UIBackgroundTaskInvalid } {
         TASK.set(Some(task));

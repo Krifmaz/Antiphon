@@ -355,7 +355,7 @@ public class CallService extends Service {
             }
             b.setCategory(Notification.CATEGORY_CALL)
                     .setContentTitle(c.isEmpty() ? "In a call" : "In a call with " + c)
-                    .setContentText(m ? "Muted" : "Antiphon")
+                    .setContentText(m ? "Muted" : "Stoop")
                     .setWhen(started)
                     .setShowWhen(true)
                     .setUsesChronometer(true)
@@ -390,7 +390,7 @@ public class CallService extends Service {
                 .setSmallIcon(R.drawable.ic_stat_antiphon)
                 .setCategory(Notification.CATEGORY_CALL)
                 .setContentTitle("Incoming call")
-                .setContentText(from.isEmpty() ? "Antiphon" : from)
+                .setContentText(from.isEmpty() ? "Stoop" : from)
                 .setOngoing(true)
                 .setTimeoutAfter(RING_TIMEOUT_MS)
                 .setContentIntent(show)

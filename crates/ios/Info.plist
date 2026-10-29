@@ -11,9 +11,9 @@
 	<key>CFBundleExecutable</key>
 	<string>antiphon-ios</string>
 	<key>CFBundleName</key>
-	<string>Antiphon</string>
+	<string>Stoop</string>
 	<key>CFBundleDisplayName</key>
-	<string>Antiphon</string>
+	<string>Stoop</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -69,7 +69,7 @@
 	<false/>
 
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Antiphon uses the microphone for calls. Your voice is encrypted on this phone and goes only to the person you are talking to.</string>
+	<string>Stoop uses the microphone for calls. Your voice is encrypted on this phone and goes only to the person you are talking to.</string>
 	<!-- audio: a call keeps running when the screen locks or another app is
 	     opened. voip: PushKit wakes the app for incoming calls. -->
 	<key>UIBackgroundModes</key>
@@ -78,7 +78,7 @@
 		<string>voip</string>
 	</array>
 	<!-- Received files go to Documents; these two make it show in the Files
-	     app under On My iPhone > Antiphon. -->
+	     app under On My iPhone > Stoop. -->
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

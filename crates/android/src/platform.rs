@@ -220,7 +220,7 @@ fn clipboard_manager<'a>(env: &mut JNIEnv<'a>, activity: &JObject) -> jni::error
 fn copy_to_clipboard(text: &str) {
     with_activity("copying to the clipboard", |env, activity| {
         let manager = clipboard_manager(env, activity)?;
-        let label = env.new_string("Antiphon")?;
+        let label = env.new_string("Stoop")?;
         let value = env.new_string(text)?;
         let clip = env
             .call_static_method(

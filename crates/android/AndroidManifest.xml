@@ -51,7 +51,7 @@
          sealed keys, and a copy of those in someone else's cloud is not a
          backup this app should make on the user's behalf. -->
     <application
-        android:label="Antiphon"
+        android:label="Stoop"
         android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:allowBackup="false"
