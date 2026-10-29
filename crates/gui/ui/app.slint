@@ -1990,6 +1990,8 @@ export component MainWindow inherits Window {
     callback captions-save-transcript();
     // Spec §5 seeding and pinning.
     in-out property <bool> seeding: false;
+    in-out property <bool> anonymous-seeding: false;
+    in-out property <string> shared-files-notice: "";
     in-out property <int> seed-scope: 0;
     in-out property <int> seed-port: 3481;
     in-out property <string> pin-nodes: "";
@@ -5611,6 +5613,14 @@ export component MainWindow inherits Window {
                                             selected(v) => { seed-scope = self.current-index; sharing-settings-changed(); }
                                         }
                                     }
+                                    if seeding : ToggleSwitch {
+                                        text: "Seed anonymously, through relays";
+                                        checked <=> anonymous-seeding;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Nobody you share with, or download from, learns your address. Instead of handing files out from this device, encrypted copies go to your pin nodes below through the hop nodes set under Anonymity, and the pin nodes hand them out. Your downloads go through those hops too. Needs at least two hop nodes and one pin node -- without them nothing is sent, rather than sent in the open. Slower than seeding directly.";
+                                        toggled => { sharing-settings-changed(); }
+                                    }
                                     SettingLabel { text: "Pin nodes"; help: "Nodes that keep an encrypted copy of every file you share, for when neither of you is online. A node only does this if its operator turned on file hosting. Comma-separated, press Enter."; text-scale: text-scale; }
                                     LineEdit {
                                         text <=> pin-nodes;
@@ -5625,6 +5635,11 @@ export component MainWindow inherits Window {
                                     HorizontalBox {
                                         padding: 0px; spacing: 6px;
                                         Button { text: "Check availability"; clicked => { check-shared-files(); } }
+                                    }
+                                    if shared-files-notice != "" : Text {
+                                        text: shared-files-notice;
+                                        font-size: 10px * text-scale;
+                                        wrap: word-wrap;
                                     }
                                     if shared-files.length == 0 : Text {
                                         text: "Nothing shared yet. Files you send in a call land here when seeding or a pin node is on.";

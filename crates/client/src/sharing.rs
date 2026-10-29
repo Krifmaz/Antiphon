@@ -105,6 +105,20 @@ pub fn revision() -> u64 {
 
 static STATUS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
+static NOTICE: Mutex<String> = Mutex::new(String::new());
+
+/// Says something about sharing as a whole rather than one file -- for
+/// now, why anonymous seeding refused to send anything.
+fn set_notice(text: impl Into<String>) {
+    *NOTICE.lock().unwrap() = text.into();
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The last thing said about sharing as a whole, or empty.
+pub fn notice() -> String {
+    NOTICE.lock().unwrap().clone()
+}
+
 fn set_status(file_id: &str, text: impl Into<String>) {
     let mut s = STATUS.lock().unwrap();
     s.retain(|(id, _)| id != file_id);
@@ -151,6 +165,31 @@ pub fn scope_from_index(i: i32) -> Scope {
         2 => Scope::Anyone,
         _ => Scope::Conversation,
     }
+}
+
+/// Whether this device answers for seeded files itself. With anonymous
+/// seeding on it never does: answering from here would hand out the very
+/// address anonymous seeding exists to hide, so the seeding is done by
+/// pin nodes instead (see [`route`]).
+pub fn seeds_from_here(config: &crate::config::AppConfig) -> bool {
+    config.seeding && !config.anonymous_seeding
+}
+
+/// How shared-file traffic leaves this device (spec §5 "Anonymous seeding
+/// through relays"): directly, or through an onion circuit over the hop
+/// nodes set for anonymity mode.
+///
+/// With anonymous seeding on but fewer than two hop nodes this is an
+/// error, never a quiet fallback to [`swarm::Route::Direct`]: someone who
+/// asked not to be seen must not be shown because a setting was missing.
+pub fn route(config: &crate::config::AppConfig) -> Result<swarm::Route, String> {
+    if !config.anonymous_seeding {
+        return Ok(swarm::Route::Direct);
+    }
+    if config.anonymity_hops.len() < antiphon_net::onion::MIN_HOPS {
+        return Err("Anonymous seeding needs at least two hop nodes, set under Anonymity. Nothing was sent.".into());
+    }
+    Ok(swarm::Route::Anonymous(config.anonymity_hops.iter().take(antiphon_net::onion::MAX_HOPS).cloned().collect()))
 }
 
 /// Starts or stops answering for seeded files on `port`.
@@ -230,8 +269,15 @@ fn uploader_label(node: &str) -> Option<[u8; 32]> {
     Some(sha2::Sha256::digest(me.sign(&msg)).into())
 }
 
-/// Uploads a sealed copy to each pin node. Returns the nodes that took it.
-pub async fn pin(path: &Path, key: &FileKey, nodes: &[String], code: &str) -> (Vec<String>, Vec<String>) {
+/// Uploads a sealed copy to each pin node, along `route`. Returns the
+/// nodes that took it (by their real address, which is what goes in a
+/// link) and what went wrong with the rest.
+///
+/// Through a circuit, each node gets its own: the node sees the
+/// circuit's last hop as the uploader, and the uploader label (a
+/// signature over the node's name) is the only thing tying uploads
+/// together -- and only at that one node, for its quotas.
+pub async fn pin(path: &Path, key: &FileKey, nodes: &[String], code: &str, route: &swarm::Route) -> (Vec<String>, Vec<String>) {
     let mut took = Vec::new();
     let mut problems = Vec::new();
     let Ok((size, hashes)) = hashes_of(path, key) else {
@@ -239,19 +285,31 @@ pub async fn pin(path: &Path, key: &FileKey, nodes: &[String], code: &str) -> (V
     };
     let id = file_seal::file_id(size, &hashes);
     let token = file_seal::read_token(key);
-    let socket = match crate::vpn::bind(TrafficKind::Files, 0).await {
-        Ok(s) => s,
-        Err(e) => return (took, vec![e.to_string()]),
-    };
     for node in nodes {
         let Some(addr) = crate::delivery::resolve(TrafficKind::Files, node).await else {
             problems.push(format!("{node}: can't find it"));
             continue;
         };
+        let (socket, to) = match route {
+            swarm::Route::Direct => match crate::vpn::bind(TrafficKind::Files, 0).await {
+                Ok(s) => (Arc::new(s), addr),
+                Err(e) => {
+                    problems.push(format!("{node}: {e}"));
+                    continue;
+                }
+            },
+            swarm::Route::Anonymous(hops) => match crate::anonymity::route_to(hops, addr).await {
+                Ok(link) => link,
+                Err(e) => {
+                    problems.push(format!("{node}: couldn't build an anonymous path: {e}"));
+                    continue;
+                }
+            },
+        };
         let Some(uploader) = uploader_label(node) else { continue };
         let Ok(mut f) = std::fs::File::open(path) else { continue };
         let sealed = |i: u32| read_at(&mut f, i, size).ok().map(|plain| file_seal::seal_chunk(key, i, &plain));
-        match antiphon_net::blob::put(&socket, addr, id, size, uploader, token, code.as_bytes(), &hashes, sealed, swarm::TIMEOUT).await {
+        match antiphon_net::blob::put(&*socket, to, id, size, uploader, token, code.as_bytes(), &hashes, sealed, swarm::TIMEOUT).await {
             Ok(()) => took.push(addr.to_string()),
             Err(e) => problems.push(format!("{node}: {e}")),
         }
@@ -264,14 +322,26 @@ pub async fn pin(path: &Path, key: &FileKey, nodes: &[String], code: &str) -> (V
 /// Makes a file shareable: seeds it if seeding is on, pins it to your pin
 /// nodes, and returns the link to send. `None` when there is nowhere it
 /// would be held after the call.
+///
+/// With anonymous seeding on, nothing is seeded from here and the link
+/// carries no seeding port: only pin nodes, reached through circuits,
+/// hold it -- so the link says nothing about where this device is.
 pub fn share(runtime: &tokio::runtime::Handle, path: &Path, name: &str, with: &str) -> Option<crate::control::ControlMessage> {
     let config = crate::config::load();
     if !config.seeding && config.pin_nodes.is_empty() {
         return None;
     }
+    let route = match route(&config) {
+        Ok(r) => r,
+        Err(e) => {
+            set_notice(e);
+            return None;
+        }
+    };
+    let here = seeds_from_here(&config);
     let key = file_seal::new_key();
     let size = std::fs::metadata(path).ok()?.len();
-    let id = if config.seeding {
+    let id = if here {
         seed(path, &key, scope_from_index(config.seed_scope)).ok()?.0
     } else {
         file_seal::file_id(size, &hashes_of(path, &key).ok()?.1)
@@ -279,13 +349,13 @@ pub fn share(runtime: &tokio::runtime::Handle, path: &Path, name: &str, with: &s
     let pinned = if config.pin_nodes.is_empty() {
         Vec::new()
     } else {
-        let (took, problems) = runtime.block_on(pin(path, &key, &config.pin_nodes, &config.pin_code));
+        let (took, problems) = runtime.block_on(pin(path, &key, &config.pin_nodes, &config.pin_code, &route));
         if !problems.is_empty() {
             set_status(&hex(&id), format!("Not pinned everywhere: {}", problems.join("; ")));
         }
         took
     };
-    if !config.seeding && pinned.is_empty() {
+    if !here && pinned.is_empty() {
         return None;
     }
     remember(SharedFile {
@@ -303,7 +373,7 @@ pub fn share(runtime: &tokio::runtime::Handle, path: &Path, name: &str, with: &s
         size,
         file_id: hex(&id),
         key: hex(&key),
-        seed_port: if config.seeding { config.seed_port } else { 0 },
+        seed_port: if here { config.seed_port } else { 0 },
         holders: pinned,
     })
 }
@@ -326,10 +396,12 @@ pub fn share_in_community(
     if !config.seeding && config.pin_nodes.is_empty() && hosted.is_empty() {
         return Err("Nothing would hold it: turn on seeding or add a pin node under Shared files.".into());
     }
+    let route = route(&config)?;
+    let here = seeds_from_here(&config);
     let key = file_seal::new_key();
     let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     let scope = if config.seed_scope == 2 { Scope::Anyone } else { Scope::Community(community.id.0) };
-    let id = if config.seeding {
+    let id = if here {
         seed(path, &key, scope)?.0
     } else {
         file_seal::file_id(size, &hashes_of(path, &key).map_err(|e| e.to_string())?.1)
@@ -337,19 +409,19 @@ pub fn share_in_community(
     let mut holders = Vec::new();
     let mut problems = Vec::new();
     if !config.pin_nodes.is_empty() {
-        let (took, p) = runtime.block_on(pin(path, &key, &config.pin_nodes, &config.pin_code));
+        let (took, p) = runtime.block_on(pin(path, &key, &config.pin_nodes, &config.pin_code, &route));
         holders.extend(took);
         problems.extend(p);
     }
     for node in hosted {
-        let (took, p) = runtime.block_on(pin(path, &key, std::slice::from_ref(&node.addr), &node.code));
+        let (took, p) = runtime.block_on(pin(path, &key, std::slice::from_ref(&node.addr), &node.code, &route));
         holders.extend(took);
         problems.extend(p);
     }
     if !problems.is_empty() {
         set_status(&hex(&id), format!("Not pinned everywhere: {}", problems.join("; ")));
     }
-    if !config.seeding && holders.is_empty() {
+    if !here && holders.is_empty() {
         return Err(format!("No node took it: {}", problems.join("; ")));
     }
     remember(SharedFile {
@@ -388,19 +460,36 @@ fn addrs(file: &SharedFile) -> Vec<SocketAddr> {
 
 /// Asks the holders of every listed file whether it's still there.
 pub fn check_all(runtime: &tokio::runtime::Handle) {
+    let route = match route(&crate::config::load()) {
+        Ok(r) => r,
+        Err(e) => {
+            set_notice(e);
+            return;
+        }
+    };
     for file in load() {
         let (Some(id), Some(key)) = (unhex32(&file.file_id), unhex32(&file.key)) else { continue };
+        let route = route.clone();
         runtime.spawn(async move {
-            let a = swarm::availability(&addrs(&file), id, file_seal::read_token(&key)).await;
+            let a = swarm::availability(&addrs(&file), id, file_seal::read_token(&key), &route).await;
             set_status(&file.file_id, a.wording());
         });
     }
 }
 
-/// Downloads a listed file to `dest`, then seeds it too if seeding is on.
+/// Downloads a listed file to `dest`, then seeds it too if seeding is on
+/// -- from here, or, with anonymous seeding, by handing it to your pin
+/// nodes through circuits, so you keep helping without being seen.
 pub fn download(runtime: &tokio::runtime::Handle, file_id: &str, dest: PathBuf) {
     let Some(file) = load().into_iter().find(|f| f.file_id == file_id) else { return };
     let (Some(id), Some(key)) = (unhex32(&file.file_id), unhex32(&file.key)) else { return };
+    let route = match route(&crate::config::load()) {
+        Ok(r) => r,
+        Err(e) => {
+            set_status(&file.file_id, e);
+            return;
+        }
+    };
     let rt = runtime.clone();
     runtime.spawn(async move {
         let progress = Arc::new(Mutex::new(Progress::default()));
@@ -421,19 +510,24 @@ pub fn download(runtime: &tokio::runtime::Handle, file_id: &str, dest: PathBuf) 
         // claimed as that identity: the seeder is a member, and your main
         // key would tell them who you are (spec §7).
         let me = crate::community::identity_for_link(&file.with).or_else(crate::delivery::identity);
-        let result = swarm::download(&addrs(&file), id, key, me, &dest, progress).await;
+        let result = swarm::download(&addrs(&file), id, key, me, &dest, progress, &route).await;
         watch.abort();
         match result {
             Ok(()) => {
                 set_status(&file.file_id, format!("Saved to {}", dest.display()));
                 let config = crate::config::load();
-                if config.seeding {
+                if seeds_from_here(&config) {
                     let scope = scope_from_index(config.seed_scope);
                     let _ = rt.spawn_blocking(move || seed(&dest, &key, scope)).await;
+                } else if config.seeding && config.anonymous_seeding && !config.pin_nodes.is_empty() {
+                    let (took, _) = pin(&dest, &key, &config.pin_nodes, &config.pin_code, &route).await;
+                    if !took.is_empty() {
+                        remember(SharedFile { holders: took, ..file.clone() });
+                    }
                 }
             }
             Err(e) => {
-                let a = swarm::availability(&addrs(&file), id, file_seal::read_token(&key)).await;
+                let a = swarm::availability(&addrs(&file), id, file_seal::read_token(&key), &route).await;
                 let text = if a == Availability::Available { format!("Download failed: {e}") } else { a.wording().to_string() };
                 set_status(&file.file_id, text);
             }
@@ -444,6 +538,27 @@ pub fn download(runtime: &tokio::runtime::Handle, file_id: &str, dest: PathBuf) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anonymous_seeding_never_falls_back_to_the_open() {
+        let mut config = crate::config::AppConfig { seeding: true, ..Default::default() };
+        assert_eq!(route(&config).unwrap(), swarm::Route::Direct);
+        assert!(seeds_from_here(&config));
+
+        // Asked for, but with one hop: refused, not sent directly.
+        config.anonymous_seeding = true;
+        config.anonymity_hops = vec!["127.0.0.1:1".into()];
+        assert!(route(&config).is_err());
+        // And this device stops answering for files itself either way.
+        assert!(!seeds_from_here(&config));
+
+        config.anonymity_hops = vec!["a:1".into(), "b:1".into(), "c:1".into(), "d:1".into()];
+        assert_eq!(
+            route(&config).unwrap(),
+            swarm::Route::Anonymous(vec!["a:1".into(), "b:1".into(), "c:1".into()]),
+            "at most three hops, as calls use"
+        );
+    }
 
     #[test]
     fn seeding_a_file_gives_the_id_the_whole_file_would() {

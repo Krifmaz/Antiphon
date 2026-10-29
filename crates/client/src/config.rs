@@ -140,6 +140,15 @@ pub struct AppConfig {
     /// out (spec §5 "Seeding"). Off by default.
     #[serde(default)]
     pub seeding: bool,
+    /// Seed without ever showing your own address (spec §5 "Anonymous
+    /// seeding through relays"). Instead of answering from this device,
+    /// sealed copies are handed to your pin nodes over an onion circuit
+    /// through `anonymity_hops`, and those nodes do the serving; your own
+    /// downloads go through circuits too. Off by default. Needs at least
+    /// two hop nodes and one pin node; without them nothing is sent,
+    /// rather than sent in the open.
+    #[serde(default)]
+    pub anonymous_seeding: bool,
     /// Who seeded files go to: 0 the conversation it was shared in,
     /// 1 your contacts, 2 anyone with the link.
     #[serde(default)]
@@ -829,6 +838,7 @@ impl Default for AppConfig {
             captions_enabled: false,
             captions_own_voice: false,
             seeding: false,
+            anonymous_seeding: false,
             seed_scope: 0,
             seed_port: default_seed_port(),
             pin_nodes: Vec::new(),
