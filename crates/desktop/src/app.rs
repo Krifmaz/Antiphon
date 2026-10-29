@@ -125,6 +125,14 @@ const TOUR: &[Step] = &[
     Step { name: "account", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Account)) },
     Step { name: "community", size: (1280.0, 820.0), setup: |app| app.go(Route::Community(Demo::club(), 0)) },
     Step {
+        name: "community-emoji",
+        size: (1280.0, 820.0),
+        setup: |app| {
+            app.go(Route::Community(Demo::club(), 0));
+            let _ = app.send(Msg::Dialog(Some(ui::Dialog::SpaceEmoji(Demo::club()))));
+        },
+    },
+    Step {
         name: "community-notify",
         size: (1280.0, 820.0),
         setup: |app| {

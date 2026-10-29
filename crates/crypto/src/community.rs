@@ -55,6 +55,14 @@ pub const MAX_CHANNELS: usize = 50;
 pub const MAX_ROLES: usize = 16;
 pub const MAX_BANS: usize = 1000;
 const MAX_NAME: usize = 80;
+/// Custom emoji a community may have. Few, because the whole set travels
+/// with every new version of the manifest.
+pub const MAX_EMOJI: usize = 16;
+/// The longest a custom emoji's picture may be, as base64: a small image
+/// (the apps make them 32 pixels square, about a kilobyte).
+pub const MAX_EMOJI_IMAGE: usize = 1800;
+/// The longest a custom emoji's name may be.
+pub const MAX_EMOJI_NAME: usize = 24;
 const MAX_TEXT: usize = 500;
 
 /// Permission bits a role carries.
@@ -131,6 +139,26 @@ pub struct Channel {
     pub topic: String,
 }
 
+/// A community's own emoji (spec §13 "custom emoji"): a short name,
+/// written `:name:` in a message, and a small picture. Only someone who
+/// may manage the community adds or removes them, so what members are
+/// shown is chosen by the people they agreed to be governed by when they
+/// joined, never by whoever posts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Emoji {
+    /// Lowercase letters, digits and underscores, 2 to [`MAX_EMOJI_NAME`].
+    pub name: String,
+    /// The picture (PNG or JPEG), base64.
+    pub image: String,
+}
+
+impl Emoji {
+    /// Whether `name` is usable as an emoji name.
+    pub fn valid_name(name: &str) -> bool {
+        (2..=MAX_EMOJI_NAME).contains(&name.len()) && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Ban {
     pub key: Key,
@@ -184,6 +212,10 @@ pub struct Manifest {
     /// default": members pin files shared here to `nodes.files`.
     #[serde(default)]
     pub server_hosted_files: bool,
+    /// Its custom emoji. Left out of the JSON while empty, so a manifest
+    /// without any reads exactly as one from before they existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emoji: Vec<Emoji>,
 }
 
 /// Why a manifest, or a change to one, was refused.
@@ -299,6 +331,7 @@ impl Manifest {
             bans: Vec::new(),
             nodes: Nodes::default(),
             server_hosted_files: false,
+            emoji: Vec::new(),
         }
     }
 
@@ -389,6 +422,15 @@ impl Manifest {
         if self.members.iter().any(|m| self.is_banned(&m.key.0)) {
             return bad("a banned person is still a member");
         }
+        if self.emoji.len() > MAX_EMOJI || self.emoji.iter().any(|e| !Emoji::valid_name(&e.name) || e.image.is_empty() || e.image.len() > MAX_EMOJI_IMAGE) {
+            return bad("emoji");
+        }
+        let mut names: Vec<_> = self.emoji.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        names.dedup();
+        if names.len() != self.emoji.len() {
+            return bad("an emoji name is used twice");
+        }
         let mut ids: Vec<_> = self.channels.iter().map(|c| c.id).collect();
         ids.sort();
         ids.dedup();
@@ -445,6 +487,9 @@ pub fn check_transition(old: &Manifest, old_signed: &SignedManifest, new: &Signe
 
     if n.name != old.name || n.description != old.description || n.nodes != old.nodes || n.server_hosted_files != old.server_hosted_files {
         need(perm::MANAGE_COMMUNITY, "change the community's settings")?;
+    }
+    if n.emoji != old.emoji {
+        need(perm::MANAGE_COMMUNITY, "change the community's emoji")?;
     }
     if n.channels != old.channels {
         need(perm::MANAGE_CHANNELS, "change channels")?;
@@ -623,6 +668,36 @@ mod tests {
         // Someone no longer a member signs nothing.
         let attempt = w.propose(&alice, |m| m.name = "Mine now".into());
         assert_eq!(check_transition(&w.m, &w.signed, &attempt), Err(Denied::NotAMember));
+    }
+
+    #[test]
+    fn only_managers_change_the_emoji_and_bad_ones_are_refused() {
+        let mut w = community();
+        let owner = IdentityKeyPair::from_master_seed(w.owner.master_seed());
+        let member = IdentityKeyPair::generate();
+        w.apply(&owner, |m| add(m, &member, 2)).unwrap();
+        let party = || Emoji { name: "party_cat".into(), image: "iVBORw0KGgo=".into() };
+        assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.emoji.push(party()))).is_err(), "a member can't add one");
+        w.apply(&owner, |m| m.emoji.push(party())).unwrap();
+        assert_eq!(w.m.emoji.len(), 1);
+        assert!(check_transition(&w.m, &w.signed, &w.propose(&member, |m| m.emoji.clear())).is_err(), "nor remove one");
+        // Names that could be confused with text, oversized pictures and
+        // a name used twice are malformed for everyone.
+        for bad in [
+            Emoji { name: "Party Cat".into(), image: "x".into() },
+            Emoji { name: "p".into(), image: "x".into() },
+            Emoji { name: "big".into(), image: "x".repeat(MAX_EMOJI_IMAGE + 1) },
+            party(),
+        ] {
+            assert!(w.apply(&owner, |m| m.emoji.push(bad.clone())).is_err(), "{:?} was let in", bad.name);
+        }
+    }
+
+    #[test]
+    fn a_manifest_without_emoji_reads_as_before() {
+        let w = community();
+        let json = String::from_utf8(w.signed.body.clone()).unwrap();
+        assert!(!json.contains("emoji"), "an empty set isn't written, so older apps see the same manifest");
     }
 
     #[test]

@@ -142,6 +142,10 @@ pub enum Dialog {
     ConfirmLeave(String),
     /// Which messages notify you in this group chat or community (by id).
     SpaceNotify(String),
+    /// Pick one of this community's emoji to put in the message (by id).
+    EmojiPicker(String),
+    /// This community's custom emoji: see, add and remove them (by id).
+    SpaceEmoji(String),
 }
 
 /// How a toast is coloured.
@@ -477,6 +481,16 @@ pub enum Action {
     },
     /// Leave a group chat or community (the dialog already asked).
     LeaveSpace(String),
+    /// Choose a picture to add as one of this community's emoji (by id);
+    /// its name comes from the file's.
+    AddEmoji(String),
+    /// Take one of a community's emoji away.
+    RemoveEmoji {
+        /// The community's id.
+        community: String,
+        /// The emoji's name.
+        name: String,
+    },
     /// Choose which messages notify me in a space or one of its channels.
     SpaceNotify {
         /// The group chat or community's id.
@@ -590,6 +604,8 @@ pub enum Msg {
     ChannelCreate(String),
     /// Show or hide the files waiting to be sent.
     ToggleQueue,
+    /// Put `:name:` (a custom emoji) at the end of the composer's text.
+    InsertEmoji(String),
     /// Close a toast by its id.
     DismissToast(u64),
     /// Where the pointer is, so a right-click menu opens under it.
@@ -1157,6 +1173,17 @@ impl Ui {
                 self.channel_name.clear();
                 self.set_dialog(None);
                 vec![Action::AddChannel { community, name }]
+            }
+            Msg::InsertEmoji(name) => {
+                if let Some(key) = self.draft_key() {
+                    let draft = self.drafts.entry(key).or_default();
+                    if !draft.is_empty() && !draft.ends_with(' ') {
+                        draft.push(' ');
+                    }
+                    draft.push_str(&format!(":{name}: "));
+                }
+                self.set_dialog(None);
+                Vec::new()
             }
             Msg::ToggleQueue => {
                 self.queue_open = !self.queue_open;

@@ -568,6 +568,11 @@ pub struct Community {
     pub can_manage_channels: bool,
     /// Which of its messages notify you.
     pub notify: Notify,
+    /// Its custom emoji's names, written `:name:`; their pictures are
+    /// registered in [`crate::avatars`] under [`crate::avatars::emoji_id`].
+    pub emoji: Vec<String>,
+    /// You may change its settings, its emoji among them.
+    pub can_manage: bool,
 }
 
 /// Which messages notify you, in a space or one channel.

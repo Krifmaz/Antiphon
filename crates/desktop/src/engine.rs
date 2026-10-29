@@ -77,6 +77,9 @@ enum Event {
     Queue(Vec<PathBuf>, String),
     /// A voice message was left (or why it couldn't be).
     VoiceSent(Result<(), String>),
+    /// A picture picked to be a community's emoji: (community, file name,
+    /// the picture made small), or why it couldn't be used.
+    EmojiPicked(Result<(String, String, String), String>),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -710,6 +713,11 @@ impl Engine {
                 self.toast("Voice message sent", ToastKind::Ok);
             }
             Event::VoiceSent(Err(why)) => self.toast(why, ToastKind::Err),
+            Event::EmojiPicked(Ok((community, file, image))) => match crate::spaces::add_emoji(&community, &file, image) {
+                Ok(name) => self.toast(format!("Added :{name}:"), ToastKind::Ok),
+                Err(why) => self.toast(why, ToastKind::Err),
+            },
+            Event::EmojiPicked(Err(why)) => self.toast(why, ToastKind::Err),
             Event::Queue(paths, peer) => {
                 for path in paths {
                     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
@@ -1153,6 +1161,17 @@ impl Engine {
             }
             A::SendFile => self.send_file(),
             A::RecordVoice(to) => self.record_voice(to),
+            A::AddEmoji(community) => {
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    let Some(path) = rfd::FileDialog::new().set_title("Choose an emoji picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp"]).pick_file() else {
+                        return;
+                    };
+                    let file = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let made = std::fs::read(&path).map_err(|e| format!("Couldn't open that file: {e}")).and_then(|b| profile::emoji_from_image(&b));
+                    Engine::push(&events, Event::EmojiPicked(made.map(|image| (community, file, image))));
+                });
+            }
             A::FinishVoice { to, send } => self.finish_voice(&to, send),
             A::PlayVoice { to, id } => self.play_voice(to, id),
             A::AcceptFile => {
@@ -1408,6 +1427,7 @@ impl Engine {
             | A::InviteToSpace { .. }
             | A::AddChannel { .. }
             | A::SpaceNotify { .. }
+            | A::RemoveEmoji { .. }
             | A::LeaveSpace(_)) => {
                 let invite = matches!(a, A::InviteToSpace { .. });
                 match self.spaces.act(a) {

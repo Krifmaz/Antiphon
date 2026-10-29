@@ -224,6 +224,9 @@ fn side<'a>(ui: &'a Ui, c: &'a Community, channel: u32) -> El<'a, Msg> {
     let mut col = column![].spacing(2);
     if !c.group {
         let mut head = row![label("Channels"), fill()].align_y(Alignment::Center);
+        if c.can_manage {
+            head = head.push(icon_btn(Icon::Smile, "Custom emoji", Some(Msg::Dialog(Some(Dialog::SpaceEmoji(c.id.clone()))))));
+        }
         if c.can_manage_channels {
             head = head.push(icon_btn(Icon::Plus, "Add a channel", Some(Msg::Dialog(Some(Dialog::AddChannel(c.id.clone()))))));
         }
@@ -336,7 +339,7 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, line: &'a Line, first: bool, phone:
         .max_width(520)
         .into()
     } else {
-        let words = if line.deleted { t("Message deleted").size(13.5).color(p.faint) } else { t(line.text.as_str()).size(14).wrapping(Wrapping::WordOrGlyph) };
+        let words: El<'a, Msg> = if line.deleted { t("Message deleted").size(13.5).color(p.faint).into() } else { with_emoji(&line.text, c) };
         let mut words = column![words].spacing(2);
         if line.edited {
             words = words.push(faint("edited").size(10.5));
@@ -385,7 +388,9 @@ fn composer<'a>(ui: &'a Ui, c: &'a Community, ch: Option<&'a Channel>) -> El<'a,
     if can_send {
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }
+    let picker = (!c.emoji.is_empty() && can_send).then(|| Msg::Dialog(Some(Dialog::EmojiPicker(c.id.clone()))));
     let bar = row![
+        icon_btn(Icon::Smile, "Emoji", picker),
         container(input).width(Length::Fill).padding([0, 6]),
         icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send)),
     ]
@@ -496,6 +501,88 @@ pub fn notify<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         }
         col = col.push(rows);
     }
+    col.into()
+}
+
+/// A message's words with its community's `:name:` emoji drawn as
+/// pictures. A message of nothing but emoji draws them large. Words that
+/// aren't a known emoji stay words, so `:unknown:` reads as typed.
+fn with_emoji<'a>(text: &'a str, c: &'a Community) -> El<'a, Msg> {
+    let emoji_at = |word: &str| -> Option<iced_core::image::Handle> {
+        let name = word.strip_prefix(':')?.strip_suffix(':')?;
+        c.emoji.iter().any(|e| e == name).then(|| crate::avatars::picture(&crate::avatars::emoji_id(&c.id, name)))?
+    };
+    let words: Vec<&str> = text.split(' ').collect();
+    if c.emoji.is_empty() || !words.iter().any(|w| emoji_at(w).is_some()) {
+        return t(text).size(14).wrapping(Wrapping::WordOrGlyph).into();
+    }
+    let only_emoji = words.iter().all(|w| w.is_empty() || emoji_at(w).is_some());
+    let size = if only_emoji { 40.0 } else { 20.0 };
+    let mut r = row![].spacing(0).align_y(Alignment::Center);
+    for (i, w) in words.iter().enumerate() {
+        let gap = if i + 1 < words.len() { " " } else { "" };
+        match emoji_at(w) {
+            Some(handle) => {
+                r = r.push(with_tip(iced_widget::image(handle).width(size).height(size), *w, iced_widget::tooltip::Position::Top));
+                if !gap.is_empty() {
+                    r = r.push(t(gap).size(14));
+                }
+            }
+            None => r = r.push(t(format!("{w}{gap}")).size(14)),
+        }
+    }
+    r.wrap().into()
+}
+
+/// The community's emoji to pick from; one goes into the message.
+pub fn emoji_picker<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let mut grid = row![].spacing(6);
+    for name in &c.emoji {
+        let face: El<'a, Msg> = match crate::avatars::picture(&crate::avatars::emoji_id(&c.id, name)) {
+            Some(h) => iced_widget::image(h).width(32).height(32).into(),
+            None => t(format!(":{name}:")).size(12).into(),
+        };
+        let b = button(container(face).center(40)).padding(2).style(theme::btn(Btn::Ghost)).on_press(Msg::InsertEmoji(name.clone()));
+        grid = grid.push(with_tip(b, format!(":{name}:"), iced_widget::tooltip::Position::Top));
+    }
+    let mut col = column![grid.wrap()].spacing(14);
+    if c.can_manage {
+        col = col.push(row![fill(), btn_sm("Manage emoji", Btn::Ghost, Some(Msg::Dialog(Some(Dialog::SpaceEmoji(c.id.clone())))))]);
+    }
+    col.into()
+}
+
+/// A community's custom emoji, for someone who may change them: each with
+/// its name and a way to remove it, and adding another.
+pub fn emoji_manager<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let mut col = column![muted(format!(
+        "Everyone in {} sees these, written :name: in a message. Pick a small, square picture; its file name becomes the emoji's name. Up to 16.",
+        c.name
+    ))
+    .size(13.5)]
+    .spacing(8);
+    for name in &c.emoji {
+        let face: El<'a, Msg> = match crate::avatars::picture(&crate::avatars::emoji_id(&c.id, name)) {
+            Some(h) => iced_widget::image(h).width(28).height(28).into(),
+            None => space().width(28).into(),
+        };
+        col = col.push(
+            row![
+                face,
+                t(format!(":{name}:")).size(13.5).font(theme::mono()).width(Length::Fill),
+                icon_btn(Icon::Trash, "Remove", c.can_manage.then(|| Msg::Do(Action::RemoveEmoji { community: c.id.clone(), name: name.clone() }))),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    if c.emoji.is_empty() {
+        col = col.push(faint("None yet.").size(12.5));
+    }
+    let full = c.emoji.len() >= 16;
+    col = col.push(row![fill(), btn_icon(Icon::Plus, "Add emoji", Btn::Primary, (c.can_manage && !full).then(|| Msg::Do(Action::AddEmoji(c.id.clone()))))]);
     col.into()
 }
 

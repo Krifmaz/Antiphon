@@ -152,6 +152,13 @@ impl Spaces {
                 let level = level.or(channel.is_none().then_some(ui::Notify::All)).map(from_ui);
                 store.set_notify(&id, channel, level);
             }
+            A::RemoveEmoji { community, name } => {
+                let id = key(&community)?;
+                store.with_space(&id, |space, identity| {
+                    let outs = space.update(identity, |m| m.emoji.retain(|e| e.name != name))?;
+                    Ok(((), outs, vec![Event::Changed]))
+                })?;
+            }
             A::LeaveSpace(community) => {
                 let id = key(&community)?;
                 // A space you were never let into has nobody to tell.
@@ -168,6 +175,45 @@ impl Spaces {
         }
         Ok(None)
     }
+}
+
+/// Adds a custom emoji to a community: `file_name` is the picked file's,
+/// made into the emoji's name; `image` is its picture as
+/// `profile::emoji_from_image` makes it. Returns the name it got.
+pub fn add_emoji(community: &str, file_name: &str, image: String) -> Result<String, String> {
+    let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+    let id = key(community)?;
+    let mut name = emoji_name(file_name);
+    store.with_space(&id, |space, identity| {
+        let taken = |n: &str| space.manifest().emoji.iter().any(|e| e.name == n);
+        // A name already used gets a number rather than replacing it.
+        let base = name.clone();
+        let mut n = 2;
+        while taken(&name) {
+            name = format!("{}{n}", &base[..base.len().min(antiphon_crypto::community::MAX_EMOJI_NAME - 2)]);
+            n += 1;
+        }
+        if space.manifest().emoji.len() >= antiphon_crypto::community::MAX_EMOJI {
+            return Err("It has as many emoji as it can; remove one first".into());
+        }
+        let emoji = antiphon_crypto::community::Emoji { name: name.clone(), image };
+        let outs = space.update(identity, |m| m.emoji.push(emoji))?;
+        Ok(((), outs, vec![Event::Changed]))
+    })?;
+    Ok(name)
+}
+
+/// An emoji name from a file name: its stem in lowercase, anything but
+/// letters and digits made an underscore, cut to length.
+fn emoji_name(file_name: &str) -> String {
+    let stem = file_name.rsplit_once('.').map_or(file_name, |(s, _)| s);
+    let mut name: String = stem.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    name = name.trim_matches('_').to_string();
+    name.truncate(antiphon_crypto::community::MAX_EMOJI_NAME);
+    if name.len() < 2 {
+        name = "emoji".into();
+    }
+    name
 }
 
 /// A space's id from its hex.
@@ -243,6 +289,16 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
         can_post: joined && m.can(&me, perm::POST, None),
         can_invite: joined && m.can(&me, perm::INVITE, None),
         can_manage_channels: joined && !group && m.can(&me, perm::MANAGE_CHANNELS, None),
+        can_manage: joined && !group && m.can(&me, perm::MANAGE_COMMUNITY, None),
+        emoji: m
+            .emoji
+            .iter()
+            .map(|e| {
+                // Decoded once, when its picture changes.
+                ui::avatars::set(&ui::avatars::emoji_id(&delivery::hex(&s.id().0), &e.name), &e.image, "", antiphon_client::profile::decode_emoji);
+                e.name.clone()
+            })
+            .collect(),
     }
 }
 
@@ -275,4 +331,17 @@ fn channel_model(store: &Store, space: &community::Space, channel: u32) -> ui::C
         })
         .collect();
     ui::ChannelView { community: delivery::hex(&space.id().0), channel, lines }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emoji_names_come_from_file_names() {
+        assert_eq!(emoji_name("Party Cat.png"), "party_cat");
+        assert_eq!(emoji_name("x.gif"), "emoji");
+        assert_eq!(emoji_name("__ok__.jpeg"), "ok");
+        assert!(antiphon_crypto::community::Emoji::valid_name(&emoji_name("Ünïcode héllo wörld that is far too long.png")));
+    }
 }
