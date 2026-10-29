@@ -26,6 +26,10 @@ use winit::window::WindowId;
 
 use crate::{audio, callkit, logger, network, platform, screen};
 
+/// A way into the event loop from other threads, set once the loop exists.
+/// Behind a Mutex because the proxy is not promised to be `Sync`. A wake
+/// before it is set is dropped, which is harmless: what was posted stays
+/// in the queue, and the loop drains it once it runs.
 static PROXY: OnceLock<Mutex<EventLoopProxy<Wake>>> = OnceLock::new();
 
 /// Wakes the event loop from any thread. Called after every
@@ -50,6 +54,9 @@ fn data_dir() -> PathBuf {
     dir
 }
 
+/// Sets up logging, the platform modules and the event loop, then runs
+/// the app. Must be called on the main thread, from `main`; it returns
+/// only if the event loop cannot be created.
 pub fn run() {
     logger::init();
     // A panic would otherwise vanish: nothing reads an iOS app's stderr.
@@ -81,13 +88,20 @@ pub fn run() {
     }
 }
 
+/// Whether UIKit says the app is in the background. `false` off the main
+/// thread, where UIApplication cannot be asked, which is never the case
+/// for its one caller: winit's handlers run on the main thread.
 fn in_background() -> bool {
     objc2::MainThreadMarker::new().is_some_and(|mtm| {
         UIApplication::sharedApplication(mtm).applicationState() == UIApplicationState::Background
     })
 }
 
+/// The [`ApplicationHandler`] winit runs: the shared [`Runner`], plus the
+/// headless start described in the module comment. Every method runs on
+/// the main thread.
 struct Shell {
+    /// The shared app, which does all the real work.
     runner: Runner,
     /// Whether the runner has been resumed at least once, so the shared
     /// app exists.

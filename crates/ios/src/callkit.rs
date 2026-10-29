@@ -44,35 +44,60 @@ const PUSH_ENABLED_KEY: &str = "antiphon.push.enabled";
 
 /// The one call CallKit knows about.
 struct Call {
+    /// CallKit's identifier for the call, made here; every report and
+    /// action about it names this.
     uuid: Retained<NSUUID>,
+    /// Reported by a push (true) or started from the app's side (false).
+    /// An incoming call never answered ends as "unanswered", or "declined"
+    /// when the user ends it.
     incoming: bool,
     /// Answered, from CallKit's screen or in the app.
     answered: bool,
 }
 
+/// The CallKit objects, made on first use and kept for the life of the
+/// process. Main thread only, in [`CALLKIT`].
 struct CallKit {
+    /// Reports calls to the system and receives the user's actions on them
+    /// through [`ProviderDelegate`].
     provider: Retained<CXProvider>,
+    /// Requests actions from the app's side (start, answer), which CallKit
+    /// then performs through the provider's delegate.
     controller: Retained<CXCallController>,
     /// The provider holds its delegate weakly.
     _delegate: Retained<ProviderDelegate>,
+    /// The call in progress, if any. One at a time: the provider is
+    /// configured for a single call.
     call: Option<Call>,
 }
 
+/// The PushKit registration, kept alive so VoIP pushes keep arriving: a
+/// registry delivers only while it exists.
 struct Push {
+    /// The registry for VoIP pushes, on the main queue.
     _registry: Retained<PKPushRegistry>,
+    /// The registry holds its delegate weakly.
     _delegate: Retained<PushDelegate>,
 }
 
 thread_local! {
+    /// CallKit, once set up. Thread-local because it is used only on the
+    /// main thread; a `RefCell` because a delegate callback can arrive
+    /// while it is borrowed, which [`with_callkit`] detects.
     static CALLKIT: RefCell<Option<CallKit>> = const { RefCell::new(None) };
+    /// PushKit, once the user has turned push on. Main thread only.
     static PUSH: RefCell<Option<Push>> = const { RefCell::new(None) };
 }
 
+/// Posts to the shared code and wakes the event loop, which may need to
+/// start the app headless to take it (see `shell`).
 fn post(event: PlatformEvent) {
     platform::post(event);
     crate::shell::wake();
 }
 
+/// A CallKit completion block that logs `what` with the error, if any.
+/// CallKit calls it on the main queue.
 fn log_error(what: &'static str) -> RcBlock<dyn Fn(*mut NSError)> {
     RcBlock::new(move |error: *mut NSError| {
         // SAFETY: CallKit passes nil or a live error.
@@ -82,11 +107,16 @@ fn log_error(what: &'static str) -> RcBlock<dyn Fn(*mut NSError)> {
     })
 }
 
+/// A generic CallKit handle: just a name, not a phone number or email, so
+/// CallKit offers no "call back" through the Phone app.
 fn handle(name: &str) -> Retained<CXHandle> {
     // SAFETY: a designated initialiser with valid arguments.
     unsafe { CXHandle::initWithType_value(CXHandle::alloc(), CXHandleType::Generic, &NSString::from_str(name)) }
 }
 
+/// A call update showing `name` and turning off everything this app does
+/// not support (video, hold, grouping, keypad), so CallKit's screen hides
+/// those buttons.
 fn update_for(name: &str) -> Retained<CXCallUpdate> {
     // SAFETY: setters with valid arguments on a fresh object.
     unsafe {
@@ -247,6 +277,9 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "AntiphonCallKitDelegate"]
+    /// The provider's delegate: the user's actions on CallKit's screen,
+    /// delivered on the main queue. Each action must be fulfilled, or
+    /// CallKit times it out and fails the call.
     struct ProviderDelegate;
 
     unsafe impl NSObjectProtocol for ProviderDelegate {}
@@ -261,6 +294,8 @@ define_class!(
             }
         }
 
+        /// A call the app asked to start (see [`set_call`]): fulfilled at
+        /// once, since the call engine is already connecting.
         #[unsafe(method(provider:performStartCallAction:))]
         fn start_call(&self, provider: &CXProvider, action: &CXStartCallAction) {
             // SAFETY: plain calls on objects CallKit passed in.
@@ -270,6 +305,9 @@ define_class!(
             }
         }
 
+        /// Answer, pressed on CallKit's screen, or requested by
+        /// [`call_connected`] for a call answered in the app; only the
+        /// first is passed on, so an answer is not echoed back.
         #[unsafe(method(provider:performAnswerCallAction:))]
         fn answer_call(&self, _provider: &CXProvider, action: &CXAnswerCallAction) {
             let answered_here = with_callkit(self.mtm(), |callkit| match callkit.call.as_mut() {
@@ -287,6 +325,8 @@ define_class!(
             unsafe { action.fulfill() };
         }
 
+        /// The red button on CallKit's screen: a decline while an incoming
+        /// call is still ringing, a hang-up after.
         #[unsafe(method(provider:performEndCallAction:))]
         fn end_call(&self, _provider: &CXProvider, action: &CXEndCallAction) {
             let ended = with_callkit(self.mtm(), |callkit| callkit.call.take()).flatten();
@@ -298,6 +338,7 @@ define_class!(
             unsafe { action.fulfill() };
         }
 
+        /// Mute on CallKit's screen or a headset, with the new state.
         #[unsafe(method(provider:performSetMutedCallAction:))]
         fn set_muted(&self, _provider: &CXProvider, action: &CXSetMutedCallAction) {
             // SAFETY: plain calls on the action CallKit passed in.
@@ -310,6 +351,7 @@ define_class!(
 );
 
 impl ProviderDelegate {
+    /// A fresh delegate. Main thread only, as the class is `MainThreadOnly`.
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(());
         // SAFETY: NSObject's designated initialiser.
@@ -321,11 +363,15 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "AntiphonPushKitDelegate"]
+    /// The PushKit registry's delegate, called on the main queue.
     struct PushDelegate;
 
     unsafe impl NSObjectProtocol for PushDelegate {}
 
     unsafe impl PKPushRegistryDelegate for PushDelegate {
+        /// A new or changed VoIP token, passed on as lowercase hex (64
+        /// characters for today's 32-byte tokens), which is how APNs takes
+        /// it.
         #[unsafe(method(pushRegistry:didUpdatePushCredentials:forType:))]
         fn did_update(&self, _registry: &PKPushRegistry, credentials: &PKPushCredentials, _kind: &PKPushType) {
             // SAFETY: a property read.
@@ -335,6 +381,9 @@ define_class!(
             post(PlatformEvent::PushRegistered(hex));
         }
 
+        /// A VoIP push. The call is reported to CallKit before anything
+        /// else and before `completion` runs, as iOS requires; then the
+        /// sealed bytes are queued for the shared code.
         #[unsafe(method(pushRegistry:didReceiveIncomingPushWithPayload:forType:withCompletionHandler:))]
         fn did_receive(
             &self,
@@ -352,6 +401,8 @@ define_class!(
             completion.call(());
         }
 
+        /// The token is no longer valid. Only logged: PushKit sends a new
+        /// one through `did_update` when it has one.
         #[unsafe(method(pushRegistry:didInvalidatePushTokenForType:))]
         fn did_invalidate(&self, _registry: &PKPushRegistry, _kind: &PKPushType) {
             log::info!("PushKit token invalidated");
@@ -360,6 +411,7 @@ define_class!(
 );
 
 impl PushDelegate {
+    /// A fresh delegate. Main thread only, as the class is `MainThreadOnly`.
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(());
         // SAFETY: NSObject's designated initialiser.
@@ -392,6 +444,8 @@ pub fn restore_push(mtm: MainThreadMarker) {
     }
 }
 
+/// Creates the PushKit registry if it does not exist yet, and posts the
+/// token at once if PushKit already holds one. Main thread only.
 fn start_push(mtm: MainThreadMarker) {
     PUSH.with(|slot| {
         let Ok(mut slot) = slot.try_borrow_mut() else { return };

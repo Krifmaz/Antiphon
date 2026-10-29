@@ -57,6 +57,7 @@ define_class!(
 );
 
 impl PickerDelegate {
+    /// A fresh delegate. Main thread only, as the class is `MainThreadOnly`.
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(());
         // SAFETY: NSObject's designated initialiser.
@@ -64,6 +65,8 @@ impl PickerDelegate {
     }
 }
 
+/// Ends a pick: drops the delegate the picker held weakly, posts the
+/// result, and wakes the event loop to take it. Main thread only.
 fn finish(event: PlatformEvent) {
     DELEGATE.with(|delegate| delegate.borrow_mut().take());
     platform::post(event);
@@ -72,9 +75,15 @@ fn finish(event: PlatformEvent) {
 
 /// Stops using a security-scoped URL when dropped, so an early return
 /// cannot leak the access (iOS caps how many an app may hold).
+///
+/// The fields are the URL and whether access was granted, since only a
+/// granted access may be stopped.
 struct Access<'a>(&'a NSURL, bool);
 
 impl<'a> Access<'a> {
+    /// Starts accessing `url`. Not every URL needs it (one inside the app's
+    /// own container does not), so a refusal is not an error: the read
+    /// that follows is what fails, if anything does.
     fn start(url: &'a NSURL) -> Self {
         // SAFETY: a plain call on a valid URL.
         Self(url, unsafe { url.startAccessingSecurityScopedResource() })
@@ -90,6 +99,7 @@ impl Drop for Access<'_> {
     }
 }
 
+/// The file-system path of a file URL, as std::fs wants it.
 fn path_of(url: &NSURL) -> io::Result<std::path::PathBuf> {
     url.path().map(|p| p.to_string().into()).ok_or_else(|| io::Error::other("the file has no path"))
 }

@@ -25,25 +25,42 @@ import java.util.UUID;
  * never looks inside; it hands the bytes to Rust.
  */
 public class PushReceiver extends BroadcastReceiver {
+    /** The logcat tag, shared with the rest of the app. */
     private static final String TAG = AntiphonActivity.TAG;
 
+    /** Sent to the distributor: asks it for an endpoint for this app. */
     private static final String REGISTER = "org.unifiedpush.android.distributor.REGISTER";
+    /** Sent to the distributor: a message was received and need not be resent. */
     private static final String MESSAGE_ACK = "org.unifiedpush.android.distributor.MESSAGE_ACK";
+    /**
+     * The feature asked for at registration: messages delivered as raw
+     * bytes, since a sealed wake-up is binary and not valid text.
+     */
     private static final String FEATURE_BYTES = "org.unifiedpush.android.distributor.feature.BYTES_MESSAGE";
 
+    /** From the distributor: the endpoint to give out, sent on every registration. */
     private static final String NEW_ENDPOINT = "org.unifiedpush.android.connector.NEW_ENDPOINT";
+    /** From the distributor: it refused the registration, with a reason. */
     private static final String REGISTRATION_FAILED = "org.unifiedpush.android.connector.REGISTRATION_FAILED";
+    /** From the distributor: this app's registration was removed. */
     private static final String UNREGISTERED = "org.unifiedpush.android.connector.UNREGISTERED";
+    /** From the distributor: a push message for this app. */
     private static final String MESSAGE = "org.unifiedpush.android.connector.MESSAGE";
 
+    /** The SharedPreferences file holding the registration below. */
     private static final String PREFS = "unifiedpush";
+    /** This registration's secret token; see {@link #register}. */
     private static final String KEY_TOKEN = "token";
+    /** The package name of the distributor registered with. */
     private static final String KEY_DISTRIBUTOR = "distributor";
 
     /**
      * Rust's register_push. Asks the distributor for an endpoint; it
      * answers with NEW_ENDPOINT, every time, even when it already gave one.
      * Returns false when no distributor is installed.
+     *
+     * Called through JNI on Rust's thread, not the main thread; it only
+     * reads preferences and sends a broadcast, which are safe there.
      */
     public static boolean register(Context context) {
         SharedPreferences prefs = prefs(context);
@@ -102,10 +119,18 @@ public class PushReceiver extends BroadcastReceiver {
         return first;
     }
 
+    /** The registration's preferences, private to this app. */
     private static SharedPreferences prefs(Context context) {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
+    /**
+     * Every broadcast from the distributor, on the main thread. Anything
+     * without this registration's token is ignored, since any app can send
+     * this receiver a broadcast. The work is kept short -- the bytes go
+     * straight to Rust's queue -- because Android allows a receiver about
+     * ten seconds before it treats the app as not responding.
+     */
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent.getAction();

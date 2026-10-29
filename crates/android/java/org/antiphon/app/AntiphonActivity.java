@@ -27,6 +27,7 @@ import android.util.Log;
  * anything that touches the UI is posted to the UI thread.
  */
 public class AntiphonActivity extends NativeActivity {
+    /** The logcat tag for the Java side, the same as Rust's. */
     static final String TAG = "antiphon";
 
     /** Opens the activity and answers the ringing call. */
@@ -34,26 +35,42 @@ public class AntiphonActivity extends NativeActivity {
     /** Opens the activity over the lock screen to show a ringing call. */
     static final String ACTION_RINGING = "org.antiphon.app.RINGING";
 
+    /**
+     * The request code for the document picker, so onActivityResult can
+     * tell its answer apart. 1 is the microphone request Rust makes.
+     */
     private static final int PICK_FILE = 2;
+    /** The request code for the notification permission prompt. */
     private static final int NOTIFICATION_PERMISSION = 3;
 
-    /** Whether the app is on screen, where its own UI is the ring. */
+    /**
+     * Whether the app is on screen, where its own UI is the ring. Written
+     * on the main thread, read on Rust's, hence volatile.
+     */
     static volatile boolean inFront;
 
+    /** The network watcher, kept so it can be unregistered; null when none. */
     private ConnectivityManager.NetworkCallback networkCallback;
 
+    /** The activity is in front: from now on, a call rings in the app itself. */
     @Override
     protected void onResume() {
         super.onResume();
         inFront = true;
     }
 
+    /** The activity is leaving the front: calls ring as a notification again. */
     @Override
     protected void onPause() {
         inFront = false;
         super.onPause();
     }
 
+    /**
+     * Starts the Rust app (through NativeActivity), and before anything can
+     * need one, the notification channels and the network watcher. Also
+     * handles the intent that launched it, which may be a call's Answer.
+     */
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -62,6 +79,7 @@ public class AntiphonActivity extends NativeActivity {
         handle(getIntent());
     }
 
+    /** Stops watching the network, which would otherwise leak this activity. */
     @Override
     protected void onDestroy() {
         if (networkCallback != null) {
@@ -88,6 +106,11 @@ public class AntiphonActivity extends NativeActivity {
         handle(intent);
     }
 
+    /**
+     * Acts on the intent that opened the activity: Answer from the
+     * incoming-call alert answers the call and shows it over the lock
+     * screen; a tap on the alert itself only shows it. Main thread.
+     */
     private void handle(Intent intent) {
         if (intent == null) return;
         String action = intent.getAction();
@@ -109,6 +132,7 @@ public class AntiphonActivity extends NativeActivity {
     void showWhenLocked(boolean on) {
         if (Build.VERSION.SDK_INT < 27) return;
         runOnUiThread(new Runnable() {
+            /** Window flags may only be changed on the UI thread. */
             @Override
             public void run() {
                 setShowWhenLocked(on);
@@ -117,9 +141,14 @@ public class AntiphonActivity extends NativeActivity {
         });
     }
 
-    /** Opens the system's document picker. The answer comes to onActivityResult. */
+    /**
+     * Opens the system's document picker. The answer comes to
+     * onActivityResult. Called through JNI from Rust's thread, so the
+     * picker is started from the UI thread.
+     */
     public void pickFile() {
         runOnUiThread(new Runnable() {
+            /** Starts the picker; a failure counts as a cancelled pick. */
             @Override
             public void run() {
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -139,6 +168,12 @@ public class AntiphonActivity extends NativeActivity {
         });
     }
 
+    /**
+     * The document picker's answer, on the main thread. Keeps read access
+     * to the document across restarts, looks up its display name and size
+     * in bytes, and hands them to Rust; anything but a document is a
+     * cancel.
+     */
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -172,12 +207,13 @@ public class AntiphonActivity extends NativeActivity {
     /**
      * Android 13 and later hide every notification, the ongoing call
      * included, until the user allows them. Asked when something first
-     * needs one rather than at launch.
+     * needs one rather than at launch. Callable from any thread.
      */
     public void requestNotificationPermission() {
         if (Build.VERSION.SDK_INT < 33) return;
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
         runOnUiThread(new Runnable() {
+            /** Permission prompts must be started from the UI thread. */
             @Override
             public void run() {
                 requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION);
@@ -188,12 +224,14 @@ public class AntiphonActivity extends NativeActivity {
     /**
      * Asks to be left out of battery optimisation, so Doze does not cut the
      * network while the app listens for calls. The system shows its own
-     * yes/no dialog; nothing happens if the app is already exempt.
+     * yes/no dialog; nothing happens if the app is already exempt. Called
+     * through JNI from Rust's thread.
      */
     public void requestBatteryExemption() {
         PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (power == null || power.isIgnoringBatteryOptimizations(getPackageName())) return;
         runOnUiThread(new Runnable() {
+            /** Opens the system's dialog, from the UI thread. */
             @Override
             public void run() {
                 Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -217,11 +255,16 @@ public class AntiphonActivity extends NativeActivity {
         ConnectivityManager connectivity = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (connectivity == null) return;
         networkCallback = new ConnectivityManager.NetworkCallback() {
+            /**
+             * Any change to the default network, signal strength included,
+             * on ConnectivityManager's own thread; Rust filters it.
+             */
             @Override
             public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
                 Native.networkChanged();
             }
 
+            /** The default network is gone, on the same thread as above. */
             @Override
             public void onLost(Network network) {
                 Native.networkChanged();

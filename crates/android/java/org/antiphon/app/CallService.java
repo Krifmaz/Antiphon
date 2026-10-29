@@ -39,39 +39,68 @@ import java.util.concurrent.atomic.AtomicInteger;
  * channels.
  */
 public class CallService extends Service {
+    /** The logcat tag, shared with the rest of the app. */
     private static final String TAG = AntiphonActivity.TAG;
 
+    /** Starts the service, or brings it up to date with what Rust said. */
     static final String ACTION_UPDATE = "org.antiphon.app.UPDATE";
+    /** The Hang up button on the ongoing-call notification. */
     static final String ACTION_HANG_UP = "org.antiphon.app.HANG_UP";
+    /** The Mute/Unmute button on the ongoing-call notification. */
     static final String ACTION_MUTE = "org.antiphon.app.MUTE";
+    /** The Decline button on the incoming-call alert. */
     static final String ACTION_DECLINE = "org.antiphon.app.DECLINE";
 
+    /** Notification channel for the ongoing call; low importance, silent. */
     private static final String CHANNEL_CALL = "call";
+    /** Notification channel for the incoming-call alert; rings. */
     private static final String CHANNEL_INCOMING = "incoming";
+    /** Notification channel for listening and transfers; minimal. */
     private static final String CHANNEL_BACKGROUND = "background";
+    /** Notification channel for plain notifications from {@link #notify}. */
     private static final String CHANNEL_MESSAGES = "messages";
 
+    /** The foreground service's own notification, replaced on each update. */
     private static final int ID_ONGOING = 1;
+    /** The incoming-call alert; one at a time, withdrawn by id. */
     private static final int ID_RINGING = 2;
+    /**
+     * The next id for a plain notification, so each is added rather than
+     * replacing the last. Starts well clear of the fixed ids above, and is
+     * atomic because notify may be called from several threads.
+     */
     private static final AtomicInteger nextId = new AtomicInteger(100);
 
     /** The incoming-call alert gives up after this long, as a phone call does. */
     private static final long RING_TIMEOUT_MS = 60_000;
 
-    // What has to keep running, as Rust last said. Written on Rust's
-    // thread, read on the main thread, so guarded by `lock`.
+    /**
+     * Guards the fields below: what has to keep running, as Rust last said.
+     * Written on Rust's thread, read on the main thread.
+     */
     private static final Object lock = new Object();
+    /** Who the call is with ("" when unknown), or null when there is none. */
     private static String call;
+    /** Whether the app is listening for incoming calls. */
     private static boolean listening;
+    /** How many file transfers are running. */
     private static int transfers;
+    /**
+     * Whether the notification's Mute button has the call muted. The
+     * service flips it itself and tells Rust; reset when a call starts.
+     */
     private static boolean muted;
+    /** When the call started, in milliseconds since the epoch, for the chronometer. */
     private static long callStarted;
 
+    /** Posts to the main thread, where the service is started and updated. */
     private static final Handler main = new Handler(Looper.getMainLooper());
     /** The running service, if any. Main thread only. */
     private static CallService running;
 
+    /** Keeps the CPU awake during a call; null when not held. */
     private PowerManager.WakeLock wakeLock;
+    /** Keeps Wi-Fi out of power save during a call; null when not held. */
     private WifiManager.WifiLock wifiLock;
 
     /**
@@ -79,6 +108,10 @@ public class CallService extends Service {
      * or null when there is none. Starts the service when something has to
      * keep running, updates its notification while it runs, and stops it
      * when nothing does.
+     *
+     * Called through JNI on Rust's thread. The state is stored under
+     * {@code lock} at once; starting or updating the service is posted to
+     * the main thread, where Service calls belong.
      */
     public static void update(Context context, String callWith, boolean listen, int transferCount) {
         final Context app = context.getApplicationContext();
@@ -99,6 +132,10 @@ public class CallService extends Service {
             if (!idle) activity.requestNotificationPermission();
         }
         main.post(new Runnable() {
+            /**
+             * On the main thread: updates the running service, or starts one
+             * if there is something to keep running and none is up.
+             */
             @Override
             public void run() {
                 if (running != null) {
@@ -121,16 +158,19 @@ public class CallService extends Service {
         });
     }
 
+    /** Whether nothing has to keep running. Callers must hold {@code lock}. */
     private static boolean isIdle() {
         return call == null && !listening && transfers == 0;
     }
 
+    /** Records this as the running service. Main thread, as all lifecycle calls are. */
     @Override
     public void onCreate() {
         super.onCreate();
         running = this;
     }
 
+    /** Lets go of the wake and Wi-Fi locks, and forgets this service. */
     @Override
     public void onDestroy() {
         releaseLocks();
@@ -138,11 +178,17 @@ public class CallService extends Service {
         super.onDestroy();
     }
 
+    /** Not a bound service: started and stopped only. */
     @Override
     public IBinder onBind(Intent intent) {
         return null;
     }
 
+    /**
+     * A start request, on the main thread: an update from Rust, or a button
+     * on one of the notifications, passed on to Rust. Every path ends by
+     * bringing the service in line with the latest state.
+     */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
@@ -174,7 +220,10 @@ public class CallService extends Service {
         return START_NOT_STICKY;
     }
 
-    /** Android 15 stops a dataSync service after six hours a day. */
+    /**
+     * Android 15 stops a dataSync service after six hours a day. It must
+     * stop itself here, or the system crashes the app.
+     */
     @Override
     public void onTimeout(int startId, int fgsType) {
         Log.w(TAG, "the system ended the background service after its time limit");
@@ -182,7 +231,10 @@ public class CallService extends Service {
         stopSelf();
     }
 
-    /** Brings the notification and the service in line with what Rust last said. */
+    /**
+     * Brings the notification and the service in line with what Rust last
+     * said. Main thread only.
+     */
     private void apply() {
         String c;
         boolean l;
@@ -243,6 +295,10 @@ public class CallService extends Service {
         return types;
     }
 
+    /**
+     * The dataSync service type, or 0 before Android 10, where types do not
+     * exist. The type of last resort, which needs no extra permission.
+     */
     private static int dataSyncType() {
         return Build.VERSION.SDK_INT >= 29 ? ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC : 0;
     }
@@ -275,6 +331,12 @@ public class CallService extends Service {
         }
     }
 
+    /**
+     * The ongoing notification for a call with {@code c} (null for none),
+     * listening {@code l}, {@code t} transfers and mute state {@code m}. A
+     * call shows a running timer and Mute and Hang up buttons; otherwise a
+     * quiet line saying what is going on.
+     */
     private Notification build(String c, boolean l, int t, boolean m) {
         Notification.Builder b = new Notification.Builder(this, c != null ? CHANNEL_CALL : CHANNEL_BACKGROUND)
                 .setSmallIcon(R.drawable.ic_stat_antiphon)
@@ -313,6 +375,7 @@ public class CallService extends Service {
      * {@code from} is null. With the phone locked or the app out of sight
      * it opens the app full screen, as a phone call does; with the app in
      * front the app's own screen is the alert, so nothing is shown.
+     * Callable from any thread: NotificationManager is thread-safe.
      */
     public static void ring(Context context, String from) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
@@ -346,7 +409,11 @@ public class CallService extends Service {
         }
     }
 
-    /** Rust's notify: a plain notification that opens the app when tapped. */
+    /**
+     * Rust's notify: a plain notification that opens the app when tapped.
+     * Also used by PushReceiver when a push arrives and the app is not
+     * running. Callable from any thread.
+     */
     public static void notify(Context context, String title, String body) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         if (manager == null) return;
@@ -442,6 +509,7 @@ public class CallService extends Service {
         }
     }
 
+    /** Lets go of whichever of the two locks is held. Safe to call twice. */
     private void releaseLocks() {
         if (wakeLock != null) {
             wakeLock.release();
@@ -453,17 +521,27 @@ public class CallService extends Service {
         }
     }
 
+    /** A notification button titled {@code title} that fires {@code intent}. */
     private static Notification.Action action(Context context, String title, PendingIntent intent) {
         return new Notification.Action.Builder(
                 Icon.createWithResource(context, R.drawable.ic_stat_antiphon), title, intent).build();
     }
 
+    /**
+     * A PendingIntent that delivers {@code action} to this service. The
+     * action's hash is the request code, so each button gets its own
+     * PendingIntent rather than all sharing the last one made.
+     */
     private static PendingIntent service(Context context, String action) {
         Intent intent = new Intent(context, CallService.class).setAction(action);
         return PendingIntent.getService(context, action.hashCode(), intent,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
+    /**
+     * A PendingIntent that opens AntiphonActivity with {@code action}, for
+     * the incoming-call alert. Request codes as in {@link #service}.
+     */
     private static PendingIntent activity(Context context, String action) {
         Intent intent = new Intent(context, AntiphonActivity.class)
                 .setAction(action)
@@ -472,6 +550,10 @@ public class CallService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
+    /**
+     * A PendingIntent that brings the app to the front as the launcher icon
+     * would, without acting on anything.
+     */
     static PendingIntent openApp(Context context) {
         Intent intent = new Intent(context, AntiphonActivity.class)
                 .setAction(Intent.ACTION_MAIN)
