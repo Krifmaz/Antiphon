@@ -21,7 +21,13 @@ name: release
 #   one that differs fails its platform. The version is written into the workspace first
 #   (packaging/set-version.sh), so `--version` and the About screen show it.
 #   Re-running a version replaces its release. cleanup-releases.yml deletes old ones.
+#   A pull request that changes the packaging runs everything but the publish step, so a broken installer
+#   shows up before a release needs it.
 on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       bump:
@@ -41,9 +47,10 @@ on:
 permissions:
   contents: write
 
-# releases queue one after the other
+# releases queue one after the other; a pull request's check gets a group of its own
 concurrency:
-  group: release
+  group: ${{ github.event_name == 'pull_request' && format('release-check-{0}', github.ref) || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -248,10 +255,10 @@ jobs:
           cat hashes/*.sha256 >> out/SHA256SUMS
           cat out/SHA256SUMS
       - name: Publish
-        if: inputs.publish
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
         run: |
           gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
           gh release create "v$V" out/* --title "Stoop $V" --notes-file notes.md --target "$GITHUB_SHA" --latest
       - name: Not published
-        if: ${{ !inputs.publish }}
-        run: echo "publish was unticked; the files are this run's Stoop-* artifacts" | tee -a "$GITHUB_STEP_SUMMARY"
+        if: github.event_name != 'workflow_dispatch' || !inputs.publish
+        run: echo "Not published (a pull request check, or publish unticked); the files are this run's Stoop-* artifacts" | tee -a "$GITHUB_STEP_SUMMARY"
