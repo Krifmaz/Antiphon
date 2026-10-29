@@ -115,16 +115,18 @@ impl Spaces {
             }
             A::EditPost { community, id: message, text } => {
                 let id = key(&community)?;
+                let channel = store.channel_of(&id, message);
                 store.with_space(&id, |space, identity| {
                     let me = identity.public().identity_key;
-                    let outs = space.edit(message, &text)?;
+                    let outs = space.edit(message, &text, channel)?;
                     Ok(((), outs, vec![Event::Edited { id: message, sender: me, text: text.trim().to_string() }]))
                 })?;
             }
             A::DeletePost { community, id: message, author } => {
                 let id = key(&community)?;
                 let author = connection_mode::decode_hex32(&author).ok_or("whose message that is isn't known")?;
-                store.with_space(&id, |space, _| Ok(((), space.delete(message, author)?, vec![Event::Deleted { id: message, author }])))?;
+                let channel = store.channel_of(&id, message);
+                store.with_space(&id, |space, _| Ok(((), space.delete(message, author, channel)?, vec![Event::Deleted { id: message, author }])))?;
             }
             A::InviteToSpace { community, person } => {
                 let id = key(&community)?;
@@ -141,7 +143,7 @@ impl Spaces {
                         // One past the highest, so a removed channel's
                         // number is never reused for a different one.
                         let next = m.channels.iter().map(|c| c.id).max().map_or(0, |n| n + 1);
-                        m.channels.push(antiphon_crypto::community::Channel { id: next, name: name.clone(), topic: String::new() });
+                        m.channels.push(antiphon_crypto::community::Channel { id: next, name: name.clone(), ..Default::default() });
                     })?;
                     Ok(((), outs, vec![Event::Changed]))
                 })?;
@@ -156,6 +158,13 @@ impl Spaces {
                 let id = key(&community)?;
                 store.with_space(&id, |space, identity| {
                     let outs = space.update(identity, |m| m.emoji.retain(|e| e.name != name))?;
+                    Ok(((), outs, vec![Event::Changed]))
+                })?;
+            }
+            A::ManageSpace { community, change } => {
+                let id = key(&community)?;
+                store.with_space(&id, |space, identity| {
+                    let outs = manage(space, identity, change)?;
                     Ok(((), outs, vec![Event::Changed]))
                 })?;
             }
@@ -216,6 +225,91 @@ fn emoji_name(file_name: &str) -> String {
     name
 }
 
+/// What a role can be allowed, in the order the roles dialog lists them:
+/// the permission bit and how the dialog says it.
+const PERMS: [(u32, &str); 8] = [
+    (perm::POST, "Post messages"),
+    (perm::INVITE, "Invite people"),
+    (perm::MANAGE_MESSAGES, "Remove other people's messages"),
+    (perm::KICK, "Remove members below them"),
+    (perm::BAN, "Ban members below them"),
+    (perm::MANAGE_ROLES, "Give members roles below their own"),
+    (perm::MANAGE_CHANNELS, "Add channels and choose who reads them"),
+    (perm::MANAGE_COMMUNITY, "Change the community's name and settings"),
+];
+
+/// Signs one change to how a community is set up into its manifest and
+/// sends it to everyone. The manifest's own rules refuse what the signer
+/// isn't allowed (`check_transition`), so this only says why up front
+/// where it can.
+fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyPair, change: ui::SpaceChange) -> Result<Vec<community::Out>, String> {
+    use ui::SpaceChange as C;
+    let member_key = |hex: &str| connection_mode::decode_hex32(hex).map(Key).ok_or_else(|| "That member isn't known".to_string());
+    match change {
+        C::ChannelPrivate { channel, private } => {
+            let me = space.me();
+            space.update(identity, |m| {
+                let owner = m.is_owner(&me);
+                if let Some(c) = m.channels.iter_mut().find(|c| c.id == channel) {
+                    // Whoever makes it private keeps reading it, unless an
+                    // owner (who always can).
+                    c.readers = private.then(|| if owner { Vec::new() } else { vec![Key(me)] });
+                }
+            })
+        }
+        C::ChannelReader { channel, member, on } => {
+            let who = member_key(&member)?;
+            space.update(identity, |m| {
+                if let Some(readers) = m.channels.iter_mut().find(|c| c.id == channel).and_then(|c| c.readers.as_mut()) {
+                    readers.retain(|k| *k != who);
+                    if on {
+                        readers.push(who);
+                    }
+                }
+            })
+        }
+        C::AddRole(name) => {
+            if space.manifest().roles.len() >= antiphon_crypto::community::MAX_ROLES {
+                return Err(format!("A community can have at most {} roles", antiphon_crypto::community::MAX_ROLES));
+            }
+            // New roles start out able to do what newcomers can.
+            let perms = space.manifest().roles.last().map_or(perm::POST, |r| r.perms);
+            space.update(identity, |m| {
+                let at = m.roles.len().saturating_sub(1);
+                m.insert_role(at, antiphon_crypto::community::Role { name: name.trim().to_string(), perms });
+            })
+        }
+        C::RemoveRole(at) => {
+            if at + 1 >= space.manifest().roles.len() {
+                return Err("The role newcomers get can't be removed".into());
+            }
+            space.update(identity, |m| {
+                m.remove_role(at);
+            })
+        }
+        C::RolePerm { role, perm: which, on } => {
+            let (bit, _) = *PERMS.get(which).ok_or("That isn't something a role can do")?;
+            space.update(identity, |m| {
+                if let Some(r) = m.roles.get_mut(role) {
+                    if on {
+                        r.perms |= bit;
+                    } else {
+                        r.perms &= !bit;
+                    }
+                }
+            })
+        }
+        C::MemberRole { member, role } => {
+            let who = member_key(&member)?;
+            space.update(identity, |m| {
+                if let Some(x) = m.members.iter_mut().find(|x| x.key == who) {
+                    x.role = role as u16;
+                }
+            })
+        }
+    }
+}
+
 /// A space's id from its hex.
 fn key(hex: &str) -> Result<Key, String> {
     connection_mode::decode_hex32(hex).map(Key).ok_or_else(|| "That isn't one of yours".to_string())
@@ -245,31 +339,66 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
     let me = s.me();
     let joined = s.joining.is_none() && !s.removed;
     let group = m.kind == Kind::Group;
+    let assigns = joined && !group && m.perms(&me) & perm::MANAGE_ROLES != 0;
+    let last = m.roles.len().saturating_sub(1);
     let members = m
         .members
         .iter()
         .map(|x| {
             let k = x.key.0;
-            let role = if m.is_owner(&k) { "Owner".to_string() } else { m.roles.get(x.role as usize).map(|r| r.name.clone()).unwrap_or_default() };
+            let owner = m.is_owner(&k);
+            let role = if owner { "Owner".to_string() } else { m.roles.get(x.role as usize).map(|r| r.name.clone()).unwrap_or_default() };
+            // Only someone you outrank, and only to a role at or below
+            // your own rank (the manifest's re-roling rule).
+            let assignable = if assigns && !owner && m.can(&me, perm::MANAGE_ROLES, Some(&k)) {
+                (0..m.roles.len()).filter(|&i| i as u32 >= m.rank(&me)).collect()
+            } else {
+                Vec::new()
+            };
             ui::Member {
                 id: delivery::hex(&k),
                 name: s.name_of(&k),
                 status: s.card(&k).map(|c| c.status.clone()).unwrap_or_default(),
                 role,
                 me: k == me,
+                role_index: (!owner).then_some(x.role as usize),
+                plain: group || (!owner && x.role as usize == last),
+                assignable,
             }
         })
         .collect::<Vec<_>>();
+    let roles = if group {
+        Vec::new()
+    } else {
+        m.roles
+            .iter()
+            .enumerate()
+            .map(|(i, r)| ui::Role {
+                name: r.name.clone(),
+                perms: PERMS.iter().map(|(bit, what)| (what.to_string(), r.perms & bit == *bit)).collect(),
+                holders: m.members.iter().filter(|x| x.role as usize == i && !m.is_owner(&x.key.0)).count(),
+            })
+            .collect()
+    };
     let count = members.len();
     ui::Community {
         id: delivery::hex(&s.id().0),
         name: m.name.clone(),
         group,
         detail: format!("{} · {count} {}", if group { "Group chat" } else { "Community" }, if count == 1 { "member" } else { "members" }),
+        // A private channel you can't read isn't shown at all.
         channels: m
             .channels
             .iter()
-            .map(|c| ui::Channel { id: c.id, name: c.name.clone(), topic: c.topic.clone(), notify: store.notify_setting(&s.id(), Some(c.id)).map(to_ui) })
+            .filter(|c| m.can_read(c.id, &me) || s.joining.is_some())
+            .map(|c| ui::Channel {
+                id: c.id,
+                name: c.name.clone(),
+                topic: c.topic.clone(),
+                private: c.readers.is_some(),
+                readers: c.readers.iter().flatten().map(|k| delivery::hex(&k.0)).collect(),
+                notify: store.notify_setting(&s.id(), Some(c.id)).map(to_ui),
+            })
             .collect(),
         // A space muted with the older ring rule shows as muted here too.
         notify: match store.notify_setting(&s.id(), None) {
@@ -299,6 +428,9 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
                 e.name.clone()
             })
             .collect(),
+        roles,
+        can_edit_roles: joined && !group && m.is_owner(&me),
+        can_assign_roles: assigns,
     }
 }
 

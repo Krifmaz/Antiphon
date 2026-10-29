@@ -564,8 +564,15 @@ pub struct Community {
     pub can_post: bool,
     /// You may invite people.
     pub can_invite: bool,
-    /// You may add channels.
+    /// You may add channels, and make one private or open.
     pub can_manage_channels: bool,
+    /// Its roles, most powerful first; the last is the one newcomers get.
+    /// Empty for a group chat.
+    pub roles: Vec<Role>,
+    /// You may change what the roles are and what each may do (owners).
+    pub can_edit_roles: bool,
+    /// You may give members roles below your own.
+    pub can_assign_roles: bool,
     /// Which of its messages notify you.
     pub notify: Notify,
     /// Its custom emoji's names, written `:name:`; their pictures are
@@ -573,6 +580,18 @@ pub struct Community {
     pub emoji: Vec<String>,
     /// You may change its settings, its emoji among them.
     pub can_manage: bool,
+}
+
+/// One role of a community, as the roles dialog shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Role {
+    /// What it is called ("Moderator").
+    pub name: String,
+    /// Each thing a role can be allowed, in a fixed order, with whether
+    /// this one is: ("Invite people", true).
+    pub perms: Vec<(String, bool)>,
+    /// How many members hold it.
+    pub holders: usize,
 }
 
 /// Which messages notify you, in a space or one channel.
@@ -598,6 +617,12 @@ pub struct Channel {
     pub topic: String,
     /// Its own notification setting; `None` follows the space's.
     pub notify: Option<Notify>,
+    /// Only the members in [`Channel::readers`] (and the owners) get its
+    /// messages; everyone else doesn't see it at all.
+    pub private: bool,
+    /// Who can read a private channel, by member id (hex); empty for an
+    /// open one.
+    pub readers: Vec<String>,
 }
 
 /// Someone in a group chat or community.
@@ -613,6 +638,14 @@ pub struct Member {
     pub role: String,
     /// It is me.
     pub me: bool,
+    /// Their role's place in [`Community::roles`]; `None` for an owner.
+    pub role_index: Option<usize>,
+    /// They hold the role newcomers get, which says nothing about them, so
+    /// no badge shows it.
+    pub plain: bool,
+    /// The roles (places in [`Community::roles`]) you may give them;
+    /// empty when you can't change their role.
+    pub assignable: Vec<usize>,
 }
 
 /// An invitation to a group chat or community.

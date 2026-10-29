@@ -6639,7 +6639,7 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
             space_action(&app, |store, sid| {
                 store.with_space(sid, |space, identity| {
                     let me = identity.public().identity_key;
-                    let outs = space.edit(id, &text)?;
+                    let outs = space.edit(id, &text, None)?;
                     Ok(((), outs, vec![community::Event::Edited { id, sender: me, text: text.trim().to_string() }]))
                 })?;
                 done = true;
@@ -6657,7 +6657,7 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
             let Some(app) = window_weak.upgrade() else { return };
             let (Ok(id), Some(author)) = (id.parse::<u64>(), connection_mode::decode_hex32(&sender)) else { return };
             space_action(&app, |store, sid| {
-                store.with_space(sid, |space, _| Ok(((), space.delete(id, author)?, vec![community::Event::Deleted { id, author }])))
+                store.with_space(sid, |space, _| Ok(((), space.delete(id, author, None)?, vec![community::Event::Deleted { id, author }])))
             });
         });
     }
@@ -6725,7 +6725,7 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
             }
             space_update(&app, |m| {
                 let id = m.channels.iter().map(|c| c.id).max().unwrap_or(0) + 1;
-                m.channels.push(antiphon_crypto::community::Channel { id, name, topic: String::new() });
+                m.channels.push(antiphon_crypto::community::Channel { id, name, ..Default::default() });
             });
             app.set_space_new_channel("".into());
         });
