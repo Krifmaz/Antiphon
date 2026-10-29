@@ -1548,6 +1548,7 @@ pub fn start_pipeline(
 
     // Spec §3 group calls: everyone beyond the primary connection.
     let group = Arc::new(crate::group::Group::default());
+    group.device_rate.store(sample_rate, Ordering::Relaxed);
     let send_group = group.clone();
     let send_peer = peer.clone();
     let send_muted = muted.clone();
@@ -1569,11 +1570,11 @@ pub fn start_pipeline(
     let send_echo_cancel = echo_cancel.clone();
     let send_monitor_sink = monitor_sink.clone();
     let send_task = tokio::spawn(async move {
-        // The last frame actually transmitted, carried as a backup copy on
-        // the next one (spec section 2 forward error correction).
-        let mut previous_frame: Option<Vec<f32>> = None;
-        // Application frame sequence, independent of the crypto counter.
-        let mut sequence: u32 = 0;
+        // Spec §2: Opus, its bitrate set by the link's reports, with its
+        // in-band FEC as the backup copy of each packet's predecessor.
+        // It numbers the packets itself (the application sequence,
+        // independent of the crypto counter).
+        let mut voice = antiphon_net::voice::VoiceSender::new(sample_rate);
         while let Some(mut samples) = rx.recv().await {
             // Spec §1 echo cancellation, before the mic chain: the
             // gate and compressor are tuned for a voice, and running them
@@ -1630,44 +1631,44 @@ pub fn start_pipeline(
                         tap.push(crate::captions::OWN_VOICE, sample_rate, &samples);
                     }
                 }
-                // Spec §2, layer one: every frame carries a low-quality
-                // copy of the one before it, so a single lost frame is
-                // repaired with no round trip and no added delay.
-                let bytes = antiphon_net::fec::encode(sequence, &samples, previous_frame.as_deref());
-                previous_frame = Some(samples.clone());
-                // Kept so a resend request can be answered without
-                // re-running the mic chain.
-                {
-                    let mut cache = send_resend_cache.lock().unwrap();
-                    cache.push_back((sequence, bytes.clone()));
-                    while cache.len() > RESEND_CACHE_FRAMES {
-                        cache.pop_front();
+                // Spec §2 automatic bandwidth: the tier and FEC the
+                // link's reports call for, then whatever packets this
+                // block completed (usually one or none).
+                send_group.link.tune(&mut voice);
+                for (sequence, bytes) in voice.push(&samples) {
+                    // Kept so a resend request can be answered without
+                    // re-running the mic chain.
+                    {
+                        let mut cache = send_resend_cache.lock().unwrap();
+                        cache.push_back((sequence, bytes.clone()));
+                        while cache.len() > RESEND_CACHE_FRAMES {
+                            cache.pop_front();
+                        }
                     }
-                }
-                sequence = sequence.wrapping_add(1);
-                if let Some(sfu) = send_group.sfu_call() {
-                    // Spec §3 past the mesh: one SFrame-sealed upload, and
-                    // the SFU forwards it to everyone.
-                    sfu.send_audio(&bytes).await;
-                } else {
-                    // Spec §3 SFrame: in a group call with MLS keys, sealed
-                    // once under this epoch's key for everyone keyed in.
-                    let sealed = send_group.keys.seal_audio(&bytes);
-                    let to_primary =
-                        send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
-                    if let Err(e) = send_peer.send_audio(to_primary).await {
-                        eprintln!("[net] send error: {e}");
+                    if let Some(sfu) = send_group.sfu_call() {
+                        // Spec §3 past the mesh: one SFrame-sealed upload, and
+                        // the SFU forwards it to everyone.
+                        sfu.send_audio(&bytes).await;
+                    } else {
+                        // Spec §3 SFrame: in a group call with MLS keys, sealed
+                        // once under this epoch's key for everyone keyed in.
+                        let sealed = send_group.keys.seal_audio(&bytes);
+                        let to_primary =
+                            send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                        if let Err(e) = send_peer.send_audio(to_primary).await {
+                            eprintln!("[net] send error: {e}");
+                        }
+                        // Spec §3 group mesh: the same frame to everyone else in
+                        // the call, one upload each.
+                        send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
                     }
-                    // Spec §3 group mesh: the same frame to everyone else in
-                    // the call, one upload each.
-                    send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
                 }
             } else {
-                // Cleared while not transmitting, so the first frame after
-                // a pause doesn't offer a backup copy of audio from before
+                // Cleared while not transmitting, so the first packet after
+                // a pause doesn't carry a backup copy of audio from before
                 // the silence -- repairing a gap with unrelated speech is
                 // worse than leaving it.
-                previous_frame = None;
+                voice.pause();
             }
         }
     });
@@ -1705,6 +1706,10 @@ pub fn start_pipeline(
     let peer_card = Arc::new(Mutex::new(None));
     let recv_card = peer_card.clone();
     let recv_video = video.clone();
+    // The primary connection's voice decoder; its losses go into our
+    // reports back (spec §2 automatic bandwidth), as source 0.
+    let mut recv_voice = antiphon_net::voice::VoiceReceiver::new(sample_rate);
+    group.link.watch(0, recv_voice.loss());
     let recv_task = tokio::spawn(async move {
         let result = recv_peer
             .recv_loop(move |msg| match msg {
@@ -1718,7 +1723,7 @@ pub fn start_pipeline(
                     // Ordered by the *application* sequence inside the
                     // payload, not the crypto counter outside it, so a
                     // resend lands in the slot it belongs to.
-                    if let Some(decoded) = antiphon_net::fec::decode(&plaintext) {
+                    if let Some(decoded) = recv_voice.decode(&plaintext) {
                         recv_jitter.lock().unwrap().push_with_backup(
                             decoded.sequence as u64,
                             decoded.primary,
@@ -1743,6 +1748,9 @@ pub fn start_pipeline(
                             recv_silent.store(true, Ordering::Relaxed);
                         }
                         *recv_profile.lock().unwrap() = Some(hello);
+                    }
+                    Some(ControlMessage::LinkReport { loss_pct, sent_ms, echo_ms, held_ms }) => {
+                        recv_group.link.on_report(0, loss_pct, sent_ms, echo_ms, held_ms);
                     }
                     Some(ControlMessage::AudioMissing { sequences }) => {
                         // Best effort: anything already aged out of the
@@ -1916,6 +1924,10 @@ pub fn start_pipeline(
     let drain_ptt = ptt_active.clone();
     let drain_peer_muted = peer_muted.clone();
     let drain_group = group.clone();
+    // Spec §2 automatic bandwidth: reports go out from this loop, and the
+    // video budget follows the plan.
+    let drain_video = video.clone();
+    let mut report_ticks: u32 = 0;
     // Spec §3 group calls and §1 ducking: everyone's audio meets here.
     // The primary connection is source 0; each leg is its id + 1.
     let mut mixer = crate::mixer::Mixer::default();
@@ -1924,6 +1936,20 @@ pub fn start_pipeline(
         let mut tick = tokio::time::interval(Duration::from_millis(10));
         loop {
             tick.tick().await;
+            report_ticks += 1;
+            if report_ticks >= crate::link_quality::REPORT_EVERY_TICKS {
+                report_ticks = 0;
+                drain_video.set_share(drain_group.link.plan().video_percent);
+                let mut reports = vec![(drain_nack_peer.clone(), drain_group.link.report(0).encode())];
+                for (source, leg) in drain_group.leg_sources() {
+                    reports.push((leg, drain_group.link.report(source).encode()));
+                }
+                tokio::spawn(async move {
+                    for (peer, bytes) in reports {
+                        let _ = peer.send_control(&bytes).await;
+                    }
+                });
+            }
             let caption_tap = crate::captions::tap();
             mixer.set_duck_db(drain_duck_db.load(Ordering::Relaxed) as f32);
             // Cheap no-op most ticks (a single mutex check, internally

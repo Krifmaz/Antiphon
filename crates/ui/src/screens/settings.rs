@@ -259,6 +259,12 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         setting("Echo cancellation", Some("Stops them hearing themselves when you use speakers."), switch(s.echo_cancel, |on| Msg::Do(Action::EchoCancel(on)))),
         divider(),
         setting("Automatic level", Some("Keeps your voice at an even loudness."), switch(s.auto_gain, |on| Msg::Do(Action::AutoGain(on)))),
+        divider(),
+        setting(
+            "Low data calls",
+            Some("Voice only, at the least data that stays clear. Calls already lower their quality by themselves when the connection is poor."),
+            switch(s.low_data, |on| Msg::Do(Action::LowData(on))),
+        ),
     ]
     .spacing(12);
     if !s.presets.is_empty() {

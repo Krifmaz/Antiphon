@@ -14,6 +14,9 @@ chacha20poly1305 = "0.11.0"
 ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
+# The voice codec (`voice.rs`): Opus, as a pure Rust port of libopus, so
+# no platform build needs a C toolchain for it.
+mousiki = "0.2.1"
 sha2 = "0.11.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 zeroize = "1.9.0"

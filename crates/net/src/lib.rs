@@ -18,10 +18,12 @@ pub mod dht;
 pub mod mailbox;
 pub mod media_seal;
 pub mod onion;
+pub mod rate;
 pub mod relay;
 pub mod sfu;
 mod socket;
 pub mod stun;
+pub mod voice;
 pub mod vpn;
 
 pub use error::NetError;

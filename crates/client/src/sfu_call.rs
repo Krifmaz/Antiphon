@@ -109,6 +109,9 @@ struct Member {
     name: String,
     /// Where the member's audio waits to be mixed.
     jitter: Arc<Mutex<JitterBuffer>>,
+    /// The member's voice decoder: Opus keeps state between packets, so
+    /// one per person.
+    voice: antiphon_net::voice::VoiceReceiver,
 }
 
 /// Room members by tag, shared by the receiver task, the sealer and the call.
@@ -212,8 +215,8 @@ impl SfuCall {
                         SfuEvent::Media { from, payload } => match payload.split_first() {
                             Some((&KIND_MEDIA, sealed)) => {
                                 let Some(plain) = sealer.open(from, sealed) else { continue };
-                                let Some(decoded) = antiphon_net::fec::decode(&plain) else { continue };
-                                if let Some(m) = members.lock().unwrap().get(&from) {
+                                if let Some(m) = members.lock().unwrap().get_mut(&from) {
+                                    let Some(decoded) = m.voice.decode(&plain) else { continue };
                                     m.jitter.lock().unwrap().push_with_backup(
                                         decoded.sequence as u64,
                                         decoded.primary,
@@ -240,6 +243,9 @@ impl SfuCall {
                                                 identity_key: a.identity_key,
                                                 name: a.name,
                                                 jitter: Arc::new(Mutex::new(JitterBuffer::new(JITTER_MAX_WAIT))),
+                                                voice: antiphon_net::voice::VoiceReceiver::new(
+                                                    group.upgrade().map_or(48_000, |g| g.device_rate()),
+                                                ),
                                             },
                                         );
                                         // Say hello back at once, so a newcomer
@@ -538,7 +544,7 @@ mod tests {
         let key = IdentityKeyPair::generate().public().identity_key;
         members.lock().unwrap().insert(
             [1; 16],
-            Member { id: 0, identity_key: key, name: String::new(), jitter: Arc::new(Mutex::new(JitterBuffer::new(JITTER_MAX_WAIT))) },
+            Member { id: 0, identity_key: key, name: String::new(), jitter: Arc::new(Mutex::new(JitterBuffer::new(JITTER_MAX_WAIT))), voice: antiphon_net::voice::VoiceReceiver::new(48_000) },
         );
         let mut sealer = RoomSealer { group: Arc::downgrade(&group), members };
         let plain = antiphon_net::fec::encode(0, &[0.1f32; 960], None);

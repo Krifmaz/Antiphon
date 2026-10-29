@@ -427,6 +427,9 @@ pub struct Settings {
     pub noise_suppression: bool,
     /// Echo cancellation is on.
     pub echo_cancel: bool,
+    /// "Low data" calls (spec §2 automatic bandwidth): voice held at
+    /// 8 kbit/s and no video. On a phone, the data saver.
+    pub low_data: bool,
     /// Automatic level is on.
     pub auto_gain: bool,
     /// The voice preset in use ("Natural", "Broadcast", ...).

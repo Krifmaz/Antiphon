@@ -289,6 +289,8 @@ pub enum Action {
     NoiseSuppression(bool),
     /// Echo cancellation on or off.
     EchoCancel(bool),
+    /// "Low data" calls on or off.
+    LowData(bool),
     /// Automatic level on or off.
     AutoGain(bool),
     /// Use a voice preset by name.

@@ -93,6 +93,10 @@ mod file_transfer;
 mod history;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/link_quality.rs"]
+mod link_quality;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/outbox.rs"]
 mod outbox;
 #[cfg(any(target_os = "android", target_os = "ios"))]

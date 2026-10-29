@@ -161,7 +161,10 @@ fn main() -> anyhow::Result<()> {
         replay_seconds: Arc::new(std::sync::atomic::AtomicU32::new(loaded.replay_seconds)),
         duck_db: Arc::new(std::sync::atomic::AtomicU32::new(loaded.duck_db)),
         peer_eq: Arc::new(Mutex::new(None)),
-        echo_cancel: Arc::new(std::sync::atomic::AtomicBool::new(loaded.echo_cancel)),
+        echo_cancel: {
+            antiphon_client::link_quality::set_low_data(loaded.low_data_calls);
+            Arc::new(std::sync::atomic::AtomicBool::new(loaded.echo_cancel))
+        },
         // Built once for the process, not once per call: the filter it
         // learns describes this room and these speakers, which do not
         // change between calls (spec §1's "survives device hot-swap").
@@ -5961,6 +5964,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         silent_call_mode: app.get_silent_call_mode(),
         start_call_silently: app.get_start_call_silently(),
         echo_cancel: app.get_echo_cancel(),
+        // The classic window has no switch for it; kept as stored.
+        low_data_calls: previous.low_data_calls,
         duck_db: app.get_duck_db().max(0) as u32,
         presence: app.get_my_presence(),
         crash_reporting: app.get_crash_reporting(),

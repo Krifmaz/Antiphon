@@ -1185,6 +1185,11 @@ impl Engine {
                 }
                 self.save();
             }
+            A::LowData(on) => {
+                self.cfg.low_data_calls = on;
+                antiphon_client::link_quality::set_low_data(on);
+                self.save();
+            }
             A::AutoGain(on) => {
                 self.cfg.chain.gain = if on { GainConfig::default() } else { GainConfig::Fixed { enabled: false, gain_db: 0.0 } };
                 self.chain_changed();
@@ -1774,6 +1779,7 @@ impl Engine {
             ptt_capturing: self.ptt_capturing,
             noise_suppression: self.cfg.chain.noise_suppress.enabled,
             echo_cancel: self.cfg.echo_cancel,
+            low_data: self.cfg.low_data_calls,
             auto_gain: matches!(self.cfg.chain.gain, GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -2141,6 +2147,7 @@ fn relay_invite_secret() -> [u8; 32] {
 /// Builds the shared state the call engine runs on, as the classic app did.
 pub fn start_state(runtime: tokio::runtime::Handle) -> anyhow::Result<Arc<AppState>> {
     let loaded = config::load();
+    antiphon_client::link_quality::set_low_data(loaded.low_data_calls);
     let ptt_key = Keycode::from_str(&loaded.ptt_key).or_else(|_| Keycode::from_str(caps_lock::default_ptt_key())).unwrap_or(Keycode::Space);
     let mode = transmit_mode(loaded.transmit_mode);
     let transmit = Arc::new(TransmitSettings::new(ptt_key, mode, loaded.va_threshold));
