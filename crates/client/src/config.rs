@@ -51,6 +51,10 @@ pub struct StoopPrefs {
     pub theme: String,
     /// Accent id, or `custom`.
     pub accent: String,
+    /// The custom accent as `#rrggbb`, used when `accent` is `custom`.
+    pub custom_accent: String,
+    /// Reading-font id: `inter` (the default) or `opendyslexic`.
+    pub font: String,
     /// Open the door (listen for calls) as soon as the app starts.
     pub door_on_start: bool,
     /// Notify about messages that arrive while the window is in the background.
@@ -61,7 +65,15 @@ pub struct StoopPrefs {
 
 impl Default for StoopPrefs {
     fn default() -> Self {
-        StoopPrefs { theme: "stoop".into(), accent: "logo".into(), door_on_start: false, notify_messages: true, port: 6002 }
+        StoopPrefs {
+            theme: "stoop".into(),
+            accent: "logo".into(),
+            custom_accent: String::new(),
+            font: "inter".into(),
+            door_on_start: false,
+            notify_messages: true,
+            port: 6002,
+        }
     }
 }
 

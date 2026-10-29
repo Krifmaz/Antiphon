@@ -405,6 +405,10 @@ dependencies = [
 name = "antiphon"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "accesskit_macos",
+ "accesskit_unix",
+ "accesskit_windows",
  "antiphon-audio",
  "antiphon-client",
  "antiphon-crypto",
@@ -655,8 +659,11 @@ dependencies = [
 name = "antiphon-ui"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "iced_core",
  "iced_widget",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

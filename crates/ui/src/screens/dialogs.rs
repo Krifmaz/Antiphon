@@ -2,7 +2,7 @@
 
 use iced_core::text::Wrapping;
 use iced_core::{Alignment, Color, Length};
-use iced_widget::{column, container, qr_code, row, text_input};
+use iced_widget::{column, container, qr_code, row};
 
 use super::clip;
 use crate::icons::{icon, Icon};
@@ -159,9 +159,9 @@ fn add<'a>(ui: &'a Ui) -> El<'a, Msg> {
         muted("Paste the invite link they sent you. Their name comes with it, or give them one of your own.").size(13.5),
         field(
             "Invite link",
-            text_input("stoop://… or antiphon://…", &ui.add_invite).on_input(Msg::AddInvite).on_submit(Msg::AddSubmit).padding([10, 12]).size(14).style(theme::input)
+            input("Invite link", "stoop-add-invite", "stoop://… or antiphon://…", &ui.add_invite).on_input(Msg::AddInvite).on_submit(Msg::AddSubmit).padding([10, 12]).size(14)
         ),
-        field("Name (optional)", text_input("What you call them", &ui.add_name).on_input(Msg::AddName).on_submit(Msg::AddSubmit).padding([10, 12]).size(14).style(theme::input)),
+        field("Name (optional)", input("Name (optional)", "stoop-add-name", "What you call them", &ui.add_name).on_input(Msg::AddName).on_submit(Msg::AddSubmit).padding([10, 12]).size(14)),
     ]
     .spacing(14);
     if !ui.add_error.is_empty() {

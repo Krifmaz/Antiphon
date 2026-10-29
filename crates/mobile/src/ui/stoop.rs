@@ -42,11 +42,12 @@ impl App {
         let model = self.build_model();
         self.model = model;
         let s = &self.model.settings;
-        let look = (s.theme.clone(), s.accent.clone());
+        let look = (s.theme.clone(), s.accent.clone(), s.custom_accent.clone(), s.font.clone());
         if look != self.look {
             // A phone follows its own dark palette for "system": there is
             // no portable way to ask Android or iOS which one it is in here.
-            stoop::theme::set(stoop::theme::palette(&look.0, &look.1, "", true));
+            stoop::theme::set(stoop::theme::palette(&look.0, &look.1, &look.2, true));
+            stoop::theme::set_font(&look.3);
             self.look = look;
         }
         self.stoop.set_reduced_motion(self.settings.reduced_motion);
@@ -140,6 +141,8 @@ impl App {
         let settings = stoop::Settings {
             theme: self.settings.theme.clone(),
             accent: self.settings.accent.clone(),
+            custom_accent: self.settings.custom_accent.clone(),
+            font: self.settings.font.clone(),
             transmit: if self.settings.open_mic { Transmit::Open } else { Transmit::PushToTalk },
             noise_suppression: chain.noise_suppress.enabled,
             echo_cancel: false,
@@ -567,6 +570,41 @@ impl App {
                 self.settings.accent = accent;
                 self.save();
             }
+            Action::CustomAccent(hex) => {
+                self.settings.accent = "custom".into();
+                self.settings.custom_accent = hex;
+                self.save();
+            }
+            Action::Font(font) => {
+                self.settings.font = font;
+                self.save();
+            }
+            // A phone has no save dialog the shared code can open, so a
+            // theme travels through the clipboard: copied out as the same
+            // JSON a desktop saves, and pasted back in.
+            Action::ExportTheme => {
+                let s = &self.settings;
+                let file = stoop::theme_file::ThemeFile::new(&s.theme, &s.accent, &s.custom_accent, &s.font);
+                crate::platform::copy_to_clipboard(&file.to_json());
+                self.stoop.toast("Theme copied. Paste it anywhere to keep or share it.", ToastKind::Ok);
+            }
+            Action::ImportTheme => match crate::platform::read_clipboard().map(|t| stoop::theme_file::ThemeFile::parse(&t)) {
+                Some(Ok(file)) => {
+                    self.settings.theme = file.theme;
+                    self.settings.accent = file.accent;
+                    if !file.custom_accent.is_empty() {
+                        self.settings.custom_accent = file.custom_accent;
+                    }
+                    self.settings.font = file.font;
+                    self.save();
+                    self.stoop.toast("Theme loaded", ToastKind::Ok);
+                }
+                Some(Err(why)) => self.stoop.toast(why, ToastKind::Err),
+                None => self.stoop.toast("Copy a theme first, then import it.", ToastKind::Info),
+            },
+            // A phone moves the typing cursor with touch; keyboard focus is
+            // a desktop matter.
+            Action::FocusInput(_) => {}
             Action::ReducedMotion(on) => {
                 self.settings.reduced_motion = on;
                 self.save();

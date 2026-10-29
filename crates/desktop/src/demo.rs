@@ -70,6 +70,7 @@ impl Demo {
             settings: ui::Settings {
                 theme: "stoop".into(),
                 accent: "logo".into(),
+                font: "inter".into(),
                 inputs: vec!["Blue Yeti".into(), "MacBook Pro Microphone".into()],
                 outputs: vec!["AirPods Pro".into(), "MacBook Pro Speakers".into()],
                 input: "Blue Yeti".into(),
@@ -324,6 +325,11 @@ impl Demo {
             }
             Action::Theme(t) => self.model.settings.theme = t,
             Action::Accent(a) => self.model.settings.accent = a,
+            Action::CustomAccent(hex) => {
+                self.model.settings.accent = "custom".into();
+                self.model.settings.custom_accent = hex;
+            }
+            Action::Font(f) => self.model.settings.font = f,
             Action::Transmit(t) => self.model.settings.transmit = t,
             Action::NoiseSuppression(on) => self.model.settings.noise_suppression = on,
             Action::EchoCancel(on) => self.model.settings.echo_cancel = on,
