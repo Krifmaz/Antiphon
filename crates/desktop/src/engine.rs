@@ -7,7 +7,7 @@
 //! turns its state into a [`ui::Model`] on demand and carries out the
 //! [`ui::Action`]s the interface hands it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use antiphon_audio::{ChainConfig, GainConfig};
 use antiphon_client::control::{ControlMessage, Hello, ProfileCard};
 use antiphon_client::transfer_queue::TransferQueue;
+use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
     caps_lock, config, connection_mode, delivery, discovery, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
@@ -74,6 +75,8 @@ enum Event {
     Avatar(Result<String, String>),
     /// Files picked to send to this contact (id), for the queue.
     Queue(Vec<PathBuf>, String),
+    /// A voice message was left (or why it couldn't be).
+    VoiceSent(Result<(), String>),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -125,6 +128,32 @@ struct CallInfo {
     status: Option<String>,
     /// When the call ended, to clear the reason after [`ENDED_FOR`].
     ended_at: Option<Instant>,
+}
+
+/// The rate voice messages are decoded and played at.
+const CLIP_RATE: u32 = 48_000;
+
+/// A voice message being recorded.
+struct Recording {
+    /// The contact it is for.
+    to: String,
+    /// Raised to stop recording.
+    stop: Arc<AtomicBool>,
+    /// Raised (before `stop`) to send what was recorded rather than drop it.
+    send: Arc<AtomicBool>,
+    /// When it started, for the counter and the length cap.
+    started: Instant,
+}
+
+/// A voice message's clip, decoded: one I sent from the copy kept when it
+/// was made, or one I received once its fetch has finished.
+fn load_clip(link: &VoiceLink, mine: bool) -> Option<Vec<f32>> {
+    if mine {
+        let path = config::config_dir()?.join("voice-messages").join(&link.name);
+        antiphon_net::voice::decode_clip(&std::fs::read(path).ok()?, CLIP_RATE)
+    } else {
+        voice_message::load_fetched(link, CLIP_RATE)
+    }
 }
 
 /// A file waiting in the send queue.
@@ -223,6 +252,19 @@ pub struct Engine {
     /// The queued file being read or sent now, and a flag raised once
     /// that is over (sent, failed, declined or cancelled).
     sending: Option<Arc<AtomicBool>>,
+    /// A voice message being recorded.
+    recording: Option<Recording>,
+    /// Voice messages seen in conversations, by (contact, message id):
+    /// the link to the clip, and whether it is one I sent.
+    voice_links: HashMap<(String, u64), (VoiceLink, bool)>,
+    /// Received clips whose fetch has been started, by file id.
+    voice_fetched: HashSet<String>,
+    /// A clip asked to play before it had arrived: (contact, message id),
+    /// and when it was last looked for. It plays once it is here.
+    voice_waiting: Option<(String, u64, Instant)>,
+    /// The clip playing: (contact, message id), the stream to keep
+    /// alive, and when it ends.
+    playing: Option<(String, u64, antiphon_audio::PlaybackHandle, Instant)>,
     /// Settings > Account & backup: phrase, backup files, moving devices.
     account: crate::account::AccountState,
 }
@@ -266,6 +308,11 @@ impl Engine {
             viewing: None,
             send_queue: TransferQueue::default(),
             sending: None,
+            recording: None,
+            voice_links: HashMap::new(),
+            voice_fetched: HashSet::new(),
+            voice_waiting: None,
+            playing: None,
             account: Default::default(),
         };
         engine.load_previews();
@@ -294,7 +341,12 @@ impl Engine {
 
     /// Whether a call is up or being placed, so the app ticks faster.
     pub fn busy(&self) -> bool {
-        self.call.phase != ui::Phase::Idle || self.state.loopback.lock().unwrap().is_some() || self.ptt_capturing
+        self.call.phase != ui::Phase::Idle
+            || self.state.loopback.lock().unwrap().is_some()
+            || self.ptt_capturing
+            || self.recording.is_some()
+            || self.playing.is_some()
+            || self.voice_waiting.is_some()
     }
 
     // ---------------------------------------------------------------- tick
@@ -373,6 +425,7 @@ impl Engine {
 
         self.watch_call(open);
         self.pump_queue();
+        self.voice_upkeep();
     }
 
     /// Reads a yes/no from the running call; false when there is none.
@@ -651,6 +704,12 @@ impl Engine {
                 self.toast("Picture updated", ToastKind::Ok);
             }
             Event::Avatar(Err(why)) => self.toast(why, ToastKind::Err),
+            Event::VoiceSent(Ok(())) => {
+                // It is in their history now; the conversation reloads.
+                self.conv = None;
+                self.toast("Voice message sent", ToastKind::Ok);
+            }
+            Event::VoiceSent(Err(why)) => self.toast(why, ToastKind::Err),
             Event::Queue(paths, peer) => {
                 for path in paths {
                     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
@@ -1093,6 +1152,9 @@ impl Engine {
                 }
             }
             A::SendFile => self.send_file(),
+            A::RecordVoice(to) => self.record_voice(to),
+            A::FinishVoice { to, send } => self.finish_voice(&to, send),
+            A::PlayVoice { to, id } => self.play_voice(to, id),
             A::AcceptFile => {
                 if let Some(Some(why)) = self.with_call(|a| a.accept_file_offer(&rt)) {
                     self.toast(why, ToastKind::Warn);
@@ -1468,6 +1530,118 @@ impl Engine {
         }
     }
 
+    // ---------------------------------------------------------------- voice messages
+
+    /// Starts recording a voice message for contact `to`, until
+    /// [`Engine::finish_voice`] or the length cap.
+    fn record_voice(&mut self, to: String) {
+        if self.recording.is_some() {
+            return;
+        }
+        let (stop, send) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (t_stop, t_send) = (stop.clone(), send.clone());
+        let (input, chain, rt, events, who) = (self.cfg.input_device.clone(), self.cfg.chain.clone(), self.state.runtime.clone(), self.events.clone(), to.clone());
+        std::thread::spawn(move || {
+            let (rate, mut samples) = match state::record_until(input.as_deref(), t_stop, voice_message::MAX_SECONDS) {
+                Ok(recorded) => recorded,
+                Err(e) => {
+                    Engine::push(&events, Event::VoiceSent(Err(format!("Couldn't record: {e}"))));
+                    return;
+                }
+            };
+            if !t_send.load(Ordering::SeqCst) {
+                return;
+            }
+            // Through the same chain as a call, so it sounds like you do
+            // live, then without the silence before and after.
+            voice_message::process_recording(&mut samples, rate, &chain);
+            let clip = voice_message::trim_silence(&samples, 0.01).to_vec();
+            let sent = voice_message::leave(&rt, &who, &clip, rate).map(|_| ());
+            Engine::push(&events, Event::VoiceSent(sent));
+        });
+        self.recording = Some(Recording { to, stop, send, started: Instant::now() });
+    }
+
+    /// Stops the recording for `to`: sends it, or throws it away.
+    fn finish_voice(&mut self, to: &str, send: bool) {
+        let Some(r) = self.recording.take_if(|r| r.to == to) else { return };
+        r.send.store(send, Ordering::SeqCst);
+        r.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Plays a voice message, or stops it if it is the one playing.
+    fn play_voice(&mut self, to: String, id: u64) {
+        if self.playing.as_ref().is_some_and(|(p, i, ..)| *p == to && *i == id) {
+            self.playing = None;
+            return;
+        }
+        let Some((link, mine)) = self.voice_links.get(&(to.clone(), id)).cloned() else { return };
+        match load_clip(&link, mine) {
+            Some(samples) => self.start_clip(to, id, &samples),
+            None if mine => self.toast("That recording isn't on this device any more", ToastKind::Warn),
+            None => {
+                if self.voice_fetched.insert(link.file_id.clone()) {
+                    voice_message::fetch(&self.state.runtime, &link, &to);
+                }
+                self.voice_waiting = Some((to, id, Instant::now()));
+            }
+        }
+    }
+
+    /// Plays decoded samples through the chosen speakers.
+    fn start_clip(&mut self, to: String, id: u64, samples: &[f32]) {
+        match state::play_clip(self.cfg.output_device.as_deref(), CLIP_RATE, samples) {
+            Ok(handle) => {
+                let ends = Instant::now() + Duration::from_secs_f32(voice_message::duration_secs(samples, CLIP_RATE) + 0.3);
+                self.playing = Some((to, id, handle, ends));
+            }
+            Err(e) => self.toast(format!("Couldn't play it: {e}"), ToastKind::Err),
+        }
+    }
+
+    /// Per-tick upkeep: the length cap on a recording, a clip that finished
+    /// playing, and a clip waited for that may have arrived.
+    fn voice_upkeep(&mut self) {
+        if let Some(r) = &self.recording {
+            if r.started.elapsed() >= Duration::from_secs(voice_message::MAX_SECONDS as u64) {
+                let to = r.to.clone();
+                self.finish_voice(&to, true);
+            }
+        }
+        if self.playing.as_ref().is_some_and(|(.., ends)| Instant::now() >= *ends) {
+            self.playing = None;
+        }
+        // Looked for once a second: decoding is not free.
+        let Some((to, id, last)) = self.voice_waiting.clone() else { return };
+        if last.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        match self.voice_links.get(&(to.clone(), id)).cloned().and_then(|(link, mine)| load_clip(&link, mine)) {
+            Some(samples) => {
+                self.voice_waiting = None;
+                self.start_clip(to, id, &samples);
+            }
+            None => self.voice_waiting = Some((to, id, Instant::now())),
+        }
+    }
+
+    /// Turns the voice messages among `lines` into players: remembers each
+    /// clip's link, starts fetching received ones, and shows a short line
+    /// instead of the link's text.
+    fn find_voice(&mut self, person: &str, lines: &mut [ui::Line]) {
+        for line in lines.iter_mut() {
+            let Some(link) = voice_message::parse_link(&line.text) else { continue };
+            line.text = format!("Voice message ({}:{:02})", link.seconds / 60, link.seconds % 60);
+            line.voice = Some(ui::VoiceClip { seconds: link.seconds, ..Default::default() });
+            // Fetched as it comes on screen, so it is ready by the time
+            // it is pressed.
+            if !line.mine && self.voice_fetched.insert(link.file_id.clone()) {
+                voice_message::fetch(&self.state.runtime, &link, person);
+            }
+            self.voice_links.insert((person.to_string(), line.id), (link, line.mine));
+        }
+    }
+
     /// Asks for files to send to the person on the call. They join the
     /// queue, which sends them one at a time.
     fn send_file(&mut self) {
@@ -1619,7 +1793,7 @@ impl Engine {
             settings: self.settings(),
             notice: None,
             first_run: self.cfg.profile.display_name.trim().is_empty(),
-            device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true },
+            device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true, voice_messages: true },
             phone: None,
             account: self.account.model(&self.state.identity),
             communities,
@@ -1991,7 +2165,8 @@ impl Engine {
         let rev = if live { self.with_call(|a| a.chat_rev.load(Ordering::Relaxed)).unwrap_or(0) } else { 0 };
         let stale = self.conv.as_ref().is_none_or(|c| c.person != id || c.live != live || c.rev != rev);
         if stale {
-            let lines = if live { self.live_lines() } else { self.stored_lines(&contact.identity_key) };
+            let mut lines = if live { self.live_lines() } else { self.stored_lines(&contact.identity_key) };
+            self.find_voice(id, &mut lines);
             if let Some(last) = lines.iter().rev().find(|l| l.file.is_none()) {
                 let text = if last.mine { format!("You: {}", last.text) } else { last.text.clone() };
                 let at = self.previews.get(id).map(|(_, at)| *at).unwrap_or_else(now_secs);
@@ -1999,13 +2174,20 @@ impl Engine {
             }
             self.conv = Some(ConvCache { person: id.to_string(), live, rev, lines });
         }
-        let lines = self.conv.as_ref().map(|c| c.lines.clone()).unwrap_or_default();
+        let mut lines = self.conv.as_ref().map(|c| c.lines.clone()).unwrap_or_default();
+        for line in lines.iter_mut() {
+            if let Some(clip) = line.voice.as_mut() {
+                clip.playing = self.playing.as_ref().is_some_and(|(p, i, ..)| p == id && *i == line.id);
+                clip.fetching = self.voice_waiting.as_ref().is_some_and(|(p, i, _)| p == id && *i == line.id);
+            }
+        }
         Some(ui::Conversation {
             person: id.to_string(),
             lines,
             live,
             queues: !live && !contact.identity_key.is_empty(),
             expiry: contact.expire_after_secs.map(expiry_label),
+            recording: self.recording.as_ref().filter(|r| r.to == id).map(|r| r.started.elapsed().as_secs() as u32),
         })
     }
 

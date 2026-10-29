@@ -91,7 +91,7 @@ impl Demo {
             },
             notice: None,
             first_run: false,
-            device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true },
+            device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true, voice_messages: true },
             phone: None,
             account: ui::Account { can_pick_file: true, ..Default::default() },
             communities: communities(),
@@ -207,13 +207,14 @@ impl Demo {
                 Line { reactions: vec![("👍".into(), 1)], ..line(4, false, "just yourself. and maybe that lemon thing", "19:20", None) },
                 line(5, true, "deal 🍋", "19:21", None),
                 Line { pinned: true, ..line(6, false, "Address is 14 Larkspur Lane, ring twice", "09:03", Some("Today")) },
+                Line { voice: Some(ui::VoiceClip { seconds: 14, ..Default::default() }), ..line(9, false, "Voice message (0:14)", "09:05", None) },
                 line(7, true, "got it. calling you in a sec", "13:58", None),
                 Line { delivery: Delivery::Delivered, ..line(8, false, "See you on the porch at 8?", "14:02", None) },
             ]
         } else {
             vec![line(1, false, "hey! got your invite", "13:30", Some("Today")), line(2, true, "welcome to my stoop", "13:31", None)]
         };
-        self.model.conversation = Some(ui::Conversation { person: id.into(), lines, live: self.model.call.with(id), queues: !self.model.call.with(id), expiry: None });
+        self.model.conversation = Some(ui::Conversation { person: id.into(), lines, live: self.model.call.with(id), queues: !self.model.call.with(id), expiry: None, recording: None });
     }
 
     /// What an action does to made-up data: enough to click around.
@@ -254,6 +255,25 @@ impl Demo {
                 }
             }
             Action::OpenChannel { community, channel } => self.open_channel(&community, channel),
+            Action::PlayVoice { id, .. } => {
+                if let Some(c) = self.model.conversation.as_mut() {
+                    for l in c.lines.iter_mut() {
+                        if let Some(v) = l.voice.as_mut() {
+                            v.playing = l.id == id && !v.playing;
+                        }
+                    }
+                }
+            }
+            Action::RecordVoice(_) => {
+                if let Some(c) = self.model.conversation.as_mut() {
+                    c.recording = Some(7);
+                }
+            }
+            Action::FinishVoice { .. } => {
+                if let Some(c) = self.model.conversation.as_mut() {
+                    c.recording = None;
+                }
+            }
             Action::QueueMove { id, up } => {
                 let q = &mut self.model.transfers.queued;
                 if let Some(at) = q.iter().position(|f| f.id == id) {

@@ -189,7 +189,7 @@ impl App {
             first_run: self.settings.display_name.trim().is_empty(),
             // Group chats and communities need the community store and its
             // courier, which the phone doesn't run yet: their screens stay hidden.
-            device: stoop::Device { phone: true, files: true, ptt_keys: false, communities: false },
+            device: stoop::Device { phone: true, files: true, ptt_keys: false, communities: false, voice_messages: false },
             phone: Some(stoop::Phone {
                 speaker: self.settings.speaker,
                 mic_allowed: self.mic_permission,
@@ -344,6 +344,7 @@ impl App {
             live,
             queues: !live,
             expiry: chat.expire_after_secs().map(|s| format!("Messages vanish after {}", super::Expiry::from_secs(Some(s)))),
+            recording: None,
         })
     }
 
@@ -519,6 +520,9 @@ impl App {
             }
             Action::Note(..) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
+            // Voice messages aren't recorded on the phone yet (the
+            // button is hidden by `Device::voice_messages`).
+            Action::RecordVoice(_) | Action::FinishVoice { .. } | Action::PlayVoice { .. } => {}
             Action::QueueMove { id, up } => {
                 if up {
                     self.files.queue.move_up(id);

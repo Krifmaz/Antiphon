@@ -111,6 +111,8 @@ pub struct Device {
     /// Group chats and communities work on this device; without them the
     /// screens for them are not offered.
     pub communities: bool,
+    /// Voice messages can be recorded here.
+    pub voice_messages: bool,
 }
 
 /// The person using the app.
@@ -303,6 +305,8 @@ pub struct Conversation {
     pub queues: bool,
     /// Disappearing messages ("Messages vanish after 1 day").
     pub expiry: Option<String>,
+    /// A voice message being recorded for them: seconds so far.
+    pub recording: Option<u32>,
 }
 
 /// One message.
@@ -336,6 +340,19 @@ pub struct Line {
     pub reactions: Vec<(String, u32)>,
     /// A file instead of text: (name, size).
     pub file: Option<(String, String)>,
+    /// A voice message instead of text.
+    pub voice: Option<VoiceClip>,
+}
+
+/// A voice message in a conversation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VoiceClip {
+    /// How long it is.
+    pub seconds: u32,
+    /// Playing now.
+    pub playing: bool,
+    /// Still on its way from where it was left; it plays once here.
+    pub fetching: bool,
 }
 
 /// How far a message of mine got.

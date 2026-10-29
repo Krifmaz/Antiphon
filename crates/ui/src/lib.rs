@@ -245,6 +245,22 @@ pub enum Action {
     },
     /// Choose a file and offer it to the person on the call.
     SendFile,
+    /// Start recording a voice message for this contact.
+    RecordVoice(String),
+    /// Stop recording: send it (true) or throw it away.
+    FinishVoice {
+        /// The contact it is for.
+        to: String,
+        /// Send it rather than drop it.
+        send: bool,
+    },
+    /// Play a voice message in a conversation, or stop it if it is playing.
+    PlayVoice {
+        /// The contact the conversation is with.
+        to: String,
+        /// Which message.
+        id: u64,
+    },
     /// Take the file the person on the call offered.
     AcceptFile,
     /// Turn the offered file down.
@@ -561,6 +577,8 @@ pub enum Msg {
     ChannelName(String),
     /// Add the channel named in the box to this community (by id).
     ChannelCreate(String),
+    /// Show or hide the files waiting to be sent.
+    ToggleQueue,
     /// Close a toast by its id.
     DismissToast(u64),
     /// Where the pointer is, so a right-click menu opens under it.
@@ -639,6 +657,9 @@ pub struct Ui {
     space_group: bool,
     /// The new channel's name box.
     channel_name: String,
+    /// The list of files waiting to be sent is open (it starts folded,
+    /// so a long queue never pushes the messages off screen).
+    queue_open: bool,
     /// Toasts on screen, oldest first.
     toasts: Vec<Toast>,
     /// The id the next toast gets.
@@ -707,6 +728,7 @@ impl Ui {
             space_name: String::new(),
             space_group: false,
             channel_name: String::new(),
+            queue_open: false,
             toasts: Vec::new(),
             next_toast: 1,
             cursor: Point::ORIGIN,
@@ -1124,6 +1146,10 @@ impl Ui {
                 self.channel_name.clear();
                 self.set_dialog(None);
                 vec![Action::AddChannel { community, name }]
+            }
+            Msg::ToggleQueue => {
+                self.queue_open = !self.queue_open;
+                Vec::new()
             }
             Msg::DismissToast(id) => {
                 self.toasts.retain(|t| t.id != id);
