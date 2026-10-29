@@ -18,12 +18,27 @@ use crate::history::{self, HistorySink, StoredMessage};
 use crate::outbox::{self, Queued};
 use crate::reactions::{self, Reaction};
 
+/// One open conversation: its history loaded into memory, plus the
+/// sink that writes every change back to the sealed files.
+///
+/// The interface keeps one open for the chat on screen, and opens one
+/// briefly to file a message from anyone else. Everything is on the
+/// interface thread; nothing here is shared between threads.
 pub struct Conversation {
+    /// Whose conversation this is: their identity key, hex.
     pub peer_hex: String,
+    /// The history as last loaded, oldest first. Reloaded from disk after
+    /// every change, so it always matches what the sink wrote.
     pub messages: Vec<StoredMessage>,
+    /// Every reaction on every message, ours and theirs.
     pub reactions: Vec<Reaction>,
+    /// Our messages still waiting to be sent, oldest first.
     pub outbox: Vec<Queued>,
+    /// Writes the sealed history file, and holds the directory, peer and
+    /// key the reaction and outbox files are written with too.
     sink: HistorySink,
+    /// The id our next message gets: one past the largest id seen in the
+    /// history or the outbox, ours or theirs.
     next_id: u64,
 }
 
@@ -39,6 +54,10 @@ fn reactions_path(dir: &Path, peer_hex: &str) -> PathBuf {
 }
 
 impl Conversation {
+    /// Loads the history, outbox and reactions for `peer_hex` from `dir`,
+    /// sealed with `key`. Unreadable files read as empty rather than
+    /// failing, as the desktop's do. `expire_after_secs` is the contact's
+    /// disappearing-message timer, applied to messages written from now on.
     pub fn open(dir: &Path, key: &BackupKey, peer_hex: &str, expire_after_secs: Option<u64>) -> Self {
         let sink = HistorySink { dir: dir.to_path_buf(), peer_hex: peer_hex.to_string(), key: key.clone(), expire_after_secs };
         let messages = sink.load_all();
@@ -54,6 +73,8 @@ impl Conversation {
         Self { peer_hex: peer_hex.to_string(), messages, reactions, outbox, sink, next_id }
     }
 
+    /// The disappearing-message timer new messages are written with, in
+    /// seconds, or `None` to keep them.
     pub fn expire_after_secs(&self) -> Option<u64> {
         self.sink.expire_after_secs
     }
@@ -64,10 +85,13 @@ impl Conversation {
         self.sink.expire_after_secs = secs;
     }
 
+    /// Rereads the history from disk, which also drops expired messages.
     fn reload(&mut self) {
         self.messages = self.sink.load_all();
     }
 
+    /// Seals and writes the reactions file. A failure is logged and
+    /// otherwise ignored, as for the call log.
     fn save_reactions(&self) {
         let result = serde_json::to_vec(&self.reactions)
             .map_err(|e| e.to_string())
@@ -84,6 +108,8 @@ impl Conversation {
         }
     }
 
+    /// Seals and writes the outbox. A failure is logged and otherwise
+    /// ignored; the queue stays in memory until the next save.
     fn save_outbox(&self) {
         if let Err(e) = outbox::save(&self.sink.dir, &self.peer_hex, &self.sink.key, &self.outbox) {
             log::warn!("could not save the outbox: {e}");
@@ -130,6 +156,8 @@ impl Conversation {
         ours && (live || self.outbox.iter().any(|q| q.id == id))
     }
 
+    /// Changes one of our messages. Returns `false`, changing nothing, for
+    /// empty text or a message that [`can_change`](Self::can_change) refuses.
     pub fn edit(&mut self, id: u64, text: &str, live: Option<&Live>) -> bool {
         let text = text.trim();
         if text.is_empty() || !self.can_change(id, live.is_some()) || !self.sink.edit(id, true, text) {
@@ -146,6 +174,9 @@ impl Conversation {
         true
     }
 
+    /// Deletes one of our messages, telling them if they are on the call,
+    /// and drops its reactions. Returns `false`, changing nothing, when
+    /// [`can_change`](Self::can_change) refuses.
     pub fn delete(&mut self, id: u64, live: Option<&Live>) -> bool {
         if !self.can_change(id, live.is_some()) || !self.sink.delete(id, true) {
             return false;

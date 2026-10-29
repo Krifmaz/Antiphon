@@ -28,6 +28,11 @@
 //! toolkit. The two rule modules, [`queue`] and [`data_rules`], are plain
 //! std and compile everywhere, so their tests run on the host.
 
+// Every item this crate owns is documented, and these keep it that way.
+// The modules compiled in by `#[path]` below belong to the desktop crate
+// and carry their own `allow`, so its documentation is not enforced twice.
+#![warn(missing_docs, clippy::missing_docs_in_private_items)]
+
 pub mod data_rules;
 pub mod queue;
 
@@ -56,43 +61,43 @@ mod ui;
 // part here (the desktop has screens for things a phone does not offer
 // yet), hence `dead_code`; none of them is edited for the phone's sake.
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/content_store.rs"]
 mod content_store;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/control.rs"]
 mod control;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/file_integrity.rs"]
 mod file_integrity;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/file_preview.rs"]
 mod file_preview;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/file_transfer.rs"]
 mod file_transfer;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/history.rs"]
 mod history;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/outbox.rs"]
 mod outbox;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/pacer.rs"]
 mod pacer;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/reactions.rs"]
 mod reactions;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code)]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../gui/src/transfer_limits.rs"]
 mod transfer_limits;
 
@@ -111,11 +116,18 @@ mod config {
 
     use crate::transfer_limits::TransferLimits;
 
+    /// Where received files and partial downloads are kept: the app's
+    /// private storage, set by [`set_dir`] before any transfer starts.
     static DIR: OnceLock<PathBuf> = OnceLock::new();
+    /// The current limits, or the defaults until the app first sets them.
+    /// Behind a mutex because a transfer reads them from its own thread
+    /// while the interface thread replaces them.
     static LIMITS: Mutex<Option<TransferLimits>> = Mutex::new(None);
 
     /// The slice of the desktop's `Config` that `file_transfer` reads.
     pub struct Config {
+        /// The upload limits a transfer applies, as the desktop's field of the
+        /// same name.
         pub transfer_limits: TransferLimits,
     }
 
@@ -130,10 +142,15 @@ mod config {
         *LIMITS.lock().unwrap() = Some(limits);
     }
 
+    /// The root `file_transfer` stores received files under, or `None`
+    /// before start-up has called [`set_dir`], when there is nowhere to
+    /// keep one yet.
     pub fn config_dir() -> Option<PathBuf> {
         DIR.get().cloned()
     }
 
+    /// A fresh snapshot of the settings `file_transfer` reads. Cheap, so a
+    /// running transfer calls it repeatedly to notice changed limits.
     pub fn load() -> Config {
         Config { transfer_limits: LIMITS.lock().unwrap().unwrap_or_default() }
     }

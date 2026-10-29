@@ -30,20 +30,36 @@ const MAX_SEND_BYTES: u64 = 256 * 1024 * 1024;
 /// A file waiting to be sent, and who to.
 #[derive(Clone, Debug)]
 pub struct Outgoing {
+    /// Who it is for: their identity key, hex. It waits for a call with
+    /// them and goes to nobody else.
     pub peer_hex: String,
+    /// The platform's handle for the picked file, passed back to
+    /// [`platform::read_file`] when its turn comes.
     pub handle: String,
+    /// The file's name, as offered to the receiver.
     pub name: String,
+    /// Its size in bytes, if the picker reported one.
     pub size: Option<u64>,
 }
 
+/// A picked file read into memory and ready to offer.
 struct Prepared {
+    /// The whole file, in memory.
     source: FileSource,
+    /// Its SHA-256, hex, which the receiver checks the reassembled file
+    /// against.
     sha256: String,
+    /// A PNG preview, base64, or empty when there is none or thumbnails are
+    /// off to save data.
     thumbnail_b64: String,
 }
 
+/// Where the blocking preparation leaves its result for
+/// [`FileManager::poll`] to collect: empty until it is done. Shared with
+/// the blocking thread, hence the mutex.
 type Slot = Arc<Mutex<Option<Result<Prepared, String>>>>;
 
+/// How far the active send has got.
 enum Stage {
     /// Reading and hashing on a blocking thread; the result lands in the
     /// slot.
@@ -54,17 +70,25 @@ enum Stage {
     Sending(Arc<AtomicBool>),
 }
 
+/// The one file being sent now.
 pub struct Active {
+    /// The queue entry it came from, kept whole so an interrupted send goes
+    /// back to the front with its id and held state.
     pub entry: Entry<Outgoing>,
+    /// Whether it is still being read or already with `file_transfer`.
     stage: Stage,
     /// The user pressed pause.
     pub user_paused: bool,
     /// The data rules paused it; lifted by the rules, not by the user.
     pub held: Option<Hold>,
+    /// Chunks already charged to the cellular meter, so each poll charges
+    /// only what moved since the last one.
     counted_chunks: u32,
 }
 
 impl Active {
+    /// Whether the file is still being read and hashed, before any offer has
+    /// gone to the other side.
     pub fn preparing(&self) -> bool {
         matches!(self.stage, Stage::Preparing(_))
     }
@@ -72,25 +96,57 @@ impl Active {
 
 /// Something the user may want a notification about.
 pub enum Event {
-    Offer { name: String },
-    Saved { name: String },
-    Sent { name: String },
-    Failed { line: String },
+    /// They offered a file, waiting for an answer.
+    Offer {
+        /// The file's name as they offered it.
+        name: String,
+    },
+    /// A received file passed its hash check and was saved.
+    Saved {
+        /// The file's name as they offered it.
+        name: String,
+    },
+    /// They confirmed a file we sent arrived intact.
+    Sent {
+        /// The file's name as we offered it.
+        name: String,
+    },
+    /// A transfer either way stopped short.
+    Failed {
+        /// One sentence saying which file and why.
+        line: String,
+    },
 }
 
+/// The phone's side of file transfer: the send queue, the one send
+/// running, and received files saved where the user keeps downloads.
+///
+/// Owned by the interface and polled on its thread. The transfer itself
+/// runs on the call's runtime and is reached only through
+/// [`Live::files`](crate::call::Live::files).
 pub struct FileManager {
+    /// Files waiting their turn, in the order the user set.
     pub queue: TransferQueue<Outgoing>,
+    /// The file being sent now, if any.
     pub active: Option<Active>,
     /// Where each received file went, newest first, for the Files screen.
     pub received: Vec<(String, String)>,
     /// The last thing that finished or failed, in one sentence.
     pub last_line: Option<String>,
+    /// The app's private storage, where received files go when the platform
+    /// has no downloads folder.
     dir: PathBuf,
+    /// The transfer id of the last offer notified about, so one offer makes
+    /// one notification however often the screen polls.
     seen_offer: Option<u64>,
+    /// The incoming transfer's id and the chunks already charged to the
+    /// cellular meter, as `counted_chunks` is for the outgoing one.
     counted_incoming: (u64, u32),
 }
 
 impl FileManager {
+    /// An empty manager that saves received files under `dir` when the
+    /// platform has no downloads folder.
     pub fn new(dir: PathBuf) -> Self {
         Self {
             queue: TransferQueue::default(),
@@ -103,6 +159,9 @@ impl FileManager {
         }
     }
 
+    /// Queues a picked file for `peer_hex`. Refuses one the picker says is
+    /// over [`MAX_SEND_BYTES`] now, rather than after the user waited for
+    /// its turn.
     pub fn enqueue(&mut self, peer_hex: String, picked: PickedFile) -> Result<(), String> {
         if picked.size.is_some_and(|size| size > MAX_SEND_BYTES) {
             return Err(format!(
@@ -161,6 +220,10 @@ impl FileManager {
         events
     }
 
+    /// Collects a finished preparation and hands it to `file_transfer`,
+    /// or, while sending, charges new chunks to the meter, applies the
+    /// pause wanted by the user and the rules, and notices when the send is
+    /// over.
     fn poll_active(&mut self, live: &Live, hold: Option<Hold>, events: &mut Vec<Event>, charged: &mut u64) {
         let Some(active) = self.active.as_mut() else { return };
         match &active.stage {
@@ -234,6 +297,8 @@ impl FileManager {
         }
     }
 
+    /// Starts reading the first queued file meant for whoever is on the
+    /// call, on a blocking thread.
     fn start_next(&mut self, live: &Live, thumbnails: bool) {
         let peer = crate::contacts::hex(&live.peer_key);
         let Some(entry) = self.queue.take_next(|item| item.peer_hex == peer) else { return };
@@ -250,6 +315,9 @@ impl FileManager {
             Some(Active { entry, stage: Stage::Preparing(slot), user_paused: false, held: None, counted_chunks: 0 });
     }
 
+    /// Notices a new offer and a failed incoming transfer, charges received
+    /// chunks to the meter, and saves a file that has arrived and passed its
+    /// hash check.
     fn poll_incoming(&mut self, live: &Live, events: &mut Vec<Event>, charged: &mut u64) {
         let ready = {
             let mut files = live.files.lock().unwrap();
@@ -305,6 +373,9 @@ impl FileManager {
         Ok(target.display().to_string())
     }
 
+    /// Pauses or resumes the file being sent at the user's request. A
+    /// resume does not override a hold from the data rules; the next poll
+    /// releases it when the rules allow.
     pub fn set_user_paused(&mut self, live: Option<&Live>, paused: bool) {
         let Some(active) = self.active.as_mut() else { return };
         active.user_paused = paused;
@@ -327,6 +398,8 @@ impl FileManager {
         self.last_line = Some(format!("Stopped sending {}.", active.entry.item.name));
     }
 
+    /// Accepts the pending offer and tells the sender, or declines it with
+    /// the reason shown when there is nowhere to put the file.
     pub fn accept_offer(&mut self, live: &Live) {
         match file_transfer::accept_offer(&live.files, &live.peer, live.runtime()) {
             Some(Ok(transfer_id)) => live.send(ControlMessage::FileAccept { transfer_id }),
@@ -340,6 +413,7 @@ impl FileManager {
         }
     }
 
+    /// Declines the pending offer and tells the sender.
     pub fn decline_offer(&mut self, live: &Live) {
         if let Some(transfer_id) = file_transfer::reject_offer(&live.files) {
             live.send(ControlMessage::FileReject { transfer_id });
