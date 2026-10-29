@@ -205,7 +205,7 @@ impl Boards {
                         .collect();
                     let seqs = || out.iter().filter_map(|m| if let Message::Entry { seq, .. } = m { Some(*seq) } else { None });
                     let first = seqs().next().unwrap_or(0);
-                    let next = seqs().last().unwrap_or(b.last);
+                    let next = seqs().next_back().unwrap_or(b.last);
                     out.push(Message::Done { first, next, last: b.last });
                     out
                 }

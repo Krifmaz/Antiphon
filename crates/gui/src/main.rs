@@ -6442,6 +6442,7 @@ fn apply_spaces_to_ui(app: &MainWindow) {
     app.set_space_can_manage(joined && m.can(&me, perm::MANAGE_COMMUNITY, None));
     app.set_space_can_manage_channels(joined && m.can(&me, perm::MANAGE_CHANNELS, None));
     app.set_space_server_hosted(m.server_hosted_files);
+    app.set_space_full_scale(m.nodes.board.is_some());
     app.set_space_ring_rule(store.ring_rule(&space.id()).map_or(0, |r| r.to_i32() + 1));
     let first = |v: &[antiphon_crypto::community::NodeRef]| v.first().cloned().unwrap_or_default();
     let (mailbox, files) = (first(&m.nodes.mailbox), first(&m.nodes.files));
@@ -6762,7 +6763,21 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
             let files = node(app.get_space_files_node(), app.get_space_files_code());
             let dht = app.get_space_dht_node().trim().to_string();
             let hosted = app.get_space_server_hosted();
+            let full_scale = app.get_space_full_scale();
             space_update(&app, |m| {
+                // The board stays where it is while its node does; a new
+                // node gets a new board.
+                m.nodes.board = match (&mailbox, full_scale) {
+                    (Some(node), true) => match m.nodes.board.take() {
+                        Some(b) if b.addr == node.addr => Some(b),
+                        _ => {
+                            let mut id = [0u8; 32];
+                            getrandom::fill(&mut id).expect("OS randomness is unavailable");
+                            Some(antiphon_crypto::community::BoardRef { addr: node.addr.clone(), id: antiphon_crypto::community::Key(id) })
+                        }
+                    },
+                    _ => None,
+                };
                 m.nodes.mailbox = mailbox.into_iter().collect();
                 m.nodes.files = files.into_iter().collect();
                 m.nodes.dht = if dht.is_empty() { Vec::new() } else { vec![dht] };

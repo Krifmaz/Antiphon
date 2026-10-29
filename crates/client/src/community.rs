@@ -95,6 +95,7 @@ use antiphon_crypto::{BackupKey, IdentityKeyPair, PublicIdentity, SignedRouteRec
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::community_board::{self, EpochKey};
 use crate::delivery::hex;
 use crate::file_transfer::{decode_b64, encode_b64};
 
@@ -277,6 +278,11 @@ pub enum Wire {
     },
     /// "I have version `since`; send me what came after."
     ManifestRequest { community: Key, since: u64 },
+    /// For a newcomer to a community with a board, whose Welcome was too
+    /// big for mailboxes: it is on the board after entry `since`, sealed
+    /// under the epoch they join in, whose key and token (hex) these are
+    /// -- theirs to have, as they are in that epoch from now on.
+    BoardWelcome { community: Key, board: cm::BoardRef, epoch: u64, key: String, token: String, since: u64 },
     Manifests { community: Key, list: Vec<String> },
 }
 
@@ -290,7 +296,8 @@ impl Wire {
             | Wire::Commit { community, .. }
             | Wire::App { community, .. }
             | Wire::ManifestRequest { community, .. }
-            | Wire::Manifests { community, .. } => Some(*community),
+            | Wire::Manifests { community, .. }
+            | Wire::BoardWelcome { community, .. } => Some(*community),
         }
     }
 }
@@ -530,6 +537,8 @@ struct Saved {
     voice: Vec<Presence>,
     #[serde(default)]
     tickets: Vec<(Key, u64)>,
+    #[serde(default)]
+    board_keys: Vec<EpochKey>,
 }
 
 pub struct Space {
@@ -556,6 +565,10 @@ pub struct Space {
     /// Tickets we gave out for another community to join this shared
     /// space, and when.
     tickets: Vec<(Key, u64)>,
+    /// The recent epochs' board keys and tokens, oldest first, for
+    /// reading and posting to the community's board (kept whether or not
+    /// it has one, so they are there the moment it does).
+    board_keys: Vec<EpochKey>,
 }
 
 /// The identity to act as in a space: `main`, or the separate one derived
@@ -591,6 +604,11 @@ impl Space {
             reports: Vec::new(),
             voice: Vec::new(),
             tickets: Vec::new(),
+            board_keys: Vec::new(),
+        })
+        .map(|mut space| {
+            space.note_epoch();
+            space
         })
     }
 
@@ -637,6 +655,7 @@ impl Space {
             reports: Vec::new(),
             voice: Vec::new(),
             tickets: Vec::new(),
+            board_keys: Vec::new(),
         };
         space.learn(invite.card.clone());
         let out = Out { to: invite.from.0, wire: Wire::Join { community, key_package: b64(&key_package), card } };
@@ -658,6 +677,7 @@ impl Space {
             reports: self.reports.clone(),
             voice: self.voice.clone(),
             tickets: self.tickets.clone(),
+            board_keys: self.board_keys.clone(),
         };
         serde_json::to_vec(&saved).expect("a space always serializes")
     }
@@ -693,6 +713,7 @@ impl Space {
             reports: saved.reports,
             voice: saved.voice,
             tickets: saved.tickets,
+            board_keys: saved.board_keys,
         })
     }
 
@@ -710,6 +731,55 @@ impl Space {
 
     pub fn epoch(&self) -> Option<u64> {
         self.mls.epoch().ok()
+    }
+
+    /// The community's board, if it has one.
+    pub fn board(&self) -> Option<&cm::BoardRef> {
+        self.manifest().nodes.board.as_ref()
+    }
+
+    /// The recent epochs' board keys, oldest first; the last is the
+    /// current epoch's.
+    pub fn board_keys(&self) -> &[EpochKey] {
+        &self.board_keys
+    }
+
+    /// The board, once every member knows of it: the version before this
+    /// one named it too (or we joined with this version, which the others
+    /// already had). The version that first names a board still goes by
+    /// mail, or nobody would know to look there.
+    pub fn settled_board(&self) -> Option<&cm::BoardRef> {
+        let board = self.board()?;
+        let Some(before) = self.chain.len().checked_sub(2).map(|i| &self.chain[i].1) else { return Some(board) };
+        (before.nodes.board.as_ref() == Some(board)).then_some(board)
+    }
+
+    /// The board key an entry for `epoch` is sealed under.
+    pub fn board_key(&self, epoch: u64) -> Option<&EpochKey> {
+        self.board_keys.iter().find(|k| k.epoch == epoch)
+    }
+
+    /// Remembers the current epoch's board key. Called whenever the epoch
+    /// may have moved, before and after, so a commit can still be sealed
+    /// under the epoch it was made in.
+    fn note_epoch(&mut self) {
+        if self.mls.in_group() {
+            let id = self.id();
+            community_board::note_epoch(&mut self.board_keys, &self.mls, &id);
+        }
+    }
+
+    /// The current manifest as a commit or post carries it: in a community
+    /// with a board, as the change from the version before (a
+    /// [`cm::ManifestDelta`], marked `d:`), which stays small however many
+    /// members there are; otherwise whole.
+    fn manifest_text(&self) -> String {
+        if self.board().is_some() && self.chain.len() >= 2 {
+            if let Some(delta) = self.signed().delta_from(&self.chain[self.chain.len() - 2].0) {
+                return format!("d:{}", b64(&delta.encode()));
+            }
+        }
+        b64(&self.signed().encode())
     }
 
     /// Who can read what is sent now: the MLS group's members.
@@ -809,7 +879,8 @@ impl Space {
 
     /// A manifest change: tell everyone, then bring the group in line.
     fn publish(&mut self, signed: &SignedManifest) -> Result<Vec<Out>, String> {
-        let mut outs = self.send(&Post::Manifest { manifest: b64(&signed.encode()) })?;
+        let manifest = if *signed == *self.signed() { self.manifest_text() } else { b64(&signed.encode()) };
+        let mut outs = self.send(&Post::Manifest { manifest })?;
         outs.extend(self.converge(true));
         Ok(outs)
     }
@@ -839,24 +910,28 @@ impl Space {
         // Everyone before the removal hears of it, the removed included,
         // so they know rather than just going quiet.
         let before = self.others_in_group();
+        self.note_epoch();
         let state = b64(&self.mls.save());
         let epoch = self.mls.epoch().map_err(|e| e.to_string())?;
         let c = self.mls.remove(keys).map_err(|e| e.to_string())?;
+        self.note_epoch();
         self.previous = Some(Previous {
             epoch,
             mls: state,
             commit: sha(&c.commit),
             redo: Some(Redo::Remove { keys: keys.iter().map(|k| Key(*k)).collect() }),
         });
-        let wire = Wire::Commit { community: self.id(), commit: b64(&c.commit), manifest: b64(&self.signed().encode()), cards: Vec::new() };
+        let wire = Wire::Commit { community: self.id(), commit: b64(&c.commit), manifest: self.manifest_text(), cards: Vec::new() };
         Ok(before.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
     }
 
     fn commit_add(&mut self, key_package: &[u8], card: Card) -> Result<Vec<Out>, String> {
         let before = self.others_in_group();
+        self.note_epoch();
         let state = b64(&self.mls.save());
         let epoch = self.mls.epoch().map_err(|e| e.to_string())?;
         let c = self.mls.add(&[key_package]).map_err(|e| e.to_string())?;
+        self.note_epoch();
         self.previous = Some(Previous {
             epoch,
             mls: state,
@@ -864,11 +939,12 @@ impl Space {
             redo: Some(Redo::Add { key_package: b64(key_package), card: card.clone() }),
         });
         let manifest = b64(&self.signed().encode());
+        let change = self.manifest_text();
         let id = self.id();
         let mut outs: Vec<Out> = before
             .into_iter()
             .filter(|k| *k != card.key.0)
-            .map(|to| Out { to, wire: Wire::Commit { community: id, commit: b64(&c.commit), manifest: manifest.clone(), cards: vec![card.slim()] } })
+            .map(|to| Out { to, wire: Wire::Commit { community: id, commit: b64(&c.commit), manifest: change.clone(), cards: vec![card.slim()] } })
             .collect();
         if let Some(welcome) = c.welcome {
             outs.push(Out {
@@ -1290,7 +1366,10 @@ impl Space {
         if self.removed {
             return h;
         }
-        match self.handle_inner(identity, from, wire, &mut h) {
+        self.note_epoch();
+        let result = self.handle_inner(identity, from, wire, &mut h);
+        self.note_epoch();
+        match result {
             Ok(()) => {
                 if h.events.iter().any(|e| matches!(e, Event::Joined | Event::Changed)) || h.outs.iter().any(|o| matches!(o.wire, Wire::Commit { .. })) {
                     self.replay_held(identity, &mut h);
@@ -1312,7 +1391,8 @@ impl Space {
             return Ok(());
         }
         match wire {
-            Wire::Invite { .. } => Ok(()),
+            // The app fetches it (`Store::receive`).
+            Wire::Invite { .. } | Wire::BoardWelcome { .. } => Ok(()),
             // Asking into a shared space: only the app can check which
             // community they come from, against its own copy of it
             // (`Store::receive`, then `ally_knock`).
@@ -1559,8 +1639,25 @@ impl Space {
     /// current. A gap: ask them for what we missed. Competing with ours:
     /// the lower hash stays.
     fn take_manifest(&mut self, _identity: &IdentityKeyPair, from: [u8; 32], manifest: &str, h: &mut Handled) -> Result<(), String> {
-        let signed = SignedManifest::decode(&unb64(manifest)?).map_err(|e| e.to_string())?;
         let head = self.manifest().version;
+        let signed = match manifest.strip_prefix("d:") {
+            // A change from a version we should hold: rebuilt, then
+            // judged like any other. Not holding it, ask for what we
+            // missed, whole.
+            Some(delta) => {
+                let delta = cm::ManifestDelta::decode(&unb64(delta)?).ok_or("a malformed manifest change")?;
+                match self.chain.iter().find(|(s, _)| s.hash() == delta.base).and_then(|(s, m)| delta.apply(s, m)) {
+                    Some(signed) => signed,
+                    None => {
+                        if delta.version() > head {
+                            h.outs.push(Out { to: from, wire: Wire::ManifestRequest { community: self.id(), since: head } });
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            None => SignedManifest::decode(&unb64(manifest)?).map_err(|e| e.to_string())?,
+        };
         let Ok(incoming) = signed.open() else { return Err("a manifest with a bad signature".into()) };
         if incoming.id != self.id() {
             return Err("a manifest for another community".into());
@@ -1714,7 +1811,9 @@ fn random_id() -> u64 {
 /// Bytes of a [`Wire`] per fragment: with its header, base64 and the
 /// mail body around it, a sealed fragment fits `mailbox::MAX_BLOB`.
 pub const FRAGMENT_BYTES: usize = 540;
-const MAX_FRAGMENTS: usize = 400;
+/// Most fragments in one message: a Welcome into a community of thousands
+/// (which goes by its board) carries the whole group's tree and cards.
+const MAX_FRAGMENTS: usize = 4000;
 const MAX_PARTIAL: usize = 128;
 
 /// A [`Wire`] as base64 fragments: `msg id (8) | part (2) | parts (2) | data`.
@@ -1855,6 +1954,67 @@ struct Queued {
     persona: Option<Key>,
 }
 
+/// One entry waiting to be posted to a community's board.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct BoardQueued {
+    space: Key,
+    /// The sealed entry, base64.
+    entry: String,
+    /// On the first entry of a Welcome posted for a newcomer: who to tell
+    /// where it starts once it is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    welcome: Option<WelcomePointer>,
+}
+
+/// Where a Welcome on the board starts, for its newcomer: who, and the
+/// epoch key it is sealed under.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct WelcomePointer {
+    to: Key,
+    key: EpochKey,
+}
+
+/// How far we are with one community's board.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct BoardState {
+    /// Which board this is about: when the community moves to another,
+    /// reading starts afresh there.
+    #[serde(default)]
+    board: Option<Key>,
+    /// The last entry read; `None` before the first look.
+    seen: Option<u64>,
+    /// The newest epoch whose token the node is known to accept.
+    allowed: Option<u64>,
+    /// Looks spent waiting at an entry from an epoch we haven't reached.
+    stuck: u32,
+}
+
+/// A newcomer's Welcome on a board (from [`Wire::BoardWelcome`]), to fetch
+/// while the space is still joining.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct BoardPointer {
+    space: Key,
+    from: Key,
+    board: cm::BoardRef,
+    key: EpochKey,
+    since: u64,
+    at_secs: u64,
+}
+
+/// A Welcome longer than this many fragments goes by the board, when the
+/// community has one.
+const WELCOME_INLINE: usize = if cfg!(test) { 0 } else { 8 };
+/// Most board entries waiting to be posted, across communities.
+const MAX_BOARD_OUT: usize = 20_000;
+/// Pages read from one board per look, so one busy community can't hold
+/// up the courier; the rest comes next time.
+const BOARD_PAGES_PER_LOOK: usize = 32;
+/// How many looks an entry from an epoch we haven't reached is waited
+/// for before it is skipped (its commit never came, or we lost it).
+const BOARD_STUCK_LOOKS: u32 = 20;
+/// How long a newcomer keeps trying to fetch a Welcome from a board.
+const BOARD_WELCOME_LIFETIME_SECS: u64 = 14 * 86_400;
+
 /// How you appear in one group chat or community (spec §7 "per-community
 /// identity"). Empty fields mean "as in my profile".
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -1908,6 +2068,15 @@ struct Hub {
     /// invitation, the shared space goes on our community's list.
     #[serde(default)]
     allying: Vec<(Key, Key)>,
+    /// Entries waiting for their community's board, oldest first.
+    #[serde(default)]
+    board_out: Vec<BoardQueued>,
+    /// How far we are with each board, by community id hex.
+    #[serde(default)]
+    boards: HashMap<String, BoardState>,
+    /// Welcomes waiting on a board for us.
+    #[serde(default)]
+    board_welcomes: Vec<BoardPointer>,
 }
 
 /// Keeps a stranger's card, newest last, replacing an older one of theirs.
@@ -2159,6 +2328,53 @@ impl Store {
         }
     }
 
+    /// Takes what goes to everyone in a community with a board off `outs`
+    /// and queues it for the board instead: sealed once, posted once.
+    /// Returns what still goes member by member (a private channel's
+    /// readers, someone joining, a reply to one person).
+    ///
+    /// A commit is sealed under the epoch it was made in, which everyone
+    /// it is for (the removed included) can still read; a message under
+    /// its own epoch; a big Welcome under the epoch its newcomer joins in,
+    /// whose key goes to them by mail ([`Wire::BoardWelcome`]).
+    fn to_board(&self, hub: &mut Hub, space: &Space, identity: &IdentityKeyPair, outs: Vec<Out>) -> Vec<Out> {
+        let Some(board) = space.settled_board() else { return outs };
+        if space.removed || space.joining.is_some() || crate::config::load().strict_mode {
+            return outs;
+        }
+        let everyone = space.others_in_group();
+        let mut groups: Vec<(Wire, Vec<[u8; 32]>)> = Vec::new();
+        for out in outs {
+            match groups.iter_mut().find(|(w, _)| *w == out.wire) {
+                Some((_, to)) => to.push(out.to),
+                None => groups.push((out.wire, vec![out.to])),
+            }
+        }
+        let mut rest = Vec::new();
+        for (wire, to) in groups {
+            let epoch_of = |b64: &str| decode_b64(b64).and_then(|b| GroupMember::message_epoch(&b));
+            let (epoch, welcome) = match &wire {
+                Wire::Commit { commit, .. } => (epoch_of(commit), None),
+                Wire::App { data, .. } if !everyone.is_empty() && everyone.iter().all(|k| to.contains(k)) => (epoch_of(data), None),
+                Wire::Welcome { .. } if to.len() == 1 && fragments(&wire).len() > WELCOME_INLINE => (space.epoch(), Some(Key(to[0]))),
+                _ => (None, None),
+            };
+            let Some(key) = epoch.and_then(|e| space.board_key(e)).cloned() else {
+                rest.extend(to.into_iter().map(|to| Out { to, wire: wire.clone() }));
+                continue;
+            };
+            for (i, fragment) in fragments(&wire).into_iter().enumerate() {
+                if hub.board_out.len() >= MAX_BOARD_OUT {
+                    break;
+                }
+                let entry = b64(&community_board::seal(&board.id, &key, identity, &fragment));
+                let welcome = welcome.filter(|_| i == 0).map(|to| WelcomePointer { to, key: key.clone() });
+                hub.board_out.push(BoardQueued { space: space.id(), entry, welcome });
+            }
+        }
+        rest
+    }
+
     /// Records what a space reported: messages into channel history,
     /// edits and deletes checked against who wrote what.
     fn record(&self, space: &Space, events: &[Event], hub: &mut Hub) {
@@ -2254,6 +2470,7 @@ impl Store {
         self.save(&space).map_err(|e| e.to_string())?;
         let mut hub = self.hub();
         self.record(&space, &events, &mut hub);
+        let outs = self.to_board(&mut hub, &space, &identity, outs);
         self.queue(&mut hub, outs, space.me(), space.persona.then_some(space.id()));
         self.save_hub(&hub);
         drop(_guard);
@@ -2505,6 +2722,22 @@ impl Store {
                     let h = space.handle(identity, from, Wire::Knock { community, card, proof: None, ticket: None });
                     Ok(((), h.outs, h.events))
                 });
+            }
+            Wire::BoardWelcome { community, board, epoch, key, token, since } => {
+                // Only from whoever we are waiting to be let in by.
+                let Some(space) = self.load(&community) else { return };
+                let (Some(key), Some(token)) = (crate::connection_mode::decode_hex32(&key), crate::connection_mode::decode_hex32(&token)) else { return };
+                if space.joining != Some(from) {
+                    return;
+                }
+                let _guard = LOCK.lock().unwrap();
+                let mut hub = self.hub();
+                hub.board_welcomes.retain(|p| p.space != community);
+                let key = EpochKey { epoch, key: Key(key), token: Key(token) };
+                hub.board_welcomes.push(BoardPointer { space: community, from: Key(from), board, key, since, at_secs: now_secs() });
+                self.save_hub(&hub);
+                drop(_guard);
+                crate::delivery::kick();
             }
             other => {
                 let Some(id) = other.community() else { return };
@@ -2785,6 +3018,285 @@ impl Store {
 
     pub fn queued(&self) -> usize {
         self.hub().outbox.len()
+    }
+
+    /// Fragments that arrived together (a page of a board), taken in one
+    /// pass: one save of what is waiting for the rest, then each whole
+    /// message handled.
+    fn take_fragments(&self, fragments: Vec<([u8; 32], String)>) {
+        if fragments.is_empty() {
+            return;
+        }
+        let wires: Vec<([u8; 32], Wire)> = {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            hub.reassembly.expire(now_secs());
+            let wires = fragments.into_iter().filter_map(|(from, f)| Some((from, hub.reassembly.feed(from, &f)?))).collect();
+            self.save_hub(&hub);
+            wires
+        };
+        for (from, wire) in wires {
+            // Invitations come by mail, never by a board.
+            if !matches!(wire, Wire::Invite { .. }) {
+                self.receive(from, wire);
+            }
+        }
+    }
+
+    /// Gives a community a board on the mailbox node `addr`, or (with
+    /// `None`) takes it away. A setting like any other: it needs Manage
+    /// community, and travels as a new manifest version.
+    pub fn set_board(&self, id: &Key, addr: Option<String>) -> Result<(), String> {
+        let board = match addr.map(|a| a.trim().to_string()) {
+            Some(a) if a.is_empty() => return Err("Give the node's address.".into()),
+            Some(addr) => {
+                let mut board = [0u8; 32];
+                getrandom::fill(&mut board).expect("OS randomness is unavailable");
+                Some(cm::BoardRef { addr, id: Key(board) })
+            }
+            None => None,
+        };
+        self.with_space(id, |s, identity| {
+            if board.is_none() && s.manifest().members.len() > cm::MAX_COMMUNITY_MEMBERS {
+                return Err(format!("It has more than {} members, which it can only have with a board.", cm::MAX_COMMUNITY_MEMBERS));
+            }
+            let outs = s.update(identity, |m| m.nodes.board = board)?;
+            Ok(((), outs, vec![Event::Changed]))
+        })?;
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        hub.boards.remove(&hex(&id.0));
+        self.save_hub(&hub);
+        Ok(())
+    }
+
+    /// Spec §11 "Communities at full scale": for each community with a
+    /// board, makes sure the node takes our current epoch's token, posts
+    /// what is waiting, and reads what is new, a page at a time. Also
+    /// fetches a Welcome waiting on a board for a community we are joining.
+    /// Returns how many entries were read.
+    pub async fn sync_boards(&self) -> usize {
+        let mut read = 0;
+        let pointers = {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            let now = now_secs();
+            let before = hub.board_welcomes.len();
+            hub.board_welcomes.retain(|p| now.saturating_sub(p.at_secs) < BOARD_WELCOME_LIFETIME_SECS);
+            if hub.board_welcomes.len() != before {
+                self.save_hub(&hub);
+            }
+            hub.board_welcomes
+        };
+        for p in pointers {
+            read += self.fetch_welcome(p).await;
+        }
+        for id in self.ids() {
+            let Some(space) = self.load(&id) else { continue };
+            if space.removed || space.joining.is_some() || space.board().is_none() {
+                continue;
+            }
+            read += self.sync_board(space).await;
+        }
+        read
+    }
+
+    /// The node's address, and a socket to reach it the way messages go
+    /// (through the VPN when they are routed there, spec §6).
+    async fn board_node(board: &cm::BoardRef) -> Option<(antiphon_net::AppSocket, std::net::SocketAddr)> {
+        use antiphon_net::vpn::TrafficKind;
+        let addr = crate::delivery::resolve(TrafficKind::Messages, &board.addr).await?;
+        let socket = crate::vpn::bind(TrafficKind::Messages, 0).await.ok()?;
+        Some((socket, addr))
+    }
+
+    async fn sync_board(&self, space: Space) -> usize {
+        use antiphon_net::board as nb;
+        use antiphon_net::mailbox::Refusal;
+        use antiphon_net::NetError;
+        let id = space.id();
+        let board = space.board().expect("checked by the caller").clone();
+        let Some(current) = space.board_keys().last().cloned() else { return 0 };
+        let Some((socket, node)) = Self::board_node(&board).await else { return 0 };
+        let timeout = crate::delivery::NODE_TIMEOUT;
+        let mut state = self.hub().boards.get(&hex(&id.0)).cloned().filter(|s| s.board == Some(board.id)).unwrap_or_default();
+        state.board = Some(board.id);
+
+        // 1. The node takes our current token: we made the board, or it
+        //    already knows this epoch, or we tell it, proving an older one.
+        if state.allowed != Some(current.epoch) {
+            let allowed = match nb::open(&socket, node, board.id.0, &current.token.0, timeout).await {
+                Ok(()) => true,
+                Err(NetError::MailboxRefused(Refusal::WrongSecret)) => {
+                    let mut ok = false;
+                    for older in space.board_keys().iter().rev().skip(1) {
+                        if nb::rekey(&socket, node, board.id.0, &older.token.0, &current.token.0, timeout).await.is_ok() {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    ok
+                }
+                Err(_) => return 0,
+            };
+            if !allowed {
+                return 0;
+            }
+            state.allowed = Some(current.epoch);
+        }
+
+        // 2. What is waiting to go up, in order.
+        let waiting: Vec<BoardQueued> = self.hub().board_out.into_iter().filter(|q| q.space == id).collect();
+        let mut posted = 0;
+        for q in &waiting {
+            let Ok(entry) = unb64(&q.entry) else {
+                posted += 1;
+                continue;
+            };
+            match nb::post(&socket, node, board.id.0, &current.token.0, &entry, timeout).await {
+                Ok(seq) => {
+                    posted += 1;
+                    if let Some(w) = &q.welcome {
+                        let wire = Wire::BoardWelcome {
+                            community: id,
+                            board: board.clone(),
+                            epoch: w.key.epoch,
+                            key: hex(&w.key.key.0),
+                            token: hex(&w.key.token.0),
+                            since: seq - 1,
+                        };
+                        let _guard = LOCK.lock().unwrap();
+                        let mut hub = self.hub();
+                        self.queue(&mut hub, vec![Out { to: w.to.0, wire }], space.me(), space.persona.then_some(id));
+                        self.save_hub(&hub);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if posted > 0 {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            let mut left = posted;
+            hub.board_out.retain(|q| {
+                if q.space == id && left > 0 {
+                    left -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            self.save_hub(&hub);
+        }
+
+        // 3. What is new. A first look starts a page back from the newest,
+        //    not at the beginning: older entries are from epochs before
+        //    we were in, which we couldn't read anyway.
+        let mut since = match state.seen {
+            Some(s) => s,
+            None => match nb::fetch(&socket, node, board.id.0, &current.token.0, 0, 1, timeout).await {
+                Ok(page) => page.last.saturating_sub(nb::MAX_PAGE as u64),
+                Err(_) => return 0,
+            },
+        };
+        let mut read = 0;
+        'pages: for _ in 0..BOARD_PAGES_PER_LOOK {
+            let Ok(page) = nb::fetch(&socket, node, board.id.0, &current.token.0, since, nb::MAX_PAGE, timeout).await else { break };
+            if page.entries.is_empty() {
+                since = since.max(page.next.min(page.last));
+                break;
+            }
+            let mut batch = Vec::new();
+            for (seq, entry) in page.entries {
+                // Each page is opened with the keys as they stand: a commit
+                // earlier on it may have moved us on.
+                let keys = self.load(&id).map(|s| s.board_keys().to_vec()).unwrap_or_default();
+                match community_board::open(&board.id, &keys, &entry) {
+                    community_board::Opened::Fragment { from, fragment } => {
+                        if from != space.me() {
+                            batch.push((from, fragment));
+                        }
+                    }
+                    community_board::Opened::Ahead(_) if !batch.is_empty() => {
+                        // Handle what came before it first: the commit that
+                        // gets us there may be in this batch.
+                        self.take_fragments(std::mem::take(&mut batch));
+                        let keys = self.load(&id).map(|s| s.board_keys().to_vec()).unwrap_or_default();
+                        if let community_board::Opened::Fragment { from, fragment } = community_board::open(&board.id, &keys, &entry) {
+                            if from != space.me() {
+                                batch.push((from, fragment));
+                            }
+                        } else {
+                            state.stuck += 1;
+                            if state.stuck < BOARD_STUCK_LOOKS {
+                                break 'pages;
+                            }
+                        }
+                    }
+                    community_board::Opened::Ahead(_) => {
+                        state.stuck += 1;
+                        if state.stuck < BOARD_STUCK_LOOKS {
+                            break 'pages;
+                        }
+                    }
+                    community_board::Opened::Unreadable => {}
+                }
+                since = seq;
+                state.stuck = 0;
+                read += 1;
+                if batch.len() >= 16 {
+                    self.take_fragments(std::mem::take(&mut batch));
+                }
+            }
+            self.take_fragments(batch);
+            if since >= page.last {
+                break;
+            }
+        }
+        state.seen = Some(since);
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        hub.boards.insert(hex(&id.0), state);
+        self.save_hub(&hub);
+        read
+    }
+
+    /// Fetches a Welcome left on a board for us, and what follows it in
+    /// the same epoch, until we are in. From then on the board is read
+    /// as usual, from where this left off.
+    async fn fetch_welcome(&self, p: BoardPointer) -> usize {
+        use antiphon_net::board as nb;
+        let Some((socket, node)) = Self::board_node(&p.board).await else { return 0 };
+        let timeout = crate::delivery::NODE_TIMEOUT;
+        let mut since = p.since;
+        let mut read = 0;
+        let mut joined = false;
+        for _ in 0..BOARD_PAGES_PER_LOOK {
+            let Ok(page) = nb::fetch(&socket, node, p.board.id.0, &p.key.token.0, since, nb::MAX_PAGE, timeout).await else { break };
+            let mut batch = Vec::new();
+            for (seq, entry) in &page.entries {
+                if let community_board::Opened::Fragment { from, fragment } = community_board::open(&p.board.id, std::slice::from_ref(&p.key), entry) {
+                    batch.push((from, fragment));
+                }
+                since = *seq;
+                read += 1;
+            }
+            self.take_fragments(batch);
+            joined = self.load(&p.space).is_some_and(|s| s.joining.is_none());
+            if joined || page.entries.is_empty() || since >= page.last {
+                break;
+            }
+        }
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        if joined {
+            hub.board_welcomes.retain(|q| q.space != p.space);
+            hub.boards.insert(hex(&p.space.0), BoardState { board: Some(p.board.id), seen: Some(since), allowed: None, stuck: 0 });
+        } else if let Some(q) = hub.board_welcomes.iter_mut().find(|q| q.space == p.space) {
+            q.since = since;
+        }
+        self.save_hub(&hub);
+        read
     }
 }
 
@@ -3714,5 +4226,160 @@ mod tests {
         let main_count = alice_froms.iter().filter(|k| **k == bob.public().identity_key).count();
         assert!(main_count >= 1);
         assert!(alice_froms.iter().all(|k| *k == robin || *k == bob.public().identity_key));
+    }
+
+    #[test]
+    fn with_a_board_manifest_changes_travel_as_deltas() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let board = cm::BoardRef { addr: "node.example".into(), id: Key([8; 32]) };
+        let outs = alice.space().update(&alice_id, |m| m.nodes.board = Some(board.clone())).unwrap();
+        // Naming the board is itself a whole version, as nobody knew of it.
+        assert!(outs.iter().all(|o| !matches!(&o.wire, Wire::App { .. }) || alice.space.as_ref().unwrap().settled_board().is_none()));
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert_eq!(bob.space().board(), Some(&board));
+        assert_eq!(bob.space().manifest().max_members(), cm::MAX_BOARD_COMMUNITY_MEMBERS);
+
+        // Now a ban: the commit carries only the change, and everyone ends
+        // on the same signed version.
+        let outs = alice.space().ban(&alice_id, carol.key(), "spam").unwrap();
+        let commit = outs.iter().find_map(|o| if let Wire::Commit { manifest, .. } = &o.wire { Some(manifest.clone()) } else { None }).unwrap();
+        assert!(commit.starts_with("d:"), "a delta");
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert!(carol.space().removed);
+        assert_eq!(bob.space().signed(), alice.space().signed());
+        assert!(bob.space().manifest().is_banned(&carol.key()));
+        // Both hold the same board key for the epoch they're in, and
+        // Carol, out of the group, never learns it.
+        let (a, b) = (alice.space().board_keys().last().cloned().unwrap(), bob.space().board_keys().last().cloned().unwrap());
+        assert_eq!(a, b);
+        assert_eq!(Some(a.epoch), alice.space().epoch());
+        assert!(carol.space().board_keys().iter().all(|k| k.epoch < a.epoch));
+    }
+
+    #[test]
+    fn a_delta_on_a_version_we_lack_asks_for_the_whole() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice.space().update(&alice_id, |m| m.nodes.board = Some(cm::BoardRef { addr: "n".into(), id: Key([8; 32]) })).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        // Two changes; Bob misses the first.
+        let bob_key = bob.key();
+        let outs = alice.space().update(&alice_id, |m| m.name = "Choir II".into()).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().filter(|o| o.to != bob_key).map(|o| (0, o)).collect());
+        let outs = alice.space().update(&alice_id, |m| m.description = "We sing".into()).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert_eq!(bob.space().manifest().description, "We sing");
+        assert_eq!(bob.space().signed(), alice.space().signed());
+    }
+
+    /// A store of one's own in a fresh folder, as the app has.
+    fn store(dir: &Path, name: &str) -> Store {
+        let dir = dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = crate::history::load_or_create_backup_key(&dir).unwrap();
+        Store { dir, key, identity: Arc::new(IdentityKeyPair::generate()) }
+    }
+
+    /// Hands what `from` has queued for `to` over, as mail would.
+    fn deliver(from: &Store, to: &Store) -> usize {
+        let them = Key(to.identity.public().identity_key);
+        let mut hub = from.hub();
+        let (theirs, rest): (Vec<Queued>, Vec<Queued>) = hub.outbox.into_iter().partition(|q| q.to == them);
+        hub.outbox = rest;
+        from.save_hub(&hub);
+        for q in &theirs {
+            to.receive_fragment(from.identity.public().identity_key, &q.fragment);
+        }
+        theirs.len()
+    }
+
+    fn said(store: &Store, id: &Key) -> Vec<String> {
+        crate::history::load(&store.dir, &channel_log(id, 0), &store.key).into_iter().map(|m| m.text).collect()
+    }
+
+    /// Invites `who` by mail and has them accept; the inviter's answer
+    /// (the Welcome, or with a board a pointer to it) is left queued.
+    fn invite_in(owner: &Store, id: &Key, who: &Store, name: &str) {
+        let key = who.identity.public().identity_key;
+        owner.with_space(id, |s, identity| Ok(((), s.invite(identity, key, name)?, Vec::new()))).unwrap();
+        // As if they had asked from its join link: an invitation from a
+        // stranger is otherwise dropped.
+        let mut hub = who.hub();
+        hub.knocked.push((*id, now_secs()));
+        who.save_hub(&hub);
+        deliver(owner, who);
+        who.accept_invite(0, false).unwrap();
+        deliver(who, owner);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_community_with_a_board_posts_once_and_everyone_reads_it() {
+        let dir = std::env::temp_dir().join(format!("antiphon-board-{}", random_id()));
+        // A mailbox node with boards, on this machine.
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let node = socket.local_addr().unwrap().to_string();
+        let mailbox = antiphon_relay::mailbox::Mailbox::new(antiphon_relay::mailbox::MailboxLimits { enabled: true, ..Default::default() });
+        let mailbox = Arc::new(Mutex::new(mailbox));
+        let relay = Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default())));
+        tokio::spawn(antiphon_relay::run_node(socket, relay, Some(mailbox.clone()), None));
+
+        let (alice, bob, carol) = (store(&dir, "alice"), store(&dir, "bob"), store(&dir, "carol"));
+        let id = alice.create(Kind::Community, "Big", false).unwrap();
+        invite_in(&alice, &id, &bob, "Bob");
+        deliver(&alice, &bob);
+        assert!(bob.load(&id).unwrap().joining.is_none(), "Bob is in");
+
+        // The board is named by mail; from then on, it carries what is for
+        // everyone.
+        alice.set_board(&id, Some(node.clone())).unwrap();
+        deliver(&alice, &bob);
+        assert!(bob.load(&id).unwrap().settled_board().is_none());
+        alice.with_space(&id, |s, identity| Ok(((), s.update(identity, |m| m.description = "big".into())?, Vec::new()))).unwrap();
+        assert_eq!(deliver(&alice, &bob), 0, "the next change goes by the board");
+        alice.sync_boards().await;
+        bob.sync_boards().await;
+        assert!(bob.load(&id).unwrap().settled_board().is_some());
+
+        alice.with_space(&id, |s, _| {
+            let (outs, e) = s.post(0, "one upload", None)?;
+            Ok(((), outs, vec![e]))
+        })
+        .unwrap();
+        assert_eq!(alice.hub().outbox.len(), 0, "nothing by mail");
+        assert_eq!(alice.hub().board_out.len(), 1);
+        alice.sync_boards().await;
+        assert!(alice.hub().board_out.is_empty());
+        assert!(bob.sync_boards().await >= 1);
+        assert_eq!(said(&bob, &id), ["one upload"]);
+        assert_eq!(mailbox.lock().unwrap().stats().boards, 1);
+
+        // Carol joins: the commit and her Welcome go on the board, and she
+        // is told by mail where it starts.
+        invite_in(&alice, &id, &carol, "Carol");
+        assert!(alice.hub().outbox.is_empty(), "the Welcome waits for the board");
+        alice.sync_boards().await;
+        assert_eq!(deliver(&alice, &carol), 1, "the pointer");
+        carol.sync_boards().await;
+        assert!(carol.load(&id).unwrap().joining.is_none(), "Carol is in");
+        bob.sync_boards().await;
+        let (a, b, c) = (alice.load(&id).unwrap(), bob.load(&id).unwrap(), carol.load(&id).unwrap());
+        assert_eq!(b.readers().len(), 3, "Bob took the commit from the board");
+        assert_eq!(b.signed(), a.signed(), "and its manifest change");
+        assert_eq!((b.epoch(), c.epoch()), (a.epoch(), a.epoch()));
+
+        // A new epoch: the node lets its token in once someone proves an
+        // older one, and everyone reads on.
+        carol.with_space(&id, |s, _| {
+            let (outs, e) = s.post(0, "hi from Carol", None)?;
+            Ok(((), outs, vec![e]))
+        })
+        .unwrap();
+        carol.sync_boards().await;
+        alice.sync_boards().await;
+        bob.sync_boards().await;
+        assert_eq!(said(&alice, &id), ["one upload", "hi from Carol"]);
+        assert_eq!(said(&bob, &id), ["one upload", "hi from Carol"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

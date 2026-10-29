@@ -49,8 +49,14 @@ const SIGN_CONTEXT: &[u8] = b"antiphon/community/manifest/v1";
 /// Spec §9: "Group chats up to ~100". Every message is sealed once per
 /// recipient's mailbox, so this is also the sender's fan-out.
 pub const MAX_GROUP_MEMBERS: usize = 100;
-/// Communities are bigger, short of spec §11's deferred "full scale".
+/// Communities are bigger. Without a board each message is still sealed
+/// once per member's mailbox, which bounds this.
 pub const MAX_COMMUNITY_MEMBERS: usize = 250;
+/// Spec §11 "Communities at full scale": with a board
+/// ([`Nodes::board`]) a message is uploaded once whatever the size, and
+/// manifest changes travel as [`ManifestDelta`]s, so a community can be
+/// this big.
+pub const MAX_BOARD_COMMUNITY_MEMBERS: usize = 5000;
 pub const MAX_CHANNELS: usize = 50;
 pub const MAX_ROLES: usize = 16;
 pub const MAX_BANS: usize = 1000;
@@ -218,6 +224,21 @@ pub struct Nodes {
     pub files: Vec<NodeRef>,
     #[serde(default)]
     pub dht: Vec<String>,
+    /// The community's board (spec §11 "Communities at full scale"): an
+    /// append-only log on a mailbox node, where a message for everyone is
+    /// posted once and each member reads it, instead of a sealed copy per
+    /// member. Left out while unset, so a manifest without one reads as
+    /// before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<BoardRef>,
+}
+
+/// Where a community's board is: a mailbox node (`host[:port]`) and the
+/// board's random id there, known only to members.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BoardRef {
+    pub addr: String,
+    pub id: Key,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -355,6 +376,90 @@ impl SignedManifest {
     }
 }
 
+/// A manifest version as the change from the one before it (spec §11
+/// "Communities at full scale"): every field but the member list as it
+/// is, and the member list as who left and who was added or changed. The
+/// signature is the full version's, so whoever holds the version before
+/// rebuilds the new one exactly and checks the signature as usual -- the
+/// delta needs no trust of its own.
+///
+/// In a community of thousands the member list is most of the manifest,
+/// and a change usually touches one member, so this is what keeps each
+/// change small.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManifestDelta {
+    /// [`SignedManifest::hash`] of the version this applies to.
+    pub base: Key,
+    pub signer: Key,
+    /// Hex, as it is 64 bytes.
+    pub signature: String,
+    /// The new version with its member list left empty.
+    pub rest: Manifest,
+    pub removed: Vec<Key>,
+    /// Added, or changed (role or name), in the new version's order.
+    pub upserted: Vec<Member>,
+}
+
+impl ManifestDelta {
+    pub fn encode(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("a delta always serializes")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+
+    /// The new version's number.
+    pub fn version(&self) -> u64 {
+        self.rest.version
+    }
+
+    /// The signed version this stands for, rebuilt on `base`. `None` if
+    /// `base` isn't the version it applies to or the result isn't what
+    /// was signed. The result is checked as any other version is.
+    pub fn apply(&self, base: &SignedManifest, base_manifest: &Manifest) -> Option<SignedManifest> {
+        if base.hash() != self.base {
+            return None;
+        }
+        let mut members: Vec<Member> = base_manifest.members.iter().filter(|m| !self.removed.contains(&m.key)).cloned().collect();
+        for u in &self.upserted {
+            match members.iter_mut().find(|m| m.key == u.key) {
+                Some(m) => *m = u.clone(),
+                None => members.push(u.clone()),
+            }
+        }
+        let mut m = self.rest.clone();
+        m.members = members;
+        let signature: [u8; 64] = (0..128).step_by(2).map(|i| u8::from_str_radix(self.signature.get(i..i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?.try_into().ok()?;
+        let signed = SignedManifest { body: serde_json::to_vec(&m).ok()?, signer: self.signer.0, signature };
+        signed.open().ok()?;
+        Some(signed)
+    }
+}
+
+impl SignedManifest {
+    /// This version as a change from `base` (the version before it), if
+    /// it rebuilds exactly -- members only appended, removed or changed
+    /// in place. `None` otherwise: send the whole version then.
+    pub fn delta_from(&self, base: &SignedManifest) -> Option<ManifestDelta> {
+        let new = self.open().ok()?;
+        let old = base.open().ok()?;
+        let removed: Vec<Key> = old.members.iter().filter(|o| !new.is_member(&o.key.0)).map(|o| o.key).collect();
+        let upserted: Vec<Member> = new.members.iter().filter(|n| old.member(&n.key.0) != Some(*n)).cloned().collect();
+        let mut rest = new;
+        rest.members = Vec::new();
+        let delta = ManifestDelta {
+            base: base.hash(),
+            signer: Key(self.signer),
+            signature: self.signature.iter().map(|b| format!("{b:02x}")).collect(),
+            rest,
+            removed,
+            upserted,
+        };
+        (delta.apply(base, &old).as_ref() == Some(self)).then_some(delta)
+    }
+}
+
 impl Manifest {
     /// A new group chat or community with `creator` as its owner.
     pub fn genesis(creator: &IdentityKeyPair, kind: Kind, name: &str, creator_name: &str) -> Self {
@@ -408,6 +513,7 @@ impl Manifest {
     pub fn max_members(&self) -> usize {
         match self.kind {
             Kind::Group => MAX_GROUP_MEMBERS,
+            Kind::Community if self.nodes.board.is_some() => MAX_BOARD_COMMUNITY_MEMBERS,
             Kind::Community => MAX_COMMUNITY_MEMBERS,
         }
     }
@@ -969,5 +1075,49 @@ mod tests {
         }
         assert!(check_transition(&w.m, &w.signed, &SignedManifest::sign(&big, &owner)).is_err());
         let _ = c;
+    }
+
+    #[test]
+    fn a_change_travels_as_a_delta_that_rebuilds_the_signed_version() {
+        let mut w = community();
+        let people: Vec<IdentityKeyPair> = (0..40).map(|_| IdentityKeyPair::generate()).collect();
+        let owner = IdentityKeyPair::from_master_seed(w.owner.master_seed());
+        w.apply(&owner, |m| people.iter().for_each(|p| add(m, p, 2))).unwrap();
+        let (base, base_m) = (w.signed.clone(), w.m.clone());
+        let gone = Key(people[3].public().identity_key);
+        let newcomer = IdentityKeyPair::generate();
+        w.apply(&owner, |m| {
+            m.members.retain(|x| x.key != gone);
+            add(m, &newcomer, 2);
+            m.members.iter_mut().find(|x| x.key.0 == people[5].public().identity_key).unwrap().role = 1;
+            m.name = "Choir II".into();
+        })
+        .unwrap();
+        let delta = w.signed.delta_from(&base).expect("a delta");
+        assert_eq!((delta.removed.len(), delta.upserted.len(), delta.version()), (1, 2, w.m.version));
+        let bytes = delta.encode();
+        assert!(bytes.len() * 3 < w.signed.encode().len(), "much smaller than the whole");
+        let rebuilt = ManifestDelta::decode(&bytes).unwrap().apply(&base, &base_m).unwrap();
+        assert_eq!(rebuilt, w.signed);
+        // On the wrong base, or tampered with, it rebuilds nothing.
+        assert_eq!(delta.apply(&w.signed, &w.m), None);
+        let mut forged = delta.clone();
+        forged.upserted[0].role = 0;
+        assert_eq!(forged.apply(&base, &base_m), None);
+    }
+
+    #[test]
+    fn a_board_raises_the_member_cap() {
+        let w = community();
+        assert_eq!(w.m.max_members(), MAX_COMMUNITY_MEMBERS);
+        let mut m = w.m.clone();
+        m.nodes.board = Some(BoardRef { addr: "node.example".into(), id: Key([4; 32]) });
+        assert_eq!(m.max_members(), MAX_BOARD_COMMUNITY_MEMBERS);
+        // Setting one is a settings change, for those who manage the community.
+        let mut plain = w.m.next(&w.signed);
+        plain.nodes.board = m.nodes.board.clone();
+        assert!(check_transition(&w.m, &w.signed, &SignedManifest::sign(&plain, &w.owner)).is_ok());
+        let json = String::from_utf8(SignedManifest::sign(&w.m, &w.owner).body).unwrap();
+        assert!(!json.contains("board"), "left out while unset");
     }
 }

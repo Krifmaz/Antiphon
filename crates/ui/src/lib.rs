@@ -624,6 +624,10 @@ pub enum SpaceChange {
     },
     /// Set slow mode: the fewest seconds between one member's posts, 0 off.
     SlowMode(u32),
+    /// Give it a board on this mailbox node (`host[:port]`), so a message
+    /// for everyone is posted once and it can grow to thousands; or, with
+    /// `None`, take the board away.
+    Board(Option<String>),
     /// Open it to people asking to join from its join link, or close it.
     Listed(bool),
     /// Ask a directory (`host:port`) to list it, with this description.
@@ -793,6 +797,8 @@ pub enum Msg {
     DirectoryAdd,
     /// The directory box in a community's listing settings changed.
     ListingDirectory(String),
+    /// The node box in a community's board settings changed.
+    BoardNode(String),
     /// The description box in a community's listing settings changed.
     ListingDescription(String),
     /// Send the listing typed in the boxes (community id).
@@ -924,6 +930,8 @@ pub struct Ui {
     directory_address: String,
     /// The directory a community is to be listed in.
     listing_directory: String,
+    /// The mailbox node a community's board is to be on.
+    board_node: String,
     /// What the listing is to say.
     listing_description: String,
     /// The name for a new shared space.
@@ -1018,6 +1026,7 @@ impl Ui {
             node_edit: String::new(),
             directory_address: String::new(),
             listing_directory: String::new(),
+            board_node: String::new(),
             shared_name: String::new(),
             shared_link: String::new(),
             listing_description: String::new(),
@@ -1502,6 +1511,10 @@ impl Ui {
             }
             Msg::ListingDirectory(s) => {
                 self.listing_directory = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::BoardNode(s) => {
+                self.board_node = s.trim().to_string();
                 Vec::new()
             }
             Msg::SharedName(s) => {

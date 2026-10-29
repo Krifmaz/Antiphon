@@ -260,6 +260,7 @@ impl Spaces {
                     .collect();
                 store.with_space(&id, |space, _| Ok(((), space.report(channel, &reason, excerpts)?, Vec::new())))?;
             }
+            A::ManageSpace { community, change: ui::SpaceChange::Board(node) } => store.set_board(&key(&community)?, node)?,
             A::ManageSpace { community, change } => {
                 let id = key(&community)?;
                 store.with_space(&id, |space, identity| {
@@ -403,6 +404,8 @@ fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyP
         C::SubmitListing { .. } | C::WithdrawListing(_) => Ok(Vec::new()),
         // Handled by `Spaces::shared`: they span more than one space.
         C::StartShared(_) | C::JoinShared(_) | C::AskIntoShared(_) | C::UnlistShared(_) | C::NewAllyLink => Ok(Vec::new()),
+        // `Store::set_board`: it also starts reading the new board afresh.
+        C::Board(_) => Ok(Vec::new()),
         C::SlowMode(secs) => space.update(identity, |m| m.slow_mode_secs = secs.min(antiphon_crypto::community::MAX_SLOW_MODE_SECS)),
         C::WithdrawInvite(who) => {
             let who = member_key(&who)?;
@@ -561,6 +564,7 @@ fn community_model(store: &Store, s: &community::Space, unread: u32, voice_room:
         can_assign_roles: assigns,
         slow_mode_secs: m.slow_mode_secs,
         can_set_slow_mode: joined && !group && m.can(&me, perm::MANAGE_COMMUNITY, None),
+        board: m.nodes.board.as_ref().map(|b| b.addr.clone()),
         moderator: joined && community::is_moderator(m, &me),
         reports: s
             .reports()

@@ -12,6 +12,7 @@ pub mod anonymity;
 pub mod captions;
 pub mod caps_lock;
 pub mod community;
+pub mod community_board;
 pub mod config;
 pub mod connection_mode;
 pub mod content_store;

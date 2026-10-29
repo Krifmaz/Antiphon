@@ -861,6 +861,34 @@ pub fn moderation<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
             );
         }
         col = col.push(listing);
+        let mut board = column![].spacing(8);
+        match &c.board {
+            Some(node) => {
+                board = board.push(setting(
+                    "Full scale",
+                    Some("Messages for everyone are posted once to a board on a mailbox node, and members read them from there, so it can have thousands of members. The node can't read them."),
+                    switch("Full scale", true, move |_| change(SpaceChange::Board(None))),
+                ));
+                board = board.push(faint(format!("Board on {node}.")).size(12));
+            }
+            None => {
+                board = board.push(setting(
+                    "Full scale",
+                    Some("Post messages for everyone once, to a board on a mailbox node, instead of a copy to each member: needed past 250 members, up to 5,000. The node can't read them."),
+                    space().width(0),
+                ));
+                let node = (!ui.board_node.is_empty()).then(|| ui.board_node.clone());
+                board = board.push(
+                    row![
+                        input("Mailbox node address", "stoop-board-node", "mail.example.org:7000", &ui.board_node).on_input(Msg::BoardNode).padding([8, 10]).size(13).width(Length::Fill),
+                        btn_sm("Use a board", Btn::Primary, node.map(|n| change(SpaceChange::Board(Some(n))))),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+        col = col.push(board);
     }
     if c.moderator {
         let mut reports = column![label("Reports")].spacing(8);

@@ -681,6 +681,9 @@ pub struct Community {
     pub slow_mode_secs: u32,
     /// You may turn slow mode on or off (the community's settings).
     pub can_set_slow_mode: bool,
+    /// The mailbox node its board is on, if it has one (spec §11
+    /// "Communities at full scale").
+    pub board: Option<String>,
     /// You can act on reports: an owner, or allowed to remove messages or
     /// people.
     pub moderator: bool,
