@@ -65,6 +65,17 @@ const KIND_MEDIA: u8 = 0;
 const KIND_ANNOUNCE: u8 = 1;
 /// Room payload kind: an MLS control message for one member.
 const KIND_CONTROL: u8 = 2;
+/// Room payload kind: how much of whose audio this member lost (spec §2
+/// automatic bandwidth), sealed under the room secret.
+const KIND_REPORT: u8 = 3;
+/// Room payload kind: an SFrame-sealed video datagram.
+const KIND_VIDEO: u8 = 4;
+/// How often a member reports loss to the room. Only senders it lost
+/// audio from are listed, and nothing goes out when there are none, so a
+/// healthy room carries no reports at all.
+const REPORT_EVERY: Duration = Duration::from_secs(2);
+/// Domain separation for loss reports.
+const REPORT_CONTEXT: &[u8] = b"antiphon/sfu/report/v1";
 /// How often this member re-announces, so late joiners learn who it is.
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(5);
 /// How long joining the SFU room may take.
@@ -182,7 +193,11 @@ impl SfuCall {
         is_blocked: BlockCheck,
     ) -> anyhow::Result<Arc<SfuCall>> {
         let addr: SocketAddr = crate::state::resolve(&invite.sfu).await?;
-        let socket = Arc::new(crate::vpn::bind(antiphon_net::vpn::TrafficKind::Voice, 0).await?);
+        // Spec §3 anonymity mode: the SFU sees the circuit's last hop.
+        let (socket, addr) = match crate::anonymity::configured_hops() {
+            Some(hops) => crate::anonymity::route_to(&hops, addr).await?,
+            None => (Arc::new(crate::vpn::bind(antiphon_net::vpn::TrafficKind::Voice, 0).await?), addr),
+        };
         let me = new_member_tag();
         let room = room_token(&invite.secret, invite.day);
         let (client, mut events) = SfuClient::join(socket, addr, room, me, JOIN_TIMEOUT)
@@ -248,6 +263,11 @@ impl SfuCall {
                                                 ),
                                             },
                                         );
+                                        // A newcomer needs a whole picture, not
+                                        // patches against one they never saw.
+                                        if let Some(video) = group.upgrade().and_then(|g| g.video.lock().unwrap().clone()) {
+                                            video.request_keyframe();
+                                        }
                                         // Say hello back at once, so a newcomer
                                         // doesn't wait out the timer to hear us.
                                         let (client, announcement) = (client.clone(), announcement.clone());
@@ -255,6 +275,27 @@ impl SfuCall {
                                             let _ = client.send_media(&announcement).await;
                                         });
                                     }
+                                }
+                            }
+                            Some((&KIND_VIDEO, sealed)) => {
+                                let Some(plain) = sealer.open(from, sealed) else { continue };
+                                let Some(id) = members.lock().unwrap().get(&from).map(|m| m.id) else { continue };
+                                if let Some(group) = group.upgrade() {
+                                    if let Some(video) = group.video.lock().unwrap().as_ref() {
+                                        video.receive_from(SOURCE_BASE + id, &plain);
+                                    }
+                                }
+                            }
+                            Some((&KIND_REPORT, sealed)) => {
+                                // Entries are `[tag: 16][loss: u8]`; only
+                                // the one about us matters here.
+                                let Some(body) = open(&cipher, REPORT_CONTEXT, sealed) else { continue };
+                                let Some(loss) = body.chunks_exact(17).find(|e| e[..16] == me[..]).map(|e| e[16]) else {
+                                    continue;
+                                };
+                                let Some(id) = members.lock().unwrap().get(&from).map(|m| m.id) else { continue };
+                                if let Some(group) = group.upgrade() {
+                                    group.link.on_loss(SOURCE_BASE + id, loss);
                                 }
                             }
                             Some((&KIND_CONTROL, sealed)) => {
@@ -285,6 +326,44 @@ impl SfuCall {
             })
         };
 
+        // Spec §2 automatic bandwidth in the room: who we lost audio from,
+        // so their senders can step down.
+        let reporter = {
+            let (client, members, cipher) = (client.clone(), members.clone(), room_cipher.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(REPORT_EVERY).await;
+                    let body: Vec<u8> = members
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|(tag, m)| m.voice.loss().take_percent().filter(|l| *l > 0).map(|l| (tag, l)))
+                        .flat_map(|(tag, loss)| tag.iter().copied().chain([loss]))
+                        .collect();
+                    if !body.is_empty() {
+                        let _ = client.send_media(&seal(&cipher, KIND_REPORT, REPORT_CONTEXT, &body)).await;
+                    }
+                }
+            })
+        };
+
+        // Our video into the room: the call's video hands datagrams over a
+        // channel, sealed here with SFrame like the audio and sent once.
+        let video_sender = {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            if let Some(video) = group.video.lock().unwrap().as_ref() {
+                video.set_room(Some(tx));
+            }
+            let client = client.clone();
+            let mut sealer = RoomSealer { group: Arc::downgrade(group), members: members.clone() };
+            tokio::spawn(async move {
+                while let Some(datagram) = rx.recv().await {
+                    let Some(sealed) = sealer.seal(&datagram) else { continue };
+                    let _ = client.send_media(&[&[KIND_VIDEO][..], &sealed].concat()).await;
+                }
+            })
+        };
+
         Ok(Arc::new(SfuCall {
             invite,
             client,
@@ -292,7 +371,7 @@ impl SfuCall {
             room_cipher,
             members,
             primary_key,
-            tasks: vec![announcer, receiver],
+            tasks: vec![announcer, receiver, reporter, video_sender],
         }))
     }
 
@@ -350,6 +429,14 @@ impl SfuCall {
             .collect();
         names.sort();
         names
+    }
+
+    /// Room member `id`'s display name (`id` as in [`SfuCall::audio`],
+    /// counted from [`SOURCE_BASE`]), for their video tile.
+    pub fn name_of(&self, id: u64) -> Option<String> {
+        let members = self.members.lock().unwrap();
+        let m = members.values().find(|m| SOURCE_BASE + m.id == id)?;
+        Some(if m.name.is_empty() { antiphon_crypto::fingerprint(&m.identity_key) } else { m.name.clone() })
     }
 
     /// The identity keys of everyone else in the room.

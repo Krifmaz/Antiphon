@@ -165,8 +165,12 @@ impl Group {
     }
 
     /// One person's name by leg id, for labelling their captions (spec §7)
-    /// and their video tiles.
+    /// and their video tiles. Ids from [`crate::sfu_call::SOURCE_BASE`] up
+    /// are people in the group relay's room.
     pub fn leg_name(&self, id: u64) -> Option<String> {
+        if id >= crate::sfu_call::SOURCE_BASE {
+            return self.sfu_call()?.name_of(id);
+        }
         self.legs.lock().unwrap().iter().find(|l| l.id == id).map(Leg::name)
     }
 
@@ -573,7 +577,13 @@ impl Context {
                 }
                 let result = async {
                     let relay_addr = crate::state::resolve(&relay).await.map_err(|e| e.to_string())?;
-                    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, 0).await.map_err(|e| e.to_string())?);
+                    // Spec §3 anonymity mode: a leg goes through a circuit
+                    // like a 1:1 relayed call, so the relay (and through
+                    // it, the other member) sees only the last hop.
+                    let (socket, relay_addr) = match crate::anonymity::configured_hops() {
+                        Some(hops) => crate::anonymity::route_to(&hops, relay_addr).await.map_err(|e| e.to_string())?,
+                        None => (Arc::new(crate::vpn::bind(TrafficKind::Voice, 0).await.map_err(|e| e.to_string())?), relay_addr),
+                    };
                     let peer = if dial {
                         dial_with_retry(&socket, relay_addr, token).await?;
                         tokio::time::timeout(CONNECT_TIMEOUT, PeerConnection::connect(socket, relay_addr, &self.identity))
@@ -606,6 +616,13 @@ impl Context {
             }
             ControlMessage::GroupPunch { pair, peer_key: _ } => {
                 if self.group.is_full() {
+                    return;
+                }
+                // A punched leg is a direct connection: it would hand this
+                // machine's address to the other member. Anonymity mode
+                // refuses it rather than quietly connecting in the open.
+                if crate::anonymity::requested() {
+                    self.say("Anonymity mode is on, so nobody joins this call directly. The person adding them needs a relay in Settings > Call.");
                     return;
                 }
                 match crate::state::discover_public_address(0).await {
