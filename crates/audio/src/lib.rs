@@ -7,6 +7,8 @@
 //! model, a different order of effort than the rest of this chain):
 //! ML-based noise suppression, echo cancellation.
 
+#[cfg(target_os = "android")]
+mod aaudio;
 mod chain;
 mod echo_cancel;
 mod device;
@@ -20,7 +22,10 @@ pub use chain::{
 };
 pub use chain::{eq_curve_db, eq_preset, eq_preset_names, log_spaced_frequencies};
 pub use chain::AudioChain;
-pub use device::{list_input_devices, list_output_devices, start_capture, start_playback, AudioError, CaptureHandle, PlaybackHandle, PlaybackSink};
+pub use device::{
+    audio_backend_name, list_input_devices, list_output_devices, start_capture, start_playback, AudioBackend, AudioError,
+    CaptureHandle, PlaybackHandle, PlaybackSink,
+};
 pub use echo_cancel::EchoCanceller;
 pub use time_compress::{TimeCompressor, MAX_SPEED, MIN_SPEED};
 pub use stages::{NeuralSuppressor, NoiseSuppressor, THIN_VOICE_WARNING_STRENGTH, AutoGain, BandType, Compressor, DeEsser, Gain, HighPassFilter, Limiter, LowPassFilter, NoiseGate, PeakingEq, PitchShift, Reverb, Stage};

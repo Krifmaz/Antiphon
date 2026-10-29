@@ -12,10 +12,86 @@ pub enum AudioError {
     Cpal(#[from] cpal::Error),
 }
 
+/// An open stream from whichever API opened it. It is only held so that
+/// dropping it closes the stream.
+enum StreamHolder {
+    /// A stream cpal opened: every desktop, iOS, and Android before 9.
+    Cpal { _stream: cpal::Stream },
+    /// A call stream opened through AAudio directly, with the
+    /// voice-communication attributes cpal cannot set (see `aaudio.rs`).
+    #[cfg(target_os = "android")]
+    AAudio { _stream: crate::aaudio::Stream },
+}
+
 /// Keeps the input stream alive; dropping it stops capture.
 pub struct CaptureHandle {
-    _stream: cpal::Stream,
+    _stream: StreamHolder,
     pub sample_rate: u32,
+}
+
+/// Which audio system the desktop talks to on Linux.
+///
+/// PipeWire is preferred because it is what current distributions run: its
+/// device list names the real sinks and sources (a USB headset, the HDMI
+/// output) where ALSA on a PipeWire system mostly shows its "default" and
+/// "pipewire" plug-ins, and talking to it directly skips the ALSA
+/// compatibility layer and its extra buffering. ALSA stays as the fallback
+/// for systems without a PipeWire daemon (PulseAudio or bare ALSA), and as
+/// an escape hatch should a PipeWire setup misbehave. Other platforms have
+/// one audio API each, so this changes nothing there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioBackend {
+    /// PipeWire when its daemon is running, otherwise ALSA.
+    Auto,
+    /// ALSA even when PipeWire is running.
+    Alsa,
+}
+
+impl AudioBackend {
+    /// The environment variable that overrides the automatic choice. It is
+    /// an environment variable rather than a settings entry because the only
+    /// reason to change it is a broken audio setup, and the person debugging
+    /// that is better served by something that works before the app's own
+    /// audio does.
+    pub const ENV: &'static str = "ANTIPHON_AUDIO_BACKEND";
+
+    /// Reads a value of [`Self::ENV`]. `alsa` forces ALSA; anything else,
+    /// including nothing, is [`AudioBackend::Auto`], so a typo never leaves
+    /// someone without sound.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(|v| v.trim().to_ascii_lowercase()) {
+            Some(v) if v == "alsa" => AudioBackend::Alsa,
+            _ => AudioBackend::Auto,
+        }
+    }
+
+    /// The choice in effect for this process, from [`Self::ENV`].
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var(Self::ENV).ok().as_deref())
+    }
+}
+
+/// The cpal host to list and open devices on. Only Linux has a choice to
+/// make; see [`AudioBackend`].
+fn host() -> cpal::Host {
+    #[cfg(target_os = "linux")]
+    if AudioBackend::from_env() == AudioBackend::Alsa {
+        if let Ok(host) = cpal::host_from_id(cpal::HostId::Alsa) {
+            return host;
+        }
+    }
+    // With cpal's `pipewire` feature on (see Cargo.toml), the default host
+    // on Linux is PipeWire when its socket exists and connecting to it
+    // succeeds, and ALSA otherwise. Everywhere else it is the platform's
+    // one API: WASAPI, CoreAudio, or AAudio.
+    cpal::default_host()
+}
+
+/// The name of the audio system devices are opened on, such as "PipeWire"
+/// or "ALSA", so a settings screen or a log line can show which one the
+/// automatic choice made.
+pub fn audio_backend_name() -> &'static str {
+    host().id().name()
 }
 
 /// Finds an input device by its display name (as returned by
@@ -50,11 +126,39 @@ fn find_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Dev
 /// isn't implemented, but picking one up front is). `on_frame` is called
 /// from the audio callback thread with mono f32 samples -- keep it fast
 /// (push to a queue), never block or allocate heavily there.
+///
+/// On Android 9 and later the default microphone is opened through AAudio
+/// with the voice-communication preset instead, at 48 kHz (see `aaudio.rs`),
+/// so the phone's own echo canceller and noise suppressor run. The phone
+/// app only opens the microphone for calls, so that preset is always the
+/// right one there. If AAudio refuses, cpal opens it as before.
 pub fn start_capture(
+    device_name: Option<&str>,
+    on_frame: impl FnMut(&[f32]) + Send + 'static,
+) -> Result<CaptureHandle, AudioError> {
+    #[cfg(target_os = "android")]
+    let on_frame = match device_name {
+        Some(_) => on_frame,
+        None => match crate::aaudio::open_capture(on_frame) {
+            Ok(stream) => {
+                let handle = StreamHolder::AAudio { _stream: stream };
+                return Ok(CaptureHandle { _stream: handle, sample_rate: crate::aaudio::SAMPLE_RATE });
+            }
+            Err((e, on_frame)) => {
+                eprintln!("[audio] opening the microphone through cpal instead: {e}");
+                on_frame
+            }
+        },
+    };
+    start_cpal_capture(device_name, on_frame)
+}
+
+/// [`start_capture`] through cpal, which every platform supports.
+fn start_cpal_capture(
     device_name: Option<&str>,
     mut on_frame: impl FnMut(&[f32]) + Send + 'static,
 ) -> Result<CaptureHandle, AudioError> {
-    let host = cpal::default_host();
+    let host = host();
     let device = find_input_device(&host, device_name).ok_or(AudioError::NoInputDevice)?;
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate();
@@ -78,12 +182,12 @@ pub fn start_capture(
     )?;
     stream.play()?;
 
-    Ok(CaptureHandle { _stream: stream, sample_rate })
+    Ok(CaptureHandle { _stream: StreamHolder::Cpal { _stream: stream }, sample_rate })
 }
 
 /// Keeps the output stream alive; dropping it stops playback.
 pub struct PlaybackHandle {
-    _stream: cpal::Stream,
+    _stream: StreamHolder,
     pub sample_rate: u32,
 }
 
@@ -104,20 +208,53 @@ impl PlaybackSink {
     }
 }
 
+/// How many mono samples the playback queue holds: `buffer_seconds` of
+/// audio at `sample_rate`, and never fewer than 256, so that a tiny or zero
+/// buffer still leaves room for one callback's worth.
+fn ring_capacity(sample_rate: u32, buffer_seconds: f32) -> usize {
+    ((sample_rate as f32) * buffer_seconds).max(256.0) as usize
+}
+
 /// Starts playback to `device_name` (matched against [`list_output_devices`]),
 /// or the system default if `None` or not found, mixed down/up to its
 /// native channel count from a mono source. Returns a [`PlaybackSink`] to
 /// feed it decoded audio.
+///
+/// On Android 9 and later the default output is opened through AAudio with
+/// the voice-communication usage instead, at 48 kHz (see `aaudio.rs`), so it
+/// follows a phone call's earpiece and speakerphone routing. As with
+/// [`start_capture`], the phone app only plays audio this way during calls,
+/// and cpal takes over if AAudio refuses.
 pub fn start_playback(device_name: Option<&str>, buffer_seconds: f32) -> Result<(PlaybackHandle, PlaybackSink), AudioError> {
-    let host = cpal::default_host();
+    #[cfg(target_os = "android")]
+    if device_name.is_none() {
+        let ring = HeapRb::<f32>::new(ring_capacity(crate::aaudio::SAMPLE_RATE, buffer_seconds));
+        let (producer, mut consumer) = ring.split();
+        let fill = move |out: &mut [f32]| {
+            for sample in out.iter_mut() {
+                *sample = consumer.try_pop().unwrap_or(0.0);
+            }
+        };
+        match crate::aaudio::open_playback(fill) {
+            Ok(stream) => {
+                let handle = PlaybackHandle {
+                    _stream: StreamHolder::AAudio { _stream: stream },
+                    sample_rate: crate::aaudio::SAMPLE_RATE,
+                };
+                return Ok((handle, PlaybackSink { producer }));
+            }
+            Err(e) => eprintln!("[audio] opening the speaker through cpal instead: {e}"),
+        }
+    }
+
+    let host = host();
     let device = find_output_device(&host, device_name).ok_or(AudioError::NoOutputDevice)?;
     let config = device.default_output_config()?;
     let sample_rate = config.sample_rate();
     let channels = config.channels() as usize;
     let stream_config: cpal::StreamConfig = config.into();
 
-    let capacity = ((sample_rate as f32) * buffer_seconds).max(256.0) as usize;
-    let ring = HeapRb::<f32>::new(capacity);
+    let ring = HeapRb::<f32>::new(ring_capacity(sample_rate, buffer_seconds));
     let (producer, mut consumer) = ring.split();
 
     let stream = device.build_output_stream(
@@ -135,20 +272,46 @@ pub fn start_playback(device_name: Option<&str>, buffer_seconds: f32) -> Result<
     )?;
     stream.play()?;
 
-    Ok((PlaybackHandle { _stream: stream, sample_rate }, PlaybackSink { producer }))
+    Ok((PlaybackHandle { _stream: StreamHolder::Cpal { _stream: stream }, sample_rate }, PlaybackSink { producer }))
 }
 
 /// Lists input device names for a device picker UI (spec §1 "Device Hot-Swap").
+/// The names come from the same host [`start_capture`] opens on, so a name
+/// picked here is one it can find.
 pub fn list_input_devices() -> Vec<String> {
-    let host = cpal::default_host();
+    let host = host();
     host.input_devices()
         .map(|it| it.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
         .unwrap_or_default()
 }
 
+/// Lists output device names for a device picker UI, from the same host
+/// [`start_playback`] opens on.
 pub fn list_output_devices() -> Vec<String> {
-    let host = cpal::default_host();
+    let host = host();
     host.output_devices()
         .map(|it| it.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_override_only_recognises_alsa() {
+        assert_eq!(AudioBackend::parse(None), AudioBackend::Auto);
+        assert_eq!(AudioBackend::parse(Some("alsa")), AudioBackend::Alsa);
+        assert_eq!(AudioBackend::parse(Some(" ALSA\n")), AudioBackend::Alsa);
+        assert_eq!(AudioBackend::parse(Some("pipewire")), AudioBackend::Auto);
+        assert_eq!(AudioBackend::parse(Some("alas")), AudioBackend::Auto);
+        assert_eq!(AudioBackend::parse(Some("")), AudioBackend::Auto);
+    }
+
+    #[test]
+    fn ring_holds_the_requested_time_with_a_floor() {
+        assert_eq!(ring_capacity(48_000, 0.5), 24_000);
+        assert_eq!(ring_capacity(44_100, 1.0), 44_100);
+        assert_eq!(ring_capacity(48_000, 0.0), 256);
+    }
 }

@@ -440,6 +440,10 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "cpal",
+ "jni 0.21.1",
+ "libc",
+ "ndk-context",
+ "ndk-sys",
  "nnnoiseless",
  "ringbuf",
  "serde",
@@ -1990,6 +1994,7 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "pipewire",
  "web-sys",
  "windows 0.62.2",
  "windows-core 0.62.2",
