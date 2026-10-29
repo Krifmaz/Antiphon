@@ -215,6 +215,7 @@ enum Command {
     /// keyboard is touched, so it runs on a server or in a container
     /// (see docker/README.md).
     Echo {
+        /// UDP port to answer on, on every interface.
         #[arg(long, default_value_t = 5000)]
         port: u16,
         /// Seconds without a frame before a call counts as hung up and the
@@ -487,6 +488,8 @@ async fn run_echo(socket: Arc<UdpSocket>, identity: &IdentityKeyPair, idle: Dura
         println!("Call from {}", peer.remote_addr());
         announce_peer(identity, &peer.peer_identity());
 
+        // The receive loop's callback is synchronous, so frames are handed
+        // to this task through a channel and sent back from here.
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let recv_task = tokio::spawn(peer.clone().recv_loop(move |msg| {
             if let antiphon_net::Received::Audio { plaintext, .. } = msg {
@@ -494,6 +497,8 @@ async fn run_echo(socket: Arc<UdpSocket>, identity: &IdentityKeyPair, idle: Dura
             }
         }));
 
+        // Ends when no frame arrives within `idle`: the caller hung up or
+        // went away.
         let mut frames: u64 = 0;
         while let Ok(Some(frame)) = tokio::time::timeout(idle, rx.recv()).await {
             if let Err(e) = peer.send_audio(&frame).await {

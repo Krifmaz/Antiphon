@@ -1,3 +1,5 @@
+# Keeps the Docker build context small: build output, history, and the
+# spec and notes, none of which the image needs.
 target
 .git
 docs
