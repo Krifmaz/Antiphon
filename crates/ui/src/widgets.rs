@@ -122,7 +122,8 @@ pub fn round_btn<'a, M: Clone + 'a>(i: Icon, tip: &'a str, kind: Btn, on: Option
 }
 
 /// Wraps `content` in a tooltip, or returns it as is when `tip` is empty.
-pub fn with_tip<'a, M: 'a>(content: impl Into<El<'a, M>>, tip: &'a str, position: tooltip::Position) -> El<'a, M> {
+pub fn with_tip<'a, M: 'a>(content: impl Into<El<'a, M>>, tip: impl IntoFragment<'a>, position: tooltip::Position) -> El<'a, M> {
+    let tip = tip.into_fragment();
     if tip.is_empty() {
         return content.into();
     }
@@ -330,4 +331,42 @@ pub fn empty<'a, M: 'a>(i: Icon, title: &'a str, line: &'a str) -> El<'a, M> {
     .align_x(Alignment::Center)
     .max_width(360)
     .into()
+}
+
+/// Volume as people read it: a percentage where 100% is unchanged, 0% is
+/// silent and 200% is twice as loud (+6 dB). The engine works in dB; the
+/// slider works in this, so "normal" sits in the middle of the track.
+pub fn db_to_percent(db: f32) -> f32 {
+    if db <= -59.0 { 0.0 } else { (100.0 * 10f32.powf(db / 20.0)).clamp(0.0, 200.0) }
+}
+
+/// The inverse of [`db_to_percent`]; 0% becomes -60 dB, which is silence.
+pub fn percent_to_db(percent: f32) -> f32 {
+    if percent <= 0.5 { -60.0 } else { 20.0 * (percent / 100.0).log10() }
+}
+
+/// A volume slider on the percentage scale, with its value beside it.
+pub fn volume_slider<'a, M: Clone + 'a>(db: f32, width: iced_core::Length, on: impl Fn(f32) -> M + 'a) -> El<'a, M> {
+    let pct = db_to_percent(db).round();
+    iced_widget::row![
+        iced_widget::slider(0.0..=200.0, pct, move |v| on(percent_to_db(v))).step(5.0_f32).width(width).style(theme::slider_style),
+        faint(format!("{pct:.0}%")).size(12).width(40),
+    ]
+    .spacing(10)
+    .align_y(iced_core::Alignment::Center)
+    .into()
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn normal_volume_is_the_middle() {
+        assert_eq!(db_to_percent(0.0).round(), 100.0);
+        assert_eq!(percent_to_db(100.0), 0.0);
+        assert_eq!(db_to_percent(-60.0), 0.0);
+        assert!((percent_to_db(200.0) - 6.02).abs() < 0.01);
+        assert_eq!(db_to_percent(percent_to_db(50.0)).round(), 50.0);
+    }
 }

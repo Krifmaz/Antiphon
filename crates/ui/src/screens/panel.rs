@@ -65,6 +65,32 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
         _ => person.note.as_str(),
     };
     let note = text_input("Only you can see this", note_value).on_input(Msg::NoteEdit).on_submit(Msg::NoteSave).size(13).padding([8, 10]).style(theme::input);
+    let volume = column![
+        row![
+            icon(if person.muted { Icon::VolumeOff } else { Icon::Volume }, 15.0, p.muted),
+            volume_slider(person.volume_db, Length::Fill, {
+                let id = person.id.clone();
+                move |db| Msg::Do(Action::Volume(id.clone(), db))
+            }),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        row![
+            column![
+                t(format!("Hear {}", person.name.split_whitespace().next().unwrap_or("them"))).size(13.5).font(theme::semibold()),
+                faint("Only for you, and kept for every call.").size(11.5),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            switch(!person.muted, {
+                let id = person.id.clone();
+                move |on| Msg::Do(Action::MuteFor(id.clone(), !on))
+            }),
+        ]
+        .align_y(Alignment::Center),
+    ]
+    .spacing(8);
+    col = col.push(section("Volume", volume.into()));
     col = col.push(section("Note", note.into()));
 
     let mut calls = column![].spacing(8);

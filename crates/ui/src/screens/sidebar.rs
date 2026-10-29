@@ -121,12 +121,12 @@ pub fn person_row<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Ms
     ]
     .spacing(11)
     .align_y(Alignment::Center);
-    button(container(body).clip(true))
+    let row = button(container(body).clip(true))
         .width(Length::Fill)
         .padding([7, 10])
         .style(theme::btn(if selected { Btn::RowOn } else { Btn::Row }))
-        .on_press(Msg::Nav(Route::Person(person.id.clone())))
-        .into()
+        .on_press(Msg::Nav(Route::Person(person.id.clone())));
+    iced_widget::mouse_area(row).on_right_press(Msg::Menu(Some(person.id.clone()))).into()
 }
 
 fn mix_muted() -> iced_core::Color {

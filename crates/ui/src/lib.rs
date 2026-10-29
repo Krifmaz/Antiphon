@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use iced_core::animation::{Animation, Easing};
-use iced_core::Size;
+use iced_core::{Point, Size};
 
 pub use model::*;
 
@@ -140,8 +140,12 @@ pub enum Action {
     Hangup,
     Mute(bool),
     Deafen(bool),
-    /// The person on the call: volume trim, dB.
+    /// The person on the call: volume trim, dB (for someone not saved).
     PeerVolume(f32),
+    /// How loud this contact is for you, dB; remembered for every call.
+    Volume(String, f32),
+    /// Silence this contact for you only, or undo it; remembered.
+    MuteFor(String, bool),
     /// Send a message.
     Send { to: String, text: String },
     Edit { to: String, id: u64, text: String },
@@ -229,6 +233,10 @@ pub enum Msg {
     FirstName(String),
     FirstDone,
     DismissToast(u64),
+    /// Where the pointer is, so a right-click menu opens under it.
+    Cursor(Point),
+    /// Open the right-click menu for a person, or close it.
+    Menu(Option<String>),
     /// Copy text and say so.
     Copy(String, &'static str),
     /// An action with nothing for the interface itself to do.
@@ -258,6 +266,9 @@ pub struct Ui {
     first_name: String,
     toasts: Vec<Toast>,
     next_toast: u64,
+    cursor: Point,
+    /// The person whose right-click menu is open, and where it opened.
+    menu: Option<(String, Point)>,
     size: Size,
     now: Instant,
     /// When the app started, for the looping pulses.
@@ -295,6 +306,8 @@ impl Ui {
             first_name: String::new(),
             toasts: Vec::new(),
             next_toast: 1,
+            cursor: Point::ORIGIN,
+            menu: None,
             size: Size::new(1280.0, 820.0),
             now,
             epoch: now,
@@ -374,6 +387,7 @@ impl Ui {
 
     fn go(&mut self, route: Route) -> Vec<Action> {
         self.editing = None;
+        self.menu = None;
         let open = match &route {
             Route::Person(id) => vec![Action::Open(id.clone())],
             _ => Vec::new(),
@@ -400,7 +414,9 @@ impl Ui {
             }
             Msg::Nav(route) => self.go(route),
             Msg::Back => {
-                if self.dialog.is_some() {
+                if self.menu.is_some() {
+                    self.menu = None;
+                } else if self.dialog.is_some() {
                     self.set_dialog(None);
                 } else if self.editing.is_some() {
                     self.editing = None;
@@ -542,6 +558,14 @@ impl Ui {
                 }
                 vec![Action::Welcome(name)]
             }
+            Msg::Cursor(at) => {
+                self.cursor = at;
+                Vec::new()
+            }
+            Msg::Menu(who) => {
+                self.menu = who.map(|id| (id, self.cursor));
+                Vec::new()
+            }
             Msg::DismissToast(id) => {
                 self.toasts.retain(|t| t.id != id);
                 Vec::new()
@@ -552,6 +576,7 @@ impl Ui {
             }
             Msg::Do(action) => {
                 match &action {
+                    Action::Call(_) => self.menu = None,
                     Action::Remove(_) | Action::Block(_) => {
                         self.set_dialog(None);
                         self.route = Route::Home;
@@ -659,6 +684,17 @@ mod tests {
         let m = Model::default();
         ui.update(Msg::PortEdit("7a0b00".into()), &m);
         assert_eq!(ui.update(Msg::PortSave, &m), vec![Action::Port(7000)]);
+    }
+
+    #[test]
+    fn right_click_opens_a_menu_where_the_pointer_is() {
+        let mut ui = Ui::new();
+        let m = Model::default();
+        ui.update(Msg::Cursor(Point::new(40.0, 300.0)), &m);
+        ui.update(Msg::Menu(Some("ab".into())), &m);
+        assert_eq!(ui.menu, Some(("ab".into(), Point::new(40.0, 300.0))));
+        ui.update(Msg::Back, &m);
+        assert!(ui.menu.is_none(), "Escape closes the menu first");
     }
 
     #[test]

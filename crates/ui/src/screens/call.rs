@@ -3,7 +3,7 @@
 //! the call and the chat beside it are one place.
 
 use iced_core::{Alignment, Length};
-use iced_widget::{column, container, row, slider, space};
+use iced_widget::{column, container, row, space};
 
 use super::{clock, fill};
 use crate::icons::{icon, Icon};
@@ -131,14 +131,18 @@ fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
         r = r.push(round_btn(Icon::Paperclip, "Send a file", Btn::Round, Some(Msg::Do(Action::SendFile)), size));
     }
     if !compact {
-        let vol = row![
-            icon(Icon::Volume, 16.0, p.muted),
-            slider(-30.0..=12.0, c.peer_volume_db, |v| Msg::Do(Action::PeerVolume(v))).step(1.0_f32).width(110).style(theme::slider_style),
-            faint(format!("{:+.0} dB", c.peer_volume_db)).size(11.5).width(42),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-        r = r.push(container(vol).padding([8, 14]).style(theme::composer));
+        let vol = row![icon(Icon::Volume, 16.0, p.muted), volume_slider(c.peer_volume_db, Length::Fixed(110.0), {
+            let peer = c.peer.clone();
+            move |db| Msg::Do(match &peer {
+                Some(id) => Action::Volume(id.clone(), db),
+                None => Action::PeerVolume(db),
+            })
+        })]
+            .spacing(8)
+            .align_y(Alignment::Center);
+        let first = c.peer_name.split_whitespace().next().unwrap_or("Their");
+        let tip = format!("How loud {first} is for you. Only you hear the change.");
+        r = r.push(with_tip(container(vol).padding([8, 14]).style(theme::composer), tip, iced_widget::tooltip::Position::Top));
     }
     r = r.push(round_btn(Icon::PhoneOff, "Leave the call", Btn::DangerSolid, Some(Msg::Do(Action::Hangup)), size));
     let _ = fill;

@@ -736,6 +736,28 @@ impl Engine {
                     self.save();
                 }
             }
+            A::Volume(id, db) => {
+                let live = self.call.peer.as_deref() == Some(id.as_str());
+                if let Some(c) = contact_mut(&mut self.cfg, &id) {
+                    c.volume_db = db;
+                    self.save();
+                }
+                if live {
+                    *self.state.peer_volume_db.lock().unwrap() = db;
+                }
+            }
+            A::MuteFor(id, muted) => {
+                let live = self.call.peer.as_deref() == Some(id.as_str());
+                if let Some(c) = contact_mut(&mut self.cfg, &id) {
+                    c.muted = muted;
+                    let name = c.name.clone();
+                    self.save();
+                    self.toast(if muted { format!("{name} is muted for you") } else { format!("You can hear {name} again") }, ToastKind::Info);
+                }
+                if live {
+                    self.state.peer_muted.store(muted, Ordering::Relaxed);
+                }
+            }
             A::Send { to, text } => {
                 let preview = format!("You: {text}");
                 if self.call_with(&to) {
@@ -1179,6 +1201,8 @@ impl Engine {
                         connection_mode::Override::Relay => "Through a relay",
                     }
                     .into(),
+                    volume_db: c.volume_db,
+                    muted: c.muted,
                     id,
                 }
             })

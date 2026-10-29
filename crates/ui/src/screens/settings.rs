@@ -2,7 +2,7 @@
 //! the right. On a phone the sections stack in one scroll.
 
 use iced_core::{Alignment, Length};
-use iced_widget::{button, column, container, pick_list, progress_bar, row, scrollable, slider, text_input};
+use iced_widget::{button, column, container, pick_list, progress_bar, row, scrollable, text_input};
 
 use super::fill;
 use crate::icons::{icon, logo, Icon};
@@ -175,12 +175,7 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         row![device("Microphone", &s.inputs, &s.input, Action::Input), device("Speakers or headphones", &s.outputs, &s.output, Action::Output)].spacing(14),
         field(
             "Output volume",
-            row![
-                slider(-30.0..=12.0, s.output_db, |v| Msg::Do(Action::OutputVolume(v))).step(1.0_f32).style(theme::slider_style),
-                faint(format!("{:+.0} dB", s.output_db)).size(12).width(48),
-            ]
-            .spacing(12)
-            .align_y(Alignment::Center)
+            volume_slider(s.output_db, Length::Fill, |db| Msg::Do(Action::OutputVolume(db)))
         ),
     ]
     .spacing(16);

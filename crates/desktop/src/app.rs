@@ -68,6 +68,17 @@ const TOUR: &[Step] = &[
             app.go(Route::Person(Demo::robin()));
         },
     },
+    Step {
+        name: "volume",
+        size: (1280.0, 820.0),
+        setup: |app| {
+            app.go(Route::Home);
+            let _ = app.send(Msg::Cursor(iced::Point::new(150.0, 262.0)));
+            let theo = app.demo().model.people[1].id.clone();
+            app.demo().act(Action::Volume(theo.clone(), -4.4));
+            let _ = app.send(Msg::Menu(Some(theo)));
+        },
+    },
     Step { name: "settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Appearance)) },
     Step { name: "voice", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Voice)) },
     Step {
@@ -326,6 +337,7 @@ impl App {
 /// Window and keyboard events the interface cares about.
 fn on_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     match event {
+        Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::Ui(Msg::Cursor(position))),
         Event::Window(window::Event::Resized(size)) => Some(Message::Ui(Msg::Resized(size))),
         Event::Window(window::Event::Opened { size, .. }) => Some(Message::Ui(Msg::Resized(size))),
         Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(key::Named::Escape), .. }) => Some(Message::Escape),

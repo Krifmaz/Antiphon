@@ -86,6 +86,10 @@ pub struct Person {
     pub ring_rule: String,
     /// How a call to them is placed ("Automatic", "Direct only", ...).
     pub route: String,
+    /// How loud they are for you, dB (0 is unchanged). Remembered per person.
+    pub volume_db: f32,
+    /// Silenced for you only; they are not told.
+    pub muted: bool,
 }
 
 /// What a person last said about being around.

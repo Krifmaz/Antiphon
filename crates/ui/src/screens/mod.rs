@@ -6,6 +6,7 @@ mod conversation;
 mod dialogs;
 mod first_run;
 mod home;
+mod menu;
 mod panel;
 mod phone;
 mod settings;
@@ -31,6 +32,9 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         if rise > 0.001 {
             layers = layers.push(dialogs::view(ui, m, d, rise));
         }
+    }
+    if let Some(layer) = menu::layer(ui, m) {
+        layers = layers.push(layer);
     }
     if !ui.toasts.is_empty() {
         layers = layers.push(toasts(ui));

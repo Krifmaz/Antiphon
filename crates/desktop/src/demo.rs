@@ -134,6 +134,19 @@ impl Demo {
                 }
                 self.model.call.seconds = 0;
             }
+            Action::Volume(id, db) => {
+                if let Some(p) = self.model.people.iter_mut().find(|p| p.id == id) {
+                    p.volume_db = db;
+                }
+                if self.model.call.peer.as_deref() == Some(id.as_str()) {
+                    self.model.call.peer_volume_db = db;
+                }
+            }
+            Action::MuteFor(id, muted) => {
+                if let Some(p) = self.model.people.iter_mut().find(|p| p.id == id) {
+                    p.muted = muted;
+                }
+            }
             Action::Hangup => self.model.call = ui::Call::default(),
             Action::Mute(on) => self.model.call.muted = on,
             Action::Deafen(on) => self.model.call.deafened = on,
@@ -186,6 +199,8 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
         note: if id == ROBIN { "Neighbour from the old flat. Plays bass.".into() } else { String::new() },
         ring_rule: "Rings out loud".into(),
         route: "Automatic".into(),
+        volume_db: 0.0,
+        muted: false,
     }
 }
 

@@ -145,7 +145,7 @@ fn people<'a>(m: &'a Model) -> El<'a, Msg> {
             s
         })
         .on_press(Msg::Nav(Route::Person(person.id.clone())));
-        grid = grid.push(card);
+        grid = grid.push(iced_widget::mouse_area(card).on_right_press(Msg::Menu(Some(person.id.clone()))));
     }
     for _ in m.people.len()..4 {
         grid = grid.push(space().width(Length::Fill));
