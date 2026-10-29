@@ -11,27 +11,15 @@
 #   ios      -- clippy the iOS crate and build the simulator app (and a
 #               device build, signed when the IOS_* secrets exist) on
 #               macOS. Optional, like test-macos; nothing waits on it.
-#   version  -- decides whether this run releases, and as what (see Releases).
-#   release  -- for a release, build the binaries the reproducible way
+#   release  -- on a tag, build the release binaries the reproducible way
 #               (BUILDING.md), twice on each platform, and refuse to publish
 #               unless both builds hash identically. That turns "reproducible
 #               in principle" into something checked on every release.
 #   publish  -- attach every platform's binaries, the APK, and checksums to a GitHub
-#               Release. Linux, Windows and the APK must be there; macOS ships when
-#               its tests and reproducible build both passed.
-#
-# Releases, the way Encore does them:
-#   Start one: Actions -> CI -> Run workflow. Versions are plain MAJOR.MINOR.PATCH;
-#   by default the next one bumps PATCH of the newest v* release. Pick "minor" or
-#   "major", or type the version (e.g. 1.0.0). The tag v<version> is created by the
-#   release itself, so nothing has to be pushed by hand. Pushing a v* tag still works.
-#   Notes: docs/releases/<version>.md if it exists, otherwise the commits since the
-#   previous release. SHA256SUMS covers every file of the release.
-#   Hotfixes: every push to main also publishes a hotfix release, version
-#   <newest release>.<run number> (0.2.1.57), tagged hotfix-<version>, marked Latest
-#   so the download link always has the newest build. Only the newest three
-#   hotfixes are kept; a full release counts as newer than all of them, and the
-#   bump above only looks at v* releases, so it never picks up a hotfix number.
+#               Release for the tag. Linux, Windows and the APK must be there; macOS
+#               ships when its tests and reproducible build both passed. A pre-release when the tag says so
+#               (v0.1.0-rc1), a release otherwise. Also reachable by hand
+#               through workflow_dispatch, which creates the tag too.
 name: CI
 
 on:
@@ -39,18 +27,15 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
-  # Actions -> CI -> Run workflow: a release from this commit (see Releases).
+  # Manual release from any branch: builds exactly as a tag push would,
+  # and the publish job creates the tag at this commit along with the
+  # Release. For when a tag cannot be pushed directly.
   workflow_dispatch:
     inputs:
-      bump:
-        description: "Which number to bump for the next version"
-        type: choice
-        options: [patch, minor, major]
-        default: patch
-      version:
-        description: "Or type the version to release (MAJOR.MINOR.PATCH); overrides bump"
+      tag:
+        description: "Release tag to create (e.g. v0.1.0-rc1)"
+        required: true
         type: string
-        default: ""
 
 permissions:
   contents: write
@@ -62,52 +47,6 @@ env:
   RUST_VERSION: "1.97.0"
 
 jobs:
-  version:
-    name: version
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.v.outputs.tag }}
-      version: ${{ steps.v.outputs.version }}
-      channel: ${{ steps.v.outputs.channel }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: v
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          BUMP: ${{ inputs.bump }}
-          TYPED: ${{ inputs.version }}
-        run: |
-          # The newest full release, v<MAJOR>.<MINOR>.<PATCH> (a pre-release suffix is ignored).
-          LAST=$(gh release list --limit 200 --json tagName -q '.[].tagName' 2>/dev/null \
-            | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\(-.*\)\{0,1\}$/\1/p' | sort -V | tail -1)
-          [ -n "$LAST" ] || LAST=$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' Cargo.toml 2>/dev/null | head -1)
-          [ -n "$LAST" ] || LAST=0.1.0
-          CHANNEL=""; V=""
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            CHANNEL=stable
-            if [ -n "$TYPED" ]; then
-              V="${TYPED#v}"
-              echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::'$TYPED' is not MAJOR.MINOR.PATCH"; exit 1; }
-            else
-              IFS=. read -r MA MI PA <<< "$LAST"
-              case "$BUMP" in
-                major) V="$((MA + 1)).0.0" ;;
-                minor) V="$MA.$((MI + 1)).0" ;;
-                *) V="$MA.$MI.$((PA + 1))" ;;
-              esac
-            fi
-            TAG="v$V"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            CHANNEL=stable; TAG="$GITHUB_REF_NAME"; V="${TAG#v}"
-          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
-            CHANNEL=hotfix; V="$LAST.$GITHUB_RUN_NUMBER"; TAG="hotfix-$V"
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG:-}" >> "$GITHUB_OUTPUT"
-          echo "Release: ${TAG:-none} (${CHANNEL:-not a release})" >> "$GITHUB_STEP_SUMMARY"
-
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -267,8 +206,9 @@ jobs:
     # Runs once Linux and Windows pass, whatever happened on macOS; the
     # macOS leg checks its own tests below.
     if: >-
-      !cancelled() && needs.test.result == 'success' && needs.version.outputs.tag != ''
-    needs: [version, test, test-macos]
+      !cancelled() && needs.test.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    needs: [test, test-macos]
     runs-on: ${{ matrix.os }}
     # As in test: the macOS build never holds back the other platforms.
     continue-on-error: ${{ matrix.os == 'macos-latest' }}
@@ -358,39 +298,13 @@ jobs:
     # A failed APK stops it.
     if: >-
       !cancelled() && needs.release.result != 'skipped' &&
-      needs.android.result == 'success' && needs.version.outputs.tag != ''
+      needs.android.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     env:
-      TAG: ${{ needs.version.outputs.tag }}
-      VERSION: ${{ needs.version.outputs.version }}
-      CHANNEL: ${{ needs.version.outputs.channel }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    needs: [version, release, android]
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    needs: [release, android]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Release notes
-        run: |
-          if [ -f "docs/releases/$VERSION.md" ]; then
-            cp "docs/releases/$VERSION.md" notes.md
-          else
-            # The commits since the previous full release (or hotfix, for a hotfix).
-            if [ "$CHANNEL" = hotfix ]; then PATTERN='^(v[0-9]+\.[0-9]+\.[0-9]+|hotfix-.*)$'; else PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'; fi
-            PREV=$(gh release list --limit 200 --json tagName,createdAt -q 'sort_by(.createdAt) | reverse | .[].tagName' | grep -E "$PATTERN" | grep -vx "$TAG" | head -1 || true)
-            {
-              if [ "$CHANNEL" = hotfix ]; then echo "The newest build of main. Hotfixes are kept three at a time; the newest full release is under Releases."; echo; fi
-              echo "## Changes"
-              echo
-              if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
-                git log --no-merges --format='- %s' "$PREV..HEAD"
-              else
-                git log --no-merges --format='- %s' -30
-              fi
-            } > notes.md
-          fi
-          cat notes.md
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -418,18 +332,11 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
-          name: ${{ env.CHANNEL == 'hotfix' && format('Stoop {0} (hotfix)', env.VERSION) || format('Stoop {0}', env.VERSION) }}
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ env.CHANNEL != 'hotfix' && contains(env.VERSION, '-') }}
-          make_latest: "true"
-          body_path: notes.md
+          prerelease: ${{ contains(env.TAG, '-') }}
+          generate_release_notes: true
           files: |
             artifacts/*.zip
             artifacts/*.tar.gz
             artifacts/*.apk
             artifacts/SHA256SUMS.txt
-      - name: Keep only the newest three hotfixes
-        if: env.CHANNEL == 'hotfix'
-        run: |
-          OLD=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^hotfix-\([0-9.]*\)$/\1/p' | sort -rV | tail -n +4)
-          for v in $OLD; do echo "deleting hotfix-$v"; gh release delete "hotfix-$v" --yes --cleanup-tag || true; done
