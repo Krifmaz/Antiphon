@@ -161,6 +161,20 @@ impl Spaces {
                     Ok(((), outs, vec![Event::Changed]))
                 })?;
             }
+            A::ManageSpace { community, change: ui::SpaceChange::Report { channel, messages, reason } } => {
+                let id = key(&community)?;
+                // The excerpts are what this device's copy of the channel says.
+                let log = history::load(&store.dir, &community::channel_log(&id, channel), &store.key);
+                let excerpts: Vec<community::Excerpt> = messages
+                    .iter()
+                    .filter_map(|mid| log.iter().find(|m| m.id == *mid && !m.deleted))
+                    .filter_map(|m| {
+                        let author = connection_mode::decode_hex32(m.sender.as_deref()?)?;
+                        Some(community::Excerpt { id: m.id, author: Key(author), text: m.text.clone(), at_secs: m.at_secs })
+                    })
+                    .collect();
+                store.with_space(&id, |space, _| Ok(((), space.report(channel, &reason, excerpts)?, Vec::new())))?;
+            }
             A::ManageSpace { community, change } => {
                 let id = key(&community)?;
                 store.with_space(&id, |space, identity| {
@@ -299,6 +313,26 @@ fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyP
                 }
             })
         }
+        C::SlowMode(secs) => space.update(identity, |m| m.slow_mode_secs = secs.min(antiphon_crypto::community::MAX_SLOW_MODE_SECS)),
+        C::WithdrawInvite(who) => {
+            let who = member_key(&who)?;
+            space.withdraw_invite(who.0);
+            Ok(Vec::new())
+        }
+        C::DismissReport(id) => {
+            space.dismiss_report(id);
+            Ok(Vec::new())
+        }
+        C::RemoveMember { member, ban } => {
+            let who = member_key(&member)?;
+            if ban {
+                space.ban(identity, who.0, "")
+            } else {
+                space.kick(identity, who.0)
+            }
+        }
+        // Built from history before the space is opened (see `act`).
+        C::Report { .. } => Ok(Vec::new()),
         C::MemberRole { member, role } => {
             let who = member_key(&member)?;
             space.update(identity, |m| {
@@ -431,6 +465,42 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
         roles,
         can_edit_roles: joined && !group && m.is_owner(&me),
         can_assign_roles: assigns,
+        slow_mode_secs: m.slow_mode_secs,
+        can_set_slow_mode: joined && !group && m.can(&me, perm::MANAGE_COMMUNITY, None),
+        moderator: joined && community::is_moderator(m, &me),
+        reports: s
+            .reports()
+            .iter()
+            .map(|r| ui::Report {
+                id: r.id,
+                from: s.name_of(&r.from.0),
+                channel: m.channel(r.channel).map(|c| c.name.clone()).unwrap_or_default(),
+                reason: r.reason.clone(),
+                when: short_time(r.at_secs),
+                excerpts: r
+                    .excerpts
+                    .iter()
+                    .map(|e| {
+                        let a = e.author.0;
+                        ui::Excerpt {
+                            id: e.id,
+                            author: s.name_of(&a),
+                            author_id: delivery::hex(&a),
+                            text: e.text.clone(),
+                            verified: store.matches_history(&s.id(), r.channel, e),
+                            can_remove: m.can(&me, perm::MANAGE_MESSAGES, Some(&a)),
+                            can_kick: m.is_member(&a) && m.can(&me, perm::KICK, Some(&a)),
+                            can_ban: m.is_member(&a) && m.can(&me, perm::BAN, Some(&a)),
+                        }
+                    })
+                    .collect(),
+            })
+            .collect(),
+        pending_invites: s
+            .pending_invites()
+            .into_iter()
+            .map(|p| ui::PendingInvite { id: delivery::hex(&p.key), name: p.name, when: short_time(p.at_secs) })
+            .collect(),
     }
 }
 

@@ -81,6 +81,12 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
         }
         Dialog::ChannelSettings(id, channel) => modal("Who can read it", super::community::channel_settings(m, id, *channel), None, 480.0, close, rise),
         Dialog::Roles(id) => modal("Roles", super::community::roles(ui, m, id), None, 560.0, close, rise),
+        Dialog::Moderation(id) => modal("Moderation", super::community::moderation(m, id), None, 600.0, close, rise),
+        Dialog::Report(id, channel, _) => {
+            let send = (!ui.report_pick.is_empty()).then(|| Msg::ReportSend(id.clone(), *channel));
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Report", Btn::DangerSolid, send)].spacing(8);
+            modal("Report to the moderators", super::community::report(ui, m, id, *channel), Some(footer.into()), 520.0, close, rise)
+        }
         Dialog::ConfirmLeave(id) => {
             let name = m.communities.iter().find(|c| &c.id == id).map(|c| c.name.as_str()).unwrap_or("it");
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Leave", Btn::DangerSolid, Some(Msg::Do(Action::LeaveSpace(id.clone()))))].spacing(8);

@@ -144,6 +144,11 @@ pub enum Dialog {
     ChannelSettings(String, u32),
     /// This community's roles and who holds which (by id).
     Roles(String),
+    /// Slow mode, reports and open invitations in this community (by id).
+    Moderation(String),
+    /// Report a message (community id, channel, message id) and any others
+    /// picked with it.
+    Report(String, u32, u64),
     /// Are you sure: leave this group chat or community (by id).
     ConfirmLeave(String),
     /// Which messages notify you in this group chat or community (by id).
@@ -572,6 +577,28 @@ pub enum SpaceChange {
         /// The role's place.
         role: usize,
     },
+    /// Set slow mode: the fewest seconds between one member's posts, 0 off.
+    SlowMode(u32),
+    /// Withdraw the invitation you sent to someone (their id, hex).
+    WithdrawInvite(String),
+    /// Take a report off the list.
+    DismissReport(u64),
+    /// Remove a member (their id, hex), and with `ban` keep them out.
+    RemoveMember {
+        /// The member's id (hex).
+        member: String,
+        /// Ban rather than only remove.
+        ban: bool,
+    },
+    /// Report messages in a channel to the moderators.
+    Report {
+        /// The channel.
+        channel: u32,
+        /// The messages picked.
+        messages: Vec<u64>,
+        /// Why.
+        reason: String,
+    },
 }
 
 /// Everything that can happen in the interface.
@@ -678,6 +705,12 @@ pub enum Msg {
     ToggleQueue,
     /// Put `:name:` (a custom emoji) at the end of the composer's text.
     InsertEmoji(String),
+    /// Pick or unpick a message to report with the others.
+    ReportPick(u64),
+    /// The report's reason box changed.
+    ReportReason(String),
+    /// Send the report being written (community id, channel).
+    ReportSend(String, u32),
     /// The new role's name box changed.
     RoleName(String),
     /// Add the role named in the box to this community (by id).
@@ -781,6 +814,10 @@ pub struct Ui {
     queue_open: bool,
     /// The new role's name box.
     role_name: String,
+    /// The messages picked to report.
+    report_pick: Vec<u64>,
+    /// Why they are being reported.
+    report_reason: String,
     /// Toasts on screen, oldest first.
     toasts: Vec<Toast>,
     /// The id the next toast gets.
@@ -856,6 +893,8 @@ impl Ui {
             channel_name: String::new(),
             queue_open: false,
             role_name: String::new(),
+            report_pick: Vec::new(),
+            report_reason: String::new(),
             toasts: Vec::new(),
             next_toast: 1,
             cursor: Point::ORIGIN,
@@ -1033,6 +1072,10 @@ impl Ui {
             Msg::Dialog(d) => {
                 if d == Some(Dialog::AddPerson) {
                     self.add_error.clear();
+                }
+                if let Some(Dialog::Report(_, _, id)) = &d {
+                    self.report_pick = vec![*id];
+                    self.report_reason.clear();
                 }
                 self.set_dialog(d);
                 Vec::new()
@@ -1290,6 +1333,28 @@ impl Ui {
             Msg::ToggleQueue => {
                 self.queue_open = !self.queue_open;
                 Vec::new()
+            }
+            Msg::ReportPick(id) => {
+                if let Some(at) = self.report_pick.iter().position(|x| *x == id) {
+                    self.report_pick.remove(at);
+                } else if self.report_pick.len() < 10 {
+                    self.report_pick.push(id);
+                }
+                Vec::new()
+            }
+            Msg::ReportReason(s) => {
+                self.report_reason = s.chars().take(500).collect();
+                Vec::new()
+            }
+            Msg::ReportSend(community, channel) => {
+                if self.report_pick.is_empty() {
+                    return Vec::new();
+                }
+                let messages = std::mem::take(&mut self.report_pick);
+                let reason = std::mem::take(&mut self.report_reason).trim().to_string();
+                self.set_dialog(None);
+                self.toast("Reported to the moderators", ToastKind::Ok);
+                vec![Action::ManageSpace { community, change: SpaceChange::Report { channel, messages, reason } }]
             }
             Msg::RoleName(s) => {
                 self.role_name = s.chars().take(40).collect();

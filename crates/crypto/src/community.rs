@@ -227,6 +227,19 @@ pub struct Manifest {
     /// without any reads exactly as one from before they existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emoji: Vec<Emoji>,
+    /// Slow mode: the fewest seconds between two posts from one member;
+    /// 0 is off. Every client holds its own posts back and drops others'
+    /// that come too soon (`antiphon_client::community`). Members who may
+    /// remove messages aren't held to it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub slow_mode_secs: u32,
+}
+
+/// The longest slow mode a community can set: six hours.
+pub const MAX_SLOW_MODE_SECS: u32 = 6 * 60 * 60;
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Why a manifest, or a change to one, was refused.
@@ -343,6 +356,7 @@ impl Manifest {
             nodes: Nodes::default(),
             server_hosted_files: false,
             emoji: Vec::new(),
+            slow_mode_secs: 0,
         }
     }
 
@@ -494,6 +508,9 @@ impl Manifest {
         if self.channels.iter().any(|c| c.readers.as_ref().is_some_and(|r| r.len() > self.max_members())) {
             return bad("a private channel lists too many readers");
         }
+        if self.slow_mode_secs > MAX_SLOW_MODE_SECS {
+            return bad("slow mode is too slow");
+        }
         Ok(())
     }
 }
@@ -542,7 +559,12 @@ pub fn check_transition(old: &Manifest, old_signed: &SignedManifest, new: &Signe
     }
     let need = |p: u32, what: &'static str| if old.perms(s) & p == p { Ok(()) } else { Err(Denied::NotAllowed(what)) };
 
-    if n.name != old.name || n.description != old.description || n.nodes != old.nodes || n.server_hosted_files != old.server_hosted_files {
+    if n.name != old.name
+        || n.description != old.description
+        || n.nodes != old.nodes
+        || n.server_hosted_files != old.server_hosted_files
+        || n.slow_mode_secs != old.slow_mode_secs
+    {
         need(perm::MANAGE_COMMUNITY, "change the community's settings")?;
     }
     if n.emoji != old.emoji {
@@ -702,6 +724,18 @@ mod tests {
         let mine = w.m.member(&owner.public().identity_key).unwrap().role as usize;
         w.apply(&owner, |m| m.roles[mine].name = "Founders".into()).unwrap();
         w.apply(&owner, |m| m.roles[0].perms &= !perm::BAN).unwrap();
+    }
+
+    #[test]
+    fn slow_mode_is_a_community_setting() {
+        let mut w = community();
+        let moder = IdentityKeyPair::generate();
+        let owner = std::mem::replace(&mut w.owner, IdentityKeyPair::generate());
+        w.apply(&owner, |m| add(m, &moder, 1)).unwrap();
+        assert!(w.apply(&moder, |m| m.slow_mode_secs = 30).is_err(), "a moderator can't change the community's settings");
+        w.apply(&owner, |m| m.slow_mode_secs = 30).unwrap();
+        assert_eq!(w.m.slow_mode_secs, 30);
+        assert!(w.apply(&owner, |m| m.slow_mode_secs = MAX_SLOW_MODE_SECS + 1).is_err());
     }
 
     fn add(m: &mut Manifest, who: &IdentityKeyPair, role: u16) {

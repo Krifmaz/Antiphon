@@ -586,6 +586,17 @@ pub struct Community {
     pub can_edit_roles: bool,
     /// You may give members roles below your own.
     pub can_assign_roles: bool,
+    /// Slow mode: the fewest seconds between one member's posts; 0 is off.
+    pub slow_mode_secs: u32,
+    /// You may turn slow mode on or off (the community's settings).
+    pub can_set_slow_mode: bool,
+    /// You can act on reports: an owner, or allowed to remove messages or
+    /// people.
+    pub moderator: bool,
+    /// Reports sent to you as a moderator, oldest first.
+    pub reports: Vec<Report>,
+    /// Invitations you sent that haven't been answered.
+    pub pending_invites: Vec<PendingInvite>,
     /// Which of its messages notify you.
     pub notify: Notify,
     /// Its custom emoji's names, written `:name:`; their pictures are
@@ -593,6 +604,56 @@ pub struct Community {
     pub emoji: Vec<String>,
     /// You may change its settings, its emoji among them.
     pub can_manage: bool,
+}
+
+/// Messages a member reported to the moderators.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Report {
+    /// Its id, for dismissing it.
+    pub id: u64,
+    /// Who reported it.
+    pub from: String,
+    /// Which channel, without the hash.
+    pub channel: String,
+    /// What they said about it.
+    pub reason: String,
+    /// When ("2 h ago").
+    pub when: String,
+    /// The messages, as the reporter's app read them.
+    pub excerpts: Vec<Excerpt>,
+}
+
+/// One reported message.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Excerpt {
+    /// The message's id.
+    pub id: u64,
+    /// Who wrote it.
+    pub author: String,
+    /// Their member id (hex).
+    pub author_id: String,
+    /// What it said, by the reporter's copy.
+    pub text: String,
+    /// Your own copy says the same (`Some(true)`), something else
+    /// (`Some(false)`), or you don't have it (`None`).
+    pub verified: Option<bool>,
+    /// You may take it down.
+    pub can_remove: bool,
+    /// You may remove its author from the community.
+    pub can_kick: bool,
+    /// You may ban its author.
+    pub can_ban: bool,
+}
+
+/// An invitation you sent that is still open.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingInvite {
+    /// Their id (hex).
+    pub id: String,
+    /// What you call them.
+    pub name: String,
+    /// When it was sent ("3 d ago").
+    pub when: String,
 }
 
 /// One role of a community, as the roles dialog shows it.

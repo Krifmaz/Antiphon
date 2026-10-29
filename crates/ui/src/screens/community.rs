@@ -193,6 +193,11 @@ fn header<'a>(c: &'a Community, ch: Option<&'a Channel>, phone: bool) -> El<'a, 
         r = r.push(avatar(&c.name, &c.id, 32.0));
     }
     r = r.push(column![title, faint(clip(c.waiting.as_deref().unwrap_or(&sub), 60)).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill));
+    if c.moderator || c.can_set_slow_mode || !c.pending_invites.is_empty() {
+        let tip = if c.reports.is_empty() { "Moderation" } else { "Moderation: reports waiting" };
+        let kind = if c.reports.is_empty() { Btn::Icon } else { Btn::RowOn };
+        r = r.push(icon_btn_kind(Icon::ShieldCheck, tip, kind, Some(Msg::Dialog(Some(Dialog::Moderation(c.id.clone()))))));
+    }
     let invite = c.can_invite.then(|| Msg::Dialog(Some(Dialog::InviteToSpace(c.id.clone()))));
     if phone {
         r = r.push(icon_btn(Icon::UserPlus, "Invite", invite));
@@ -319,7 +324,7 @@ fn messages<'a>(ui: &'a Ui, m: &'a Model, c: &'a Community, ch: Option<&'a Chann
         if first && prev.is_some() {
             col = col.push(space().height(8));
         }
-        col = col.push(message(ui, c, line, first, phone));
+        col = col.push(message(ui, c, channel, line, first, phone));
         prev = Some(line);
     }
     if lines.is_empty() {
@@ -348,7 +353,7 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 
 /// One message, everyone's on the left: the author's avatar and name on
 /// the first of a run, then the words. Actions appear under the pointer.
-fn message<'a>(ui: &'a Ui, c: &'a Community, line: &'a Line, first: bool, phone: bool) -> El<'a, Msg> {
+fn message<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first: bool, phone: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
     // Read out as "who: what", in the order the channel runs.
@@ -389,6 +394,9 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, line: &'a Line, first: bool, phone:
     crate::a11y::pause(true);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
     tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
+    if !line.mine && c.waiting.is_none() && !c.group {
+        tools = tools.push(icon_btn(Icon::Info, "Report to the moderators", Some(Msg::Dialog(Some(Dialog::Report(c.id.clone(), channel, line.id))))));
+    }
     if line.mine && c.waiting.is_none() {
         tools = tools.push(icon_btn(Icon::Edit, "Edit", Some(Msg::EditStart(line.id, line.text.clone()))));
         tools = tools.push(icon_btn(
@@ -719,4 +727,106 @@ pub fn roles<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
     }
     col = col.push(people);
     scrollable(col).height(Length::Fixed(520.0)).style(theme::scroll).into()
+}
+
+/// Report messages: the one picked and any others of the channel's
+/// latest, with why. Only the moderators get it.
+pub fn report<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, Msg> {
+    let lines: &[Line] = m.channel.as_ref().filter(|v| v.community == id && v.channel == channel).map(|v| v.lines.as_slice()).unwrap_or(&[]);
+    let mut col = column![muted("The messages you tick go, as your app shows them, to the people here who can remove messages or members. Nobody else sees the report.").size(13)].spacing(10);
+    let mut list = column![].spacing(4);
+    for line in lines.iter().rev().filter(|l| !l.deleted && !l.mine).take(20).collect::<Vec<_>>().into_iter().rev() {
+        let on = ui.report_pick.contains(&line.id);
+        list = list.push(
+            row![
+                avatar(&line.author, &line.author_id, 24.0),
+                column![t(line.author.as_str()).size(12.5).font(theme::semibold()), t(clip(&line.text, 120)).size(13).wrapping(Wrapping::WordOrGlyph)].spacing(1).width(Length::Fill),
+                switch(&format!("Report {}'s message", line.author), on, { let id = line.id; move |_| Msg::ReportPick(id) }),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    col = col.push(scrollable(list).height(Length::Fixed(280.0)).style(theme::scroll));
+    col = col.push(field(
+        "Why (optional)",
+        input("Why you're reporting it", "stoop-report-reason", "Harassing another member", &ui.report_reason).on_input(Msg::ReportReason).padding([8, 10]).size(13.5),
+    ));
+    col.into()
+}
+
+/// Slow mode, the reports waiting, and the invitations you sent.
+pub fn moderation<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let mut col = column![].spacing(14);
+    if c.can_set_slow_mode {
+        const STEPS: [(&str, u32); 6] = [("Off", 0), ("10 s", 10), ("30 s", 30), ("1 min", 60), ("5 min", 300), ("15 min", 900)];
+        let on = STEPS.iter().position(|(_, s)| *s == c.slow_mode_secs).unwrap_or(0);
+        let picks = STEPS.iter().map(|(label, secs)| (*label, change(SpaceChange::SlowMode(*secs)))).collect();
+        col = col.push(column![
+            setting("Slow mode", Some("How long each member waits between posts. Everyone's app holds to it, and drops posts that come sooner. People who can remove messages aren't held to it."), space().width(0)),
+            tabs(picks, on),
+        ]
+        .spacing(8));
+    } else if c.slow_mode_secs > 0 {
+        col = col.push(faint(format!("Slow mode is on: one post every {} seconds.", c.slow_mode_secs)).size(12.5));
+    }
+    if c.moderator {
+        let mut reports = column![label("Reports")].spacing(8);
+        if c.reports.is_empty() {
+            reports = reports.push(faint("None waiting.").size(12.5));
+        }
+        for r in &c.reports {
+            let head = row![
+                column![
+                    t(format!("{} reported #{}", r.from, r.channel)).size(13.5).font(theme::semibold()),
+                    faint(if r.reason.is_empty() { r.when.clone() } else { format!("\u{201c}{}\u{201d} · {}", r.reason, r.when) }).size(12),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                btn_sm("Dismiss", Btn::Ghost, Some(change(SpaceChange::DismissReport(r.id)))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            let mut body = column![head].spacing(8);
+            for e in &r.excerpts {
+                let check = match e.verified {
+                    Some(true) => badge("Matches your copy", theme::Badge::Ok),
+                    Some(false) => badge("Differs from your copy", theme::Badge::Warn),
+                    None => badge("Not in your copy", theme::Badge::Plain),
+                };
+                let mut acts = row![check, fill()].spacing(6).align_y(Alignment::Center);
+                if e.can_remove {
+                    acts = acts.push(btn_sm("Remove message", Btn::Ghost, Some(Msg::Do(Action::DeletePost { community: c.id.clone(), id: e.id, author: e.author_id.clone() }))));
+                }
+                if e.can_kick {
+                    acts = acts.push(btn_sm("Remove member", Btn::Ghost, Some(change(SpaceChange::RemoveMember { member: e.author_id.clone(), ban: false }))));
+                }
+                if e.can_ban {
+                    acts = acts.push(btn_sm("Ban", Btn::Danger, Some(change(SpaceChange::RemoveMember { member: e.author_id.clone(), ban: true }))));
+                }
+                body = body.push(
+                    container(column![row![t(e.author.as_str()).size(12.5).font(theme::semibold())], t(e.text.as_str()).size(13).wrapping(Wrapping::WordOrGlyph), acts].spacing(4))
+                        .padding([8, 10])
+                        .width(Length::Fill)
+                        .style(theme::inset),
+                );
+            }
+            reports = reports.push(card(body).padding([10, 12]));
+        }
+        col = col.push(reports);
+    }
+    if !c.pending_invites.is_empty() {
+        let mut invites = column![label("Invitations you sent"), faint("Withdrawing one means their answer is refused. Unanswered ones run out after two weeks.").size(12)].spacing(6);
+        for p in &c.pending_invites {
+            invites = invites.push(
+                row![avatar(&p.name, &p.id, 26.0), t(p.name.as_str()).size(13).font(theme::semibold()).width(Length::Fill), faint(p.when.as_str()).size(12), btn_sm("Withdraw", Btn::Ghost, Some(change(SpaceChange::WithdrawInvite(p.id.clone()))))]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(invites);
+    }
+    scrollable(col).height(Length::Shrink).style(theme::scroll).into()
 }
