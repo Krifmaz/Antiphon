@@ -195,7 +195,7 @@ fn main() -> anyhow::Result<()> {
         });
     }
     delivery::set_hosting(&app_state.runtime, loaded.hold_mail_for_devices, loaded.hold_mail_port);
-    sharing::set_seeding(&app_state.runtime, loaded.seeding, loaded.seed_port);
+    sharing::set_seeding(&app_state.runtime, sharing::seeds_from_here(&loaded), loaded.seed_port);
     apply_vpn(&app_state.runtime, &loaded);
     discovery::start(&app_state.runtime, app_state.identity.clone());
 
@@ -2919,7 +2919,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
         main_window.on_sharing_settings_changed(move || {
             let Some(app) = window_weak.upgrade() else { return };
             let config = current_config(&app);
-            sharing::set_seeding(&state.runtime, config.seeding, config.seed_port);
+            sharing::set_seeding(&state.runtime, sharing::seeds_from_here(&config), config.seed_port);
             config::save(&config);
         });
     }
@@ -4927,6 +4927,7 @@ fn apply_routes_to_ui(app: &MainWindow, config: &config::AppConfig) {
     app.set_captions_enabled(config.captions_enabled);
     app.set_captions_own_voice(config.captions_own_voice);
     app.set_seeding(config.seeding);
+    app.set_anonymous_seeding(config.anonymous_seeding);
     app.set_seed_scope(config.seed_scope);
     app.set_seed_port(config.seed_port as i32);
     app.set_pin_nodes(config.pin_nodes.join(", ").into());
@@ -5008,6 +5009,7 @@ fn apply_shared_files_to_ui(app: &MainWindow, config: &config::AppConfig) {
         })
         .collect();
     app.set_shared_files(ModelRc::new(VecModel::from(entries)));
+    app.set_shared_files_notice(sharing::notice().into());
 }
 
 /// Saves a changed route list: bumps its sequence so contacts take the
@@ -5894,6 +5896,7 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         captions_enabled: app.get_captions_enabled(),
         captions_own_voice: app.get_captions_own_voice(),
         seeding: app.get_seeding(),
+        anonymous_seeding: app.get_anonymous_seeding(),
         seed_scope: app.get_seed_scope().clamp(0, 2),
         seed_port: previous.seed_port,
         pin_nodes: app
