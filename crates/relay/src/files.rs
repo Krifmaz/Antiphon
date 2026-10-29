@@ -36,6 +36,10 @@ pub enum Scope {
     Conversation,
     /// Those people, and only if they prove they're a saved contact.
     Contacts,
+    /// Those people, and only if they prove they're a member of this
+    /// community (by its id), checked against the holder's copy of its
+    /// signed member list at that moment -- so a ban stops serving them.
+    Community([u8; 32]),
     /// Anyone who knows its id. They still can't read it.
     Anyone,
 }
@@ -336,6 +340,10 @@ pub struct Usage {
 /// Is this identity someone the holder saved as a contact?
 pub type ContactCheck = Arc<dyn Fn(&[u8; 32]) -> bool + Send + Sync>;
 
+/// Is this identity a member of this community (by id), as far as the
+/// holder's copy of its signed manifest says?
+pub type MemberCheck = Arc<dyn Fn(&[u8; 32], &[u8; 32]) -> bool + Send + Sync>;
+
 /// How long a contact's claim lets their address download a file.
 pub const CLAIM_LIFETIME: Duration = Duration::from_secs(600);
 
@@ -350,6 +358,7 @@ pub struct FileHost {
     pub store: FileStore,
     pub policy: HostPolicy,
     contacts: ContactCheck,
+    members: MemberCheck,
     claims: HashMap<(SocketAddr, FileId), Instant>,
     pending: HashMap<FileId, Pending>,
     usage: Usage,
@@ -357,7 +366,22 @@ pub struct FileHost {
 
 impl FileHost {
     pub fn new(store: FileStore, policy: HostPolicy, contacts: ContactCheck) -> Self {
-        Self { store, policy, contacts, claims: HashMap::new(), pending: HashMap::new(), usage: Usage::default() }
+        Self {
+            store,
+            policy,
+            contacts,
+            members: Arc::new(|_, _| false),
+            claims: HashMap::new(),
+            pending: HashMap::new(),
+            usage: Usage::default(),
+        }
+    }
+
+    /// Serves "this community" scope (spec §5) with `members` as the
+    /// membership check. Without it nobody passes one.
+    pub fn with_members(mut self, members: MemberCheck) -> Self {
+        self.members = members;
+        self
     }
 
     pub fn usage(&self) -> Usage {
@@ -394,7 +418,7 @@ impl FileHost {
         match meta.scope {
             Scope::Anyone => Ok(()),
             Scope::Conversation if token_ok => Ok(()),
-            Scope::Contacts if token_ok => {
+            Scope::Contacts | Scope::Community(_) if token_ok => {
                 let claimed = self.claims.get(&(from, *id)).is_some_and(|t| now.duration_since(*t) < CLAIM_LIFETIME);
                 if claimed {
                     Ok(())
@@ -446,9 +470,13 @@ impl FileHost {
                 if at_secs.abs_diff(now_secs) > CLAIM_LIFETIME.as_secs() {
                     return refuse(Refusal::NotAContact);
                 }
-                if antiphon_crypto::verify_signature(&identity, &claim_bytes(&file, at_secs), &signature).is_err()
-                    || !(self.contacts)(&identity)
-                {
+                // The same claim proves either; which group they must be in
+                // is the file's scope, not anything the asker says.
+                let belongs = match self.store.meta(&file).map(|m| m.scope) {
+                    Some(Scope::Community(community)) => (self.members)(&community, &identity),
+                    _ => (self.contacts)(&identity),
+                };
+                if antiphon_crypto::verify_signature(&identity, &claim_bytes(&file, at_secs), &signature).is_err() || !belongs {
                     return refuse(Refusal::NotAContact);
                 }
                 self.claims.retain(|_, t| now.duration_since(*t) < CLAIM_LIFETIME);
@@ -573,6 +601,29 @@ mod tests {
         assert_eq!(ask(&mut h, Message::Info { file: id, token }, 0), Message::InfoReply { size: 3000, chunks: 3 });
         assert_eq!(ask(&mut h, Message::Chunk { file: id, token, index: 2 }, 0), Message::ChunkData { index: 2, data: chunks[2].clone() });
         assert_eq!(ask(&mut h, Message::Chunk { file: id, token: [0; 32], index: 2 }, 0), Message::Refused(Refusal::Forbidden));
+    }
+
+    #[test]
+    fn community_scope_needs_a_signed_claim_from_a_member_of_that_community() {
+        let member = IdentityKeyPair::generate();
+        let contact = IdentityKeyPair::generate();
+        let (member_key, contact_key) = (member.public().identity_key, contact.public().identity_key);
+        let choir = [7u8; 32];
+        let mut h = host(HostPolicy::default(), Arc::new(move |k| *k == contact_key))
+            .with_members(Arc::new(move |c, k| *c == choir && *k == member_key));
+        let (id, token, _) = seed(&mut h, b"rehearsal notes", Scope::Community(choir));
+        let (other, other_token, _) = seed(&mut h, b"another community's", Scope::Community([8; 32]));
+        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 100), Message::Refused(Refusal::NotAContact));
+        // Being a contact is not being a member.
+        let claim = |who: &IdentityKeyPair, file| Message::Claim { file, identity: who.public().identity_key, at_secs: 100, signature: who.sign(&claim_bytes(&file, 100)) };
+        assert_eq!(ask(&mut h, claim(&contact, id), 100), Message::Refused(Refusal::NotAContact));
+        // Nor is a member of one community a member of another.
+        assert_eq!(ask(&mut h, claim(&member, other), 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, Message::Info { file: other, token: other_token }, 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, claim(&member, id), 100), Message::ClaimOk);
+        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 100), Message::InfoReply { size: 15, chunks: 1 });
+        // The read token is still needed on top.
+        assert_eq!(ask(&mut h, Message::Info { file: id, token: [0; 32] }, 100), Message::Refused(Refusal::Forbidden));
     }
 
     #[test]

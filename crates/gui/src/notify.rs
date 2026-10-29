@@ -130,6 +130,19 @@ pub fn decide(
     }
 }
 
+/// The rule for a caller who is not a contact but shares group chats or
+/// communities with you, from the rules you set on each (spec §9
+/// "per-community ring settings"). `None` when you set none, so your
+/// default applies.
+///
+/// A 1:1 call doesn't say which community it came "from", so the most
+/// restrictive of them wins: setting a community to Never must hold even
+/// if you also share a louder one with the same person. A saved
+/// contact's own rule is checked before this and overrides it.
+pub fn shared_rule(rules: impl IntoIterator<Item = RingRule>) -> Option<RingRule> {
+    rules.into_iter().max_by_key(|r| r.to_i32())
+}
+
 /// Minutes since midnight, local time, for feeding [`decide`].
 pub fn current_minute_of_day() -> u32 {
     let secs = std::time::SystemTime::now()
@@ -253,5 +266,12 @@ mod tests {
         let q = quiet(23 * 60, 7 * 60);
         // 1440 is 00:00 the next day.
         assert!(q.covers(1440 + 60));
+    }
+
+    #[test]
+    fn the_quietest_shared_community_wins() {
+        assert_eq!(shared_rule([]), None);
+        assert_eq!(shared_rule([RingRule::Always, RingRule::SilentOnly]), Some(RingRule::SilentOnly));
+        assert_eq!(shared_rule([RingRule::Never, RingRule::Always]), Some(RingRule::Never));
     }
 }

@@ -73,6 +73,12 @@ export struct VpnConfigEntry {
     active: bool,
 }
 
+/// One line of live captions (spec §7).
+export struct CaptionLine {
+    who: string,
+    text: string,
+}
+
 /// A file that stays fetchable after the call (spec §5).
 export struct SharedFileEntry {
     name: string,
@@ -81,6 +87,63 @@ export struct SharedFileEntry {
     status: string,
     file-id: string,
     mine: bool,
+}
+
+/// A group chat or community you're in (spec §9).
+export struct SpaceEntry {
+    id: string,
+    name: string,
+    detail: string,
+    unread: int,
+}
+
+/// An invitation to a group chat or community, waiting for an answer.
+export struct SpaceInviteEntry {
+    name: string,
+    detail: string,
+}
+
+/// One message in a channel or thread (spec §9). Ids are text because
+/// they are 64-bit and Slint's integers are not.
+export struct SpaceMessage {
+    id: string,
+    sender: string,
+    sender-key: string,
+    text: string,
+    time: string,
+    mine: bool,
+    deleted: bool,
+    /// Replies in its thread; only counted in the channel view.
+    replies: int,
+    /// Its author, or a moderator who outranks them.
+    can-delete: bool,
+    /// Yours, a text message (not a shared file), and not deleted.
+    can-edit: bool,
+    /// The text without the "(edited)" marker, to edit from.
+    plain: string,
+}
+
+/// One member, with what *you* may do to them -- worked out from the
+/// signed manifest, the same rules every other member checks.
+export struct SpaceMember {
+    key: string,
+    name: string,
+    /// Their status line in this space (spec §7 per-community identity).
+    status: string,
+    /// The picture they chose for this space, if any.
+    avatar: image,
+    has-avatar: bool,
+    role: string,
+    role-index: int,
+    me: bool,
+    can-kick: bool,
+    can-ban: bool,
+    can-role: bool,
+}
+
+export struct SpaceBan {
+    key: string,
+    detail: string,
 }
 
 /// A community listed in a directory (spec §4).
@@ -1436,6 +1499,7 @@ export component MainWindow inherits Window {
     in-out property <bool> monitor-enabled: false;
     in-out property <int> monitor-latency-ms: 120;
     in-out property <int> current-tab: 0;
+    in-out property <int> spaces-unread: 0;
     in-out property <int> settings-category: 0;
 
     // Settings search (spec §0). Rust owns the filtering and writes the
@@ -1482,6 +1546,7 @@ export component MainWindow inherits Window {
     in-out property <bool> sec-notifications: true;
     in-out property <bool> sec-transferlimits: true;
     in-out property <bool> sec-sharedfiles: true;
+    in-out property <bool> sec-captions: true;
     in-out property <bool> sec-discovery: true;
     in-out property <bool> sec-outbox: true;
     in-out property <bool> sec-calladvanced: true;
@@ -1546,6 +1611,25 @@ export component MainWindow inherits Window {
     callback route-code-edited(int, string);
     callback delivery-settings-changed();
     callback find-nodes();
+    // Spec §7 on-device live captions. Off by default.
+    in-out property <bool> captions-enabled: false;
+    in-out property <bool> captions-own-voice: false;
+    in property <bool> captions-model-installed: false;
+    in property <bool> captions-download-allowed: false;
+    in property <bool> captions-downloading: false;
+    in property <float> captions-download-fraction: 0;
+    in property <string> captions-size-text;
+    in property <string> captions-model-message;
+    in property <bool> captions-live: false;
+    in property <string> captions-status;
+    in property <[CaptionLine]> caption-lines;
+    in property <bool> captions-have-transcript: false;
+    callback captions-settings-changed();
+    callback captions-download();
+    callback captions-cancel-download();
+    callback captions-import();
+    callback captions-remove-model();
+    callback captions-save-transcript();
     // Spec §5 seeding and pinning.
     in-out property <bool> seeding: false;
     in-out property <int> seed-scope: 0;
@@ -1553,6 +1637,78 @@ export component MainWindow inherits Window {
     in-out property <string> pin-nodes: "";
     in-out property <string> pin-code: "";
     in-out property <[SharedFileEntry]> shared-files: [];
+    // Spec §9: group chats and communities.
+    in-out property <[SpaceEntry]> spaces: [];
+    in-out property <[SpaceInviteEntry]> space-invites: [];
+    in-out property <string> selected-space: "";
+    in-out property <string> space-title: "";
+    in-out property <string> space-subtitle: "";
+    in-out property <bool> space-is-community: false;
+    in-out property <bool> space-removed: false;
+    in-out property <[string]> space-channel-names: [];
+    in-out property <int> space-channel-index: 0;
+    in-out property <string> space-thread-root: "";
+    /// The id of your own message being edited, or "" when composing.
+    in-out property <string> space-editing: "";
+    in-out property <[SpaceMessage]> space-messages: [];
+    in-out property <[SpaceMember]> space-members: [];
+    in-out property <[string]> space-role-names: [];
+    in-out property <[SpaceBan]> space-bans: [];
+    in-out property <[string]> space-contact-names: [];
+    in-out property <int> space-invite-index: 0;
+    in-out property <bool> space-can-post: false;
+    in-out property <bool> space-can-invite: false;
+    in-out property <bool> space-can-ban: false;
+    in-out property <bool> space-can-manage: false;
+    in-out property <bool> space-can-manage-channels: false;
+    in-out property <bool> space-server-hosted: false;
+    /// 0 = your default, then RingRule + 1 (always, silent only, never).
+    in-out property <int> space-ring-rule: 0;
+    in-out property <string> space-mailbox-node: "";
+    in-out property <string> space-mailbox-code: "";
+    in-out property <string> space-files-node: "";
+    in-out property <string> space-files-code: "";
+    in-out property <string> space-dht-node: "";
+    in-out property <string> space-status: "";
+    in-out property <string> space-input: "";
+    in-out property <string> space-new-name: "";
+    in-out property <string> space-new-channel: "";
+    in-out property <string> space-ban-reason: "";
+    callback open-communities();
+    callback refresh-space();
+    callback create-space(string, bool);
+    callback select-space(string);
+    callback accept-space-invite(int, bool);
+    callback decline-space-invite(int);
+    callback select-space-channel(int);
+    callback space-send(string);
+    callback space-edit-message(string, string);
+    callback space-delete-message(string, string);
+    callback space-invite(int);
+    callback space-kick(string);
+    callback space-ban(string, string);
+    callback space-unban(string);
+    callback space-set-role(string, int);
+    callback space-add-channel(string);
+    callback space-remove-channel();
+    callback space-save-settings();
+    callback space-set-ring-rule(int);
+    callback space-use-nodes();
+    callback space-share-file();
+    callback space-leave();
+    callback space-forget();
+    // Spec §7 "per-community identity": how you appear in the selected
+    // space, and whether you joined it under a separate identity.
+    in-out property <bool> space-new-separate: false;
+    in-out property <bool> space-separate: false;
+    in-out property <string> space-look-name: "";
+    in-out property <string> space-look-status: "";
+    in-out property <string> space-look-avatar-data: "";
+    in-out property <image> space-look-avatar;
+    in-out property <string> space-look-defaults: "";
+    callback space-save-look();
+    callback space-pick-look-avatar();
+    callback space-clear-look-avatar();
     callback sharing-settings-changed();
     // Spec §6: bring your own VPN.
     in-out property <bool> sec-vpn: true;
@@ -1895,7 +2051,15 @@ export component MainWindow inherits Window {
             // Settings button from the top left since there's one in the
             // profile widget"), so there's nothing to show here on the
             // Call tab itself.
-            if current-tab == 1 : TabButton { label: "Return"; active: false; reduced-motion: reduced-motion; clicked => { current-tab = 0; } }
+            if current-tab != 0 : TabButton { label: "Return"; active: false; reduced-motion: reduced-motion; clicked => { current-tab = 0; } }
+            // Spec §9. Its own page rather than a call-screen widget: a
+            // community is somewhere you go, not something beside a call.
+            if current-tab == 0 : TabButton {
+                label: spaces-unread > 0 ? "Groups & communities (" + spaces-unread + ")" : "Groups & communities";
+                active: false;
+                reduced-motion: reduced-motion;
+                clicked => { current-tab = 2; open-communities(); }
+            }
             Rectangle { horizontal-stretch: 1; }
         }
 
@@ -3058,10 +3222,367 @@ export component MainWindow inherits Window {
                                         MenuItem { title: "Contacts & servers"; checkable: true; checked <=> call-panel-visible-contacts; activated => { settings-changed(); } }
                                         MenuItem { title: "My invite (QR)"; checkable: true; checked <=> call-panel-visible-invite; activated => { settings-changed(); } }
                                     }
+                                    MenuItem { title: "Live captions"; checkable: true; checked <=> captions-enabled; activated => { captions-settings-changed(); } }
                                 }
                             }
                         }
                     }
+                }
+
+                // Spec §7 live captions, subtitle-style along the bottom
+                // and above every panel, so moving panels around can never
+                // hide them. Shown only while captions are actually
+                // running in a call.
+                if captions-live && (caption-lines.length > 0 || captions-status != "") : Rectangle {
+                    width: min(680px, parent.width - 24px);
+                    height: captions-layout.preferred-height;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height - 12px;
+                    background: #000000c8;
+                    border-radius: 8px;
+
+                    captions-layout := VerticalLayout {
+                        padding: 10px;
+                        spacing: 2px;
+                        for line in caption-lines : Text {
+                            text: line.who + ": " + line.text;
+                            color: #ffffff;
+                            wrap: word-wrap;
+                            font-size: 15px * text-scale;
+                            accessible-role: text;
+                            accessible-label: line.who + " said " + line.text;
+                        }
+                        if captions-status != "" : Text {
+                            text: captions-status;
+                            color: #ffffffb0;
+                            wrap: word-wrap;
+                            font-size: 10px * text-scale;
+                        }
+                        if captions-have-transcript : HorizontalLayout {
+                            alignment: end;
+                            Button { text: "Save transcript..."; clicked => { captions-save-transcript(); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if current-tab == 2 && !server-mode : HorizontalBox {
+            padding: 0px;
+            spacing: 10px;
+
+            // Yours, invitations, and making a new one.
+            VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                width: 230px;
+                horizontal-stretch: 0;
+                Text { text: "Groups & communities"; font-weight: 700; font-size: 13px * text-scale; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 2px;
+                        if spaces.length == 0 && space-invites.length == 0 : Text {
+                            text: "None yet. Name one below to start it, or accept an invitation. Everything is end-to-end encrypted and there is no server: messages go over calls and through each member's own mailboxes.";
+                            wrap: word-wrap;
+                            color: Theme.muted-text;
+                            font-size: 11px * text-scale;
+                        }
+                        for s in spaces : SideNavButton {
+                            label: s.unread > 0 ? s.name + "  (" + s.unread + ")" : s.name;
+                            active: s.id == selected-space;
+                            reduced-motion: reduced-motion;
+                            clicked => { select-space(s.id); }
+                        }
+                        if space-invites.length > 0 : Text { text: "Invitations"; font-weight: 700; font-size: 11px * text-scale; }
+                        for inv[i] in space-invites : VerticalBox {
+                            padding: 0px;
+                            spacing: 2px;
+                            Text { text: inv.name; font-weight: 700; wrap: word-wrap; font-size: 12px * text-scale; }
+                            Text { text: inv.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: 4px;
+                                Button { text: "Join"; clicked => { accept-space-invite(i, false); } }
+                                Button { text: "Join as someone new"; clicked => { accept-space-invite(i, true); } }
+                                Button { text: "Decline"; clicked => { decline-space-invite(i); } }
+                            }
+                        }
+                    }
+                }
+                LineEdit { text <=> space-new-name; placeholder-text: "Name for a new one"; }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 4px;
+                    Button { text: "New group"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, false); } }
+                    Button { text: "New community"; enabled: space-new-name != ""; clicked => { create-space(space-new-name, true); } }
+                }
+                ToggleSwitch {
+                    text: "Under a separate identity";
+                    checked <=> space-new-separate;
+                    reduced-motion: reduced-motion;
+                    text-scale: text-scale;
+                    help: "Off by default. On: you own the new one under a key made just for it, so nobody in it can match you with your contacts or your other communities. \"Join as someone new\" does the same for an invitation.";
+                }
+                Text {
+                    text: "A group is one conversation of up to 100 where anyone may invite. A community has channels, and admins and moderators who can remove and ban.";
+                    wrap: word-wrap;
+                    color: Theme.muted-text;
+                    font-size: 10px * text-scale;
+                }
+            }
+
+            // The channel, or one thread in it.
+            VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+                horizontal-stretch: 1;
+                if selected-space == "" : Text { text: "Pick one on the left."; color: Theme.muted-text; }
+                if selected-space != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 6px;
+                    vertical-stretch: 0;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 0px;
+                        Text { text: space-title; font-weight: 700; font-size: 14px * text-scale; }
+                        Text { text: space-subtitle; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if space-is-community && space-thread-root == "" : ComboBox {
+                        model: space-channel-names;
+                        current-index <=> space-channel-index;
+                        selected(v) => { select-space-channel(self.current-index); }
+                    }
+                    if space-thread-root != "" : Button { text: "Back to the channel"; clicked => { space-thread-root = ""; refresh-space(); } }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    VerticalBox {
+                        padding: 0px;
+                        spacing: 6px;
+                        if selected-space != "" && space-messages.length == 0 : Text {
+                            text: space-removed ? "You're no longer in this." : "Nothing here yet.";
+                            color: Theme.muted-text;
+                            font-size: 11px * text-scale;
+                        }
+                        for m in space-messages : VerticalBox {
+                            padding: 0px;
+                            spacing: 1px;
+                            HorizontalBox {
+                                padding: 0px;
+                                spacing: 6px;
+                                Text { text: m.sender; font-weight: 700; color: m.mine ? Theme.accent-text : Theme.muted-text; font-size: 10px * text-scale; vertical-alignment: center; }
+                                Text { text: m.time; color: Theme.muted-text; font-size: 9px * text-scale; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                if space-thread-root == "" && !m.deleted : Text {
+                                    text: m.replies == 1 ? "1 reply" : m.replies > 1 ? m.replies + " replies" : "reply";
+                                    color: thread-touch.has-hover ? Theme.accent-text : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    thread-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-thread-root = m.id; refresh-space(); }
+                                    }
+                                }
+                                if m.can-edit && space-can-post : Text {
+                                    text: "edit";
+                                    color: space-edit-touch.has-hover ? Theme.accent-text : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    space-edit-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-editing = m.id; space-input = m.plain; }
+                                    }
+                                }
+                                if m.can-delete && !m.deleted : Text {
+                                    text: m.mine ? "delete" : "remove";
+                                    color: rm-touch.has-hover ? #e05252 : Theme.muted-text;
+                                    font-size: 9px * text-scale;
+                                    vertical-alignment: center;
+                                    rm-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { space-delete-message(m.id, m.sender-key); }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: m.text;
+                                wrap: word-wrap;
+                                font-size: 12px * text-scale;
+                                font-italic: m.deleted;
+                                color: m.deleted ? Theme.muted-text : Palette.foreground;
+                            }
+                        }
+                    }
+                }
+                if space-status != "" : Text { text: space-status; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
+                if selected-space != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 6px;
+                    vertical-stretch: 0;
+                    LineEdit {
+                        text <=> space-input;
+                        enabled: space-can-post;
+                        placeholder-text: space-editing != "" ? "Edit your message..." : space-thread-root != "" ? "Reply in this thread..." : "Message...";
+                        accepted(v) => { if space-editing != "" { space-edit-message(space-editing, v); } else { space-send(v); } }
+                    }
+                    if space-editing != "" : Button { text: "Cancel"; clicked => { space-editing = ""; space-input = ""; } }
+                    if space-editing == "" : Button { text: "Share file"; enabled: space-can-post; clicked => { space-share-file(); } }
+                    Button {
+                        text: space-editing != "" ? "Save" : "Send";
+                        enabled: space-can-post && space-input != "";
+                        clicked => { if space-editing != "" { space-edit-message(space-editing, space-input); } else { space-send(space-input); } }
+                    }
+                }
+            }
+
+            // Members, and what you may do about them.
+            if selected-space != "" : ScrollView {
+                width: 290px;
+                horizontal-stretch: 0;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 4px;
+                    Text { text: "Members"; font-weight: 700; font-size: 12px * text-scale; }
+                    for mem in space-members : VerticalBox {
+                        padding: 0px;
+                        spacing: 2px;
+                        HorizontalBox {
+                            padding: 0px;
+                            spacing: 4px;
+                            if mem.has-avatar : Image {
+                                source: mem.avatar;
+                                width: 20px;
+                                height: 20px;
+                                image-fit: cover;
+                                accessible-role: image;
+                                accessible-label: mem.name;
+                            }
+                            VerticalBox {
+                                padding: 0px;
+                                spacing: 0px;
+                                horizontal-stretch: 1;
+                                Text { text: mem.me ? mem.name + " (you)" : mem.name; wrap: word-wrap; font-size: 11px * text-scale; }
+                                if mem.status != "" : Text { text: mem.status; wrap: word-wrap; color: Theme.muted-text; font-size: 10px * text-scale; }
+                            }
+                            Text { text: mem.role; color: Theme.muted-text; font-size: 10px * text-scale; }
+                        }
+                        if mem.can-role || mem.can-kick || mem.can-ban : HorizontalBox {
+                            padding: 0px;
+                            spacing: 4px;
+                            if mem.can-role : ComboBox {
+                                model: space-role-names;
+                                current-index: mem.role-index;
+                                selected(v) => { space-set-role(mem.key, self.current-index); }
+                            }
+                            if mem.can-kick : Button { text: "Remove"; clicked => { space-kick(mem.key); } }
+                            if mem.can-ban : Button { text: "Ban"; clicked => { space-ban(mem.key, space-ban-reason); } }
+                        }
+                    }
+                    if space-can-ban : LineEdit { text <=> space-ban-reason; placeholder-text: "Reason, for the ban list (optional)"; }
+                    if space-can-invite : Text { text: "Invite a contact"; font-weight: 700; font-size: 11px * text-scale; }
+                    if space-can-invite : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        ComboBox { model: space-contact-names; current-index <=> space-invite-index; }
+                        Button { text: "Invite"; enabled: space-contact-names.length > 0; clicked => { space-invite(space-invite-index); } }
+                    }
+                    if space-bans.length > 0 : Text { text: "Banned"; font-weight: 700; font-size: 11px * text-scale; }
+                    for b in space-bans : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        Text { text: b.detail; wrap: word-wrap; horizontal-stretch: 1; font-size: 10px * text-scale; color: Theme.muted-text; }
+                        if space-can-ban : Button { text: "Lift"; clicked => { space-unban(b.key); } }
+                    }
+                    if space-is-community && space-can-manage-channels : Text { text: "Channels"; font-weight: 700; font-size: 11px * text-scale; }
+                    if space-is-community && space-can-manage-channels : HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        LineEdit { text <=> space-new-channel; placeholder-text: "new channel"; }
+                        Button { text: "Add"; enabled: space-new-channel != ""; clicked => { space-add-channel(space-new-channel); } }
+                    }
+                    if space-is-community && space-can-manage-channels && space-channel-names.length > 1 : Button {
+                        text: "Remove this channel";
+                        clicked => { space-remove-channel(); }
+                    }
+                    if space-is-community : Text {
+                        text: "Its nodes";
+                        font-weight: 700;
+                        font-size: 11px * text-scale;
+                    }
+                    if space-is-community : Text {
+                        text: "Mailbox, file and DHT nodes the community runs (antiphon-relay with --mailbox-code / --files-code). Signed into its manifest, so every member sees the same ones.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    if space-is-community : LineEdit { text <=> space-mailbox-node; enabled: space-can-manage; placeholder-text: "mailbox node host:port"; }
+                    if space-is-community : LineEdit { text <=> space-mailbox-code; enabled: space-can-manage; placeholder-text: "its members code"; }
+                    if space-is-community : LineEdit { text <=> space-files-node; enabled: space-can-manage; placeholder-text: "file node host:port"; }
+                    if space-is-community : LineEdit { text <=> space-files-code; enabled: space-can-manage; placeholder-text: "its members code"; }
+                    if space-is-community : LineEdit { text <=> space-dht-node; enabled: space-can-manage; placeholder-text: "DHT node host:port"; }
+                    if space-is-community : ToggleSwitch {
+                        text: "Server-hosted files";
+                        enabled: space-can-manage;
+                        checked <=> space-server-hosted;
+                        reduced-motion: reduced-motion;
+                        text-scale: text-scale;
+                        help: "Off by default. When on, a file shared in this community is also uploaded, encrypted, to its file node, so it stays fetchable when the person who shared it is offline. The node holds bytes it cannot read.";
+                    }
+                    if space-is-community && space-can-manage : Button { text: "Save community settings"; clicked => { space-save-settings(); } }
+                    if space-is-community && space-mailbox-node != "" : Button { text: "Use its mailbox for my mail"; clicked => { space-use-nodes(); } }
+                    Text { text: "How I appear here"; font-weight: 700; font-size: 11px * text-scale; }
+                    Text {
+                        text: space-separate
+                            ? "You're in this under a separate identity: a key made just for it from your recovery phrase. Members can't match it with your contacts or your other communities -- only whoever invited you knows. Its messages go by mailbox, never over a call. It can't be switched off here; leave and be invited again for that."
+                            : "You're in this as yourself: your contacts here see the key they know. A different name or picture changes how you look, not who you are. For a key of its own, leave and accept an invitation with \"Join as someone new\".";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    LineEdit { text <=> space-look-name; placeholder-text: "Name here (empty: " + space-look-defaults + ")"; }
+                    LineEdit { text <=> space-look-status; placeholder-text: "Status here (empty: your profile's)"; }
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 4px;
+                        if space-look-avatar-data != "" : Image {
+                            source: space-look-avatar;
+                            width: 32px;
+                            height: 32px;
+                            image-fit: cover;
+                            accessible-role: image;
+                            accessible-label: "Your picture here";
+                        }
+                        Button { text: space-look-avatar-data != "" ? "Change picture" : "Add a picture"; clicked => { space-pick-look-avatar(); } }
+                        if space-look-avatar-data != "" : Button { text: "No picture"; clicked => { space-clear-look-avatar(); } }
+                    }
+                    Text {
+                        text: "Your profile picture is never sent to anyone; one added here goes to this space's members only, as a small thumbnail.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    Button { text: "Save how I appear here"; clicked => { space-save-look(); } }
+                    Text { text: "Calls and notifications"; font-weight: 700; font-size: 11px * text-scale; }
+                    Text {
+                        text: "For calls from members who aren't your contacts (a contact's own setting wins), and for message notices. If you share several, the quietest applies.";
+                        wrap: word-wrap;
+                        color: Theme.muted-text;
+                        font-size: 10px * text-scale;
+                    }
+                    ComboBox {
+                        model: ["My default", "Always ring", "Silent only", "Never (mute)"];
+                        current-index <=> space-ring-rule;
+                        selected => { space-set-ring-rule(self.current-index); }
+                    }
+                    Rectangle { height: 1px; background: Theme.divider; }
+                    if !space-removed : Button { text: "Leave"; clicked => { space-leave(); } }
+                    if space-removed : Button { text: "Forget it and its history"; clicked => { space-forget(); } }
                 }
             }
         }
@@ -4694,9 +5215,9 @@ export component MainWindow inherits Window {
                                     }
                                     if seeding : HorizontalBox {
                                         padding: 0px; spacing: 6px;
-                                        SettingLabel { text: "Hand them to"; help: "Only the conversation: whoever has the link from the chat. Contacts: those people, only if they're also your contacts. Anyone: anyone with the file's id -- they still can't read it without the key."; text-scale: text-scale; }
+                                        SettingLabel { text: "Hand them to"; help: "Where it was shared: whoever has the link from that chat -- in a community, only people its signed member list names right now, so a ban stops them. Contacts: those people, only if they're also your contacts (in a community, its members). Anyone: anyone with the file's id -- they still can't read it without the key."; text-scale: text-scale; }
                                         ComboBox {
-                                            model: ["This conversation only", "My contacts", "Anyone"];
+                                            model: ["Where it was shared only", "My contacts", "Anyone"];
                                             current-index: seed-scope;
                                             selected(v) => { seed-scope = self.current-index; sharing-settings-changed(); }
                                         }
@@ -4732,6 +5253,83 @@ export component MainWindow inherits Window {
                                         }
                                         Text { text: f.detail; color: Theme.muted-text; font-size: 10px * text-scale; wrap: word-wrap; }
                                         if f.status != "" : Text { text: f.status; font-size: 10px * text-scale; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+
+                            if section-id == "captions" : VerticalBox {
+                                padding: 0px;
+                                SectionHeader {
+                                    help: "Words appear at the bottom of the call screen as people speak. The speech recognition runs on this computer: no audio and no text is sent anywhere, and the words are forgotten when the call ends unless you save them.";
+                                    text-scale: text-scale;
+                                    title: "Live captions"; reduced-motion: reduced-motion; expanded <=> sec-captions;
+                                }
+                                if sec-captions : VerticalBox {
+                                    padding-top: 6px; padding-left: 22px; padding-bottom: 10px; spacing: 6px;
+                                    ToggleSwitch {
+                                        text: "Show live captions in calls";
+                                        checked <=> captions-enabled;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Off by default. Captions what the other people in the call say -- even while you're deafened, since that may be exactly when you need them. Someone you've muted isn't captioned.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Caption my own voice too";
+                                        checked <=> captions-own-voice;
+                                        reduced-motion: reduced-motion;
+                                        text-scale: text-scale;
+                                        help: "Adds what you say, as sent, so a saved transcript has both sides.";
+                                        toggled => { captions-settings-changed(); }
+                                    }
+                                    if captions-model-installed : HorizontalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text { text: "Speech model installed (Whisper tiny, English)."; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; font-size: 11px * text-scale; }
+                                        Button { text: "Remove"; clicked => { captions-remove-model(); } }
+                                    }
+                                    if !captions-model-installed : VerticalBox {
+                                        padding: 0px; spacing: 6px;
+                                        Text {
+                                            text: "Captions need a speech model on this computer: Whisper tiny (English), " + captions-size-text + ". It is downloaded once, only if you press Download, and checked against a fingerprint built into the app. After that, captioning works offline.";
+                                            wrap: word-wrap;
+                                            font-size: 11px * text-scale;
+                                        }
+                                        if !captions-download-allowed : Text {
+                                            text: "This build can't download the model (it has no fingerprint to check it against). If you have the files -- config.json, tokenizer.json and model.safetensors from openai/whisper-tiny.en -- choose their folder.";
+                                            color: Theme.muted-text;
+                                            wrap: word-wrap;
+                                            font-size: 10px * text-scale;
+                                        }
+                                        if captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: Theme.muted-text.with-alpha(0.25);
+                                                accessible-role: progress-indicator;
+                                                accessible-value: round(captions-download-fraction * 100) + "%";
+                                                Rectangle {
+                                                    x: 0px;
+                                                    width: parent.width * captions-download-fraction;
+                                                    height: parent.height;
+                                                    border-radius: 4px;
+                                                    background: Theme.accent;
+                                                }
+                                            }
+                                            Text { text: round(captions-download-fraction * 100) + "%"; vertical-alignment: center; font-size: 10px * text-scale; }
+                                            Button { text: "Cancel"; clicked => { captions-cancel-download(); } }
+                                        }
+                                        if !captions-downloading : HorizontalBox {
+                                            padding: 0px; spacing: 6px;
+                                            if captions-download-allowed : Button { text: "Download"; clicked => { captions-download(); } }
+                                            Button { text: "Use files I already have..."; clicked => { captions-import(); } }
+                                        }
+                                    }
+                                    if captions-model-message != "" : Text {
+                                        text: captions-model-message;
+                                        wrap: word-wrap;
+                                        font-size: 10px * text-scale;
                                     }
                                 }
                             }

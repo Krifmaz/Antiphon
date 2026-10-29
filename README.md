@@ -42,13 +42,14 @@ The short version of [`FEATURES.md`](FEATURES.md):
   an outbox and offline delivery through mailbox nodes on your own
   route list, contacts found again through a DHT when their address
   changes, an in-app WireGuard tunnel with per-mode routing and a kill
-  switch, QR / link invites, verification codes, key-change warnings, the UI editor and
+  switch, MLS group chats and communities with roles, threads and ban
+  lists, QR / link invites, verification codes, key-change warnings, the UI editor and
   theming, presence, notification rules, data export, reproducible
   build configuration with a CI pipeline for all three desktop targets.
 - **Reduced:** Caps Lock as push-to-talk works on Windows and X11 but
   not yet on macOS or Wayland; no project-run mailbox node ships as a
   default.
-- **Not built yet:** communities and group chats, large group calls
+- **Not built yet:** voice channels inside communities, large group calls
   through an SFU (small mesh group calls are keyed with MLS and SFrame
   already), mobile clients, push notifications, packaging. Each is
   listed as such in FEATURES.md.
