@@ -22,6 +22,8 @@
 //! ([`mailbox`]), host sealed files ([`files`]), and forward group calls
 //! as a selective forwarding unit ([`sfu`]): one copy of each member's
 //! sealed audio in, a copy out to every other member of the room. It can also be a hop on anonymity-mode circuits ([`onion`]).
+//! It can also peer with other relays ([`federation`]), so a call reaches
+//! someone registered at any relay in the mesh.
 //! Each is off unless the operator switches it on. The SFU holds the same kind of
 //! thing the relay does -- a blinded, daily-rotating room token, a random
 //! per-call member tag and an address per member, for as long as the call
@@ -30,6 +32,7 @@
 //! The core is a plain state machine ([`Relay::handle`]) so it can be
 //! tested without sockets; [`run`] is the thin loop around it.
 
+pub mod federation;
 pub mod files;
 pub mod mailbox;
 pub mod sfu;
@@ -91,6 +94,9 @@ pub struct Relay {
     registrations: HashMap<RelayToken, Registration>,
     tokens_per_addr: HashMap<SocketAddr, usize>,
     pairs: HashMap<SocketAddr, Pair>,
+    /// Every registered token by its federation lookup hash, so a peer
+    /// relay's lookup is answered without hashing every registration.
+    by_lookup: HashMap<[u8; 32], RelayToken>,
     forwarded: u64,
     last_sweep: Option<Instant>,
 }
@@ -144,6 +150,14 @@ impl Relay {
         }
     }
 
+    /// The live token whose federation lookup hash is `hash`, if this relay
+    /// holds one: what a peer relay is asking about when someone dialled
+    /// it for a person registered here.
+    pub fn find_by_lookup(&self, hash: &[u8; 32], now: Instant) -> Option<RelayToken> {
+        let token = self.by_lookup.get(hash)?;
+        self.registrations.get(token).filter(|r| r.expires > now).map(|_| *token)
+    }
+
     fn register(&mut self, owner: SocketAddr, token: RelayToken, now: Instant) -> bool {
         let expires = now + REGISTRATION_TTL;
         if let Some(existing) = self.registrations.get_mut(&token) {
@@ -167,6 +181,7 @@ impl Relay {
             return false;
         }
         self.registrations.insert(token, Registration { owner, expires });
+        self.by_lookup.insert(antiphon_crypto::federation::lookup_hash(&token), token);
         *self.tokens_per_addr.entry(owner).or_default() += 1;
         true
     }
@@ -208,6 +223,8 @@ impl Relay {
     fn forget(&mut self, addr: SocketAddr) {
         self.unpair(addr);
         self.registrations.retain(|_, r| r.owner != addr);
+        let registrations = &self.registrations;
+        self.by_lookup.retain(|_, t| registrations.contains_key(t));
         self.tokens_per_addr.remove(&addr);
     }
 
@@ -234,6 +251,8 @@ impl Relay {
         let expired: Vec<SocketAddr> =
             self.registrations.values().filter(|r| r.expires <= now).map(|r| r.owner).collect();
         self.registrations.retain(|_, r| r.expires > now);
+        let registrations = &self.registrations;
+        self.by_lookup.retain(|_, t| registrations.contains_key(t));
         for owner in expired {
             self.decrement(owner);
         }
@@ -310,13 +329,46 @@ pub async fn run_node_full(
     hops: Option<Arc<std::sync::Mutex<onion::HopNode>>>,
     dht: Option<Arc<std::sync::Mutex<antiphon_net::dht::DhtNode>>>,
 ) -> std::io::Result<()> {
+    run_node_with_federation(socket, relay, mailbox, files, sfu, hops, dht, None).await
+}
+
+/// Every service on one socket, and federation with other relays if
+/// `federation` is given (see [`federation`]). Each call bridged to a peer
+/// relay gets a socket of its own, read by a small task like an onion exit's.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_node_with_federation(
+    socket: Arc<UdpSocket>,
+    relay: Arc<std::sync::Mutex<Relay>>,
+    mailbox: Option<Arc<std::sync::Mutex<mailbox::Mailbox>>>,
+    files: Option<Arc<std::sync::Mutex<files::FileHost>>>,
+    sfu: Option<Arc<std::sync::Mutex<sfu::Sfu>>>,
+    hops: Option<Arc<std::sync::Mutex<onion::HopNode>>>,
+    dht: Option<Arc<std::sync::Mutex<antiphon_net::dht::DhtNode>>>,
+    federation: Option<Arc<std::sync::Mutex<federation::Federation>>>,
+) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65_536];
     let mut last_sweep = Instant::now();
     let mut exits = Exits::new(&socket)?;
     let mut tick = tokio::time::interval(Duration::from_secs(5));
+    let mut bridges = Bridges::new(&socket)?;
+    let mut fed_tick = tokio::time::interval(Duration::from_millis(250));
     loop {
         let (n, from) = tokio::select! {
             r = socket.recv_from(&mut buf) => r?,
+            Some((id, from, bytes)) = bridges.incoming.recv() => {
+                if let Some(f) = &federation {
+                    let actions = f.lock().unwrap().from_bridge(id, from, &bytes, Instant::now());
+                    bridges.perform(&socket, federation.as_ref(), actions).await;
+                }
+                continue;
+            }
+            _ = fed_tick.tick(), if federation.is_some() => {
+                if let Some(f) = &federation {
+                    let actions = f.lock().unwrap().tick(Instant::now());
+                    bridges.perform(&socket, federation.as_ref(), actions).await;
+                }
+                continue;
+            }
             Some((id, from, bytes)) = exits.incoming.recv() => {
                 if let Some(h) = &hops {
                     let actions = h.lock().unwrap().handle_exit(id, from, &bytes, Instant::now());
@@ -394,8 +446,38 @@ pub async fn run_node_full(
                     antiphon_net::mailbox::Message::Refused(antiphon_net::mailbox::Refusal::Disabled).encode(),
                 )],
             }
+        } else if antiphon_net::federation::Message::is_federation_datagram(&buf[..n]) {
+            match &federation {
+                Some(f) => {
+                    let actions = {
+                        let relay = relay.lock().unwrap();
+                        f.lock().unwrap().handle(from, &buf[..n], &relay, now)
+                    };
+                    bridges.perform(&socket, federation.as_ref(), actions).await;
+                    continue;
+                }
+                None => federation::refusal_when_disabled(&buf[..n]).map(|r| vec![(from, r)]).unwrap_or_default(),
+            }
+        } else if federation.as_ref().is_some_and(|f| f.lock().unwrap().is_bridged(from)) {
+            // A caller whose call this relay passes on to a peer relay.
+            let actions = match &federation {
+                Some(f) => f.lock().unwrap().from_caller(from, &buf[..n], now),
+                None => vec![],
+            };
+            bridges.perform(&socket, federation.as_ref(), actions).await;
+            continue;
         } else {
-            relay.lock().unwrap().handle(from, &buf[..n], now)
+            let out = relay.lock().unwrap().handle(from, &buf[..n], now);
+            match (&federation, antiphon_net::relay::Message::decode(&buf[..n])) {
+                // Nobody here under that token: ask the peer relays before
+                // saying so.
+                (Some(f), Some(Message::Dial(token))) if out == [(from, Message::NotFound.encode())] => {
+                    let actions = f.lock().unwrap().on_dial_not_found(from, token, now);
+                    bridges.perform(&socket, federation.as_ref(), actions).await;
+                    continue;
+                }
+                _ => out,
+            }
         };
         for (to, bytes) in out {
             // One unreachable peer must not stop the relay for everyone.
@@ -488,6 +570,84 @@ impl Exits {
     }
 }
 
+/// The sockets of calls bridged to peer relays, and the channel their
+/// reader tasks feed.
+struct Bridges {
+    /// Each bridge's socket, the peer relay it talks to, and its reader task.
+    sockets: HashMap<federation::BridgeId, (Arc<UdpSocket>, SocketAddr, tokio::task::JoinHandle<()>)>,
+    /// Handed to each reader task to report what arrived.
+    tx: tokio::sync::mpsc::Sender<(federation::BridgeId, SocketAddr, Vec<u8>)>,
+    /// What peer relays sent back, tagged with the bridge it came in on.
+    incoming: tokio::sync::mpsc::Receiver<(federation::BridgeId, SocketAddr, Vec<u8>)>,
+    /// Where bridge sockets bind: the node's own IP, any port.
+    bind: SocketAddr,
+}
+
+impl Bridges {
+    /// No bridges yet; they will bind on the same IP as `node`.
+    fn new(node: &UdpSocket) -> std::io::Result<Self> {
+        let (tx, incoming) = tokio::sync::mpsc::channel(4096);
+        let bind = match node.local_addr()? {
+            SocketAddr::V4(a) => SocketAddr::from((*a.ip(), 0)),
+            SocketAddr::V6(a) => SocketAddr::from((*a.ip(), 0)),
+        };
+        Ok(Self { sockets: HashMap::new(), tx, incoming, bind })
+    }
+
+    /// Carries out federation's actions. A bridge socket that fails to
+    /// open is reported back, and what that produces is carried out too.
+    async fn perform(
+        &mut self,
+        node: &UdpSocket,
+        federation: Option<&Arc<std::sync::Mutex<federation::Federation>>>,
+        actions: Vec<federation::Action>,
+    ) {
+        let mut queue = std::collections::VecDeque::from(actions);
+        while let Some(action) = queue.pop_front() {
+            match action {
+                federation::Action::Send(to, bytes) => {
+                    let _ = node.send_to(&bytes, to).await;
+                }
+                federation::Action::OpenBridge { id, relay, first } => match UdpSocket::bind(self.bind).await {
+                    Ok(s) => {
+                        let s = Arc::new(s);
+                        let _ = s.send_to(&first, relay).await;
+                        let (reader, tx) = (s.clone(), self.tx.clone());
+                        let task = tokio::spawn(async move {
+                            let mut buf = vec![0u8; 65_536];
+                            loop {
+                                match reader.recv_from(&mut buf).await {
+                                    Ok((n, from)) => {
+                                        let _ = tx.try_send((id, from, buf[..n].to_vec()));
+                                    }
+                                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                        self.sockets.insert(id, (s, relay, task));
+                    }
+                    Err(_) => {
+                        if let Some(f) = federation {
+                            queue.extend(f.lock().unwrap().bridge_failed(id));
+                        }
+                    }
+                },
+                federation::Action::BridgeSend(id, bytes) => {
+                    if let Some((s, relay, _)) = self.sockets.get(&id) {
+                        let _ = s.send_to(&bytes, *relay).await;
+                    }
+                }
+                federation::Action::CloseBridge(id) => {
+                    if let Some((_, _, task)) = self.sockets.remove(&id) {
+                        task.abort();
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The operator commitment (spec §3), printed at start-up and in `--help`
 /// so it is stated plainly rather than buried in a policy.
 pub const COMMITMENT: &str = "\
@@ -502,7 +662,10 @@ is sealed by the members and forwarded as it came.
 If it offers hops for anonymity mode, its hop key only peels routing layers:
 it never decrypts a call, and learns only the hop before and the hop after.
 If it is a DHT node, it stores records filed under keys that change daily,
-sealed so it can read neither whose they are nor the address inside.";
+sealed so it can read neither whose they are nor the address inside.
+If it peers with other relays, it asks them about a hash of a token, never
+the token, believes only answers that prove they hold it, and passes the
+call's sealed packets through without a key to any of them.";
 
 #[cfg(test)]
 mod tests {

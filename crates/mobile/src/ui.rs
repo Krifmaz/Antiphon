@@ -25,7 +25,7 @@ use iced_widget::{container, qr_code};
 use crate::call::{self, now_secs, CallEngine, Phase, Waker};
 use crate::call_log::{self, CallRecord};
 use crate::contacts::{hex, Contacts};
-use crate::control::ControlMessage;
+use crate::control::{ControlMessage, Hello, ProfileCard};
 use crate::conversation::Conversation;
 use crate::data_rules::{self, CellularMeter, DataSettings, Link};
 use crate::files::{self, FileManager};
@@ -329,6 +329,12 @@ pub struct App {
     live_peer: Option<String>,
     /// What they call themselves, from their Hello.
     peer_display_name: Option<String>,
+    /// Their picture, About line and colour, from their profile card;
+    /// copied to their contact if they are (or become) one.
+    peer_card: Option<ProfileCard>,
+    /// The file picker is open for a profile picture rather than a file
+    /// to send, so the picked file is read here instead of queued.
+    picking_avatar: bool,
 
     /// Whether the app is on screen; notifications are only for when it
     /// is not.
@@ -376,6 +382,16 @@ pub struct App {
     connected_at: Option<Instant>,
     /// The window's logical size as last told to the interface.
     size: Size,
+    /// How the call engine wakes the runner; kept so the app can be
+    /// rebuilt from disk after an account restore.
+    wake: Waker,
+    /// Settings > Account & backup: backup files and moving devices.
+    account: crate::account::PhoneAccount,
+}
+
+/// The profile card the saved settings describe, as sent to contacts.
+fn card_of(settings: &Settings) -> ProfileCard {
+    ProfileCard { bio: settings.bio.clone(), color: settings.color.clone(), avatar: settings.avatar.clone() }
 }
 
 /// Loads this phone's identity from `dir`, creating one on first start.
@@ -392,9 +408,10 @@ impl App {
     pub fn new(dir: PathBuf, wake: Waker) -> Result<Self, String> {
         let settings = Settings::load(&dir);
         let identity = load_identity(&dir);
-        let engine = CallEngine::new(settings.chain.clone(), settings.open_mic, settings.speaker, wake)
+        let engine = CallEngine::new(settings.chain.clone(), settings.open_mic, settings.speaker, wake.clone())
             .map_err(|e| format!("could not start the call engine: {e}"))?;
         engine.set_display_name(&settings.display_name);
+        engine.set_profile(&settings.status_message, card_of(&settings));
         // Received files are stored, and partial ones kept for resuming,
         // under the same folder the desktop's modules would use.
         crate::config::set_dir(dir.clone());
@@ -441,6 +458,8 @@ impl App {
             unread: 0,
             live_peer: None,
             peer_display_name: None,
+            peer_card: None,
+            picking_avatar: false,
             foreground: true,
             network: platform::network(),
             battery_saver: platform::battery_saver(),
@@ -459,6 +478,8 @@ impl App {
             talking: false,
             connected_at: None,
             size: Size::new(0.0, 0.0),
+            wake,
+            account: Default::default(),
         };
         app.refresh();
         Ok(app)
@@ -471,6 +492,29 @@ impl App {
         self.engine.mic_test_running()
             || matches!(self.engine.phase(), Phase::Connected { .. } | Phase::Dialing { .. })
             || self.stoop.needs_frames()
+            // A backup being sealed or a move offer open: its result is
+            // collected in `poll`, which runs on each frame.
+            || self.account.active()
+    }
+
+    /// Rebuilds the whole app from what is on disk, after a restore wrote
+    /// a different account there. Everything in memory -- identity,
+    /// contacts, history, settings -- belonged to the old account.
+    fn reload_account(&mut self, said: String) {
+        if self.engine.is_busy() {
+            self.engine.stop();
+        }
+        match App::new(self.dir.clone(), self.wake.clone()) {
+            Ok(fresh) => {
+                let (size, foreground) = (self.size, self.foreground);
+                *self = fresh;
+                self.foreground = foreground;
+                self.resized(size);
+                self.stoop.toast(said, antiphon_ui::ToastKind::Ok);
+                self.refresh();
+            }
+            Err(e) => self.notice = Some(format!("{said} Close and reopen Stoop to finish: {e}")),
+        }
     }
 
     /// The activity came back to the front, possibly from the permission
@@ -519,6 +563,22 @@ impl App {
     pub fn platform_event(&mut self, event: platform::PlatformEvent) {
         use platform::{CallAction, PlatformEvent};
         match event {
+            PlatformEvent::FilePicked(picked) if self.picking_avatar => {
+                self.picking_avatar = false;
+                let made = platform::read_file(&picked.handle)
+                    .map_err(|e| format!("Couldn't open {}: {e}", picked.name))
+                    .and_then(|bytes| crate::profile::avatar_from_image(&bytes));
+                match made {
+                    Ok(avatar) => {
+                        self.settings.avatar = avatar;
+                        self.profile_changed();
+                        self.stoop.toast("Picture updated", antiphon_ui::ToastKind::Ok);
+                    }
+                    Err(why) => self.stoop.toast(why, antiphon_ui::ToastKind::Err),
+                }
+            }
+            // A backup file chosen in Settings, not a file for the call.
+            PlatformEvent::FilePicked(picked) if self.account.picked(&self.dir, Some(&picked.handle)) => {}
             PlatformEvent::FilePicked(picked) => {
                 let Some(peer) = self.live_peer.clone() else {
                     self.notice = Some("The call ended before the file was picked. Send it during your next call.".into());
@@ -528,7 +588,10 @@ impl App {
                     self.notice = Some(e);
                 }
             }
-            PlatformEvent::FilePickCancelled => {}
+            PlatformEvent::FilePickCancelled => {
+                self.picking_avatar = false;
+                self.account.picked(&self.dir, None);
+            }
             PlatformEvent::NetworkChanged(network) => self.network = network,
             PlatformEvent::CallAction(CallAction::Answer) => platform::ring(None),
             PlatformEvent::CallAction(CallAction::HangUp | CallAction::Decline) => {
@@ -614,6 +677,17 @@ impl App {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
 
+        for outcome in self.account.poll() {
+            match outcome {
+                crate::account::Outcome::Toast(text, kind) => self.stoop.toast(text, kind),
+                crate::account::Outcome::Reload(said) => {
+                    self.reload_account(said);
+                    return true;
+                }
+            }
+            changed = true;
+        }
+
         for summary in self.engine.take_finished() {
             if let Ok(key) = &self.backup_key {
                 call_log::record(&mut self.calls, CallRecord::from(&summary));
@@ -627,6 +701,7 @@ impl App {
         if live_peer != self.live_peer {
             self.live_peer = live_peer.clone();
             self.peer_display_name = None;
+            self.peer_card = None;
             self.unread = 0;
             self.connected_at = live_peer.as_ref().map(|_| Instant::now());
             self.muted = false;
@@ -663,6 +738,10 @@ impl App {
                         }
                         self.peer_display_name = Some(name);
                     }
+                    continue;
+                }
+                if let ControlMessage::Profile(card) = message {
+                    self.receive_card(&peer, card);
                     continue;
                 }
                 // Their messages always land in their history, even while
@@ -761,6 +840,43 @@ impl App {
     /// Writes the settings file.
     fn save(&self) {
         self.settings.save(&self.dir);
+    }
+
+    /// Saves a changed profile, gives the engine the copy it sends when a
+    /// call connects, and tells the person on the call now.
+    fn profile_changed(&mut self) {
+        self.save();
+        let card = card_of(&self.settings);
+        self.engine.set_profile(&self.settings.status_message, card.clone());
+        if let Some(live) = self.engine.live() {
+            live.send(ControlMessage::Hello(Hello {
+                display_name: self.settings.display_name.clone(),
+                status_message: self.settings.status_message.clone(),
+                presence: None,
+                wants_silent: false,
+                relay: String::new(),
+                routes: String::new(),
+            }));
+            live.send(ControlMessage::Profile(card));
+        }
+    }
+
+    /// Keeps the card the person on the call sent: cleaned, saved to
+    /// their contact if they are one, and shown on their avatar either way.
+    fn receive_card(&mut self, peer_hex: &str, card: ProfileCard) {
+        let card = ProfileCard {
+            avatar: if crate::profile::decode_avatar(&card.avatar).is_some() { card.avatar } else { String::new() },
+            bio: crate::profile::clean_bio(&card.bio),
+            color: if antiphon_ui::avatars::named_color(&card.color).is_some() { card.color } else { String::new() },
+        };
+        antiphon_ui::avatars::set(peer_hex, &card.avatar, &card.color, crate::profile::decode_avatar);
+        if let Some(c) = self.contacts.by_key_mut(peer_hex) {
+            if (&c.avatar, &c.bio, &c.color) != (&card.avatar, &card.bio, &card.color) {
+                (c.avatar, c.bio, c.color) = (card.avatar.clone(), card.bio.clone(), card.color.clone());
+                self.contacts.save(&self.dir);
+            }
+        }
+        self.peer_card = Some(card);
     }
 
     /// Hands the changed chain to the engine, which applies it at once, and
@@ -946,6 +1062,10 @@ impl App {
                     .calls_in_progress_target()
                     .unwrap_or_default();
                 self.contacts.add_from_call(&name, &peer_key, &dialled, now_secs());
+                // What they sent about themselves this call is kept too.
+                if let Some(card) = self.peer_card.clone() {
+                    self.receive_card(&hex(&peer_key), card);
+                }
                 self.contacts.save(&self.dir);
                 self.notice = Some(format!("Saved {name}."));
             }
@@ -1001,6 +1121,7 @@ impl App {
                     self.notice = Some("Files are sent during a call. Call them first.".into());
                     return;
                 }
+                self.picking_avatar = false;
                 platform::pick_file();
             }
             Message::AcceptOffer => {
@@ -1060,7 +1181,7 @@ impl App {
             Message::DisplayName(value) => {
                 self.settings.display_name = value;
                 self.engine.set_display_name(&self.settings.display_name);
-                self.save();
+                self.profile_changed();
             }
             Message::WifiOnly(on) => {
                 self.settings.wifi_only_transfers = on;
@@ -1112,14 +1233,14 @@ impl App {
             self.notice = Some("Hang up before restoring an identity.".into());
             return;
         }
-        let seed = match antiphon_crypto::mnemonic::seed_from_phrase(self.restore_text.trim()) {
-            Ok(seed) => seed,
+        // The phrase, or recovery shares (see `account_backup`).
+        let restored = match crate::account_backup::identity_from_words(&self.restore_text) {
+            Ok(identity) => identity,
             Err(e) => {
-                self.notice = Some(format!("That phrase is not valid: {e}"));
+                self.notice = Some(e);
                 return;
             }
         };
-        let restored = IdentityKeyPair::from_master_seed(seed);
         if let Ok(current) = &self.identity {
             if current.public().identity_key == restored.public().identity_key {
                 self.notice = Some("That phrase already matches this phone's identity. Nothing to do.".into());
@@ -1131,9 +1252,10 @@ impl App {
                 return;
             }
         }
-        let path = antiphon_crypto::store::identity_path(&self.dir);
-        match antiphon_crypto::store::save(&path, &restored) {
-            Ok(()) => {
+        // The old identity is moved aside rather than overwritten, so a
+        // mistaken restore can still be undone by hand.
+        match crate::account_backup::replace_identity(&self.dir, &restored) {
+            Ok(_) => {
                 self.identity = Ok(restored);
                 self.notice = Some("Identity restored.".into());
                 self.restore_text.clear();

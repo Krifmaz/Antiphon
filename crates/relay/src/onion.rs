@@ -424,7 +424,7 @@ fn exit_may_carry(payload: &[u8]) -> bool {
 }
 
 /// Neither loopback, private, link-local, multicast nor unspecified.
-fn is_public(ip: IpAddr) -> bool {
+pub(crate) fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             !(v4.is_loopback()

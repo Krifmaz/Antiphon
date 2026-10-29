@@ -30,7 +30,10 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
     if person.verified {
         name_row = name_row.push(badge_icon(Icon::ShieldCheck, "Verified", Badge::Ok));
     }
-    let who = column![name_row, faint(if person.address.is_empty() { "No address yet" } else { person.address.as_str() }).size(12).font(theme::mono())].spacing(4);
+    let mut who = column![name_row, faint(if person.address.is_empty() { "No address yet" } else { person.address.as_str() }).size(12).font(theme::mono())].spacing(4);
+    if !person.bio.is_empty() {
+        who = who.push(container(t(person.bio.as_str()).size(13).color(p.muted)).padding([6, 0]));
+    }
 
     let mut col = column![head, container(who).padding([4, 18])].spacing(10);
 

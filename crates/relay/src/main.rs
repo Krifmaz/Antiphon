@@ -11,7 +11,8 @@ use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
 use antiphon_net::dht::{self, DhtNode, ListingEntry, NodeKey};
 use antiphon_relay::onion::{load_or_create_hop_key, HopLimits, HopNode};
 use antiphon_relay::sfu::{Sfu, SfuLimits};
-use antiphon_relay::{run_node_full, Limits, Relay, COMMITMENT};
+use antiphon_relay::federation::{self, FedLimits, Federation};
+use antiphon_relay::{run_node_with_federation, Limits, Relay, COMMITMENT};
 use clap::Parser;
 use tokio::net::UdpSocket;
 
@@ -134,6 +135,30 @@ struct Args {
     /// community; never lists people.
     #[arg(long, requires = "dht")]
     directory: Option<std::path::PathBuf>,
+    /// Peer with other relays, so someone registered at any of them can be
+    /// rung through this one, and apps can fall back across the mesh. Off
+    /// by default. Peers learn hashes of tokens, never tokens, and never a
+    /// key to any call.
+    #[arg(long)]
+    federate: bool,
+    /// A relay to peer with: `host:port`, or `host:port#key` to pin its
+    /// peer key (printed at its start-up). Repeat for several. Others are
+    /// learned from these, each proving its key before it is used.
+    #[arg(long = "peer", requires = "federate")]
+    peers: Vec<String>,
+    /// Keep the peer key in this file (created if missing), so relays that
+    /// learned it keep recognising this one after a restart.
+    #[arg(long, default_value = "antiphon-peer.key")]
+    peer_key: std::path::PathBuf,
+    /// Most relays peered with at once.
+    #[arg(long, default_value_t = FedLimits::default().max_peers)]
+    federate_max_peers: usize,
+    /// Most calls bridged to peer relays at once.
+    #[arg(long, default_value_t = FedLimits::default().max_bridges)]
+    federate_max_bridges: usize,
+    /// Peer with relays at private and loopback addresses (a LAN-only mesh).
+    #[arg(long)]
+    federate_allow_private: bool,
 }
 
 /// Loads the node's DHT key, or makes and saves one.
@@ -264,7 +289,32 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let federation = if args.federate {
+        let key = antiphon_crypto::federation::PeerKey::from_bytes(load_or_create_hop_key(&args.peer_key)?.to_bytes());
+        let mut named = Vec::new();
+        for p in &args.peers {
+            let Some((host, pin)) = federation::parse_peer(p) else { anyhow::bail!("--peer {p}: expected host:port or host:port#key") };
+            let found = tokio::net::lookup_host(host.as_str()).await?.next();
+            match found {
+                Some(a) => named.push((a, pin)),
+                None => anyhow::bail!("{host} did not resolve"),
+            }
+        }
+        let limits = FedLimits {
+            max_peers: args.federate_max_peers,
+            max_bridges: args.federate_max_bridges,
+            allow_private: args.federate_allow_private,
+            ..FedLimits::default()
+        };
+        Some(Arc::new(Mutex::new(Federation::new(key, limits, &named, std::time::Instant::now()))))
+    } else {
+        None
+    };
     println!("antiphon-relay listening on {}\n\n{COMMITMENT}", socket.local_addr()?);
+    if let Some(f) = &federation {
+        let key = federation::encode_hex(&f.lock().unwrap().public());
+        println!("\nFederating with other relays. Peer key {key}\nOther relays can pin it with --peer <this address>#{key}");
+    }
     if let Some(h) = &hops {
         let key: String = h.lock().unwrap().public_key().iter().map(|b| format!("{b:02x}")).collect();
         println!("\nHops on: carrying anonymity circuits. Hop key {key}");
@@ -329,6 +379,7 @@ async fn main() -> anyhow::Result<()> {
         let sfu = sfu.clone();
         let hops = hops.clone();
         let dht_node = dht_node.clone();
+        let federation = federation.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(secs.max(1)));
             loop {
@@ -362,12 +413,16 @@ async fn main() -> anyhow::Result<()> {
                     let s = h.lock().unwrap().stats();
                     println!("hops circuits={} exits={} cells={} refused={}", s.circuits, s.exits, s.cells, s.refused);
                 }
+                if let Some(f) = &federation {
+                    let s = f.lock().unwrap().stats();
+                    println!("federation peers={} candidates={} bridges={} bad_proofs={}", s.peers, s.candidates, s.bridges, s.bad_proofs);
+                }
             }
         });
     }
 
     tokio::select! {
-        result = run_node_full(socket, relay, mailbox, files.clone(), sfu, hops, dht_node) => result?,
+        result = run_node_with_federation(socket, relay, mailbox, files.clone(), sfu, hops, dht_node, federation) => result?,
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())

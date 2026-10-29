@@ -46,6 +46,7 @@ fn shown(m: &Model, s: Section) -> bool {
 fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     let body = match section {
         Section::Profile => profile(ui, m),
+        Section::Account => super::account::view(ui, m),
         Section::Appearance => appearance(m),
         Section::Voice => voice(m),
         Section::Network => network(ui, m),
@@ -69,15 +70,41 @@ fn edit_box<'a>(placeholder: &'a str, edited: &'a Option<String>, saved: &'a str
 /// Your name, status, and the key that proves who you are.
 fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
+    let mut picture_buttons = row![btn_icon(Icon::Edit, if m.me.has_picture { "Change picture" } else { "Add a picture" }, Btn::Default, Some(Msg::Do(Action::PickAvatar)))].spacing(8);
+    if m.me.has_picture {
+        picture_buttons = picture_buttons.push(btn_icon(Icon::Trash, "Remove", Btn::Ghost, Some(Msg::Do(Action::RemoveAvatar))));
+    }
     let me = row![
-        avatar(&m.me.name, &m.me.id, 64.0),
-        column![t(m.me.name.as_str()).size(18).font(theme::bold()), faint(if m.me.status.is_empty() { "No status" } else { m.me.status.as_str() }).size(13)].spacing(3),
+        avatar(&m.me.name, &m.me.id, 72.0),
+        column![
+            t(m.me.name.as_str()).size(18).font(theme::bold()),
+            faint(if m.me.status.is_empty() { "No status" } else { m.me.status.as_str() }).size(13),
+            picture_buttons,
+        ]
+        .spacing(6),
     ]
     .spacing(16)
     .align_y(Alignment::Center);
+    // The colour behind your initial when there is no picture, here and
+    // on your contacts' screens: automatic, or one of the set.
+    // The automatic swatch carries a sparkle, so it does not read as one
+    // more fixed colour when the key's colour happens to match one.
+    let auto = theme::avatar_color(&m.me.id);
+    let automatic = iced_widget::stack![
+        swatch(auto, auto, m.me.color.is_empty(), "Automatic", Msg::Do(Action::ProfileColor(String::new()))),
+        container(icon(Icon::Sparkle, 14.0, theme::hex("#16161f"))).center(34),
+    ];
+    let mut colors = row![automatic].spacing(8);
+    for (id, name, hex) in crate::PROFILE_COLORS {
+        let c = theme::hex(hex);
+        colors = colors.push(swatch(c, c, m.me.color == id, name, Msg::Do(Action::ProfileColor(id.to_string()))));
+    }
     let fields = column![
         field("Name", edit_box("What people see", &ui.name_edit, &m.me.name, Msg::NameEdit, Msg::NameSave)),
         field("Status", edit_box("Around after six", &ui.status_edit, &m.me.status, Msg::StatusEdit, Msg::StatusSave)),
+        field("About you", edit_box("A line or two people see in your details", &ui.bio_edit, &m.me.bio, Msg::BioEdit, Msg::BioSave)),
+        field("Colour", colors),
+        faint("Your picture, About line and colour go to the people you call. They stay on your devices and theirs.").size(12),
     ]
     .spacing(14);
     let identity = column![
@@ -301,7 +328,15 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         setting("Open my door when Stoop starts", None, switch(m.settings.open_on_start, |on| Msg::Do(Action::OpenOnStart(on)))),
     ]
     .spacing(12);
-    let relay = field("Relay", edit_box("relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave));
+    let mut relay = column![field("Relay", edit_box("relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave))].spacing(12);
+    if !m.network.relay_note.is_empty() {
+        relay = relay.push(faint(m.network.relay_note.as_str()).size(12.5));
+    }
+    relay = relay.push(divider()).push(setting(
+        "Let contacts use my relay",
+        Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
+        switch(m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
+    ));
     column![
         card(check_card),
         titled_card("Your door", None, listen),
@@ -340,9 +375,8 @@ fn about<'a>(m: &'a Model) -> El<'a, Msg> {
 }
 
 /// The phone's own settings: the microphone permission, listening in the
-/// background, mobile data, and the recovery phrase.
+/// background and mobile data. (The recovery phrase is under Account.)
 fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let p = theme::look();
     let Some(ph) = m.phone.as_ref() else { return column![].into() };
     let mut cards = column![].spacing(14);
     if !ph.mic_allowed {
@@ -382,33 +416,8 @@ fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         setting("Monthly limit for files", Some(ph.cellular_used.as_str()), limit),
     ]
     .spacing(12);
-    let phrase: El<'a, Msg> = match ph.phrase.as_deref() {
-        Some(words) => column![
-            container(t(words).size(13.5).font(theme::mono()).color(p.text)).padding([10, 12]).width(Length::Fill).style(theme::inset),
-            row![
-                btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Msg::Copy(words.to_string(), "Recovery phrase"))),
-                btn("Hide", Btn::Ghost, Some(Msg::Do(Action::ShowPhrase(false)))),
-            ]
-            .spacing(8),
-        ]
-        .spacing(10)
-        .into(),
-        None => row![btn_icon(Icon::Lock, "Show my recovery phrase", Btn::Default, Some(Msg::Do(Action::ShowPhrase(true))))].into(),
-    };
-    let ready = !ui.restore_edit.trim().is_empty();
-    let restore = column![
-        text_input("The 24 words, in order", &ui.restore_edit).on_input(Msg::RestoreEdit).padding([10, 12]).size(14).style(theme::input),
-        row![btn("Restore", Btn::Danger, ready.then_some(Msg::Dialog(Some(Dialog::ConfirmRestore))))],
-    ]
-    .spacing(10);
     cards
         .push(titled_card("In the background", None, background))
         .push(titled_card("Mobile data", None, data))
-        .push(titled_card(
-            "Recovery phrase",
-            Some("These words bring your identity back on a new phone. Anyone who has them can be you, so keep them somewhere only you can reach."),
-            phrase,
-        ))
-        .push(titled_card("Restore from a phrase", Some("Moving from another device? Type its phrase here."), restore))
         .into()
 }

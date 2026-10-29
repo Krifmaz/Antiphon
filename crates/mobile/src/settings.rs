@@ -26,6 +26,16 @@ pub struct Settings {
     pub chain: ChainConfig,
     /// The name sent to the people you call.
     pub display_name: String,
+    /// The status line sent with it ("Around this evening").
+    pub status_message: String,
+    /// A line or two about you, sent to the people you call.
+    pub bio: String,
+    /// Your avatar colour's id (`antiphon_ui::PROFILE_COLORS`); empty for
+    /// the automatic one.
+    pub color: String,
+    /// Your profile picture: a small JPEG, base64, as
+    /// `profile::avatar_from_image` makes it. Empty for none.
+    pub avatar: String,
     /// Hold file transfers while on mobile data.
     pub wifi_only_transfers: bool,
     /// Megabytes of mobile data file transfers may use per month; 0 for
@@ -60,6 +70,10 @@ impl Default for Settings {
             speaker: false,
             chain: ChainConfig::default_preset(),
             display_name: String::new(),
+            status_message: String::new(),
+            bio: String::new(),
+            color: String::new(),
+            avatar: String::new(),
             // On by default: a large file quietly eating a data plan is
             // the surprise people do not forgive, and the queue says
             // plainly why a file is waiting.

@@ -15,6 +15,7 @@
 //! window, and one screen at a time with a tab bar on a narrow one
 //! ([`theme::NARROW`]), which is what a phone gets.
 
+pub mod avatars;
 pub mod icons;
 pub mod model;
 pub mod theme;
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant};
 use iced_core::animation::{Animation, Easing};
 use iced_core::{Point, Size};
 
+pub use avatars::PROFILE_COLORS;
 pub use model::*;
 
 /// An element of this interface: the default theme, and whichever renderer
@@ -38,6 +40,12 @@ pub type El<'a, M> = iced_core::Element<'a, M, iced_core::Theme, iced_widget::Re
 pub const COMPOSER: &str = "stoop-composer";
 /// The people search box's widget id, for a find shortcut.
 pub const SEARCH: &str = "stoop-search";
+
+/// The shortest passphrase a backup accepts. The same number as
+/// `antiphon_crypto::account_seal::MIN_PASSPHRASE_CHARS`, which the apps
+/// check at compile time; repeated here so the interface can say so
+/// without depending on the crypto crate.
+pub const MIN_PASSPHRASE_CHARS: usize = 8;
 
 /// A screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +63,8 @@ pub enum Route {
 pub enum Section {
     /// Your name and status.
     Profile,
+    /// Keeping the account: recovery phrase, backup file, moving devices.
+    Account,
     /// Theme, accent and motion.
     Appearance,
     /// Devices, how your voice is sent, and processing.
@@ -63,18 +73,19 @@ pub enum Section {
     Network,
     /// Version and where data is kept.
     About,
-    /// Battery, mobile data and the recovery phrase; phones only.
+    /// Battery and mobile data; phones only.
     Phone,
 }
 
 impl Section {
     /// Every section, in the order the navigation lists them.
-    pub const ALL: [Section; 6] = [Section::Profile, Section::Appearance, Section::Voice, Section::Network, Section::Phone, Section::About];
+    pub const ALL: [Section; 7] = [Section::Profile, Section::Account, Section::Appearance, Section::Voice, Section::Network, Section::Phone, Section::About];
 
     /// The section's name as the navigation shows it.
     pub fn label(self) -> &'static str {
         match self {
             Section::Profile => "Profile",
+            Section::Account => "Account & backup",
             Section::Appearance => "Appearance",
             Section::Voice => "Voice & audio",
             Section::Network => "Network",
@@ -87,6 +98,7 @@ impl Section {
     pub fn icon(self) -> icons::Icon {
         match self {
             Section::Profile => icons::Icon::Users,
+            Section::Account => icons::Icon::Lock,
             Section::Appearance => icons::Icon::Palette,
             Section::Voice => icons::Icon::Sliders,
             Section::Network => icons::Icon::Globe,
@@ -110,6 +122,12 @@ pub enum Dialog {
     /// Are you sure: replace this device's identity with the one the
     /// recovery phrase in the box restores.
     ConfirmRestore,
+    /// Are you sure: replace this device's account with a backup file
+    /// (opened with the passphrase in the box).
+    ConfirmImport,
+    /// Are you sure: replace this device's account with the one the move
+    /// link in the box offers.
+    ConfirmReceive,
 }
 
 /// How a toast is coloured.
@@ -246,6 +264,15 @@ pub enum Action {
     SetName(String),
     /// My status line, sent at the start of every call.
     SetStatus(String),
+    /// Choose a new profile picture (the app opens a file picker).
+    PickAvatar,
+    /// Go back to the initial-letter avatar.
+    RemoveAvatar,
+    /// Save my About line.
+    SetBio(String),
+    /// Pick my avatar colour, by id from [`PROFILE_COLORS`]; empty for
+    /// the automatic one.
+    ProfileColor(String),
     /// Pick a theme by its id (see [`theme::THEMES`]).
     Theme(String),
     /// Pick an accent by its id (see [`theme::ACCENTS`]).
@@ -278,6 +305,8 @@ pub enum Action {
     OpenOnStart(bool),
     /// The relay to be reachable through; empty for none.
     Relay(String),
+    /// Let contacts with no relay of their own listen at yours.
+    LendRelay(bool),
     /// The port the door listens on.
     Port(u16),
     /// Re-run the reachability check.
@@ -311,8 +340,33 @@ pub enum Action {
     ListenOnSaver(bool),
     /// Show (true) or hide the recovery phrase.
     ShowPhrase(bool),
-    /// Restore the identity this recovery phrase makes, replacing this one.
+    /// Restore the identity this recovery phrase (or these Shamir shares,
+    /// one per line) makes, replacing this one. Contacts and settings stay.
     Restore(String),
+    /// Seal the whole account under this passphrase and save it as a file.
+    BackupSave {
+        /// What the file opens with.
+        passphrase: String,
+        /// Include message history.
+        history: bool,
+    },
+    /// Choose a backup file, open it with this passphrase, and make it
+    /// this device's account (the dialog already asked).
+    BackupOpen {
+        /// What the file opens with.
+        passphrase: String,
+    },
+    /// Offer this account to another device on the same network: show a
+    /// link and QR code.
+    MoveStart {
+        /// Include message history.
+        history: bool,
+    },
+    /// Close the offer.
+    MoveStop,
+    /// Fetch the account this move link offers and make it this device's
+    /// (the dialog already asked).
+    MoveReceive(String),
 }
 
 /// Everything that can happen in the interface.
@@ -363,6 +417,10 @@ pub enum Msg {
     StatusEdit(String),
     /// Save my status.
     StatusSave,
+    /// My About line is being edited in Settings.
+    BioEdit(String),
+    /// Save my About line.
+    BioSave,
     /// The relay box is being edited.
     RelayEdit(String),
     /// Save the relay.
@@ -377,6 +435,18 @@ pub enum Msg {
     NoteSave,
     /// The recovery phrase box changed.
     RestoreEdit(String),
+    /// The backup passphrase box changed.
+    BackupPass(String),
+    /// The "type it again" box changed.
+    BackupPass2(String),
+    /// Include message history in a backup or move.
+    IncludeHistory(bool),
+    /// Save a backup with the passphrase typed (if both boxes agree).
+    BackupSave,
+    /// The passphrase box for opening a backup changed.
+    ImportPass(String),
+    /// The move link box changed.
+    ReceiveLink(String),
     /// The mobile data limit box changed (digits only are kept).
     LimitEdit(String),
     /// Save the mobile data limit box.
@@ -427,6 +497,8 @@ pub struct Ui {
     name_edit: Option<String>,
     /// My status while it is being edited.
     status_edit: Option<String>,
+    /// My About line while it is being edited.
+    bio_edit: Option<String>,
     /// The relay while it is being edited.
     relay_edit: Option<String>,
     /// The port while it is being edited.
@@ -435,8 +507,21 @@ pub struct Ui {
     note_edit: Option<(String, String)>,
     /// The first-run name box.
     first_name: String,
-    /// The recovery phrase box, for restoring an identity on a phone.
+    /// The recovery phrase box, for restoring an identity.
     restore_edit: String,
+    /// The passphrase a new backup is sealed with.
+    backup_pass: String,
+    /// The same passphrase typed again, to catch a typo before it locks
+    /// the file for good.
+    backup_pass2: String,
+    /// Why the passphrase cannot be used yet, once Save was pressed.
+    backup_error: String,
+    /// Whether backups and moves bring message history.
+    include_history: bool,
+    /// The passphrase a backup file is opened with.
+    import_pass: String,
+    /// The move link pasted from another device.
+    receive_link: String,
     /// The mobile data limit box while it is being edited.
     limit_edit: Option<String>,
     /// Toasts on screen, oldest first.
@@ -490,11 +575,18 @@ impl Ui {
             add_error: String::new(),
             name_edit: None,
             status_edit: None,
+            bio_edit: None,
             relay_edit: None,
             port_edit: None,
             note_edit: None,
             first_name: String::new(),
             restore_edit: String::new(),
+            backup_pass: String::new(),
+            backup_pass2: String::new(),
+            backup_error: String::new(),
+            include_history: true,
+            import_pass: String::new(),
+            receive_link: String::new(),
             limit_edit: None,
             toasts: Vec::new(),
             next_toast: 1,
@@ -730,6 +822,14 @@ impl Ui {
                 Some(s) if s.trim() != model.me.status => vec![Action::SetStatus(s.trim().to_string())],
                 _ => Vec::new(),
             },
+            Msg::BioEdit(s) => {
+                self.bio_edit = Some(s);
+                Vec::new()
+            }
+            Msg::BioSave => match self.bio_edit.take() {
+                Some(s) if s.trim() != model.me.bio => vec![Action::SetBio(s.trim().to_string())],
+                _ => Vec::new(),
+            },
             Msg::RelayEdit(s) => {
                 self.relay_edit = Some(s);
                 Vec::new()
@@ -758,6 +858,44 @@ impl Ui {
             },
             Msg::RestoreEdit(s) => {
                 self.restore_edit = s;
+                Vec::new()
+            }
+            Msg::BackupPass(s) => {
+                self.backup_pass = s;
+                self.backup_error.clear();
+                Vec::new()
+            }
+            Msg::BackupPass2(s) => {
+                self.backup_pass2 = s;
+                self.backup_error.clear();
+                Vec::new()
+            }
+            Msg::IncludeHistory(on) => {
+                self.include_history = on;
+                Vec::new()
+            }
+            Msg::BackupSave => {
+                // Checked here, not only in the engine, so a typo is caught
+                // while the person is still looking at the boxes.
+                let min = MIN_PASSPHRASE_CHARS;
+                if self.backup_pass.chars().count() < min {
+                    self.backup_error = format!("Use at least {min} characters. A short sentence is easy to remember and hard to guess.");
+                    return Vec::new();
+                }
+                if self.backup_pass != self.backup_pass2 {
+                    self.backup_error = "The two passphrases don't match.".into();
+                    return Vec::new();
+                }
+                let passphrase = std::mem::take(&mut self.backup_pass);
+                self.backup_pass2.clear();
+                vec![Action::BackupSave { passphrase, history: self.include_history }]
+            }
+            Msg::ImportPass(s) => {
+                self.import_pass = s;
+                Vec::new()
+            }
+            Msg::ReceiveLink(s) => {
+                self.receive_link = s;
                 Vec::new()
             }
             Msg::LimitEdit(s) => {
@@ -812,6 +950,14 @@ impl Ui {
                     Action::Restore(_) => {
                         self.set_dialog(None);
                         self.restore_edit.clear();
+                    }
+                    Action::BackupOpen { .. } => {
+                        self.set_dialog(None);
+                        self.import_pass.clear();
+                    }
+                    Action::MoveReceive(_) => {
+                        self.set_dialog(None);
+                        self.receive_link.clear();
                     }
                     _ => {}
                 }

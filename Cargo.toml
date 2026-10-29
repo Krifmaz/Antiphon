@@ -65,6 +65,13 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.hkdf]
 opt-level = 3
+# Argon2id is built to be slow; unoptimised it is slow enough (seconds per
+# backup at the real cost) that a debug build looks hung when it saves or
+# opens an account backup.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 # Live captions (spec §7): the speech model is matrix multiplication all
 # the way down, and unoptimised it runs tens of times slower than real

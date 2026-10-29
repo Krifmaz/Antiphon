@@ -89,9 +89,13 @@ impl App {
         if self.qr.as_ref().is_none_or(|(link, _)| link != &invite) {
             self.qr = qr_code::Data::new(invite.as_bytes()).ok().map(Arc::new).map(|d| (invite.clone(), d));
         }
+        stoop::avatars::set(&id, &self.settings.avatar, &self.settings.color, crate::profile::decode_avatar);
         let me = stoop::Me {
             name: self.settings.display_name.clone(),
-            status: String::new(),
+            status: self.settings.status_message.clone(),
+            bio: self.settings.bio.clone(),
+            color: self.settings.color.clone(),
+            has_picture: !self.settings.avatar.is_empty(),
             fingerprint: id.as_bytes().chunks(4).take(8).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(" "),
             id,
             qr: self.qr.as_ref().map(|(_, d)| d.clone()),
@@ -107,14 +111,18 @@ impl App {
             .contacts
             .list
             .iter()
-            .map(|c| Person { fingerprint: c.fingerprint(), ..self.person(&c.identity_key, c.name.clone(), c.address.clone(), c.verified, live_peer.as_deref(), now) })
+            .map(|c| {
+                stoop::avatars::set(&c.identity_key, &c.avatar, &c.color, crate::profile::decode_avatar);
+                Person { fingerprint: c.fingerprint(), bio: c.bio.clone(), ..self.person(&c.identity_key, c.name.clone(), c.address.clone(), c.verified, live_peer.as_deref(), now) }
+            })
             .collect();
         // Someone not saved can still call: they get a row for the length
         // of the call, so their conversation and the call have a place.
         if let Some(peer) = &live_peer {
             if self.contacts.by_key(peer).is_none() {
                 let name = self.peer_display_name.clone().unwrap_or_else(|| self.contacts.name_for(peer));
-                people.insert(0, self.person(peer, name, String::new(), false, live_peer.as_deref(), now));
+                let bio = self.peer_card.as_ref().map(|c| c.bio.clone()).unwrap_or_default();
+                people.insert(0, Person { bio, ..self.person(peer, name, String::new(), false, live_peer.as_deref(), now) });
             }
         }
         // Most recent conversation first, as on the desktop.
@@ -175,7 +183,7 @@ impl App {
             call,
             conversation,
             transfers,
-            network: stoop::Network { checks, port: self.settings.listen_port, relay: String::new() },
+            network: stoop::Network { checks, port: self.settings.listen_port, relay: String::new(), ..Default::default() },
             settings,
             notice: self.notice.clone(),
             first_run: self.settings.display_name.trim().is_empty(),
@@ -189,11 +197,11 @@ impl App {
                 cellular_used: format!("Used this month: {}.", data_rules::size(self.meter.used(now))),
                 keep_listening: self.settings.keep_listening_in_background,
                 listen_on_saver: self.settings.listen_on_battery_saver,
-                phrase: match (&self.identity, self.phrase_visible) {
-                    (Ok(identity), true) => Some(antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed())),
-                    _ => None,
-                },
                 talking: self.talking,
+            }),
+            account: self.account.model(match (&self.identity, self.phrase_visible) {
+                (Ok(identity), true) => Some(antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed())),
+                _ => None,
             }),
         }
     }
@@ -217,6 +225,7 @@ impl App {
             route: "Direct".into(),
             volume_db: 0.0,
             muted: false,
+            bio: String::new(),
         }
     }
 
@@ -375,6 +384,16 @@ impl App {
         t
     }
 
+    /// Shows what an account action said straight away. (A reload only
+    /// ever comes later, from `poll`.)
+    fn account_toasts(&mut self, outcomes: Vec<crate::account::Outcome>) {
+        for o in outcomes {
+            if let crate::account::Outcome::Toast(text, kind) = o {
+                self.stoop.toast(text, kind);
+            }
+        }
+    }
+
     /// Carries out one thing the interface asked for.
     pub(super) fn act(&mut self, action: Action) {
         match action {
@@ -455,7 +474,29 @@ impl App {
                     self.contacts.save(&self.dir);
                 }
             }
-            Action::Note(..) | Action::SetStatus(_) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
+            Action::SetStatus(status) => {
+                self.settings.status_message = status;
+                self.profile_changed();
+            }
+            Action::PickAvatar => {
+                // Drops any backup still waiting on the picker: this pick is the picture's.
+                self.account.picked(&self.dir, None);
+                self.picking_avatar = true;
+                crate::platform::pick_file();
+            }
+            Action::RemoveAvatar => {
+                self.settings.avatar.clear();
+                self.profile_changed();
+            }
+            Action::SetBio(bio) => {
+                self.settings.bio = crate::profile::clean_bio(&bio);
+                self.profile_changed();
+            }
+            Action::ProfileColor(color) => {
+                self.settings.color = color;
+                self.profile_changed();
+            }
+            Action::Note(..) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),
@@ -507,6 +548,35 @@ impl App {
                 self.restore_text = phrase;
                 self.restore_armed = true;
                 self.update(Message::Restore);
+            }
+            Action::BackupSave { passphrase, history } => match (&self.identity, &self.backup_key) {
+                (Ok(identity), Ok(key)) => self.account.save(&self.dir, identity, key, passphrase, history),
+                _ => self.stoop.toast("Your identity or history key didn't load, so a backup can't be made yet.", ToastKind::Err),
+            },
+            Action::BackupOpen { passphrase } => {
+                if self.engine.is_busy() {
+                    self.stoop.toast("Hang up before restoring an account.", ToastKind::Warn);
+                } else {
+                    // This pick is the backup's, not a new profile picture's.
+                    self.picking_avatar = false;
+                    self.account.choose_file(passphrase);
+                }
+            }
+            Action::MoveStart { history } => match (&self.identity, &self.backup_key) {
+                (Ok(identity), Ok(key)) => {
+                    let outcomes = self.account.start_move(&self.dir, identity, key, history);
+                    self.account_toasts(outcomes);
+                }
+                _ => self.stoop.toast("Your identity or history key didn't load, so the account can't be sent yet.", ToastKind::Err),
+            },
+            Action::MoveStop => self.account.stop_move(),
+            Action::MoveReceive(link) => {
+                if self.engine.is_busy() {
+                    self.stoop.toast("Hang up before bringing an account here.", ToastKind::Warn);
+                } else {
+                    let outcomes = self.account.receive(&self.dir, &link);
+                    self.account_toasts(outcomes);
+                }
             }
         }
     }

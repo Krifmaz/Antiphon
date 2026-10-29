@@ -5,7 +5,9 @@
 //! circuits through several relays ([`onion`]), and the DHT ([`dht`]),
 //! which lets contacts find each other again after an address changes.
 
+pub mod account_move;
 mod error;
+pub mod federation;
 pub mod fec;
 pub mod file_transfer;
 mod jitter;

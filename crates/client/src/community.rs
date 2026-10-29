@@ -1913,7 +1913,7 @@ mod tests {
             Card::mine(&self.id, String::new(), self.name)
         }
         fn card_as(&self, identity: &IdentityKeyPair) -> Card {
-            let profile = crate::config::ProfileData { display_name: self.name.into(), status_message: "Online".into() };
+            let profile = crate::config::ProfileData { display_name: self.name.into(), status_message: "Online".into(), ..Default::default() };
             card_as(identity, String::new(), &profile, &self.look)
         }
         fn space(&mut self) -> &mut Space {
@@ -2395,7 +2395,7 @@ mod tests {
         tokio::spawn(antiphon_relay::run_node(sock, Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default()))), Some(mb), None));
         let mut routes = crate::delivery::default_routes();
         routes[2].nodes = vec![node.clone()];
-        let profile = |n: &str| crate::config::ProfileData { display_name: n.into(), status_message: String::new() };
+        let profile = |n: &str| crate::config::ProfileData { display_name: n.into(), status_message: String::new(), ..Default::default() };
         let card_of = |id: &IdentityKeyPair, n: &str| {
             let record = crate::delivery::my_record(id, &routes, false, 1);
             card_as(id, crate::delivery::encode_record(&record), &profile(n), &Appearance::default())

@@ -33,9 +33,39 @@ pub struct Model {
     pub first_run: bool,
     /// What this device can do.
     pub device: Device,
-    /// What only a phone has: the loudspeaker, battery and data rules, the
-    /// recovery phrase. `None` on a desktop, which hides all of it.
+    /// What only a phone has: the loudspeaker, battery and data rules.
+    /// `None` on a desktop, which hides all of it.
     pub phone: Option<Phone>,
+    /// Keeping the account: the recovery phrase, backups, moving devices.
+    pub account: Account,
+}
+
+/// Settings > Account: everything about not losing the account.
+#[derive(Clone, Default)]
+pub struct Account {
+    /// The recovery phrase, while it is shown; `None` while hidden.
+    pub phrase: Option<String>,
+    /// A slow job is running ("Sealing your backup…"); the buttons that
+    /// would start another wait until it is done.
+    pub busy: Option<String>,
+    /// An open offer to move this account to another device.
+    pub moving: Option<Moving>,
+    /// Whether this device can show a save or open dialog for a backup
+    /// file. A phone without one still saves to Downloads.
+    pub can_pick_file: bool,
+}
+
+/// An open offer to move the account to another device.
+#[derive(Clone)]
+pub struct Moving {
+    /// The link the new device opens.
+    pub link: String,
+    /// The same link as a QR code, for a phone's camera.
+    pub qr: Option<std::sync::Arc<qr_code::Data>>,
+    /// Where it stands, in words ("Waiting for your other device").
+    pub status: String,
+    /// The account has arrived on the other device.
+    pub done: bool,
 }
 
 /// The phone's own settings and state.
@@ -57,8 +87,6 @@ pub struct Phone {
     pub keep_listening: bool,
     /// Keep listening in the background even on battery saver.
     pub listen_on_saver: bool,
-    /// The recovery phrase, while it is shown; `None` while hidden.
-    pub phrase: Option<String>,
     /// The push-to-talk pad is held.
     pub talking: bool,
 }
@@ -81,6 +109,12 @@ pub struct Me {
     pub name: String,
     /// Status line ("Around this evening").
     pub status: String,
+    /// A line or two about me, shown to contacts.
+    pub bio: String,
+    /// My avatar colour's id ([`crate::PROFILE_COLORS`]); empty for automatic.
+    pub color: String,
+    /// Whether I have a profile picture (registered in [`crate::avatars`]).
+    pub has_picture: bool,
     /// Their identity key, hex: the avatar colour seed.
     pub id: String,
     /// The key's fingerprint in groups, for reading aloud.
@@ -130,6 +164,8 @@ pub struct Person {
     pub volume_db: f32,
     /// Silenced for you only; they are not told.
     pub muted: bool,
+    /// What they say about themselves, as they last sent it.
+    pub bio: String,
 }
 
 /// What a person last said about being around.
@@ -334,6 +370,11 @@ pub struct Network {
     pub port: u16,
     /// The relay to be reachable through; empty for none.
     pub relay: String,
+    /// A line on the relay actually in use when it is not simply yours
+    /// (a fallback, the mesh's, a contact's); empty when there is nothing to say.
+    pub relay_note: String,
+    /// Whether contacts with no relay may listen at yours.
+    pub lend_relay: bool,
 }
 
 /// One line of the reachability check.

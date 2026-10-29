@@ -44,6 +44,12 @@ pub enum NetError {
     /// A media frame was empty or too large for one SFU datagram.
     #[error("a group-call frame must be 1 to {max} bytes, not {0}", max = crate::sfu::MAX_MEDIA_PAYLOAD)]
     SfuPayloadSize(usize),
+    /// The relay answered a federation request saying it does not federate.
+    #[error("that relay does not peer with other relays")]
+    FederationRefused,
+    /// The relay did not answer a federation request in time.
+    #[error("the relay did not say which relays it peers with")]
+    FederationTimeout,
     #[error("the VPN is down and the kill switch is on, so this was not sent over your real connection")]
     KillSwitch,
     #[error("none of the DHT bootstrap nodes answered")]
