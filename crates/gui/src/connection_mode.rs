@@ -54,6 +54,14 @@ pub fn is_known(contact: &Contact) -> bool {
 
 /// Decides how to reach `contact` today, or says why it can't be done.
 pub fn plan(contact: &Contact, identity: &IdentityKeyPair, unix_secs: u64) -> Result<Plan, String> {
+    plan_for(contact, identity, unix_secs, crate::anonymity::requested())
+}
+
+/// [`plan`], with anonymity mode (spec §3) given explicitly. With it on,
+/// an automatic choice never goes direct -- a direct call shows both
+/// addresses, which is the opposite of what was asked for. An explicit
+/// per-contact Direct is still honoured: that is its own, narrower choice.
+pub fn plan_for(contact: &Contact, identity: &IdentityKeyPair, unix_secs: u64, anonymous: bool) -> Result<Plan, String> {
     let direct = || -> Result<Plan, String> {
         if contact.address.trim().is_empty() {
             Err(format!("There's no address for {} -- calling them direct needs one.", contact.name))
@@ -73,7 +81,7 @@ pub fn plan(contact: &Contact, identity: &IdentityKeyPair, unix_secs: u64) -> Re
     match Override::from_i32(contact.connection_mode) {
         Override::Direct => direct(),
         Override::Relay => relay(),
-        Override::Auto if is_known(contact) => direct().or_else(|_| relay()),
+        Override::Auto if is_known(contact) && !anonymous => direct().or_else(|_| relay()),
         Override::Auto => relay(),
     }
 }
@@ -152,13 +160,26 @@ mod tests {
     }
 
     #[test]
+    fn anonymity_mode_takes_a_known_contact_through_the_relay() {
+        let me = IdentityKeyPair::generate();
+        let them = IdentityKeyPair::generate();
+        let mut c = stranger("Sam");
+        c.prekey = encode_hex32(&them.public().prekey);
+        c.relay = "relay.example:3479".into();
+        assert!(matches!(plan_for(&c, &me, NOW, true), Ok(Plan::Relay { .. })));
+        // ...but an explicit Direct is the person's own narrower choice.
+        c.connection_mode = 1;
+        assert!(matches!(plan_for(&c, &me, NOW, true), Ok(Plan::Direct { .. })));
+    }
+
+    #[test]
     fn a_known_contact_goes_direct() {
         let me = IdentityKeyPair::generate();
         let them = IdentityKeyPair::generate();
         let mut c = stranger("Sam");
         c.prekey = encode_hex32(&them.public().prekey);
         c.relay = "relay.example:3479".into();
-        assert_eq!(plan(&c, &me, NOW), Ok(Plan::Direct { address: "203.0.113.7:6000".into() }));
+        assert_eq!(plan_for(&c, &me, NOW, false), Ok(Plan::Direct { address: "203.0.113.7:6000".into() }));
     }
 
     #[test]
@@ -168,13 +189,13 @@ mod tests {
         c.relay = "relay.example:3479".into();
         c.relay_secret = encode_hex32(&[4; 32]);
         let expected = relay_token::from_invite_secret(&[4; 32], relay_token::day_number(NOW));
-        assert_eq!(plan(&c, &me, NOW), Ok(Plan::Relay { relay: "relay.example:3479".into(), token: expected }));
+        assert_eq!(plan_for(&c, &me, NOW, false), Ok(Plan::Relay { relay: "relay.example:3479".into(), token: expected }));
     }
 
     #[test]
     fn a_stranger_with_no_relay_is_refused_with_the_reason_not_dialled_direct() {
         let me = IdentityKeyPair::generate();
-        let err = plan(&stranger("Sam"), &me, NOW).unwrap_err();
+        let err = plan_for(&stranger("Sam"), &me, NOW, false).unwrap_err();
         assert!(err.contains("IP address"), "{err}");
         assert!(err.contains("Direct"), "should say how to proceed: {err}");
     }
@@ -184,15 +205,15 @@ mod tests {
         let me = IdentityKeyPair::generate();
         let mut c = stranger("Sam");
         c.connection_mode = 1;
-        assert!(matches!(plan(&c, &me, NOW), Ok(Plan::Direct { .. })));
+        assert!(matches!(plan_for(&c, &me, NOW, false), Ok(Plan::Direct { .. })));
 
         let them = IdentityKeyPair::generate();
         let mut c = stranger("Sam");
         c.prekey = encode_hex32(&them.public().prekey);
         c.connection_mode = 2;
-        assert!(plan(&c, &me, NOW).is_err(), "relay forced but none known");
+        assert!(plan_for(&c, &me, NOW, false).is_err(), "relay forced but none known");
         c.relay = "relay.example:3479".into();
-        assert!(matches!(plan(&c, &me, NOW), Ok(Plan::Relay { .. })));
+        assert!(matches!(plan_for(&c, &me, NOW, false), Ok(Plan::Relay { .. })));
     }
 
     #[test]
@@ -206,7 +227,7 @@ mod tests {
         let mut alice_as_seen_by_bob = stranger("Alice");
         alice_as_seen_by_bob.prekey = encode_hex32(&alice.public().prekey);
 
-        let Ok(Plan::Relay { token, .. }) = plan(&bob_as_seen_by_alice, &alice, NOW) else { panic!() };
+        let Ok(Plan::Relay { token, .. }) = plan_for(&bob_as_seen_by_alice, &alice, NOW, false) else { panic!() };
         // Bob's clock is nearly a day behind -- still found.
         let registered = listening_tokens(&[alice_as_seen_by_bob], &bob, None, NOW - 80_000);
         assert!(registered.contains(&token));

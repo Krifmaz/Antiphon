@@ -376,6 +376,7 @@ dependencies = [
  "antiphon-protocol",
  "antiphon-relay",
  "anyhow",
+ "chacha20poly1305 0.11.0",
  "device_query",
  "dirs",
  "getrandom 0.4.3",
@@ -472,6 +473,7 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "ed25519-dalek 3.0.0",
  "getrandom 0.4.3",
+ "hkdf 0.13.0",
  "sha2 0.11.0",
  "socket2",
  "thiserror 2.0.20",
@@ -500,6 +502,7 @@ dependencies = [
  "getrandom 0.4.3",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
 ]
 

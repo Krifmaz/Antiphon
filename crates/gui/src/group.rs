@@ -56,6 +56,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum Link {
     Primary,
     Leg(u64),
+    /// Someone reached only through the call's SFU room, by the room's id
+    /// for them (`crate::sfu_call`). Carries MLS and nothing else.
+    Room(u64),
 }
 
 /// One more person in the call.
@@ -104,17 +107,39 @@ pub struct Group {
     punch_pairs: Mutex<HashMap<u64, PunchPair>>,
     /// The latest thing worth telling the user, cleared once shown.
     pub notice: Mutex<String>,
+    /// Set once the call has moved to an SFU (`crate::sfu_call`).
+    pub sfu: Mutex<Option<Arc<crate::sfu_call::SfuCall>>>,
     /// Spec §3 MLS and SFrame: the call's group keys.
     pub keys: crate::group_keys::GroupKeys,
 }
 
 impl Group {
     pub fn people(&self) -> usize {
-        self.legs.lock().unwrap().len() + 2
+        let mesh = self.legs.lock().unwrap().len() + 2;
+        match self.sfu_call() {
+            // Everyone the room has heard from, plus anyone on a leg who
+            // hasn't joined it yet.
+            Some(sfu) => {
+                let in_room = sfu.identity_keys();
+                let outside = self.leg_keys().iter().filter(|k| !in_room.contains(k)).count();
+                sfu.people().max(2) + outside
+            }
+            None => mesh,
+        }
     }
 
+    /// Full for a mesh at [`MAX_PEOPLE`]; once the call is on an SFU, at
+    /// the SFU's size instead.
     pub fn is_full(&self) -> bool {
-        self.people() >= MAX_PEOPLE
+        match self.sfu_call() {
+            Some(_) => self.people() >= crate::sfu_call::MAX_PEOPLE,
+            None => self.people() >= MAX_PEOPLE,
+        }
+    }
+
+    /// The SFU room this call has moved to, if it has.
+    pub fn sfu_call(&self) -> Option<Arc<crate::sfu_call::SfuCall>> {
+        self.sfu.lock().unwrap().clone()
     }
 
     /// Everyone's names, for the call screen.
@@ -126,6 +151,7 @@ impl Group {
             .unwrap()
             .iter()
             .map(|l| if l.relayed { format!("{} (relayed)", l.name()) } else { l.name() })
+            .chain(self.sfu_call().map(|s| s.names(&self.leg_keys())).unwrap_or_default())
             .collect()
     }
 
@@ -144,7 +170,11 @@ impl Group {
 
     /// Each leg's id and jitter buffer, for the playback loop.
     pub fn leg_audio(&self) -> Vec<(u64, Arc<Mutex<JitterBuffer>>)> {
-        self.legs.lock().unwrap().iter().map(|l| (l.id, l.jitter.clone())).collect()
+        let mut out: Vec<_> = self.legs.lock().unwrap().iter().map(|l| (l.id, l.jitter.clone())).collect();
+        if let Some(sfu) = self.sfu_call() {
+            out.extend(sfu.audio());
+        }
+        out
     }
 
     /// Every link we have and whose identity is at its far end, leaving
@@ -159,7 +189,8 @@ impl Group {
                     .filter(|l| !l.left.load(Ordering::Relaxed))
                     .map(|l| (Link::Leg(l.id), l.peer.peer_identity().identity_key)),
             )
-            .collect()
+            .collect::<Vec<_>>()
+            .pipe_room(self.sfu_call())
     }
 
     /// Sends one audio payload to every leg: SFrame-sealed (`sealed`) to
@@ -175,11 +206,15 @@ impl Group {
         match link {
             Link::Primary => Some(primary.clone()),
             Link::Leg(id) => self.legs.lock().unwrap().iter().find(|l| l.id == id).map(|l| l.peer.clone()),
+            Link::Room(_) => None,
         }
     }
 
     fn key_for(&self, link: Link, primary: &Arc<PeerConnection>) -> Option<[u8; 32]> {
-        self.peer_for(link, primary).map(|p| p.peer_identity().identity_key)
+        match link {
+            Link::Room(id) => self.sfu_call()?.identity_of(id),
+            _ => self.peer_for(link, primary).map(|p| p.peer_identity().identity_key),
+        }
     }
 
     /// Drops legs whose person said they were leaving. Returns their ids,
@@ -266,7 +301,28 @@ pub fn is_group_message(m: &ControlMessage) -> bool {
             | ControlMessage::GroupPunch { .. }
             | ControlMessage::GroupPunchAddr { .. }
             | ControlMessage::GroupPunchPeer { .. }
+            | ControlMessage::GroupSfu { .. }
     ) || crate::group_keys::is_mls_message(m)
+}
+
+/// Adds the SFU room's members to a list of links, for anyone not
+/// already reached over a real one: MLS must see each person once.
+trait PipeRoom {
+    /// Adds the room's members, skipping anyone already linked.
+    fn pipe_room(self, sfu: Option<Arc<crate::sfu_call::SfuCall>>) -> Self;
+}
+
+impl PipeRoom for Vec<(Link, [u8; 32])> {
+    fn pipe_room(mut self, sfu: Option<Arc<crate::sfu_call::SfuCall>>) -> Self {
+        if let Some(sfu) = sfu {
+            for (link, key) in sfu.links() {
+                if !self.iter().any(|(_, k)| *k == key) {
+                    self.push((link, key));
+                }
+            }
+        }
+        self
+    }
 }
 
 /// Whether an identity key is blocked.
@@ -302,6 +358,12 @@ impl Context {
     }
 
     async fn send(&self, link: Link, message: ControlMessage) {
+        if let Link::Room(id) = link {
+            if let Some(sfu) = self.group.sfu_call() {
+                sfu.send_control(id, &message).await;
+            }
+            return;
+        }
         if let Some(peer) = self.group.peer_for(link, &self.primary) {
             let _ = peer.send_control(&message.encode()).await;
         }
@@ -313,6 +375,18 @@ impl Context {
         let new_key = peer.peer_identity().identity_key;
         if new_key == self.primary.peer_identity().identity_key || self.group.leg_keys().contains(&new_key) {
             return Err("They're already in the call.".into());
+        }
+        // Spec §3: past the mesh, the call moves to an SFU rather than
+        // turning someone away.
+        if self.group.sfu_call().is_none() && self.group.people() >= MAX_PEOPLE {
+            self.move_to_sfu().await?;
+        }
+        if let Some(sfu) = self.group.sfu_call() {
+            let Some(new_id) = self.group.add_leg(peer, relayed, self.hello.clone()) else {
+                return Err(format!("A group call holds up to {} people.", crate::sfu_call::MAX_PEOPLE));
+            };
+            self.send(Link::Leg(new_id), crate::sfu_call::to_message(&sfu.invite)).await;
+            return Ok(format!("Added through the group relay. {} people in the call.", self.group.people()));
         }
         let others: Vec<(Link, [u8; 32])> = std::iter::once((Link::Primary, self.primary.peer_identity().identity_key))
             .chain(self.group.legs.lock().unwrap().iter().map(|l| (Link::Leg(l.id), l.peer.peer_identity().identity_key)))
@@ -366,6 +440,44 @@ impl Context {
         Ok(format!("Added. {} people in the call.", self.group.people()))
     }
 
+    /// Starts an SFU room on our relay and asks everyone in the call to
+    /// join it.
+    async fn move_to_sfu(&self) -> Result<(), String> {
+        let Some(relay) = self.relay.clone() else {
+            return Err(format!(
+                "A direct group call holds up to {MAX_PEOPLE} people. Past that it needs a relay that \
+                 forwards group calls (antiphon-relay --sfu), and none is set."
+            ));
+        };
+        let day = antiphon_crypto::relay_token::day_number(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        );
+        let invite = crate::sfu_call::Invite::fresh(relay, day);
+        self.join_sfu(invite.clone()).await?;
+        let message = crate::sfu_call::to_message(&invite);
+        self.send(Link::Primary, message.clone()).await;
+        for peer in self.group.leg_peers() {
+            let _ = peer.send_control(&message.encode()).await;
+        }
+        Ok(())
+    }
+
+    /// Joins the SFU room `invite` names and records it on the group.
+    async fn join_sfu(&self, invite: crate::sfu_call::Invite) -> Result<(), String> {
+        let call = crate::sfu_call::SfuCall::join(
+            invite,
+            &self.group,
+            self.identity.clone(),
+            self.hello.display_name.clone(),
+            self.primary.peer_identity().identity_key,
+            self.is_blocked.clone(),
+        )
+        .await
+        .map_err(|e| format!("Couldn't move the call to the group relay: {e}"))?;
+        *self.group.sfu.lock().unwrap() = Some(call);
+        Ok(())
+    }
+
     /// Called on every tick of the call screen: acts on what arrived for
     /// the group and keeps the MLS keys current.
     ///
@@ -404,6 +516,16 @@ impl Context {
     /// Acts on one group message from `link`.
     pub async fn handle(&self, link: Link, message: ControlMessage) {
         match message {
+            ControlMessage::GroupSfu { sfu, secret, day } => {
+                if self.group.sfu_call().is_some() {
+                    return;
+                }
+                let Some(invite) = crate::sfu_call::from_message(&sfu, &secret, day) else { return };
+                match self.join_sfu(invite).await {
+                    Ok(()) => self.say("The call grew past five, so it moved to a group relay. It still can't hear anything."),
+                    Err(e) => self.say(e),
+                }
+            }
             ControlMessage::GroupConnect { pair: _, peer_key, relay, token, dial } => {
                 let (Some(expected), Some(token)) = (decode_hex32(&peer_key), decode_hex32(&token)) else { return };
                 if self.group.is_full() {

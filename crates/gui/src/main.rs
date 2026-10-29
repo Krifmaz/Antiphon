@@ -22,6 +22,10 @@ mod outbox;
 mod pacer;
 mod presence;
 mod reachability;
+mod fallback_relay;
+mod network_ui;
+mod anonymity;
+mod sfu_call;
 mod reactions;
 mod replay_history;
 mod sealed_ring;
@@ -614,6 +618,7 @@ fn main() -> anyhow::Result<()> {
     apply_reachability(&main_window, &current_reachability(&main_window));
     main_window.set_call_mode(reachability::Mode::Direct.label().into());
     main_window.set_call_mode_explanation(reachability::Mode::Direct.explain().into());
+    network_ui::install(&main_window, &app_state);
 
     main_window.show()?;
     tray.show()?;
@@ -706,7 +711,7 @@ fn local_hello(app: &MainWindow) -> Hello {
         // the caller before connecting; a listener never knocks, since
         // answering is not something you do quietly.
         wants_silent: app.get_start_call_silently(),
-        relay: app.get_relay_server().trim().to_string(),
+        relay: network_ui::effective_relay(app),
         routes: delivery::my_record_hex(),
     }
 }
@@ -717,8 +722,12 @@ fn add_to_group_call(app: &MainWindow, state: &Arc<AppState>, contact: config::C
     let ctx = {
         let call = state.call.lock().unwrap();
         let Some(active) = call.as_ref() else { return };
-        if active.group.is_full() {
-            app.set_contacts_message(format!("A group call holds up to {} people.", group::MAX_PEOPLE).into());
+        // Past the mesh the call moves to our relay's SFU, so only a
+        // full SFU call, or a full mesh with no relay, turns anyone away.
+        let has_relay = !network_ui::effective_relay(app).is_empty();
+        if active.group.is_full() && (active.group.sfu_call().is_some() || !has_relay) {
+            let most = if active.group.sfu_call().is_some() { sfu_call::MAX_PEOPLE } else { group::MAX_PEOPLE };
+            app.set_contacts_message(format!("A group call holds up to {most} people.").into());
             return;
         }
         group_context(app, state, active)
@@ -765,7 +774,7 @@ fn add_to_group_call(app: &MainWindow, state: &Arc<AppState>, contact: config::C
 
 /// What acting on group-call messages needs (spec §3).
 fn group_context(app: &MainWindow, state: &Arc<AppState>, active: &state::ActiveCall) -> group::Context {
-    let relay = app.get_relay_server().trim().to_string();
+    let relay = network_ui::effective_relay(app);
     group::Context {
         group: active.group.clone(),
         primary: active.peer.clone(),
@@ -886,7 +895,7 @@ fn listen_relay(
     app: &MainWindow,
     state: &Arc<AppState>,
 ) -> Option<(String, state::RelayTokens)> {
-    let relay = app.get_relay_server().trim().to_string();
+    let relay = network_ui::effective_relay(app);
     if relay.is_empty() {
         return None;
     }
@@ -3850,8 +3859,13 @@ fn finish_connect(
             let remote_addr = peer.remote_addr().to_string();
             // Spec §3: a connection that came from our relay's address is
             // a relayed one, and the address is the relay's, not theirs.
-            let relayed = *state.relay_addr.lock().unwrap() == Some(peer.remote_addr());
-            let mode = if relayed { reachability::Mode::Relayed } else { reachability::Mode::Direct };
+            let anonymous = anonymity::is_circuit(peer.remote_addr());
+            let relayed = anonymous || *state.relay_addr.lock().unwrap() == Some(peer.remote_addr());
+            let mode = match (anonymous, relayed) {
+                (true, _) => reachability::Mode::Anonymous,
+                (false, true) => reachability::Mode::Relayed,
+                (false, false) => reachability::Mode::Direct,
+            };
             let trust = evaluate_peer_trust(&remote_addr, &peer_identity, relayed);
             // Spec §1: this person's remembered volume trim and mute, so a
             // quiet microphone stays fixed across calls rather than being
@@ -4734,7 +4748,7 @@ fn apply_reachability(app: &MainWindow, state: &reachability::Reachability) {
 /// Kept in the UI properties rather than in `AppState` because every one
 /// of these facts is already displayed there; a second copy is a second
 /// thing to keep in step.
-fn current_reachability(app: &MainWindow) -> reachability::Reachability {
+pub(crate) fn current_reachability(app: &MainWindow) -> reachability::Reachability {
     reachability::Reachability {
         public_address_known: !app.get_public_address().is_empty(),
         port_forwarded: app.get_port_mapped(),
@@ -4816,7 +4830,7 @@ fn refresh_invite(app: &MainWindow, state: &std::sync::Arc<state::AppState>) {
     let mut invite = antiphon_crypto::Invite::new(state.identity.public().identity_key, address.clone());
     // Spec §3: with a relay, the link also lets its holder ring you
     // through it without either of you seeing the other's address.
-    let relay = app.get_relay_server().trim().to_string();
+    let relay = network_ui::effective_relay(app);
     if !relay.is_empty() {
         invite.relay = relay;
         invite.relay_secret = Some(relay_invite_secret());
@@ -5573,6 +5587,10 @@ fn apply_config_to_ui(app: &MainWindow, config: &config::AppConfig) {
     )));
     app.set_ip_direct_calling(config.ip_direct_calling);
     app.set_relay_server(config.relay_server.clone().into());
+    app.set_fallback_relays_text(config.fallback_relays.join("\n").into());
+    app.set_use_project_relays(config.use_project_relays);
+    app.set_anonymity_mode(config.anonymity_mode);
+    app.set_anonymity_hops_text(config.anonymity_hops.join("\n").into());
     app.set_ptt_toggle(config.ptt_toggle);
     app.set_mute_hold(config.mute_hold);
     app.set_deafen_hold(config.deafen_hold);
@@ -5856,6 +5874,10 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         ip_direct_calling: app.get_ip_direct_calling(),
         relay_server: app.get_relay_server().trim().to_string(),
         relay_invite_secret: previous.relay_invite_secret.clone(),
+        fallback_relays: fallback_relay::parse_list(&app.get_fallback_relays_text()),
+        use_project_relays: app.get_use_project_relays(),
+        anonymity_mode: app.get_anonymity_mode(),
+        anonymity_hops: fallback_relay::parse_list(&app.get_anonymity_hops_text()),
         routes: previous.routes.clone(),
         route_sequence: previous.route_sequence,
         route_fan_out: app.get_route_fan_out(),

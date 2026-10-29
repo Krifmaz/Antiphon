@@ -1,8 +1,9 @@
 //! UDP transport for direct P2P calls (spec §3 "Known contacts -> Direct
 //! P2P"): handshake + encrypted send/receive over a single peer connection,
 //! and the client side of a relay ([`relay`]) for "everyone else -> Relay".
-//! The DHT ([`dht`]) lets contacts find each other again after an
-//! address changes. The SFU group transport is not implemented here.
+//! The client side of a group-call SFU ([`sfu`]), anonymity-mode
+//! circuits through several relays ([`onion`]), and the DHT ([`dht`]),
+//! which lets contacts find each other again after an address changes.
 
 mod error;
 pub mod fec;
@@ -13,7 +14,10 @@ pub mod port_map;
 pub mod blob;
 pub mod dht;
 pub mod mailbox;
+pub mod media_seal;
+pub mod onion;
 pub mod relay;
+pub mod sfu;
 mod socket;
 pub mod stun;
 pub mod vpn;

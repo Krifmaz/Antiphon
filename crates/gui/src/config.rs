@@ -67,6 +67,21 @@ pub struct AppConfig {
     /// first use; replacing it revokes every link handed out before.
     #[serde(default)]
     pub relay_invite_secret: String,
+    /// Relays to fall back on when `relay_server` is empty or down, tried
+    /// in order (spec §3 "Project-hosted relays exist as fallback"). See
+    /// `crate::fallback_relay`.
+    #[serde(default)]
+    pub fallback_relays: Vec<String>,
+    /// Whether the project's own relays are tried after yours.
+    #[serde(default = "default_true")]
+    pub use_project_relays: bool,
+    /// Anonymity mode (spec §3): relays to route calls through, `host:port`
+    /// each, in order. Two or more turn it on. See `crate::anonymity`.
+    #[serde(default)]
+    pub anonymity_hops: Vec<String>,
+    /// Route calls through `anonymity_hops`.
+    #[serde(default)]
+    pub anonymity_mode: bool,
     /// Your delivery routes (spec §8), in order -- your inbox
     /// configuration, published to contacts. See `crate::delivery`.
     #[serde(default = "crate::delivery::default_routes")]
@@ -773,6 +788,10 @@ impl Default for AppConfig {
             mute_hold: false,
             relay_server: String::new(),
             relay_invite_secret: String::new(),
+            fallback_relays: Vec::new(),
+            use_project_relays: true,
+            anonymity_hops: Vec::new(),
+            anonymity_mode: false,
             routes: crate::delivery::default_routes(),
             route_fan_out: false,
             strict_mode: false,

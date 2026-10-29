@@ -901,8 +901,14 @@ pub async fn establish_listen(
     identity: Arc<IdentityKeyPair>,
     relay: Option<(SocketAddr, RelayTokens)>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, port).await?);
-    if let Some((relay_addr, tokens)) = relay {
+    let mut socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, port).await?);
+    if let Some((mut relay_addr, tokens)) = relay {
+        // Spec §3 anonymity mode: register through a circuit, so the relay
+        // only ever sees the last hop. The direct port stays unused --
+        // listening on it would hand your address to whoever calls.
+        if let Some(hops) = crate::anonymity::configured_hops() {
+            (socket, relay_addr) = crate::anonymity::route_to(&hops, relay_addr).await?;
+        }
         // Holds only a weak handle: once the listen (or the call it
         // became) drops the socket, the refresh stops on its own.
         let weak = Arc::downgrade(&socket);
@@ -932,7 +938,11 @@ pub async fn establish_relayed_call(
     local_port: u16,
     identity: Arc<IdentityKeyPair>,
 ) -> Result<PeerConnection> {
-    let socket = Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?);
+    let (socket, relay) = match crate::anonymity::configured_hops() {
+        // Spec §3 anonymity mode: the relay sees the circuit's last hop.
+        Some(hops) => crate::anonymity::route_to(&hops, relay).await?,
+        None => (Arc::new(crate::vpn::bind(TrafficKind::Voice, local_port).await?), relay),
+    };
     antiphon_net::relay::dial(&socket, relay, token, Duration::from_secs(5)).await?;
     match tokio::time::timeout(Duration::from_secs(15), PeerConnection::connect(socket, relay, &identity)).await {
         Ok(result) => Ok(result?),
@@ -1601,17 +1611,23 @@ pub fn start_pipeline(
                     }
                 }
                 sequence = sequence.wrapping_add(1);
-                // Spec §3 SFrame: in a group call with MLS keys, sealed
-                // once under this epoch's key for everyone keyed in.
-                let sealed = send_group.keys.seal_audio(&bytes);
-                let to_primary =
-                    send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
-                if let Err(e) = send_peer.send_audio(to_primary).await {
-                    eprintln!("[net] send error: {e}");
+                if let Some(sfu) = send_group.sfu_call() {
+                    // Spec §3 past the mesh: one SFrame-sealed upload, and
+                    // the SFU forwards it to everyone.
+                    sfu.send_audio(&bytes).await;
+                } else {
+                    // Spec §3 SFrame: in a group call with MLS keys, sealed
+                    // once under this epoch's key for everyone keyed in.
+                    let sealed = send_group.keys.seal_audio(&bytes);
+                    let to_primary =
+                        send_group.keys.frame_for(&send_peer.peer_identity().identity_key, &bytes, sealed.as_deref());
+                    if let Err(e) = send_peer.send_audio(to_primary).await {
+                        eprintln!("[net] send error: {e}");
+                    }
+                    // Spec §3 group mesh: the same frame to everyone else in
+                    // the call, one upload each.
+                    send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
                 }
-                // Spec §3 group mesh: the same frame to everyone else in
-                // the call, one upload each.
-                send_group.send_audio_to_legs(&bytes, sealed.as_deref()).await;
             } else {
                 // Cleared while not transmitting, so the first frame after
                 // a pause doesn't offer a backup copy of audio from before

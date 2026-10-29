@@ -125,6 +125,7 @@ phrase.
 ```bash
 cargo run -p antiphon-relay -- --listen 0.0.0.0:3479
 # or: docker build -f crates/relay/Dockerfile -t antiphon-relay . && docker run -p 3479:3479/udp antiphon-relay
+# or the published image: docker run -p 3479:3479/udp ghcr.io/krifmaz/antiphon-relay:latest
 ```
 
 Put its `host:port` in Settings > Call > Relay server. While listening,
@@ -157,6 +158,13 @@ records under keys that change daily, and can't tell whose they are.
 per line as `name | description | invite link`. In the app: Settings >
 Call > Finding contacts -- switch the DHT on and add bootstrap nodes
 (none are built in), or add a directory and press Browse.
+
+### Test peer
+
+`antiphon-cli echo --port 5000` is a headless peer that answers every call
+and sends your audio back, so a client has someone to call without a
+second person. [`docker/README.md`](docker/README.md) runs it in Docker;
+the image is published as `ghcr.io/krifmaz/antiphon-echo`.
 
 ## Layout
 
