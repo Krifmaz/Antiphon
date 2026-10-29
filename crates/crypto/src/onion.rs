@@ -44,6 +44,8 @@ use zeroize::Zeroize;
 
 use crate::error::CryptoError;
 
+/// HKDF salt for hop keys, versioned so a future layout cannot be confused
+/// with this one.
 const HOP_SALT: &[u8] = b"antiphon/onion/hop/v1";
 
 /// Bytes a data layer adds: the sequence number and the AEAD tag.
@@ -55,10 +57,12 @@ pub const SETUP_OVERHEAD: usize = 32 + 16;
 pub struct HopSecret(StaticSecret);
 
 impl HopSecret {
+    /// A fresh random hop key, for a relay that does not persist one.
     pub fn generate() -> Self {
         Self(StaticSecret::random())
     }
 
+    /// Restores a hop key saved with [`HopSecret::to_bytes`].
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(StaticSecret::from(bytes))
     }
@@ -69,6 +73,7 @@ impl HopSecret {
         self.0.to_bytes()
     }
 
+    /// The public half that callers learn and build circuits to.
     pub fn public(&self) -> [u8; 32] {
         PublicKey::from(&self.0).to_bytes()
     }
@@ -100,8 +105,12 @@ pub fn client_keys(hop_public: &[u8; 32]) -> Result<([u8; 32], LayerKeys), Crypt
 
 /// The three keys one hop shares with the caller for one circuit.
 pub struct LayerKeys {
+    /// One-time key for this hop's slice of the circuit-building message.
     setup: [u8; 32],
+    /// Key for layers travelling away from the caller.
     forward: [u8; 32],
+    /// Key for layers travelling back to the caller; separate from `forward`
+    /// so a hop's own output cannot be reflected back at it.
     backward: [u8; 32],
 }
 
@@ -114,6 +123,8 @@ impl Drop for LayerKeys {
 }
 
 impl LayerKeys {
+    /// Expands the X25519 agreement into the three keys. Both public keys go
+    /// into the HKDF info so the keys are bound to this exact pair.
     fn derive(shared: &[u8; 32], eph_pub: &[u8; 32], hop_pub: &[u8; 32]) -> Self {
         let mut info = [0u8; 64];
         info[..32].copy_from_slice(eph_pub);
@@ -130,10 +141,13 @@ impl LayerKeys {
         keys
     }
 
+    /// Seals this hop's setup slice. The fixed nonce is safe only because the
+    /// setup key is fresh per hop per circuit and used once.
     pub fn seal_setup(&self, plain: &[u8]) -> Vec<u8> {
         cipher(&self.setup).encrypt(&Nonce::from([0u8; 12]), plain).expect("ChaCha20-Poly1305 sealing does not fail")
     }
 
+    /// Opens a setup slice sealed with [`LayerKeys::seal_setup`].
     pub fn open_setup(&self, sealed: &[u8]) -> Result<Vec<u8>, CryptoError> {
         cipher(&self.setup).decrypt(&Nonce::from([0u8; 12]), sealed).map_err(|_| CryptoError::DecryptionFailed)
     }
@@ -144,29 +158,38 @@ impl LayerKeys {
         seal_layer(&self.forward, seq, plain)
     }
 
+    /// Peels one forward layer, returning what this hop passes on.
     pub fn open_forward(&self, layer: &[u8]) -> Result<Vec<u8>, CryptoError> {
         open_layer(&self.forward, layer)
     }
 
+    /// One backward layer: `[seq][ciphertext]`. As with forward, `seq` must
+    /// not repeat under these keys.
     pub fn seal_backward(&self, seq: u64, plain: &[u8]) -> Vec<u8> {
         seal_layer(&self.backward, seq, plain)
     }
 
+    /// Peels one backward layer (the caller unwinding a hop's wrapping).
     pub fn open_backward(&self, layer: &[u8]) -> Result<Vec<u8>, CryptoError> {
         open_layer(&self.backward, layer)
     }
 }
 
+/// A ChaCha20-Poly1305 instance for one of the layer keys.
 fn cipher(key: &[u8; 32]) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&Key::from(*key))
 }
 
+/// The nonce for a data layer: the sequence number, big-endian, in the
+/// low eight bytes.
 fn nonce(seq: u64) -> Nonce {
     let mut n = [0u8; 12];
     n[4..].copy_from_slice(&seq.to_be_bytes());
     Nonce::from(n)
 }
 
+/// Seals `plain` under `key` and prefixes the sequence number, which
+/// travels in the clear because UDP reorders.
 fn seal_layer(key: &[u8; 32], seq: u64, plain: &[u8]) -> Vec<u8> {
     let sealed = cipher(key).encrypt(&nonce(seq), plain).expect("ChaCha20-Poly1305 sealing does not fail");
     let mut out = Vec::with_capacity(8 + sealed.len());
@@ -175,6 +198,8 @@ fn seal_layer(key: &[u8; 32], seq: u64, plain: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Opens a `[seq][ciphertext]` layer; refuses anything too short to hold
+/// the sequence number and tag.
 fn open_layer(key: &[u8; 32], layer: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if layer.len() < LAYER_OVERHEAD {
         return Err(CryptoError::DecryptionFailed);

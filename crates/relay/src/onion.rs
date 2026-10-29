@@ -38,6 +38,8 @@ use std::time::{Duration, Instant};
 use antiphon_crypto::onion::{HopSecret, LayerKeys};
 use antiphon_net::onion::{Cell, Setup, CREATED_MARK};
 
+/// Bounds on what a hop node holds, so offering hops cannot be turned into
+/// a way to exhaust the operator's memory or sockets.
 #[derive(Clone, Copy, Debug)]
 pub struct HopLimits {
     /// Circuits held at once, across everyone.
@@ -72,9 +74,13 @@ impl Default for HopLimits {
 /// Aggregate counters -- all a hop can report.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HopStats {
+    /// Circuits held right now.
     pub circuits: usize,
+    /// Of those, how many this node is the exit for.
     pub exits: usize,
+    /// Cells forwarded in either direction since start.
     pub cells: u64,
+    /// CREATEs refused for limits or a forbidden next hop or target.
     pub refused: u64,
 }
 
@@ -96,23 +102,47 @@ pub enum Action {
     CloseExit(CircuitId),
 }
 
+/// Where a circuit goes after this node.
 enum Next {
     /// Extended, waiting for the next hop's CREATED.
-    Pending { addr: SocketAddr, circ: u32 },
-    Linked { addr: SocketAddr, circ: u32 },
-    Exit { target: SocketAddr },
+    Pending {
+        /// The next hop's address.
+        addr: SocketAddr,
+        /// The circuit id this node chose on the link to it.
+        circ: u32,
+    },
+    /// Extended and confirmed: forward to the next hop.
+    Linked {
+        /// The next hop's address.
+        addr: SocketAddr,
+        /// The circuit id on the link to it.
+        circ: u32,
+    },
+    /// This node is the exit and sends to `target` from its own socket.
+    Exit {
+        /// The only address the exit sends to or accepts replies from.
+        target: SocketAddr,
+    },
 }
 
+/// One circuit as this node sees it: its neighbours, never the whole path.
 struct Circuit {
+    /// The neighbour towards the caller.
     prev: SocketAddr,
+    /// The circuit id on the link to `prev`.
     prev_circ: u32,
+    /// Where traffic away from the caller goes.
     next: Next,
+    /// This hop's layer keys for the circuit, in memory only.
     keys: LayerKeys,
+    /// The next backward sequence number under `keys`.
     back_seq: u64,
+    /// When a cell last passed, for idle expiry.
     last_seen: Instant,
 }
 
 impl Circuit {
+    /// Adds this hop's backward layer to a payload heading for the caller.
     fn wrap_backward(&mut self, payload: &[u8]) -> Vec<u8> {
         let layer = self.keys.seal_backward(self.back_seq, payload);
         self.back_seq += 1;
@@ -120,21 +150,36 @@ impl Circuit {
     }
 }
 
+/// The hop side of anonymity mode: a socket-free state machine holding the
+/// hop key and every circuit through this node.
 pub struct HopNode {
+    /// The hop key that peels this node's layers.
     secret: HopSecret,
+    /// `secret`'s public half, cached for HOPKEY answers.
     public: [u8; 32],
+    /// Limits on circuits held.
     limits: HopLimits,
+    /// Every circuit, by this node's own handle.
     circuits: HashMap<CircuitId, Circuit>,
+    /// Circuits by the caller-side neighbour and link id.
     by_prev: HashMap<(SocketAddr, u32), CircuitId>,
+    /// Circuits by the far-side neighbour and link id.
     by_next: HashMap<(SocketAddr, u32), CircuitId>,
+    /// How many circuits each caller-side neighbour holds, for
+    /// [`HopLimits::max_circuits_per_addr`].
     per_addr: HashMap<SocketAddr, usize>,
+    /// The handle the next circuit gets.
     next_id: CircuitId,
+    /// Cells forwarded, for [`HopStats`].
     cells: u64,
+    /// CREATEs refused, for [`HopStats`].
     refused: u64,
+    /// When idle circuits were last swept, so sweeping stays cheap.
     last_sweep: Option<Instant>,
 }
 
 impl HopNode {
+    /// A hop node with `secret` as its hop key and no circuits.
     pub fn new(secret: HopSecret, limits: HopLimits) -> Self {
         Self {
             public: secret.public(),
@@ -156,6 +201,7 @@ impl HopNode {
         self.public
     }
 
+    /// Totals for the operator; nothing per circuit or per address.
     pub fn stats(&self) -> HopStats {
         HopStats {
             circuits: self.circuits.len(),
@@ -259,6 +305,8 @@ impl HopNode {
         out
     }
 
+    /// Handles a CREATE: opens this hop's setup, then extends or becomes the
+    /// exit. Undecryptable CREATEs are dropped silently.
     fn create(&mut self, from: SocketAddr, circ: u32, ephemeral: &[u8; 32], sealed: &[u8], now: Instant) -> Vec<Action> {
         if self.by_prev.contains_key(&(from, circ)) {
             // A resend, or a clashing id: either way the circuit already
@@ -311,15 +359,18 @@ impl HopNode {
         out
     }
 
+    /// Answers REFUSED on the caller's side and counts it.
     fn refuse(&mut self, to: SocketAddr, circ: u32) -> Vec<Action> {
         self.refused += 1;
         vec![Action::Send(to, Cell::Refused { circ }.encode())]
     }
 
+    /// Whether a circuit may extend or exit to `ip` under the limits.
     fn may_reach(&self, ip: IpAddr) -> bool {
         self.limits.allow_private || is_public(ip)
     }
 
+    /// Forgets a circuit and its indexes, closing its exit socket if it had one.
     fn remove(&mut self, id: CircuitId) -> Vec<Action> {
         let Some(c) = self.circuits.remove(&id) else { return vec![] };
         self.by_prev.remove(&(c.prev, c.prev_circ));
@@ -338,6 +389,7 @@ impl HopNode {
         }
     }
 
+    /// Sweeps at most every five seconds, from the datagram path.
     fn sweep_if_due(&mut self, now: Instant) -> Vec<Action> {
         if self.last_sweep.is_some_and(|t| now.duration_since(t) < Duration::from_secs(5)) {
             return vec![];
@@ -399,6 +451,7 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
+/// A random link-local circuit id.
 fn random_u32() -> u32 {
     let mut b = [0u8; 4];
     getrandom::fill(&mut b).expect("OS randomness is unavailable");
@@ -445,22 +498,27 @@ mod tests {
     use super::*;
     use antiphon_net::onion::{Layers, Plan};
 
+    /// A private address on `port`, reachable only with [`open`] limits.
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from(([10, 0, 0, 1], port))
     }
 
+    /// A documentation-range address that counts as public.
     fn public(port: u16) -> SocketAddr {
         SocketAddr::from(([198, 51, 100, 7], port))
     }
 
+    /// A hop node with a fresh hop key.
     fn node(limits: HopLimits) -> HopNode {
         HopNode::new(HopSecret::generate(), limits)
     }
 
+    /// Default limits, but letting circuits reach private addresses.
     fn open() -> HopLimits {
         HopLimits { allow_private: true, ..HopLimits::default() }
     }
 
+    /// The cells among `actions` sent from the node's own socket, decoded.
     fn sent(actions: &[Action]) -> Vec<(SocketAddr, Cell)> {
         actions
             .iter()

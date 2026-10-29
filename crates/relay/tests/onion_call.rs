@@ -17,6 +17,7 @@ use antiphon_relay::onion::{HopLimits, HopNode};
 use antiphon_relay::{run, run_node_with_hops, Limits, Relay};
 use tokio::net::UdpSocket;
 
+/// How long any single wait in these tests may take before it fails.
 const T: Duration = Duration::from_secs(5);
 
 /// A hop node on loopback. Loopback is "private", so it has to be let in.
@@ -51,6 +52,7 @@ async fn logging_relay() -> (SocketAddr, Arc<Mutex<HashSet<SocketAddr>>>) {
     (addr, seen)
 }
 
+/// Fetches each node's hop key from one probe socket, in path order.
 async fn hop_keys(nodes: &[SocketAddr]) -> Vec<(SocketAddr, [u8; 32])> {
     let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut out = Vec::new();
@@ -93,6 +95,9 @@ async fn exchange_audio(caller: PeerConnection, listener: PeerConnection) {
     assert_eq!(got_c, (0..5u8).map(|i| vec![b'l', i]).collect::<Vec<_>>());
 }
 
+/// Every loopback address the caller's side of a shim uses: the call
+/// socket, the stand-in relay address and the circuit socket. None of
+/// them may ever reach the target relay.
 fn shim_addrs(shim: &OnionShim) -> [SocketAddr; 3] {
     [shim.socket().local_addr().unwrap(), shim.relay_addr(), shim.circuit_addr()]
 }

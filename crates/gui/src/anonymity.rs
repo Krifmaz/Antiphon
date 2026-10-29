@@ -25,7 +25,9 @@ use antiphon_net::AppSocket;
 
 use antiphon_net::vpn::TrafficKind;
 
+/// How long to wait for each hop node to hand out its hop key.
 const HOP_KEY_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long building the circuit through all the hops may take.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The hop nodes to use, if anonymity mode is on and has enough of them.

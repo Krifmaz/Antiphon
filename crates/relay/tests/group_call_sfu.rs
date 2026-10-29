@@ -17,8 +17,11 @@ use antiphon_relay::{run_node, run_node_with_sfu, Limits, Relay};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+/// How long any single wait in these tests may take before it fails.
 const WAIT: Duration = Duration::from_secs(5);
 
+/// Runs a node with the SFU switched on, over loopback; returns its address
+/// and the SFU state so tests can inspect rooms.
 async fn start_sfu(limits: SfuLimits) -> (SocketAddr, Arc<Mutex<Sfu>>) {
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let addr = socket.local_addr().unwrap();
@@ -33,14 +36,19 @@ async fn start_sfu(limits: SfuLimits) -> (SocketAddr, Arc<Mutex<Sfu>>) {
     (addr, sfu)
 }
 
+/// Joins `room` at `sfu` from a fresh loopback socket with a fresh tag.
 async fn join(sfu: SocketAddr, room: RoomToken) -> Result<(SfuClient, mpsc::Receiver<SfuEvent>), NetError> {
     let socket = Arc::new(antiphon_net::AppSocket::from(UdpSocket::bind("127.0.0.1:0").await.unwrap()));
     SfuClient::join(socket, sfu, room, sfu::new_member_tag(), WAIT).await
 }
 
+/// One joined member: its client, its event stream and its SFrame keys.
 struct Member {
+    /// The member's connection to the SFU.
     client: SfuClient,
+    /// Media and roster events from the client.
     events: mpsc::Receiver<SfuEvent>,
+    /// Opens other members' frames and seals this one's.
     sealer: SframeSealer,
 }
 
@@ -70,6 +78,7 @@ async fn members(sfu: SocketAddr, room: RoomToken, n: usize) -> Vec<Member> {
         .collect()
 }
 
+/// Waits until `m` sees `others` other members in its roster.
 async fn wait_for_roster(m: &SfuClient, others: usize) {
     let mut watch = m.roster_watch();
     tokio::time::timeout(WAIT, watch.wait_for(|r| r.len() == others)).await.expect("roster never filled").unwrap();

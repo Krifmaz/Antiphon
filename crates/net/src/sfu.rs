@@ -57,12 +57,18 @@ use crate::error::NetError;
 /// relay, mailbox and blob traffic by this prefix alone.
 pub const MAGIC: [u8; 4] = [0xA7, b'S', b'F', b'1'];
 
+/// Bytes in a [`RoomToken`].
 pub const ROOM_LEN: usize = 32;
+/// Bytes in a [`MemberTag`].
 pub const MEMBER_LEN: usize = 16;
+/// Bytes in a join [`Cookie`].
 pub const COOKIE_LEN: usize = 16;
 
+/// The opaque name of a room at an SFU; see [`room_token`].
 pub type RoomToken = [u8; ROOM_LEN];
+/// A member's per-call random tag; see [`new_member_tag`].
 pub type MemberTag = [u8; MEMBER_LEN];
+/// The SFU's stateless proof that a joiner receives at its claimed address.
 pub type Cookie = [u8; COOKIE_LEN];
 
 /// Largest media payload carried. Calls send 20 ms of 48 kHz audio as
@@ -79,14 +85,22 @@ pub const MAX_ROSTER: usize = 200;
 /// short enough to keep a NAT mapping to the SFU open while muted.
 pub const JOIN_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Member asks to join, or refreshes, a room.
 const OP_JOIN: u8 = 0x01;
+/// Member says goodbye.
 const OP_LEAVE: u8 = 0x02;
+/// A sealed frame, forwarded verbatim to the rest of the room.
 const OP_MEDIA: u8 = 0x03;
+/// SFU asks the joiner to repeat JOIN with this cookie.
 const OP_CHALLENGE: u8 = 0x80;
+/// SFU confirms the join and says how many are in the room.
 const OP_JOINED: u8 = 0x81;
+/// SFU lists every member tag in the room.
 const OP_ROSTER: u8 = 0x82;
+/// SFU says no, with a [`Refusal`] code.
 const OP_REFUSED: u8 = 0x83;
 
+/// HKDF salt for room tokens, versioned so a future layout cannot collide.
 const ROOM_SALT: &[u8] = b"antiphon/sfu/room/v1";
 
 /// The room a group meets in at an SFU, for `day`
@@ -130,6 +144,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// The one-byte wire code for this refusal.
     fn code(self) -> u8 {
         match self {
             Refusal::RoomFull => 1,
@@ -140,6 +155,7 @@ impl Refusal {
         }
     }
 
+    /// The refusal for a wire code; `None` for codes this build does not know.
     fn from_code(c: u8) -> Option<Self> {
         Some(match c {
             1 => Refusal::RoomFull,
@@ -151,6 +167,7 @@ impl Refusal {
         })
     }
 
+    /// A short, user-facing explanation of the refusal.
     pub fn describe(self) -> &'static str {
         match self {
             Refusal::RoomFull => "the call is full on this server",
@@ -165,16 +182,46 @@ impl Refusal {
 /// A parsed SFU datagram.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
-    Join { room: RoomToken, member: MemberTag, cookie: Option<Cookie> },
-    Leave { member: MemberTag },
-    Media { member: MemberTag, payload: Vec<u8> },
-    Challenge { cookie: Cookie },
-    Joined { members: u16 },
+    /// Join a room, or refresh membership of one.
+    Join {
+        /// The room to join.
+        room: RoomToken,
+        /// The joiner's tag for this call.
+        member: MemberTag,
+        /// The SFU's cookie, on the second JOIN of a fresh join; `None`
+        /// on the first and on refreshes.
+        cookie: Option<Cookie>,
+    },
+    /// Leave the room now.
+    Leave {
+        /// The tag that is leaving.
+        member: MemberTag,
+    },
+    /// A sealed media frame.
+    Media {
+        /// The sender's tag, which receivers bind into authentication.
+        member: MemberTag,
+        /// The sealed frame; the SFU never parses it.
+        payload: Vec<u8>,
+    },
+    /// Prove you receive here: send JOIN again with `cookie`.
+    Challenge {
+        /// The stateless cookie to echo back.
+        cookie: Cookie,
+    },
+    /// The join is accepted.
+    Joined {
+        /// How many members the room now holds.
+        members: u16,
+    },
+    /// Every member tag in the room, the receiver's own included.
     Roster(Vec<MemberTag>),
+    /// The SFU said no.
     Refused(Refusal),
 }
 
 impl Message {
+    /// The datagram as it goes on the wire, starting with [`MAGIC`].
     pub fn encode(&self) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
         match self {
@@ -255,6 +302,8 @@ impl Message {
         }
     }
 
+    /// Cheap check for whether a datagram is SFU traffic, so a shared socket
+    /// can route it without parsing.
     pub fn is_sfu_datagram(bytes: &[u8]) -> bool {
         bytes.starts_with(&MAGIC)
     }
@@ -286,7 +335,12 @@ pub fn encode_media(member: &MemberTag, payload: &[u8]) -> Vec<u8> {
 pub enum SfuEvent {
     /// A sealed frame from another member. Open it with the call's
     /// [`crate::media_seal::MediaSealer`]; the SFU never could.
-    Media { from: MemberTag, payload: Vec<u8> },
+    Media {
+        /// The tag the SFU routed the frame under.
+        from: MemberTag,
+        /// The frame, still sealed.
+        payload: Vec<u8>,
+    },
     /// Everyone else now in the room (this member left out).
     Roster(Vec<MemberTag>),
     /// A refresh was refused -- typically the SFU restarted and has no
@@ -306,11 +360,17 @@ pub const EVENT_QUEUE: usize = 512;
 /// it stops the refreshes, and the SFU forgets the member after its idle
 /// expiry; [`SfuClient::leave`] says goodbye straight away.
 pub struct SfuClient {
+    /// The socket this member sends from and the task receives on.
     socket: Arc<crate::AppSocket>,
+    /// The SFU's address; datagrams from anywhere else are ignored.
     sfu: SocketAddr,
+    /// The room this member is in.
     room: RoomToken,
+    /// This member's tag for the call.
     member: MemberTag,
+    /// The latest roster, kept current by the background task.
     roster: watch::Receiver<Vec<MemberTag>>,
+    /// The background task that refreshes and receives.
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -371,14 +431,17 @@ impl SfuClient {
         Ok(())
     }
 
+    /// This member's tag.
     pub fn member(&self) -> MemberTag {
         self.member
     }
 
+    /// The room this client joined.
     pub fn room(&self) -> RoomToken {
         self.room
     }
 
+    /// The SFU this client talks to.
     pub fn sfu_addr(&self) -> SocketAddr {
         self.sfu
     }
@@ -407,6 +470,7 @@ impl Drop for SfuClient {
     }
 }
 
+/// The roster without this member's own tag.
 fn others(roster: &[MemberTag], me: &MemberTag) -> Vec<MemberTag> {
     roster.iter().filter(|t| *t != me).copied().collect()
 }

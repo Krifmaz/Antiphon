@@ -137,6 +137,7 @@ impl Group {
         }
     }
 
+    /// The SFU room this call has moved to, if it has.
     pub fn sfu_call(&self) -> Option<Arc<crate::sfu_call::SfuCall>> {
         self.sfu.lock().unwrap().clone()
     }
@@ -307,6 +308,7 @@ pub fn is_group_message(m: &ControlMessage) -> bool {
 /// Adds the SFU room's members to a list of links, for anyone not
 /// already reached over a real one: MLS must see each person once.
 trait PipeRoom {
+    /// Adds the room's members, skipping anyone already linked.
     fn pipe_room(self, sfu: Option<Arc<crate::sfu_call::SfuCall>>) -> Self;
 }
 
@@ -460,6 +462,7 @@ impl Context {
         Ok(())
     }
 
+    /// Joins the SFU room `invite` names and records it on the group.
     async fn join_sfu(&self, invite: crate::sfu_call::Invite) -> Result<(), String> {
         let call = crate::sfu_call::SfuCall::join(
             invite,

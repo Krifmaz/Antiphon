@@ -28,6 +28,7 @@ use antiphon_net::NetError;
 /// so none is listed that nobody is running.
 pub const PROJECT_RELAYS: &[&str] = &[];
 
+/// How long one relay gets to answer a probe before the next is tried.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 /// The order relays are tried in: yours, then your fallbacks, then the

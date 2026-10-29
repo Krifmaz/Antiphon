@@ -407,13 +407,19 @@ pub async fn run_node_full(
 /// The exit sockets of circuits that end at this node, and the channel
 /// their reader tasks feed.
 struct Exits {
+    /// Each circuit's own exit socket and the task reading from it. One socket
+    /// per circuit, so the target relay sees separate ordinary clients.
     sockets: HashMap<onion::CircuitId, (Arc<UdpSocket>, tokio::task::JoinHandle<()>)>,
+    /// Handed to each reader task to report what arrived.
     tx: tokio::sync::mpsc::Sender<(onion::CircuitId, SocketAddr, Vec<u8>)>,
+    /// Replies from targets, tagged with the circuit they came in on.
     incoming: tokio::sync::mpsc::Receiver<(onion::CircuitId, SocketAddr, Vec<u8>)>,
+    /// Where exit sockets bind: the node's own IP, any port.
     bind: SocketAddr,
 }
 
 impl Exits {
+    /// An empty set of exits that bind on the same IP as `node`.
     fn new(node: &UdpSocket) -> std::io::Result<Self> {
         // Bounded, so a flood at one exit socket queues a little and then
         // drops rather than growing without limit.
@@ -425,6 +431,9 @@ impl Exits {
         Ok(Self { sockets: HashMap::new(), tx, incoming, bind })
     }
 
+    /// Carries out a hop node's actions: sends, opens and closes exit sockets.
+    /// A socket that fails to open is reported back to the hop node, and the
+    /// actions that produces are carried out too.
     async fn perform(
         &mut self,
         node: &UdpSocket,

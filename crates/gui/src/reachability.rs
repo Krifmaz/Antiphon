@@ -174,6 +174,7 @@ pub enum Status {
 /// What [`Status`] is worked out from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct StatusInputs {
+    /// What the local port mapping and STUN said about reaching this machine.
     pub reach: Reachability,
     /// `Some(true)` for an endpoint-dependent (symmetric) NAT, from asking
     /// two STUN servers; `None` while unknown.
@@ -185,6 +186,8 @@ pub struct StatusInputs {
 }
 
 impl Status {
+    /// Works out the status line from what was measured, erring towards
+    /// "relayed" or "checking" rather than promising "Direct".
     pub fn from_inputs(i: &StatusInputs) -> Status {
         let blocked_reason = if i.vpn_active {
             Some(Status::RelayedVpn)
@@ -248,6 +251,7 @@ impl Status {
         if self == Status::Checking { Status::Unchecked } else { self }
     }
 
+    /// Whether people can reach this machine, directly or through a relay.
     pub fn is_ok(&self) -> bool {
         matches!(self, Status::Direct | Status::RelayedVpn | Status::RelayedBlocked)
     }
@@ -262,6 +266,7 @@ pub fn default_route_via_vpn() -> Option<bool> {
     default_route_interface().map(|name| is_vpn_interface(&name))
 }
 
+/// The interface the default route leaves through, by name.
 fn default_route_interface() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
@@ -305,6 +310,8 @@ pub fn is_vpn_interface(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Status inputs with the public address known whenever the NAT check
+    /// answered at all.
     fn inputs(symmetric: Option<bool>, vpn: bool, relay: bool) -> StatusInputs {
         StatusInputs {
             reach: Reachability { public_address_known: symmetric.is_some(), ..Default::default() },

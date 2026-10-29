@@ -44,8 +44,11 @@ pub const MOVE_GRACE: Duration = Duration::from_secs(5);
 /// How long a cookie stays valid: one to two of these.
 const COOKIE_PERIOD: Duration = Duration::from_secs(60);
 
+/// What the operator allows the SFU to hold, so hosting group calls cannot
+/// be turned into a way to exhaust the node.
 #[derive(Clone, Copy, Debug)]
 pub struct SfuLimits {
+    /// Rooms held at once, across everyone.
     pub max_rooms: usize,
     /// Clamped to `antiphon_net::sfu::MAX_ROSTER`.
     pub max_members_per_room: usize,
@@ -62,31 +65,48 @@ impl Default for SfuLimits {
 /// Aggregate counters -- the only thing the SFU can report, by design.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SfuStats {
+    /// Rooms with at least one member right now.
     pub rooms: usize,
+    /// Members across all rooms right now.
     pub members: usize,
     /// Datagrams sent out by fan-out (one per receiving member).
     pub forwarded: u64,
 }
 
+/// Everything the SFU holds about one member: no identity, no key.
 struct Member {
+    /// The room the member joined.
     room: RoomToken,
+    /// Where the member's frames and roster go; only this address may speak
+    /// for its tag.
     addr: SocketAddr,
+    /// When the member was last heard from, for [`MEMBER_IDLE`].
     last_seen: Instant,
 }
 
+/// The SFU state machine: rooms, members and the cookie key, with no
+/// sockets, so it can be tested directly.
 pub struct Sfu {
+    /// Operator limits, with the per-room cap already clamped.
     limits: SfuLimits,
     /// Keys the join cookies. Random per process and never stored.
     secret: [u8; 32],
+    /// When this process started, the epoch for cookie periods.
     started: Instant,
+    /// Member tags in each room, in join order.
     rooms: HashMap<RoomToken, Vec<MemberTag>>,
+    /// Every member, by tag.
     members: HashMap<MemberTag, Member>,
+    /// Room memberships per address, for [`SfuLimits::max_rooms_per_addr`].
     per_addr: HashMap<SocketAddr, usize>,
+    /// Datagrams sent by fan-out, for [`SfuStats`].
     forwarded: u64,
+    /// When quiet members were last swept, so sweeping stays cheap.
     last_sweep: Option<Instant>,
 }
 
 impl Sfu {
+    /// An empty SFU with a fresh cookie key.
     pub fn new(limits: SfuLimits) -> Self {
         let mut secret = [0u8; 32];
         getrandom::fill(&mut secret).expect("OS randomness is unavailable");
@@ -103,10 +123,12 @@ impl Sfu {
         }
     }
 
+    /// The limits in force, after clamping.
     pub fn limits(&self) -> SfuLimits {
         self.limits
     }
 
+    /// Totals for the operator; nothing per room or per member.
     pub fn stats(&self) -> SfuStats {
         SfuStats { rooms: self.rooms.len(), members: self.members.len(), forwarded: self.forwarded }
     }
@@ -149,6 +171,8 @@ impl Sfu {
         out
     }
 
+    /// Handles a JOIN: refreshes a live member, moves a quiet one to a proven
+    /// new address, or admits a new one once its cookie checks out.
     fn join(
         &mut self,
         from: SocketAddr,
@@ -214,6 +238,7 @@ impl Sfu {
         ]
     }
 
+    /// How many members `room` holds, for JOINED.
     fn room_size(&self, room: &RoomToken) -> u16 {
         self.rooms.get(room).map_or(0, |m| m.len()) as u16
     }
@@ -238,6 +263,7 @@ impl Sfu {
         self.broadcast_roster(&member.room)
     }
 
+    /// Drops one membership from `addr`'s count.
     fn release_addr(&mut self, addr: SocketAddr) {
         if let Some(n) = self.per_addr.get_mut(&addr) {
             *n = n.saturating_sub(1);
@@ -247,6 +273,8 @@ impl Sfu {
         }
     }
 
+    /// The join cookie for this address, room and tag in the cookie period
+    /// `periods_back` before now. Stateless: nothing is held until it returns.
     fn cookie(&self, from: SocketAddr, room: &RoomToken, tag: &MemberTag, now: Instant, periods_back: u64) -> Cookie {
         let period = (now.duration_since(self.started).as_secs() / COOKIE_PERIOD.as_secs()).saturating_sub(periods_back);
         let mut h = Sha256::new();
@@ -266,10 +294,13 @@ impl Sfu {
         cookie
     }
 
+    /// Accepts a cookie from this period or the one before, so one minted just
+    /// before a period boundary still works.
     fn cookie_valid(&self, cookie: &Cookie, from: SocketAddr, room: &RoomToken, tag: &MemberTag, now: Instant) -> bool {
         [0, 1].iter().any(|back| self.cookie(from, room, tag, now, *back) == *cookie)
     }
 
+    /// Sweeps at most every five seconds, from the datagram path.
     fn sweep_if_due(&mut self, now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
         if self.last_sweep.is_some_and(|t| now.duration_since(t) < Duration::from_secs(5)) {
             return vec![];
@@ -311,6 +342,7 @@ mod tests {
     use super::*;
     use antiphon_net::sfu::encode_media;
 
+    /// A private address on `port`.
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from(([10, 0, 0, 1], port))
     }
@@ -328,6 +360,7 @@ mod tests {
         s.handle(from, &Message::Join { room, member: tag, cookie: Some(cookie) }.encode(), now)
     }
 
+    /// Every SFU message among `out` addressed to `to`, decoded.
     fn decoded(out: &[(SocketAddr, Vec<u8>)], to: SocketAddr) -> Vec<Message> {
         out.iter().filter(|(a, _)| *a == to).filter_map(|(_, b)| Message::decode(b)).collect()
     }

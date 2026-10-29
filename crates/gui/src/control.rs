@@ -187,7 +187,16 @@ pub enum ControlMessage {
     /// SFU relay"): join the room at `sfu` named by `secret` and `day`.
     /// Sent only over the call's own end-to-end sessions, so the SFU never
     /// learns the secret. See `crate::sfu_call`.
-    GroupSfu { sfu: String, secret: String, day: u64 },
+    GroupSfu {
+        /// The SFU's `host:port`.
+        sfu: String,
+        /// The room secret, hex; the room token is derived from it and
+        /// `day`, so only the token ever reaches the SFU.
+        secret: String,
+        /// The day number the caller picked, so everyone lands in one room
+        /// even across midnight.
+        day: u64,
+    },
     /// Spec §3 "Groups -- MLS": the group call's key agreement, run over
     /// each member's existing encrypted link. A member not yet in the MLS
     /// group offers a KeyPackage; the committer answers with a Welcome and

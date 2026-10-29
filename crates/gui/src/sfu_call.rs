@@ -59,24 +59,39 @@ pub const MAX_PEOPLE: usize = 50;
 /// Mixer source ids for SFU members start here, clear of mesh legs.
 pub const SOURCE_BASE: u64 = 1 << 32;
 
+/// Room payload kind: an SFrame-sealed audio frame.
 const KIND_MEDIA: u8 = 0;
+/// Room payload kind: a signed announcement of who is behind a tag.
 const KIND_ANNOUNCE: u8 = 1;
+/// Room payload kind: an MLS control message for one member.
 const KIND_CONTROL: u8 = 2;
+/// How often this member re-announces, so late joiners learn who it is.
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(5);
+/// How long joining the SFU room may take.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Most a member's jitter buffer waits for a late frame.
 const JITTER_MAX_WAIT: Duration = Duration::from_millis(80);
+/// Domain separation for announcements and the room key, versioned so a
+/// changed announcement layout cannot be mistaken for an older one.
 const ANNOUNCE_CONTEXT: &[u8] = b"antiphon/sfu/announce/v2";
+/// Domain separation for control messages, so neither kind can pass for
+/// the other.
 const CONTROL_CONTEXT: &[u8] = b"antiphon/sfu/control/v1";
 
 /// Where and how to join, as handed from member to member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invite {
+    /// The SFU's `host:port`.
     pub sfu: String,
+    /// The room secret: shared only over the call's end-to-end links, never
+    /// with the SFU.
     pub secret: [u8; 32],
+    /// The day number the room token is derived for, picked by the inviter.
     pub day: u64,
 }
 
 impl Invite {
+    /// A new invite with a fresh random room secret.
     pub fn fresh(sfu: String, day: u64) -> Self {
         let mut secret = [0u8; 32];
         getrandom::fill(&mut secret).expect("OS randomness is unavailable");
@@ -86,18 +101,26 @@ impl Invite {
 
 /// Someone heard in the room, after their announcement checked out.
 struct Member {
+    /// This machine's local handle for the member, for links and mixer ids.
     id: u64,
+    /// The identity that signed the member's announcement.
     identity_key: [u8; 32],
+    /// The announced display name, at most 64 characters.
     name: String,
+    /// Where the member's audio waits to be mixed.
     jitter: Arc<Mutex<JitterBuffer>>,
 }
 
+/// Room members by tag, shared by the receiver task, the sealer and the call.
 type Members = Arc<Mutex<HashMap<MemberTag, Member>>>;
 
 /// SFrame through the room, as a [`MediaSealer`]: the call's MLS keys,
 /// with each room tag tied to the identity that announced it.
 pub struct RoomSealer {
+    /// The call's group, for its MLS keys; weak so the room does not keep a
+    /// finished call alive.
     group: Weak<Group>,
+    /// Who is behind each tag, so a frame opens only as its announcer's.
     members: Members,
 }
 
@@ -118,14 +141,20 @@ impl MediaSealer for RoomSealer {
 
 /// This machine's place in an SFU call.
 pub struct SfuCall {
+    /// Where the call is, to hand on to anyone added later.
     pub invite: Invite,
+    /// This member's connection to the SFU room.
     client: Arc<SfuClient>,
+    /// Seals this machine's audio for the room.
     sealer: Mutex<RoomSealer>,
+    /// Seals announcements and control messages under the room secret.
     room_cipher: ChaCha20Poly1305,
+    /// Everyone else heard in the room.
     members: Members,
     /// The person this machine's call started with, left out of the
     /// names list because the call screen already shows them.
     primary_key: [u8; 32],
+    /// The announcer and receiver tasks, stopped when the call is dropped.
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -280,6 +309,7 @@ impl SfuCall {
         let _ = self.client.send_media(&seal(&self.room_cipher, KIND_CONTROL, CONTROL_CONTEXT, &body)).await;
     }
 
+    /// Everyone in the room, this machine included.
     pub fn people(&self) -> usize {
         self.members.lock().unwrap().len() + 1
     }
@@ -316,11 +346,14 @@ impl SfuCall {
         names
     }
 
+    /// The identity keys of everyone else in the room.
     pub fn identity_keys(&self) -> Vec<[u8; 32]> {
         self.members.lock().unwrap().values().map(|m| m.identity_key).collect()
     }
 }
 
+/// The room key for announcements and control messages, derived from the
+/// room secret so only members can read them.
 fn room_cipher(secret: &[u8; 32]) -> ChaCha20Poly1305 {
     let mut key = [0u8; 32];
     Hkdf::<Sha256>::new(Some(ANNOUNCE_CONTEXT), secret)
@@ -337,15 +370,21 @@ fn announce_body(identity: &IdentityKeyPair, room: &[u8; 32], tag: &MemberTag, n
     [&identity_key[..], &signature, name.as_bytes()].concat()
 }
 
+/// What an announcement signs: context, room, tag, identity and name.
 fn signed_part(room: &[u8; 32], tag: &MemberTag, identity_key: &[u8; 32], name: &[u8]) -> Vec<u8> {
     [ANNOUNCE_CONTEXT, room, tag, identity_key, name].concat()
 }
 
+/// A checked announcement: who is behind a tag.
 struct Announcement {
+    /// The identity whose signature checked out.
     identity_key: [u8; 32],
+    /// Their name, lossily decoded and cut to 64 characters.
     name: String,
 }
 
+/// Checks an announcement's signature for this room and tag; `None` if it
+/// does not verify.
 fn parse_announce(body: &[u8], room: &[u8; 32], tag: &MemberTag) -> Option<Announcement> {
     if body.len() < 96 {
         return None;
@@ -358,6 +397,8 @@ fn parse_announce(body: &[u8], room: &[u8; 32], tag: &MemberTag) -> Option<Annou
     Some(Announcement { identity_key, name })
 }
 
+/// `[kind][nonce 12][ciphertext]` under the room key, with `context` as
+/// associated data. Random nonces, since many members share the key.
 fn seal(cipher: &ChaCha20Poly1305, kind: u8, context: &[u8], body: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; 12];
     getrandom::fill(&mut nonce).expect("OS randomness is unavailable");
@@ -367,6 +408,7 @@ fn seal(cipher: &ChaCha20Poly1305, kind: u8, context: &[u8], body: &[u8]) -> Vec
     [&[kind][..], &nonce, &sealed].concat()
 }
 
+/// Opens what [`seal`] made (without its kind byte); `None` on any failure.
 fn open(cipher: &ChaCha20Poly1305, context: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
     let (nonce, ct) = sealed.split_at_checked(12)?;
     let nonce: [u8; 12] = nonce.try_into().ok()?;
@@ -382,6 +424,8 @@ pub fn to_message(invite: &Invite) -> ControlMessage {
     }
 }
 
+/// An invite back from a [`ControlMessage::GroupSfu`]; `None` if the
+/// secret is not 32 bytes of hex.
 pub fn from_message(sfu: &str, secret: &str, day: u64) -> Option<Invite> {
     Some(Invite { sfu: sfu.to_string(), secret: crate::connection_mode::decode_hex32(secret)?, day })
 }

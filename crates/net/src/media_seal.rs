@@ -33,6 +33,8 @@ use crate::sfu::MemberTag;
 pub trait MediaSealer: Send {
     /// `None` while there is no key to seal under yet.
     fn seal(&mut self, plain: &[u8]) -> Option<Vec<u8>>;
+    /// Opens a frame the SFU routed under `sender`'s tag; `None` for anything
+    /// that does not authenticate as that member's.
     fn open(&mut self, sender: MemberTag, sealed: &[u8]) -> Option<Vec<u8>>;
 }
 
@@ -40,11 +42,15 @@ pub trait MediaSealer: Send {
 /// [`MediaSealer::open`] checks that leaf is the one the room tag belongs
 /// to, so a member can't replay its frames under someone else's tag.
 pub struct SframeSealer {
+    /// The SFrame keys and replay state for this call.
     ctx: SframeContext,
+    /// Which MLS leaf each room tag belongs to, so a frame's KID can be checked
+    /// against the tag it arrived under.
     leaves: HashMap<MemberTag, u32>,
 }
 
 impl SframeSealer {
+    /// A sealer over `ctx`, with no senders known yet.
     pub fn new(ctx: SframeContext) -> Self {
         Self { ctx, leaves: HashMap::new() }
     }
@@ -59,6 +65,7 @@ impl SframeSealer {
         self.leaves.insert(sender, leaf);
     }
 
+    /// Forgets `sender`'s leaf when they leave, so their tag opens nothing more.
     pub fn remove_sender(&mut self, sender: &MemberTag) {
         self.leaves.remove(sender);
     }
@@ -80,6 +87,7 @@ impl MediaSealer for SframeSealer {
 mod tests {
     use super::*;
 
+    /// Two sealers keyed into the same epoch, as leaves 0 and 1.
     fn pair() -> (SframeSealer, SframeSealer) {
         let key = [7u8; 16];
         let mut a = SframeContext::new(0);

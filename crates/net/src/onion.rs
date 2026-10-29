@@ -98,13 +98,21 @@ use crate::error::NetError;
 /// never a valid protocol frame version.
 pub const MAGIC: [u8; 4] = [0xA7, b'O', b'N', b'1'];
 
+/// Caller asks a node for its hop key.
 pub const OP_HOPKEY_REQUEST: u8 = 0x01;
+/// Builds a circuit: an ephemeral key and the setup sealed to this hop.
 pub const OP_CREATE: u8 = 0x02;
+/// A data layer travelling away from the caller.
 pub const OP_FORWARD: u8 = 0x03;
+/// Tears a circuit down, in either direction.
 pub const OP_DESTROY: u8 = 0x04;
+/// A node's answer to [`OP_HOPKEY_REQUEST`]: its hop public key.
 pub const OP_HOPKEY: u8 = 0x81;
+/// The circuit is built; the layer wraps [`CREATED_MARK`] once per hop.
 pub const OP_CREATED: u8 = 0x82;
+/// A data layer travelling back towards the caller.
 pub const OP_BACKWARD: u8 = 0x83;
+/// The hop will not carry this circuit: full, hops disabled, or a bad exit.
 pub const OP_REFUSED: u8 = 0x84;
 
 /// A HOPKEY request is padded to at least the size of its reply, so a
@@ -126,17 +134,54 @@ pub const BUILD_TIMEOUT: Duration = Duration::from_secs(5);
 /// One onion datagram.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Cell {
+    /// "What is your hop key?", padded to [`HOPKEY_REQUEST_LEN`].
     HopKeyRequest,
-    Create { circ: u32, ephemeral: [u8; 32], sealed: Vec<u8> },
-    Forward { circ: u32, layer: Vec<u8> },
-    Destroy { circ: u32 },
+    /// Builds a circuit one hop further.
+    Create {
+        /// The circuit id on this link, chosen by the sender.
+        circ: u32,
+        /// The caller's fresh ephemeral key for this hop.
+        ephemeral: [u8; 32],
+        /// This hop's [`Setup`], sealed under the agreed setup key.
+        sealed: Vec<u8>,
+    },
+    /// Traffic travelling away from the caller.
+    Forward {
+        /// The circuit id on this link.
+        circ: u32,
+        /// The onion of remaining layers.
+        layer: Vec<u8>,
+    },
+    /// Tears the circuit down.
+    Destroy {
+        /// The circuit id on this link.
+        circ: u32,
+    },
+    /// A node's hop public key.
     HopKey([u8; 32]),
-    Created { circ: u32, layer: Vec<u8> },
-    Backward { circ: u32, layer: Vec<u8> },
-    Refused { circ: u32 },
+    /// The circuit is built, confirmed by every hop.
+    Created {
+        /// The circuit id on this link.
+        circ: u32,
+        /// [`CREATED_MARK`] wrapped by each hop's backward layer.
+        layer: Vec<u8>,
+    },
+    /// Traffic travelling back towards the caller.
+    Backward {
+        /// The circuit id on this link.
+        circ: u32,
+        /// The reply, with this and earlier hops' backward layers.
+        layer: Vec<u8>,
+    },
+    /// The hop will not carry this circuit.
+    Refused {
+        /// The circuit id the refusal is for.
+        circ: u32,
+    },
 }
 
 impl Cell {
+    /// The cell as it goes on the wire, starting with [`MAGIC`].
     pub fn encode(&self) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
         match self {
@@ -200,11 +245,14 @@ impl Cell {
         }
     }
 
+    /// Cheap check for whether a datagram is meant for the onion code at all,
+    /// so a socket shared with other protocols can route it.
     pub fn is_onion_datagram(bytes: &[u8]) -> bool {
         bytes.starts_with(&MAGIC)
     }
 }
 
+/// Writes `op`, the circuit id and a layer: the shape most cells share.
 fn with_layer(out: &mut Vec<u8>, op: u8, circ: u32, layer: &[u8]) {
     out.push(op);
     out.extend_from_slice(&circ.to_be_bytes());
@@ -215,15 +263,28 @@ fn with_layer(out: &mut Vec<u8>, op: u8, circ: u32, layer: &[u8]) {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Setup {
     /// Pass this CREATE body on to `next`.
-    Extend { next: SocketAddr, ephemeral: [u8; 32], sealed: Vec<u8> },
+    Extend {
+        /// The next hop's address.
+        next: SocketAddr,
+        /// The caller's ephemeral key for the next hop.
+        ephemeral: [u8; 32],
+        /// The next hop's setup, sealed to it; opaque to this hop.
+        sealed: Vec<u8>,
+    },
     /// Be the exit: send what arrives to `target` as plain UDP.
-    Exit { target: SocketAddr },
+    Exit {
+        /// The relay the call is placed or received through.
+        target: SocketAddr,
+    },
 }
 
+/// Setup tag: pass the rest on to the next hop.
 const SETUP_EXTEND: u8 = 0x01;
+/// Setup tag: this hop is the exit.
 const SETUP_EXIT: u8 = 0x02;
 
 impl Setup {
+    /// The setup's plaintext, before it is sealed to the hop.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
@@ -241,6 +302,7 @@ impl Setup {
         out
     }
 
+    /// `None` for a setup that is malformed or carries trailing bytes.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (&kind, rest) = bytes.split_first()?;
         let (addr, rest) = decode_addr(rest)?;
@@ -256,6 +318,7 @@ impl Setup {
     }
 }
 
+/// Appends an address as `family (4 or 6) | ip | port BE`.
 fn encode_addr(out: &mut Vec<u8>, addr: &SocketAddr) {
     match addr.ip() {
         IpAddr::V4(ip) => {
@@ -270,6 +333,7 @@ fn encode_addr(out: &mut Vec<u8>, addr: &SocketAddr) {
     out.extend_from_slice(&addr.port().to_be_bytes());
 }
 
+/// Reads an address written by [`encode_addr`], returning it and the rest.
 fn decode_addr(bytes: &[u8]) -> Option<(SocketAddr, &[u8])> {
     let (&family, rest) = bytes.split_first()?;
     let (ip, rest) = match family {
@@ -290,6 +354,7 @@ fn decode_addr(bytes: &[u8]) -> Option<(SocketAddr, &[u8])> {
     Some((SocketAddr::new(ip, port), &rest[2..]))
 }
 
+/// A random circuit id or counter start, so ids say nothing across links.
 fn random_u32() -> u32 {
     let mut b = [0u8; 4];
     getrandom::fill(&mut b).expect("OS randomness is unavailable");
@@ -326,16 +391,22 @@ pub async fn fetch_hop_key(socket: &impl crate::Datagram, node: SocketAddr, time
 /// The caller's end of a built circuit: its [`Layers`], and the socket
 /// that talks to the entry.
 pub struct Circuit {
+    /// The socket bound for this circuit; only the entry ever sees it.
     socket: Arc<AppSocket>,
+    /// The first hop, the only address this circuit talks to.
     entry: SocketAddr,
+    /// The keys and counters that wrap and peel traffic.
     layers: Layers,
 }
 
 /// The caller's keys for a built circuit, without a socket: wraps
 /// datagrams on the way out and peels replies on the way back.
 pub struct Layers {
+    /// The circuit id on the caller's link to the entry.
     circ: u32,
+    /// One set of keys per hop, entry first.
     hops: Vec<LayerKeys>,
+    /// The next forward sequence number under each hop's keys.
     seqs: Vec<u64>,
 }
 
@@ -368,8 +439,11 @@ impl Layers {
 
 /// A circuit's keys and first cell, before anything is sent.
 pub struct Plan {
+    /// The circuit id the CREATE uses on the link to the entry.
     pub circ: u32,
+    /// The encoded CREATE cell to send to the entry.
     pub create: Vec<u8>,
+    /// Every hop's keys, entry first, kept until the circuit is confirmed.
     hops: Vec<LayerKeys>,
 }
 
@@ -412,6 +486,7 @@ impl Plan {
     }
 }
 
+/// Removes each hop's backward layer, entry first; `None` if any fails.
 fn peel_backward(hops: &[LayerKeys], mut layer: Vec<u8>) -> Option<Vec<u8>> {
     for k in hops {
         layer = k.open_backward(&layer).ok()?;
@@ -466,10 +541,12 @@ impl Circuit {
         Err(NetError::OnionTimeout)
     }
 
+    /// The entry hop's address.
     pub fn entry(&self) -> SocketAddr {
         self.entry
     }
 
+    /// How many hops the circuit runs through.
     pub fn hop_count(&self) -> usize {
         self.layers.hops.len()
     }
@@ -480,6 +557,7 @@ impl Circuit {
         Ok(self.socket.local_addr()?)
     }
 
+    /// [`Layers::wrap`]: one datagram, wrapped for the exit to deliver.
     pub fn wrap(&mut self, payload: &[u8]) -> Vec<u8> {
         self.layers.wrap(payload)
     }
@@ -493,12 +571,15 @@ impl Circuit {
         self.layers.unwrap(cell)
     }
 
+    /// Wraps `payload` and sends it to the entry.
     pub async fn send(&mut self, payload: &[u8]) -> Result<(), NetError> {
         let cell = self.wrap(payload);
         self.socket.send_to(&cell, self.entry).await?;
         Ok(())
     }
 
+    /// Waits for the next genuine reply on this circuit, skipping anything
+    /// that does not unwrap.
     pub async fn recv(&self) -> Result<Vec<u8>, NetError> {
         let mut buf = vec![0u8; 65_536];
         loop {
@@ -566,18 +647,26 @@ async fn pump_loop(mut circuit: Circuit, pump: UdpSocket, user: SocketAddr) {
 ///
 /// Dropping it stops the pump and tells the hops to forget the circuit.
 pub struct OnionShim {
+    /// The loopback socket the call code uses in place of its own.
     socket: Arc<AppSocket>,
+    /// The loopback stand-in for the target relay's address.
     relay_addr: SocketAddr,
+    /// The circuit's real socket address, as the entry sees it.
     circuit_addr: SocketAddr,
+    /// The pump task moving datagrams between `socket` and the circuit.
     task: JoinHandle<()>,
+    /// What [`Drop`] needs to send DESTROY: the circuit socket, the entry and
+    /// the encoded cell.
     destroy: (Arc<AppSocket>, SocketAddr, Vec<u8>),
 }
 
 impl OnionShim {
+    /// The socket to hand to the call code.
     pub fn socket(&self) -> Arc<AppSocket> {
         self.socket.clone()
     }
 
+    /// The address to use as the target relay's.
     pub fn relay_addr(&self) -> SocketAddr {
         self.relay_addr
     }
@@ -619,6 +708,7 @@ mod tests {
     use super::*;
     use antiphon_crypto::onion::HopSecret;
 
+    /// A documentation-range IPv4 address on `port`, for codec tests.
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from(([10, 0, 0, 1], port))
     }
