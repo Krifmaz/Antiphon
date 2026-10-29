@@ -21,9 +21,9 @@ name: release
 #     Android  Stoop-android-<v>.apk
 #     SHA256SUMS covers every file of the release, then the bare desktop binaries inside them (BUILDING.md).
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release,
-#   then an Install section naming the files. Linux, Windows and (when it is built) Android are required;
-#   macOS is not (its runners are sometimes unavailable for hours, and GitHub cancels a job no runner takes
-#   within about 15 minutes): a release without it says so under "Not in this release".
+#   then an Install section naming the files. Linux, Windows and (when it is built) Android are required.
+#   The release does not wait for macOS, whose runners are sometimes unavailable for hours: mac-attach adds
+#   the .dmg, its checksums and its Install line when build-macos finishes, or says it is not in this release.
 #   Every desktop binary is built twice from clean and compared byte for byte before it is packaged
 #   (spec §10); one that differs fails its platform. The version is written into the workspace first
 #   (packaging/set-version.sh), so `--version` and the About screen show it.
@@ -137,14 +137,10 @@ jobs:
             target: x86_64-pc-windows-msvc
             platform: windows-x86_64
             ext: ".exe"
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            platform: macos-aarch64
-            ext: ""
-    env:
+    env: &build-env
       V: ${{ needs.version.outputs.version }}
       SV: ${{ needs.version.outputs.semver }}
-    steps:
+    steps: &build-steps
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -224,6 +220,23 @@ jobs:
         with:
           name: hashes-${{ matrix.platform }}
           path: hashes/*
+
+  # macOS on its own: the release does not wait for it. Its runners are sometimes unavailable for hours
+  # (a job can sit queued all afternoon), so the release goes out with Windows, Linux and Android and
+  # mac-attach adds the .dmg once this job finishes.
+  build-macos:
+    name: build (macos-aarch64)
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            ext: ""
+    env: *build-env
+    steps: *build-steps
 
   android:
     needs: version
@@ -350,7 +363,8 @@ jobs:
             fi
             if have "Stoop-android-$V.apk"; then echo "* **Android**: \`Stoop-android-$V.apk\`"; fi
             if ! have "Stoop-$V-macos-aarch64.dmg"; then
-              echo "* **Not in this release:** macOS – its build did not run this time; the next release has it"
+              # mac-attach replaces this line (MACOS-PENDING) once the macOS build finishes or fails
+              echo "* **macOS**: still building, the .dmg is added here when it finishes <!-- MACOS-PENDING -->"
             fi
             echo "* Every desktop binary was built twice from clean and the two compared byte for byte before packaging · checksums in \`SHA256SUMS\`"
           } >> notes.md
@@ -378,3 +392,43 @@ jobs:
       - name: Not published
         if: env.CHANNEL == 'check' || (env.CHANNEL == 'stable' && !inputs.publish)
         run: echo "Not published (a pull request check, or publish unticked); the files are this run's Stoop-* artifacts" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Adds the macOS .dmg to the release publish made, once build-macos is done: the file, its lines in
+  # SHA256SUMS, and its Install line in the notes. If the macOS build failed, the notes say so instead.
+  # Nothing to do when publish already had the .dmg (macOS finished first) or did not publish.
+  mac-attach:
+    needs: [version, build-macos, publish]
+    if: >-
+      ${{ !cancelled() && needs.publish.result == 'success'
+      && (needs.version.outputs.channel == 'hotfix' || (needs.version.outputs.channel == 'stable' && inputs.publish)) }}
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      MAC: ${{ needs.build-macos.result }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Release notes
+        run: gh release view "$TAG" --json body -q .body > notes.md
+      - uses: actions/download-artifact@v4
+        if: env.MAC == 'success'
+        with:
+          pattern: "*-macos-aarch64"
+          path: mac
+          merge-multiple: true
+      - name: Attach the .dmg
+        run: |
+          grep -q 'MACOS-PENDING' notes.md || { echo "the release already has macOS"; exit 0; }
+          DMG="Stoop-$V-macos-aarch64.dmg"
+          if [ "$MAC" = success ] && [ -f "mac/$DMG" ]; then
+            gh release download "$TAG" -p SHA256SUMS -D sums
+            { (cd mac && sha256sum -- "$DMG"); cat mac/macos-aarch64.sha256; } >> sums/SHA256SUMS
+            gh release upload "$TAG" "mac/$DMG" sums/SHA256SUMS --clobber
+            LINE="* **macOS** (Apple silicon): \`$DMG\` (if macOS will not open it the first time: System Settings → Privacy \& Security → Open Anyway)"
+          else
+            LINE="* **Not in this release:** macOS – its build did not finish this time; the next release has it"
+          fi
+          sed -i "s|^.*MACOS-PENDING.*\$|$LINE|" notes.md
+          gh release edit "$TAG" --notes-file notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
