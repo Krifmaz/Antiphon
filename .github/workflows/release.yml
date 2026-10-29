@@ -1,0 +1,257 @@
+name: release
+
+# Every run makes a normal GitHub release tagged v<version> and titled "Stoop <version>", the way Encore
+# releases. Versions are plain MAJOR.MINOR.PATCH: by default the next number bumps PATCH of the newest
+# release; pick "minor"/"major" or type the version by hand (e.g. 1.0.0). The first release takes the
+# version in Cargo.toml. The tag is created through the release (the API may create tags; a git push from
+# the Actions token may not).
+#   Start one: Actions → release → Run workflow (from the branch to release).
+#   Untick "publish" to build and package everything without making a release: the files are attached to
+#   the run as artifacts and the notes are shown in its summary.
+#   Files (packaging/package.sh):
+#     Windows  Stoop-<v>-windows-x86_64.exe        the installer, per user, no administrator rights
+#     Linux    Stoop-<v>-linux-x86_64.AppImage     and stoop_<v>_amd64.deb, and stoop-<v>-linux-x86_64.tar.gz
+#     macOS    Stoop-<v>-macos-aarch64.dmg         signed ad hoc
+#     SHA256SUMS covers every file of the release, then the bare binaries inside them (BUILDING.md).
+#   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release,
+#   then an Install section naming the files. A platform whose build did not finish is named under
+#   "Not in this release"; Linux and Windows are required, macOS is not (its runners are sometimes
+#   unavailable for hours, and GitHub cancels a job no runner takes within about 15 minutes).
+#   Every binary is built twice from clean and compared byte for byte before it is packaged (spec §10);
+#   one that differs fails its platform. The version is written into the workspace first
+#   (packaging/set-version.sh), so `--version` and the About screen show it.
+#   Re-running a version replaces its release. cleanup-releases.yml deletes old ones.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which number to bump for the next version"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "Or type the version to release (MAJOR.MINOR.PATCH); overrides bump"
+        type: string
+        default: ""
+      publish:
+        description: "Publish the release (untick to build and package only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# releases queue one after the other
+concurrency:
+  group: release
+
+env:
+  CARGO_TERM_COLOR: always
+  # BUILDING.md: the stated toolchain
+  RUST_VERSION: "1.97.0"
+  # the binaries keep their crate names until the rename lands; the packages are called Stoop
+  APP_BIN: antiphon
+  CLI_BIN: antiphon-cli
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          BUMP: ${{ inputs.bump }}
+          WANT: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          semver() { echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
+          if [ -n "$WANT" ]; then
+            V="${WANT#v}"
+          else
+            # the newest version so far: release tags v<MAJOR.MINOR.PATCH> (the old -rc and -test ones don't count)
+            LAST=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
+                    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+            if [ -z "$LAST" ]; then
+              # the first release: Cargo.toml's version
+              V=$(awk '/^\[workspace\.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^version *= *"/ { gsub(/.*= *"|".*/, ""); print; exit }' Cargo.toml)
+            else
+              IFS=. read -r A B C <<< "$LAST"
+              case "$BUMP" in
+                major) V="$((A + 1)).0.0" ;;
+                minor) V="$A.$((B + 1)).0" ;;
+                *)     V="$A.$B.$((C + 1))" ;;
+              esac
+            fi
+          fi
+          semver "$V" || { echo "::error::bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Version $V"
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            ext: ".exe"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            ext: ""
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - name: System packages (Linux)
+        if: runner.os == 'Linux'
+        # the build libraries, then dpkg-dev for the .deb's Depends line and `file` for appimagetool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libfontconfig1-dev libdbus-1-dev libgtk-3-dev dpkg-dev file
+      - name: NSIS (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ] || choco install nsis -y --no-progress
+      - name: Version ${{ env.V }}
+        shell: bash
+        run: bash packaging/set-version.sh "$V"
+      - name: Tests
+        shell: bash
+        run: cargo test --workspace --locked
+      - name: Reproducible environment
+        shell: bash
+        # CARGO_ENCODED_RUSTFLAGS rather than RUSTFLAGS, and Windows-form
+        # paths on Windows: under Git Bash $PWD is /d/a/... while rustc sees
+        # D:\a\..., so a POSIX-form prefix never matches and the path ships
+        # in the binary. See BUILDING.md.
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          SRC="$PWD"; CH="${CARGO_HOME:-$HOME/.cargo}"; EXTRA=""
+          if [ "$RUNNER_OS" = Windows ]; then
+            SRC="$(cygpath -w "$SRC")"; CH="$(cygpath -w "$CH")"
+            # The MSVC linker stamps the current time into the PE header
+            # unless told otherwise; see .cargo/config.toml. Setting the
+            # environment variable replaces that file's flags, so repeat it.
+            EXTRA=$'\x1f-Clink-arg=/Brepro'
+          fi
+          printf 'CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo%s\n' "$SRC" "$CH" "$EXTRA" >> "$GITHUB_ENV"
+      - name: Build once
+        shell: bash
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          mkdir -p scratch/first
+          cp target/${{ matrix.target }}/release/{$APP_BIN,$CLI_BIN}${{ matrix.ext }} scratch/first/
+      - name: Build again from clean
+        shell: bash
+        run: |
+          cargo clean
+          cargo build --release --locked --target ${{ matrix.target }}
+          mkdir -p scratch/second
+          cp target/${{ matrix.target }}/release/{$APP_BIN,$CLI_BIN}${{ matrix.ext }} scratch/second/
+      - name: Refuse to ship anything that does not reproduce
+        shell: bash
+        run: |
+          for bin in $APP_BIN${{ matrix.ext }} $CLI_BIN${{ matrix.ext }}; do
+            cmp scratch/first/$bin scratch/second/$bin || {
+              echo "::error::$bin differs between two builds of the same commit ($(cmp -l scratch/first/$bin scratch/second/$bin | wc -l) bytes, first at offset $(cmp -l scratch/first/$bin scratch/second/$bin | head -1 | awk '{print $1}'))"
+              exit 1
+            }
+          done
+          # the bare binaries' hashes, for SHA256SUMS (sha256sum on Linux and Git Bash, shasum on macOS)
+          mkdir -p hashes
+          cd scratch/first
+          if command -v sha256sum >/dev/null; then sha256sum -- *; else shasum -a 256 -- *; fi \
+            | sed 's|^\([0-9a-f]*\) [ *]|\1  ${{ matrix.platform }}/|' >../../hashes/${{ matrix.platform }}.sha256
+          cat ../../hashes/${{ matrix.platform }}.sha256
+      - name: Package
+        shell: bash
+        run: bash packaging/package.sh --version "$V" --bin scratch/first --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stoop-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hashes-${{ matrix.platform }}
+          path: hashes/*
+
+  publish:
+    needs: [version, build]
+    # also when the macOS build did not run or failed: the check below decides
+    if: always() && needs.version.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Stoop-*
+          path: out
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hashes-*
+          path: hashes
+          merge-multiple: true
+      - name: Linux and Windows are required
+        run: |
+          ls -la out
+          for f in "Stoop-$V-windows-x86_64.exe" "Stoop-$V-linux-x86_64.AppImage" "stoop_${V}_amd64.deb" "stoop-$V-linux-x86_64.tar.gz"; do
+            [ -f "out/$f" ] || { echo "::error::no $f: not publishing"; exit 1; }
+          done
+      - name: Notes
+        run: |
+          have() { [ -f "out/$1" ]; }
+          PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | grep -vx "v$V" | head -1)
+          if [ -f "docs/releases/$V.md" ]; then cp "docs/releases/$V.md" notes.md; else
+            { echo "## Changes"; git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60; } > notes.md
+          fi
+          {
+            echo
+            echo "---"
+            echo "### Install"
+            echo "* **Windows**: \`Stoop-$V-windows-x86_64.exe\` – the installer, for you only, no administrator rights; Stoop is in the Start menu afterwards"
+            echo "* **Linux**: \`Stoop-$V-linux-x86_64.AppImage\` (make it executable and run it) or \`stoop_${V}_amd64.deb\` (\`sudo apt install ./stoop_${V}_amd64.deb\`) · without installing: \`stoop-$V-linux-x86_64.tar.gz\`"
+            if have "Stoop-$V-macos-aarch64.dmg"; then
+              echo "* **macOS** (Apple silicon): \`Stoop-$V-macos-aarch64.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway)"
+            else
+              echo "* **Not in this release:** macOS – its build did not run this time; the next release has it"
+            fi
+            echo "* Every binary was built twice from clean and the two compared byte for byte before packaging · checksums in \`SHA256SUMS\`"
+          } >> notes.md
+          cat notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Checksums
+        # every file of the release, then the bare binaries inside them (what a rebuild is compared to, BUILDING.md)
+        run: |
+          (cd out && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS)
+          cat hashes/*.sha256 >> out/SHA256SUMS
+          cat out/SHA256SUMS
+      - name: Publish
+        if: inputs.publish
+        run: |
+          gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$V" out/* --title "Stoop $V" --notes-file notes.md --target "$GITHUB_SHA" --latest
+      - name: Not published
+        if: ${{ !inputs.publish }}
+        run: echo "publish was unticked; the files are this run's Stoop-* artifacts" | tee -a "$GITHUB_STEP_SUMMARY"
