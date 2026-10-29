@@ -856,6 +856,8 @@ impl App {
                 wants_silent: false,
                 relay: String::new(),
                 routes: String::new(),
+                // The phone runs no relay of its own to lend.
+                lends_relay: false,
             }));
             live.send(ControlMessage::Profile(card));
         }

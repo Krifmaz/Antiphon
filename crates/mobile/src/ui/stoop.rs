@@ -496,7 +496,9 @@ impl App {
                 self.settings.color = color;
                 self.profile_changed();
             }
-            Action::Note(..) | Action::Relay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
+            // Lending a relay needs a relay of one's own, which the phone
+            // does not run; the setting is the desktop's.
+            Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),
