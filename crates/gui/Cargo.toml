@@ -6,26 +6,16 @@ version.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 device_query = "4.0.1"
-dirs = "6.0.0"
 getrandom = "0.4.3"
-chacha20poly1305 = "0.11.0"
-hkdf = "0.13.0"
 image = "0.25.10"
 qrcode = { version = "0.14.1", default-features = false }
 rfd = "0.17.2"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.11.0"
 slint = { version = "1.17.1", features = ["unstable-fontique-010"] }
-zeroize = "1.9.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-captions = { version = "0.1.0", path = "../captions" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
-antiphon-protocol = { version = "0.1.0", path = "../protocol" }
-# The mailbox, run in-app when this device holds mail for your others.
-antiphon-relay = { version = "0.1.0", path = "../relay" }
 antiphon-client = { version = "0.1.0", path = "../client" }
 
 [target.'cfg(windows)'.dependencies]
@@ -37,8 +27,6 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 # Already linked through device_query; used directly to put Caps Lock back
 # off after it was used as push-to-talk.
 x11 = { version = "2.21.0", features = ["xlib"] }
-
-[dev-dependencies]
 
 [build-dependencies]
 slint-build = "1.17.1"

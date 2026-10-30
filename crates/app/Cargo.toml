@@ -8,10 +8,8 @@ anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 device_query = "4.0.1"
 inquire = "0.9.4"
-serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
-antiphon-protocol = { version = "0.1.0", path = "../protocol" }
