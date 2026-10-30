@@ -20,8 +20,9 @@ OLD=$(awk '/^\[workspace\.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^vers
 [ -n "$OLD" ] || { echo "no [workspace.package] version in Cargo.toml" >&2; exit 1; }
 [ "$OLD" != "$V" ] || { echo "already $V"; exit 0; }
 
-# the names of the workspace's own crates, from their manifests
-NAMES=$(for m in "$ROOT"/crates/*/Cargo.toml; do sed -n 's/^name *= *"\([^"]*\)".*/\1/p' "$m" | head -1; done)
+# the names of the workspace's own crates, from their manifests, on one line: macOS's awk refuses a
+# newline inside a -v value ("newline in string"), which is how this used to be passed below.
+NAMES=$(for m in "$ROOT"/crates/*/Cargo.toml; do sed -n 's/^name *= *"\([^"]*\)".*/\1/p' "$m" | head -1; done | tr '\n' ' ')
 
 awk -v v="$V" '
   /^\[workspace\.package\]/ { s = 1 } /^\[/ && !/^\[workspace\.package\]/ { s = 0 }
@@ -36,7 +37,7 @@ for m in "$ROOT"/crates/*/Cargo.toml; do
 done
 
 awk -v v="$V" -v names="$NAMES" '
-  BEGIN { split(names, a, /[ \n]+/); for (i in a) own["name = \"" a[i] "\""] = 1 }
+  BEGIN { split(names, a, / +/); for (i in a) own["name = \"" a[i] "\""] = 1 }
   hit && /^version = "/ { print "version = \"" v "\""; hit = 0; next }
   { hit = ($0 in own); print }' "$ROOT/Cargo.lock" > "$ROOT/Cargo.lock.new"
 mv "$ROOT/Cargo.lock.new" "$ROOT/Cargo.lock"
