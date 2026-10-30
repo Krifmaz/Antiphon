@@ -229,8 +229,30 @@ the binary is the source — no trust required.
   last lines are the bare binaries' hashes, `<platform>/<binary>`. So
   reproducibility is not a property someone asserted once; it is checked on
   every release, and a regression in it fails the build rather than
-  shipping. The installers themselves (NSIS, AppImage, .deb, .dmg) are not
-  claimed to be reproducible; the binaries inside them are.
+  shipping. The APK gets the same treatment: built twice from clean,
+  signed with the same key both times (an RSA signature over the same bytes
+  is the same), and compared; on a mismatch the job lists the entries that
+  differ. The installers themselves (NSIS, MSI, AppImage, .deb, Flatpak,
+  .dmg) are not claimed to be reproducible; the binaries inside them are.
+  Every published file then gets a **signed build attestation** (below).
+  The Linux binaries are built on Ubuntu 24.04 rather than the newest
+  runner image, so they need only glibc 2.39 and run on the distributions
+  people actually have; the Flatpak uses the newest
+  org.freedesktop.Platform, whose glibc is newer still.
+
+## Verifying a download
+
+Each release file has a provenance statement signed through Sigstore by
+GitHub for the workflow run that built it: the repository, the workflow,
+the commit and the run. With the GitHub CLI:
+
+```bash
+gh attestation verify Stoop-0.1.0-windows-x86_64.exe -R Krifmaz/Stoop
+```
+
+That ties the exact file you downloaded to a commit you can read. To go
+further, build that commit yourself and compare your binaries with the
+`<platform>/<binary>` lines at the end of `SHA256SUMS`.
 
 ## Cross-check
 
@@ -256,19 +278,17 @@ Being straight about the gap, because a half-finished verification story is
 worse than an absent one — it invites people to believe a check happened
 that did not:
 
-- **Nothing is signed.** There is no release key, so there is currently no
-  way to confirm a published hash came from the project rather than from
-  whoever served you the download page. Reproducibility proves the binary
-  matches *some* source; a signature is what ties the published hash to the
-  people who made it. Both are needed.
+- **No platform code signing.** Release files are attested (above), which
+  ties each one to the run and commit that built it, but the Windows and
+  macOS binaries carry no Authenticode or Apple Developer ID signature, so
+  SmartScreen and Gatekeeper warn on first start. Both need a paid
+  certificate; the pipeline has no step for them yet.
 - **One machine per platform, not two.** The pipeline's two builds run on
   the same runner image. That rules out the non-determinism this file is
   about (symbol ordering, timestamps, paths) but not a difference between
   two differently provisioned machines. A verifier building on their own
   machine and matching the published hash is the check that closes that,
   and it is the one this procedure exists to make possible.
-- **Packaging.** The pipeline produces bare binaries, not the Flatpak /
-  AppImage / deb / MSI / dmg spec §10 lists.
 
 ## Running the tests
 

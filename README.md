@@ -65,16 +65,21 @@ The short version of [`FEATURES.md`](FEATURES.md):
 
 ## Installing
 
-Releases are on the [Releases page](https://github.com/Krifmaz/Antiphon/releases), one per
+Releases are on the [Releases page](https://github.com/Krifmaz/Stoop/releases), one per
 version, titled "Stoop <version>":
 
-- **Windows:** `Stoop-<version>-windows-x86_64.exe`, an installer that needs no administrator rights.
-- **Linux:** `Stoop-<version>-linux-x86_64.AppImage` or `stoop_<version>_amd64.deb`, or the plain
-  binaries in `stoop-<version>-linux-x86_64.tar.gz`.
+- **Windows:** `Stoop-<version>-windows-x86_64.exe`, an installer that needs no administrator rights,
+  or `Stoop-<version>-windows-x86_64.msi` for deploying to many PCs.
+- **Linux:** `Stoop-<version>-linux-x86_64.AppImage`, `stoop_<version>_amd64.deb` or
+  `Stoop-<version>-linux-x86_64.flatpak` (`flatpak install --user <file>`), or the plain binaries in
+  `stoop-<version>-linux-x86_64.tar.gz`.
 - **macOS (Apple silicon):** `Stoop-<version>-macos-aarch64.dmg`.
+- **Android:** `Stoop-android-<version>.apk`.
 
-`SHA256SUMS` lists every file. Each release binary is built twice from a
-clean tree and packaged only when both builds match byte for byte.
+`SHA256SUMS` lists every file. Each release binary and the APK are built twice from a
+clean tree and packaged only when both builds match byte for byte, and every file has a
+signed build attestation: `gh attestation verify <file> -R Krifmaz/Stoop` (see
+[`BUILDING.md`](BUILDING.md#verifying-a-download)).
 
 ## Building
 
