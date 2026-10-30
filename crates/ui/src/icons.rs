@@ -115,6 +115,8 @@ pub enum Icon {
     Play,
     /// A square: stop.
     Stop,
+    /// Two bars: pause.
+    Pause,
     /// A chevron pointing up: earlier, sooner.
     Up,
     /// A chevron pointing down: later.
@@ -194,6 +196,7 @@ impl Icon {
             Icon::Keyboard => r#"<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M8 16h8M10 13h4"/>"#,
             Icon::Play => r#"<path d="M6 3l14 9-14 9z"/>"#,
             Icon::Stop => r#"<rect x="6" y="6" width="12" height="12" rx="1.5"/>"#,
+            Icon::Pause => r#"<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>"#,
             Icon::Up => r#"<path d="m18 15-6-6-6 6"/>"#,
             Icon::Down => r#"<path d="m6 9 6 6 6-6"/>"#,
             Icon::Hash => r#"<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>"#,

@@ -532,6 +532,8 @@ pub struct Transfers {
     /// phone app keeps its queue across restarts by file handle; the
     /// desktop offers files only during a call.
     pub pick_anytime: bool,
+    /// The file going out can be paused and resumed (desktop only).
+    pub can_pause: bool,
 }
 
 /// A file waiting to be sent.

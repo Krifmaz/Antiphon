@@ -621,15 +621,24 @@ pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         );
     }
     for tr in &m.transfers.active {
+        // A file going out can be held and let go again without starting over.
+        let pause = (m.transfers.can_pause && !tr.incoming).then(|| {
+            if tr.paused {
+                icon_btn(Icon::Play, "Resume", Some(Msg::Do(Action::PauseTransfer(false))))
+            } else {
+                icon_btn(Icon::Pause, "Pause", Some(Msg::Do(Action::PauseTransfer(true))))
+            }
+        });
         col = col.push(
             container(
                 column![
                     row![
                         icon(if tr.incoming { Icon::Download } else { Icon::Send }, 14.0, p.muted),
                         t(tr.name.as_str()).size(13).font(theme::semibold()).width(Length::Fill),
-                        faint(tr.detail.as_str()).size(11.5),
-                        icon_btn(Icon::X, "Cancel", Some(Msg::Do(Action::CancelTransfer))),
+                        faint(if tr.paused { "Paused" } else { tr.detail.as_str() }).size(11.5),
                     ]
+                    .push(pause)
+                    .push(icon_btn(Icon::X, "Cancel", Some(Msg::Do(Action::CancelTransfer))))
                     .spacing(8)
                     .align_y(Alignment::Center),
                     progress_bar(0.0..=1.0, tr.progress).girth(5).style(theme::progress),

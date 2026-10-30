@@ -1944,6 +1944,9 @@ impl Engine {
             A::CancelTransfer => {
                 self.with_call(|a| a.cancel_file_transfer(&rt));
             }
+            A::PauseTransfer(paused) => {
+                self.with_call(|a| file_transfer::set_paused(&a.file_transfer, paused));
+            }
             A::QueueMove { id, up } => {
                 if up {
                     self.send_queue.move_up(id);
@@ -3287,7 +3290,7 @@ impl Engine {
 
     /// Files on their way in either direction.
     fn transfers(&self) -> ui::Transfers {
-        let mut t = ui::Transfers::default();
+        let mut t = ui::Transfers { can_pause: true, ..ui::Transfers::default() };
         let call = self.state.call.lock().unwrap();
         let Some(a) = call.as_ref() else {
             drop(call);

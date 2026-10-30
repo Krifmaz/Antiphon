@@ -454,6 +454,8 @@ pub enum Action {
     DeclineFile,
     /// Stop the file on its way, in either direction.
     CancelTransfer,
+    /// Pause (true) or resume the file going out.
+    PauseTransfer(bool),
     /// Move a waiting file one place earlier (true) or later.
     QueueMove {
         /// Which file ([`QueuedFile::id`]).

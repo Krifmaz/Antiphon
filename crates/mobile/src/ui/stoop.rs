@@ -594,6 +594,8 @@ impl App {
             Action::SendFile => self.update(Message::PickFile),
             Action::AcceptFile => self.update(Message::AcceptOffer),
             Action::DeclineFile => self.update(Message::DeclineOffer),
+            // Never offered here (`can_pause` stays false).
+            Action::PauseTransfer(_) => {}
             Action::CancelTransfer => {
                 if self.files.active.is_some() {
                     self.update(Message::CancelSend);
