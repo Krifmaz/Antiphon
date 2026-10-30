@@ -247,6 +247,7 @@ impl AccountState {
                 }
             }),
             can_pick_file: true,
+            can_export_data: true,
             // The engine fills these in from `my_devices`.
             devices: Vec::new(),
             device_sync: String::new(),

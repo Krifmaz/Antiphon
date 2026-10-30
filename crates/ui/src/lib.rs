@@ -562,6 +562,9 @@ pub enum Action {
     /// Use the gallery's look at this index (see [`theme::LOOKS`]): its
     /// theme and accent together.
     Look(usize),
+    /// Export everything, readable without Stoop, into a folder the
+    /// person picks (spec §13 "take everything with you").
+    ExportData,
     /// Use a voice preset by name.
     Preset(String),
     /// Turn a chain stage (by id) on or off.

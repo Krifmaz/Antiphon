@@ -252,6 +252,9 @@ impl PhoneAccount {
                 }
             }),
             can_pick_file: false,
+            // A phone keeps its files out of reach of a folder picker;
+            // the backup file is how its data travels.
+            can_export_data: false,
             devices: self.devices.clone(),
             device_sync: sync_line(mailboxes.len()),
             can_remove_devices: !mailboxes.is_empty(),

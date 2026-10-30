@@ -766,6 +766,8 @@ impl App {
             // A phone has no file dialog to save a preset through or pick
             // one from, so the tab never offers it.
             Action::ExportPreset | Action::ImportPreset => {}
+            // Nor a folder to export everything into; the tab never offers it.
+            Action::ExportData => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

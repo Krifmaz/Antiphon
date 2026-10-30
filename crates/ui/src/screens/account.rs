@@ -47,7 +47,14 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
                 Some("Your identity, contacts, profile and settings in one file, locked with a passphrase. Keep it somewhere other than this device."),
                 backup(ui, m, idle),
             ))
-            .push(titled_card("Restore from a backup file", Some("Replaces this device's account with the one in the file."), import(ui, idle))),
+            .push(titled_card("Restore from a backup file", Some("Replaces this device's account with the one in the file."), import(ui, idle)))
+            .push(m.account.can_export_data.then(|| {
+                titled_card(
+                    "Take your data with you",
+                    Some("Settings, contacts, your message history, sound clips and received files, as plain JSON and WAV files in a folder any program can open. Your messages are written out readable, so keep the folder private. Your keys are left out: your recovery phrase brings you back."),
+                    btn_icon(Icon::Download, "Export everything…", Btn::Default, idle.then_some(Msg::Do(Action::ExportData))),
+                )
+            })),
         2 => cards
             .push(titled_card(
                 "Recovery phrase",

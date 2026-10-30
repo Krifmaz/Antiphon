@@ -21,7 +21,7 @@ use antiphon_client::transfer_queue::{self, Entry, TransferQueue};
 use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
-    caps_lock, community, config, connection_mode, delivery, discovery, node_picker, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
+    caps_lock, community, config, connection_mode, data_export, delivery, discovery, node_picker, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
     group, moderation, notify, outbox, presence, profile, push_wake, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
@@ -995,6 +995,36 @@ impl Engine {
                 Ok(file) => Self::push(&events, Event::Theme(file)),
                 Err(why) => Self::push(&events, Event::Toast(why, ToastKind::Err)),
             }
+        });
+    }
+
+    /// Exports everything into a folder the person picks, off the window's
+    /// thread (spec §13 "take everything with you, in an open format"):
+    /// settings, contacts, decrypted history, sound clips and received
+    /// files, with the keys left out (see [`data_export`]).
+    fn export_data(&mut self) {
+        let Some(dir) = self.dir.clone() else {
+            self.toast("There is no data folder to export from.", ToastKind::Err);
+            return;
+        };
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(dest) = rfd::FileDialog::new().set_title("Choose a folder to export into").pick_folder() else { return };
+            // History is decrypted on the way out, because an export you
+            // cannot read is not an export; the key itself stays here.
+            let key = history::load_or_create_backup_key(&dir).ok();
+            let decrypt = |identity: &str| {
+                let log = history::load(&dir, identity, key.as_ref()?);
+                (!log.is_empty()).then_some(log)
+            };
+            let (text, kind) = match data_export::export_all(&dir, &dest, decrypt) {
+                Ok(s) => (
+                    format!("Exported {} contacts and {} conversations ({} messages) to {}", s.contacts, s.conversations, s.messages, dest.display()),
+                    ToastKind::Ok,
+                ),
+                Err(e) => (format!("Couldn't export: {e}"), ToastKind::Err),
+            };
+            Self::push(&events, Event::Toast(text, kind));
         });
     }
 
@@ -2003,6 +2033,7 @@ impl Engine {
                     self.chain_changed();
                 }
             }
+            A::ExportData => self.export_data(),
             A::ExportPreset => self.export_preset(),
             A::ImportPreset => self.import_preset(),
             A::MicTest(on) => self.mic_test(on),
