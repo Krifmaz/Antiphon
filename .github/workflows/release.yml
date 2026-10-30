@@ -181,7 +181,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ] || choco install nsis -y --no-progress
+          have_nsis() { command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ]; }
+          # the Chocolatey feed fails now and then while choco still exits 0, so retry and check for makensis itself
+          for try in 1 2 3 4; do
+            have_nsis && break
+            choco install nsis -y --no-progress || true
+            have_nsis || sleep $((try * 15))
+          done
+          have_nsis || { echo "::error::NSIS did not install"; exit 1; }
           # WiX 4 for the MSI, pinned like the rest of the toolchain
           dotnet tool install --global wix --version 4.0.6
           echo "$USERPROFILE\.dotnet\tools" >> "$GITHUB_PATH"
