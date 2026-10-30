@@ -1,0 +1,24 @@
+// Daylight: Warm paper for bright rooms.
+// Built into Stoop. The accent is chosen separately in Settings.
+stoop-theme {
+    id: light;
+    name: "Daylight";
+    dark: false;
+
+    bg: #f3f1ea; // window ground
+    bg2: #faf8f2; // people list and other side surfaces
+    panel: #ffffff; // cards and the conversation
+    panel2: #efece3; // nested boxes, hovered rows, inputs
+    border: #e2ddd0; // hairlines
+    text: #1c1b18; // body text
+    muted: #5f5b50; // secondary text
+    faint: #8c8778; // captions and hints
+
+    ok: #1f9d5c; // connected, speaking, encrypted
+    warn: #b7791f; // needs attention
+    err: #c53030; // leave the call, destructive actions
+    info: #2b6cb0; // neutral information
+
+    // Letter avatars cycle through these.
+    avatars: [#d9cbf7, #c4e1fb, #bfeccf, #f6dfb5, #f3c9ea, #f6c5c5];
+}

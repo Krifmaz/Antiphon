@@ -18,6 +18,7 @@
 pub mod a11y;
 pub mod avatars;
 pub mod icons;
+pub mod markup;
 pub mod model;
 pub mod theme;
 pub mod theme_file;

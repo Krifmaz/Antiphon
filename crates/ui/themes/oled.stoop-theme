@@ -1,0 +1,24 @@
+// OLED black: True black grounds, so an OLED screen switches those pixels off.
+// Built into Stoop. The accent is chosen separately in Settings.
+stoop-theme {
+    id: oled;
+    name: "OLED black";
+    dark: true;
+
+    bg: #000000; // window ground
+    bg2: #000000; // people list and other side surfaces
+    panel: #0b0b0d; // cards and the conversation
+    panel2: #17171b; // nested boxes, hovered rows, inputs
+    border: #232329; // hairlines
+    text: #ececf4; // body text
+    muted: #9a9aa8; // secondary text
+    faint: #6e6e78; // captions and hints
+
+    ok: #8ee3b0; // connected, speaking, encrypted
+    warn: #f7cd8c; // needs attention
+    err: #f4a3a3; // leave the call, destructive actions
+    info: #9fd2fb; // neutral information
+
+    // Letter avatars cycle through these.
+    avatars: [#c7aef5, #9fd2fb, #8ee3b0, #f7cd8c, #f2a7e4, #f4a3a3];
+}

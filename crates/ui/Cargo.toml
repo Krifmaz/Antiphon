@@ -15,6 +15,7 @@ version.workspace = true
 accesskit = "0.24.1"
 iced_core = "0.14.0"
 iced_widget = { version = "0.14.0", features = ["svg", "canvas", "qr_code", "image", "wgpu"] }
-# Theme files: plain JSON data, read and written through serde only.
+# Theme files from earlier builds: plain JSON data, read through serde only.
+# Current theme files are Stoop's own markup (src/markup.rs), parsed by hand.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

@@ -1,0 +1,24 @@
+// Stoop: Encore's charcoal and cream, with a faint that stays legible at 12 px.
+// Built into Stoop. The accent is chosen separately in Settings.
+stoop-theme {
+    id: stoop;
+    name: "Stoop";
+    dark: true;
+
+    bg: #161617; // window ground
+    bg2: #1c1c1e; // people list and other side surfaces
+    panel: #222224; // cards and the conversation
+    panel2: #2a2a2d; // nested boxes, hovered rows, inputs
+    border: #353538; // hairlines
+    text: #f0ead6; // body text
+    muted: #aaa493; // secondary text
+    faint: #918b77; // captions and hints
+
+    ok: #8ee3b0; // connected, speaking, encrypted
+    warn: #f7cd8c; // needs attention
+    err: #f4a3a3; // leave the call, destructive actions
+    info: #9fd2fb; // neutral information
+
+    // Letter avatars cycle through these.
+    avatars: [#c7aef5, #9fd2fb, #8ee3b0, #f7cd8c, #f2a7e4, #f4a3a3];
+}

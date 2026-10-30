@@ -7,10 +7,14 @@
 //! Encore's charcoal-and-cream with Stoop's pastel status colours
 //! (project brand notes, 2026-10-28).
 //!
+//! The themes themselves are not in this file: each is a markup file in
+//! `crates/ui/themes` (see [`crate::markup`]), built into the binary and
+//! read by [`bundled`], so a theme is edited as data rather than code.
+//!
 //! Pages never pick colours themselves. They call the helpers in
 //! [`crate::widgets`], which call the style functions here.
 
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 use iced_core::border::Radius;
 use iced_core::{font, Background, Border, Color, Font, Shadow, Theme, Vector};
@@ -231,15 +235,9 @@ pub fn partner(c: Color) -> Color {
 /// `system` means.
 pub fn palette(theme: &str, accent: &str, custom: &str, system_dark: bool) -> Palette {
     let theme = if theme == "system" { if system_dark { "stoop" } else { "light" } } else { theme };
-    let dark = theme != "light";
-    // bg, bg2, panel, panel2, border, text, muted, faint
-    let t = match theme {
-        "oled" => ["#000000", "#000000", "#0b0b0d", "#17171b", "#232329", "#ececf4", "#9a9aa8", "#6e6e78"],
-        "light" => ["#f3f1ea", "#faf8f2", "#ffffff", "#efece3", "#e2ddd0", "#1c1b18", "#5f5b50", "#8c8778"],
-        "dark" => ["#0b0b12", "#12121c", "#161624", "#1d1d2e", "#2a2a40", "#ececf4", "#9a9ab3", "#6b6b85"],
-        // Stoop: Encore's charcoal and cream, with a faint that stays legible at 12 px.
-        _ => ["#161617", "#1c1c1e", "#222224", "#2a2a2d", "#353538", "#f0ead6", "#aaa493", "#918b77"],
-    };
+    // An unknown id falls back to Stoop, the first bundled theme.
+    let base = bundled().iter().find(|b| b.id == theme).unwrap_or(&bundled()[0]);
+    let dark = base.dark;
     let (a, b) = match ACCENTS.iter().find(|x| x.0 == accent) {
         Some(x) => (hex(x.2), hex(x.3)),
         None => {
@@ -250,35 +248,76 @@ pub fn palette(theme: &str, accent: &str, custom: &str, system_dark: bool) -> Pa
     // A cream accent is unreadable on a light ground; deepen it to the gold.
     let (a, b) = if !dark && luminance(a) > 0.7 { (hex("#8a7440"), hex("#b0925a")) } else { (a, b) };
     let on_accent = if (luminance(a) + luminance(b)) / 2.0 > 0.45 { hex("#16161f") } else { Color::WHITE };
-    let status = if dark {
-        ["#8ee3b0", "#f7cd8c", "#f4a3a3", "#9fd2fb"]
-    } else {
-        ["#1f9d5c", "#b7791f", "#c53030", "#2b6cb0"]
-    };
-    let avatars = if dark {
-        ["#c7aef5", "#9fd2fb", "#8ee3b0", "#f7cd8c", "#f2a7e4", "#f4a3a3"].map(hex)
-    } else {
-        ["#d9cbf7", "#c4e1fb", "#bfeccf", "#f6dfb5", "#f3c9ea", "#f6c5c5"].map(hex)
-    };
-    Palette {
-        bg: hex(t[0]),
-        bg2: hex(t[1]),
-        panel: hex(t[2]),
-        panel2: hex(t[3]),
-        border: hex(t[4]),
-        text: hex(t[5]),
-        muted: hex(t[6]),
-        faint: hex(t[7]),
-        accent: a,
-        accent2: b,
-        on_accent,
-        ok: hex(status[0]),
-        warn: hex(status[1]),
-        err: hex(status[2]),
-        info: hex(status[3]),
+    Palette { accent: a, accent2: b, on_accent, ..base.palette }
+}
+
+/// The built-in themes' markup, one file each in `crates/ui/themes`, in
+/// [`THEMES`] order (without `system`, which picks one of these).
+const BUNDLED: [&str; 4] = [
+    include_str!("../themes/stoop.stoop-theme"),
+    include_str!("../themes/dark.stoop-theme"),
+    include_str!("../themes/oled.stoop-theme"),
+    include_str!("../themes/light.stoop-theme"),
+];
+
+/// One built-in theme, read from its markup.
+#[derive(Clone, Debug)]
+pub struct Base {
+    /// The id Settings and theme files use, such as `dark`.
+    pub id: String,
+    /// The name Settings shows, such as `Midnight`.
+    pub name: String,
+    /// Whether this is a dark theme.
+    pub dark: bool,
+    /// Every token but the accent ones, which [`palette`] fills in.
+    pub palette: Palette,
+}
+
+/// The built-in themes, parsed from [`BUNDLED`] the first time they are
+/// asked for. The files ship inside the binary and a test parses each one,
+/// so a failure here is a build mistake, not something a person can cause.
+pub fn bundled() -> &'static [Base] {
+    static CELL: OnceLock<Vec<Base>> = OnceLock::new();
+    CELL.get_or_init(|| BUNDLED.iter().map(|text| read_base(text).unwrap_or_else(|e| panic!("a built-in theme is malformed: {e}"))).collect())
+}
+
+/// Reads one built-in theme's markup into a [`Base`]. Every token is
+/// required, so a theme file cannot silently leave a colour grey.
+pub fn read_base(text: &str) -> Result<Base, String> {
+    let doc = crate::markup::parse(text)?;
+    if doc.element != "stoop-theme" {
+        return Err(format!("expected a stoop-theme element, found {}", doc.element));
+    }
+    let id = doc.text("id").ok_or("missing id")?.to_string();
+    let name = doc.text("name").ok_or("missing name")?.to_string();
+    let dark = doc.bool("dark").ok_or("missing dark: true or false")?;
+    // Reads a required colour token, naming it when absent.
+    let c = |k: &str| doc.color(k).ok_or_else(|| format!("{id}: missing colour {k}"));
+    let avatars: [Color; 6] = doc
+        .colors("avatars")
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| format!("{id}: avatars must list six colours"))?;
+    let palette = Palette {
+        bg: c("bg")?,
+        bg2: c("bg2")?,
+        panel: c("panel")?,
+        panel2: c("panel2")?,
+        border: c("border")?,
+        text: c("text")?,
+        muted: c("muted")?,
+        faint: c("faint")?,
+        // The accent tokens come from the accent setting, not the theme.
+        accent: Color::BLACK,
+        accent2: Color::BLACK,
+        on_accent: Color::WHITE,
+        ok: c("ok")?,
+        warn: c("warn")?,
+        err: c("err")?,
+        info: c("info")?,
         avatars,
         dark,
-    }
+    };
+    Ok(Base { id, name, dark, palette })
 }
 
 /// The palette every style reads: set by `set`, read by `look`, so styles
@@ -926,6 +965,27 @@ mod tests {
         assert_eq!(weighted(d, font::Weight::Normal).weight, font::Weight::Normal);
         assert_eq!(weighted(FONT, font::Weight::Semibold).weight, font::Weight::Semibold, "Inter has its own semibold");
         assert_eq!(font_for("anything else"), FONT);
+    }
+
+    #[test]
+    fn every_bundled_theme_parses_and_matches_settings() {
+        let ids: Vec<&str> = bundled().iter().map(|b| b.id.as_str()).collect();
+        // Settings' table, less `system`, which picks one of these.
+        let offered: Vec<&str> = THEMES.iter().map(|t| t.0).filter(|&t| t != "system").collect();
+        assert_eq!(ids, offered);
+        for b in bundled() {
+            let name = THEMES.iter().find(|t| t.0 == b.id).map(|t| t.1);
+            assert_eq!(name, Some(b.name.as_str()), "{} is named differently in Settings", b.id);
+            assert_eq!(b.dark, b.id != "light");
+        }
+    }
+
+    #[test]
+    fn a_built_in_theme_must_set_every_token() {
+        let full = BUNDLED[0];
+        assert!(read_base(full).is_ok());
+        assert!(read_base(&full.replace("    muted:", "    // muted:")).is_err());
+        assert!(read_base(&full.replace("avatars: [", "avatars: [#000, ")).is_err(), "seven avatars");
     }
 
     #[test]

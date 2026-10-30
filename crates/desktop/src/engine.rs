@@ -903,12 +903,12 @@ impl Engine {
             let Some(path) = rfd::FileDialog::new()
                 .set_title("Export theme")
                 .set_file_name(ui::theme_file::FILE_NAME)
-                .add_filter("Stoop theme", &["json"])
+                .add_filter("Stoop theme", &[ui::theme_file::EXTENSIONS[0]])
                 .save_file()
             else {
                 return;
             };
-            let (text, kind) = match std::fs::write(&path, file.to_json()) {
+            let (text, kind) = match std::fs::write(&path, file.to_markup()) {
                 Ok(()) => (format!("Theme saved to {}", path.display()), ToastKind::Ok),
                 Err(e) => (format!("Couldn't save the theme: {e}"), ToastKind::Err),
             };
@@ -922,7 +922,7 @@ impl Engine {
     fn import_theme(&mut self) {
         let events = self.events.clone();
         std::thread::spawn(move || {
-            let Some(path) = rfd::FileDialog::new().set_title("Import theme").add_filter("Stoop theme", &["json"]).pick_file() else { return };
+            let Some(path) = rfd::FileDialog::new().set_title("Import theme").add_filter("Stoop theme", &ui::theme_file::EXTENSIONS).pick_file() else { return };
             // Refuse anything too big before reading it into memory.
             let too_big = std::fs::metadata(&path).map(|m| m.len() > ui::theme_file::MAX_BYTES as u64).unwrap_or(false);
             let parsed = if too_big {

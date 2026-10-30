@@ -680,11 +680,11 @@ impl App {
             }
             // A phone has no save dialog the shared code can open, so a
             // theme travels through the clipboard: copied out as the same
-            // JSON a desktop saves, and pasted back in.
+            // markup a desktop saves, and pasted back in.
             Action::ExportTheme => {
                 let s = &self.settings;
                 let file = stoop::theme_file::ThemeFile::new(&s.theme, &s.accent, &s.custom_accent, &s.font);
-                crate::platform::copy_to_clipboard(&file.to_json());
+                crate::platform::copy_to_clipboard(&file.to_markup());
                 self.stoop.toast("Theme copied. Paste it anywhere to keep or share it.", ToastKind::Ok);
             }
             Action::ImportTheme => match crate::platform::read_clipboard().map(|t| stoop::theme_file::ThemeFile::parse(&t)) {
