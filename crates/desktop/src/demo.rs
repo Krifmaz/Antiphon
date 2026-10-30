@@ -90,6 +90,7 @@ impl Demo {
                 auto_gain: true,
                 preset: "Natural".into(),
                 presets: ["Natural", "Warm", "Clear", "Broadcast", "Thin Mic Rescue"].map(String::from).to_vec(),
+                sound_clips: vec![ui::SoundRow { name: "Drum roll".into(), gain_db: 0.0 }, ui::SoundRow { name: "Applause".into(), gain_db: -3.0 }],
                 output_db: 0.0,
                 notify_messages: true,
                 open_on_start: true,
@@ -140,6 +141,9 @@ impl Demo {
             talk_hint: Some("Speak to talk".into()),
             can_camera: true,
             can_share: true,
+            replay: vec!["12:31 · 2 s".into()],
+            replay_offer: true,
+            sounds: self.model.settings.sound_clips.iter().map(|c| c.name.clone()).collect(),
             ..ui::Call::default()
         };
     }

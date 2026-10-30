@@ -147,6 +147,14 @@ const TOUR: &[Step] = &[
         },
     },
     Step {
+        name: "sounds",
+        size: (1280.0, 900.0),
+        setup: |app| {
+            app.go(Route::Settings(Section::Voice));
+            let _ = app.send(Msg::SettingsTab(3));
+        },
+    },
+    Step {
         name: "fine-tune",
         size: (1280.0, 900.0),
         setup: |app| {

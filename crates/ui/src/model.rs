@@ -369,6 +369,14 @@ pub struct Call {
     pub can_camera: bool,
     /// This device can share its screen.
     pub can_share: bool,
+    /// Moments the network damaged badly enough to be worth a second
+    /// listen, as labels, newest first (spec §2 replay history; desktop
+    /// only).
+    pub replay: Vec<String>,
+    /// A newly damaged moment is being offered ("Ask me" replay mode).
+    pub replay_offer: bool,
+    /// The soundboard's clip names, to play into the call (desktop only).
+    pub sounds: Vec<String>,
 }
 
 /// One picture on a call: someone's camera or screen.
@@ -655,8 +663,15 @@ pub struct Settings {
     pub mute_hold: bool,
     /// Deafen only while its key is held, rather than toggling.
     pub deafen_hold: bool,
+    /// The save-replay shortcut's key, as a name; empty when unbound.
+    pub replay_key: String,
     /// The shortcut waiting for a key press to bind it.
     pub binding: Option<Hotkey>,
+    /// What happens when their audio is damaged and recovered (desktop
+    /// only).
+    pub replay_mode: ReplayMode,
+    /// The soundboard's clips (desktop only).
+    pub sound_clips: Vec<SoundRow>,
     /// Noise suppression is on.
     pub noise_suppression: bool,
     /// Echo cancellation is on.
@@ -842,6 +857,72 @@ pub enum CaptionsDo {
     SaveTranscript,
 }
 
+/// What happens when the network damages their audio badly enough that
+/// a moment is worth hearing again (spec §2 replay modes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReplayMode {
+    /// Keep the moments to play from the call, and say nothing.
+    #[default]
+    Off,
+    /// Offer to play each one.
+    Ask,
+    /// Play each one straight away.
+    Auto,
+}
+
+impl ReplayMode {
+    /// Every mode, in the order Settings offers them.
+    pub const ALL: [ReplayMode; 3] = [ReplayMode::Off, ReplayMode::Ask, ReplayMode::Auto];
+
+    /// The mode as Settings names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReplayMode::Off => "Just keep them",
+            ReplayMode::Ask => "Ask me",
+            ReplayMode::Auto => "Play at once",
+        }
+    }
+}
+
+/// One soundboard clip, as Settings shows it.
+#[derive(Clone, Debug, Default)]
+pub struct SoundRow {
+    /// Its name (the file's, when added).
+    pub name: String,
+    /// How much louder or quieter it plays, dB.
+    pub gain_db: f32,
+}
+
+/// Something to do with the replay history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayDo {
+    /// Choose what happens when a moment is damaged.
+    Mode(ReplayMode),
+    /// Play the kept moment at this index (newest first).
+    Play(usize),
+    /// Save what you just heard to a sound file.
+    Save,
+    /// Forget the kept moments.
+    Clear,
+    /// Close the offer to play a new one.
+    Dismiss,
+}
+
+/// Something to do with the soundboard.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SoundDo {
+    /// Add a clip from a WAV file.
+    Add,
+    /// Take the clip at this index off the soundboard.
+    Remove(usize),
+    /// Hear the clip at this index yourself.
+    Preview(usize),
+    /// Play the clip at this index into the call.
+    Send(usize),
+    /// Set how much louder or quieter the clip at this index plays, dB.
+    Gain(usize, f32),
+}
+
 /// A keyboard shortcut that works while Stoop is in the background
 /// (desktop only).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -854,12 +935,14 @@ pub enum Hotkey {
     Deafen,
     /// Leaves the call.
     HangUp,
+    /// Saves what you just heard to a sound file.
+    Replay,
 }
 
 impl Hotkey {
     /// The shortcuts besides push to talk, in the order Settings lists
     /// them.
-    pub const OTHERS: [Hotkey; 3] = [Hotkey::Mute, Hotkey::Deafen, Hotkey::HangUp];
+    pub const OTHERS: [Hotkey; 4] = [Hotkey::Mute, Hotkey::Deafen, Hotkey::HangUp, Hotkey::Replay];
 
     /// The shortcut as Settings names it.
     pub fn label(self) -> &'static str {
@@ -868,6 +951,7 @@ impl Hotkey {
             Hotkey::Mute => "Mute",
             Hotkey::Deafen => "Deafen",
             Hotkey::HangUp => "Hang up",
+            Hotkey::Replay => "Save replay",
         }
     }
 
@@ -878,6 +962,7 @@ impl Hotkey {
             Hotkey::Mute => "Turns your microphone off or back on during a call.",
             Hotkey::Deafen => "Stops you hearing the call, and them hearing you, or brings both back.",
             Hotkey::HangUp => "Leaves the call.",
+            Hotkey::Replay => "Saves what you just heard in the call to a sound file.",
         }
     }
 }
@@ -890,6 +975,7 @@ impl Settings {
             Hotkey::Mute => &self.mute_key,
             Hotkey::Deafen => &self.deafen_key,
             Hotkey::HangUp => &self.hangup_key,
+            Hotkey::Replay => &self.replay_key,
         }
     }
 
@@ -899,7 +985,7 @@ impl Settings {
         match hotkey {
             Hotkey::Mute => Some(self.mute_hold),
             Hotkey::Deafen => Some(self.deafen_hold),
-            Hotkey::Talk | Hotkey::HangUp => None,
+            Hotkey::Talk | Hotkey::HangUp | Hotkey::Replay => None,
         }
     }
 }

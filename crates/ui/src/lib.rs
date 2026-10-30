@@ -218,7 +218,7 @@ impl Section {
     pub fn tabs(self, desktop: bool) -> &'static [&'static str] {
         match self {
             Section::Account => &["Identity", "Backup file", "Recovery phrase"],
-            Section::Voice if desktop => &["Input & output", "Processing", "Fine-tune", "Plugins"],
+            Section::Voice if desktop => &["Input & output", "Processing", "Fine-tune", "Sounds", "Plugins"],
             Section::Voice => &["Input & output", "Processing", "Fine-tune"],
             Section::Appearance => &["Theme", "Text & motion"],
             Section::Relays => &["Relay", "Mailboxes"],
@@ -571,6 +571,10 @@ pub enum Action {
     ExportData,
     /// Live captions: the switches, the model, the transcript.
     Captions(CaptionsDo),
+    /// The replay history: its mode, playing, saving, clearing.
+    Replay(ReplayDo),
+    /// The soundboard: adding, removing, hearing and sending clips.
+    Sound(SoundDo),
     /// Use a voice preset by name.
     Preset(String),
     /// Turn a chain stage (by id) on or off.

@@ -31,6 +31,8 @@ use device_query::Keycode;
 use iced::widget::qr_code;
 
 /// What the voice preset list calls "no EQ".
+mod sounds;
+
 const NATURAL: &str = "Natural";
 /// How long an ended call's reason stays on screen.
 const ENDED_FOR: Duration = Duration::from_secs(3);
@@ -86,6 +88,8 @@ enum Event {
     EmojiPicked(Result<(String, String, String), String>),
     /// A theme file was chosen and read: use what it says.
     Theme(ui::theme_file::ThemeFile),
+    /// A soundboard clip was chosen, checked and copied in: list it.
+    SoundAdded(antiphon_client::soundboard::SoundClip),
     /// A voice preset file was chosen and read: use its chain.
     Preset(config::VoicePreset),
     /// The directories were read: what they list, what went wrong, and
@@ -273,6 +277,11 @@ pub struct Engine {
     binding: Option<ui::Hotkey>,
     /// Live captions: the recogniser, its model and the transcript.
     captions: crate::captions::Captions,
+    /// How many damaged moments the call had cut when last looked at;
+    /// `None` outside a call (see [`Engine::watch_replay`]).
+    replay_seen: Option<u64>,
+    /// The newest damaged moment is being offered ("Ask me" mode).
+    replay_offer: bool,
     /// The last delivery round handled; a new number means messages moved.
     delivery_seen: u64,
     /// The last LAN discovery count handled; a new number means new peers.
@@ -380,6 +389,8 @@ impl Engine {
             outputs: antiphon_audio::list_output_devices(),
             binding: None,
             captions: crate::captions::Captions::default(),
+            replay_seen: None,
+            replay_offer: false,
             plugins_found: None,
             plugins_scanning: false,
             api: None,
@@ -489,6 +500,7 @@ impl Engine {
         self.serve_api(open);
 
         self.captions.tick(&self.state, self.dir.as_deref(), self.cfg.captions_enabled, self.cfg.captions_own_voice);
+        self.watch_replay();
 
         // The far end hung up, or the connection died under us.
         let ended = self.state.call.lock().unwrap().as_ref().is_some_and(|a| !a.is_live());
@@ -534,6 +546,9 @@ impl Engine {
         let t = &self.state.transmit;
         let (mute, deafen, hangup) =
             (t.pending_mute.swap(false, Ordering::Relaxed), t.pending_deafen.swap(false, Ordering::Relaxed), t.pending_hangup.swap(false, Ordering::Relaxed));
+        if t.pending_replay.swap(false, Ordering::Relaxed) {
+            self.save_replay();
+        }
         if mute {
             let now = !self.flag(|a| a.muted.load(Ordering::Relaxed));
             self.act(ui::Action::Mute(now), open);
@@ -1287,7 +1302,7 @@ impl Engine {
                 match r {
                     // One key, one job: a key that already does something
                     // else would do both at once.
-                    Ok(name) => match [ui::Hotkey::Talk, ui::Hotkey::Mute, ui::Hotkey::Deafen, ui::Hotkey::HangUp].into_iter().find(|&h| h != hotkey && *self.key_mut(h) == name) {
+                    Ok(name) => match [ui::Hotkey::Talk, ui::Hotkey::Mute, ui::Hotkey::Deafen, ui::Hotkey::HangUp, ui::Hotkey::Replay].into_iter().find(|&h| h != hotkey && *self.key_mut(h) == name) {
                         Some(other) => self.toast(format!("{} is already the {} key", key_label(&name), other.label().to_lowercase()), ToastKind::Warn),
                         None => {
                             self.toast(format!("{} is now {}", hotkey.label(), key_label(&name)), ToastKind::Ok);
@@ -1322,6 +1337,11 @@ impl Engine {
             Event::PluginsFound(found) => {
                 self.plugins_scanning = false;
                 self.plugins_found = Some(found);
+            }
+            Event::SoundAdded(clip) => {
+                self.toast(format!("Added \"{}\"", clip.name), ToastKind::Ok);
+                self.cfg.sound_clips.push(clip);
+                self.save();
             }
             Event::Preset(preset) => {
                 // A preset is how you sound, not what runs on your
@@ -2052,7 +2072,7 @@ impl Engine {
                 match hotkey {
                     ui::Hotkey::Mute => self.cfg.mute_hold = on,
                     ui::Hotkey::Deafen => self.cfg.deafen_hold = on,
-                    ui::Hotkey::Talk | ui::Hotkey::HangUp => return,
+                    ui::Hotkey::Talk | ui::Hotkey::HangUp | ui::Hotkey::Replay => return,
                 }
                 self.sync_transmit();
                 self.save();
@@ -2117,6 +2137,8 @@ impl Engine {
                 }
             }
             A::ExportData => self.export_data(),
+            A::Replay(what) => self.replay_do(what),
+            A::Sound(what) => self.sound_do(what),
             A::Captions(ui::CaptionsDo::On(on)) => {
                 self.cfg.captions_enabled = on;
                 self.save();
@@ -2567,6 +2589,7 @@ impl Engine {
         *t.mute_key.lock().unwrap() = Keycode::from_str(&self.cfg.mute_key).ok();
         *t.deafen_key.lock().unwrap() = Keycode::from_str(&self.cfg.deafen_key).ok();
         *t.hangup_key.lock().unwrap() = Keycode::from_str(&self.cfg.hangup_key).ok();
+        *t.replay_key.lock().unwrap() = Keycode::from_str(&self.cfg.replay_key).ok();
         t.mute_hold.store(self.cfg.mute_hold, Ordering::Relaxed);
         t.deafen_hold.store(self.cfg.deafen_hold, Ordering::Relaxed);
         caps_lock::set_bound(*t.ptt_key.lock().unwrap() == Keycode::CapsLock && mode == MODE_PTT);
@@ -2579,6 +2602,7 @@ impl Engine {
             ui::Hotkey::Mute => &mut self.cfg.mute_key,
             ui::Hotkey::Deafen => &mut self.cfg.deafen_key,
             ui::Hotkey::HangUp => &mut self.cfg.hangup_key,
+            ui::Hotkey::Replay => &mut self.cfg.replay_key,
         }
     }
 
@@ -3090,6 +3114,7 @@ impl Engine {
             m.deafened = a.deafened.load(Ordering::Relaxed);
             m.my_level = a.mic_level.lock().map(|l| *l).unwrap_or(0.0).min(1.0);
             m.sending = a.ptt_active.load(Ordering::Relaxed);
+            self.sounds_model(a, &mut m);
             m.their_level = (self.their_level * 2.5).min(1.0);
             let (delivered, concealed) = a.jitter.lock().unwrap().stats();
             let total = delivered + concealed;
@@ -3321,7 +3346,10 @@ impl Engine {
             hangup_key: bound_label(&self.cfg.hangup_key),
             mute_hold: self.cfg.mute_hold,
             deafen_hold: self.cfg.deafen_hold,
+            replay_key: bound_label(&self.cfg.replay_key),
             binding: self.binding,
+            replay_mode: sounds::replay_mode(self.cfg.replay_mode),
+            sound_clips: self.sound_rows(),
             noise_suppression: self.cfg.chain.noise_suppress.enabled,
             echo_cancel: self.cfg.echo_cancel,
             low_data: self.cfg.low_data_calls,

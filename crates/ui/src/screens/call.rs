@@ -90,6 +90,16 @@ pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
     if let Some(cc) = captions(m) {
         col = col.push(cc);
     }
+    if let Some(r) = replay(c) {
+        col = col.push(r);
+    }
+    if c.phase == Phase::Connected && !c.sounds.is_empty() {
+        let mut board = row![faint("Soundboard").size(12)].spacing(6).align_y(Alignment::Center);
+        for (i, name) in c.sounds.iter().enumerate() {
+            board = board.push(btn_sm(name.as_str(), Btn::Ghost, Some(Msg::Do(Action::Sound(crate::SoundDo::Send(i))))));
+        }
+        col = col.push(board.wrap());
+    }
     if let Some(pad) = talk_pad(m) {
         col = col.push(pad);
     }
@@ -114,6 +124,37 @@ fn captions<'a>(m: &'a Model) -> Option<El<'a, Msg>> {
         lines = lines.push(faint("Captions will appear here.").size(12));
     }
     Some(container(lines).padding([10, 14]).max_width(720).style(theme::inset).into())
+}
+
+/// Spec §2 replay: the moments the network damaged, newest first, each a
+/// button to hear it again, with saving what you just heard; and, in
+/// "Ask me" mode, the offer of the newest.
+fn replay<'a>(c: &'a crate::Call) -> Option<El<'a, Msg>> {
+    use crate::ReplayDo as R;
+    if c.phase != Phase::Connected || c.replay.is_empty() {
+        return None;
+    }
+    let p = theme::look();
+    let mut body = column![].spacing(8);
+    if c.replay_offer {
+        body = body.push(
+            row![
+                icon(Icon::Refresh, 16.0, p.warn),
+                t("Their audio dropped out and was recovered.").size(13).width(Length::Fill),
+                btn_sm("Hear it", Btn::Primary, Some(Msg::Do(Action::Replay(R::Play(0))))),
+                icon_btn(Icon::X, "Not now", Some(Msg::Do(Action::Replay(R::Dismiss)))),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    let mut clips = row![faint("Hear again").size(12)].spacing(6).align_y(Alignment::Center);
+    for (i, label) in c.replay.iter().enumerate() {
+        clips = clips.push(btn_sm(label.as_str(), Btn::Ghost, Some(Msg::Do(Action::Replay(R::Play(i))))));
+    }
+    clips = clips.push(btn_sm("Save what I heard…", Btn::Ghost, Some(Msg::Do(Action::Replay(R::Save))))).push(icon_btn(Icon::X, "Forget these", Some(Msg::Do(Action::Replay(R::Clear)))));
+    body = body.push(clips.wrap());
+    Some(container(body).padding([10, 14]).max_width(720).style(theme::inset).into())
 }
 
 /// The words both sides read out to rule out someone in the middle.

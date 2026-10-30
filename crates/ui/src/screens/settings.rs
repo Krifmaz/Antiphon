@@ -487,7 +487,14 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     let cards = match tab {
         1 => cards.push(titled_card("Processing", None, processing)),
         2 => fine_tune(cards, s),
-        3 if !m.device.phone => cards.push(titled_card(
+        3 if !m.device.phone => cards
+            .push(titled_card(
+                "Replay",
+                Some("When the network damages their voice badly enough to lose words, Stoop keeps the moment so you can hear it again. It is kept, sealed, only in memory and only for the call."),
+                replay_modes(s),
+            ))
+            .push(titled_card("Soundboard", Some("Short WAV clips you can play into a call, up to 15 seconds each."), soundboard(s))),
+        4 if !m.device.phone => cards.push(titled_card(
             "Plugins",
             Some("Your own LADSPA, LV2 and VST3 effects, run on your microphone after the processing. A plugin is a program: add only ones you trust."),
             plugins(&s.plugins),
@@ -515,6 +522,43 @@ fn key_button<'a>(s: &'a crate::Settings, hotkey: Hotkey) -> El<'a, Msg> {
     }
     let key = s.key(hotkey);
     btn_icon(Icon::Keyboard, if key.is_empty() { "Choose a key" } else { key }, Btn::Default, s.binding.is_none().then_some(Msg::Do(Action::BindKey(hotkey)))).into()
+}
+
+/// The replay modes, as a row of choices.
+fn replay_modes(s: &crate::Settings) -> El<'_, Msg> {
+    let mut seg = row![].spacing(4);
+    for mode in crate::ReplayMode::ALL {
+        let on = s.replay_mode == mode;
+        seg = seg.push(
+            pressable(t(mode.label()).size(13).font(theme::semibold()), Role::Tab, mode.label(), on, if on { Btn::TabOn } else { Btn::Tab }, Msg::Do(Action::Replay(crate::ReplayDo::Mode(mode)))).padding([7, 14]),
+        );
+    }
+    column![container(seg).padding(4).style(theme::tabs_frame), faint("The kept moments are listed in the call, ready to play.").size(12.5)].spacing(10).into()
+}
+
+/// The soundboard's clips, each with its level, a button to hear it and
+/// one to take it off; then adding one.
+fn soundboard(s: &crate::Settings) -> El<'_, Msg> {
+    use crate::SoundDo as S;
+    let mut body = column![].spacing(12);
+    if s.sound_clips.is_empty() {
+        body = body.push(faint("No clips yet.").size(13));
+    }
+    for (i, clip) in s.sound_clips.iter().enumerate() {
+        let head = row![
+            t(clip.name.as_str()).size(14).font(theme::semibold()).width(Length::Fill),
+            icon_btn(Icon::Play, "Hear it", Some(Msg::Do(Action::Sound(S::Preview(i))))),
+            icon_btn(Icon::Trash, "Remove", Some(Msg::Do(Action::Sound(S::Remove(i))))),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        body = body.push(
+            container(column![head, field("Level", value_slider(&clip.name, clip.gain_db, -24.0, 12.0, 0.5, "dB", move |db| Msg::Do(Action::Sound(S::Gain(i, db)))))].spacing(8))
+                .padding(10)
+                .style(theme::tabs_frame),
+        );
+    }
+    body.push(btn_icon(Icon::Plus, "Add a clip…", Btn::Default, Some(Msg::Do(Action::Sound(S::Add))))).into()
 }
 
 /// Voice's "Fine-tune" tab (spec §1 "every chain stage toggles
