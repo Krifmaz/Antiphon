@@ -267,7 +267,7 @@ fn me_bar<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     .style(focus_style(|_, _| button::Style::default(), door_focused))
     .on_press(Msg::Do(Action::Door(!open)));
     let door = with_tip(door, if open { "People can call you. Click to close your door." } else { "Click to open your door and take calls." }, iced_widget::tooltip::Position::Top);
-    let settings_on = matches!(ui.route, Route::Settings(_));
+    let settings_on = matches!(ui.route, Route::Settings(_) | Route::SettingsMenu);
     let c = &m.call;
     let me = row![
         avatar_dot(&m.me.name, &m.me.id, 34.0, Some(if open { p.ok } else { p.faint }), p.bg),

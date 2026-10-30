@@ -48,7 +48,7 @@ pub struct Model {
     pub channel: Option<ChannelView>,
     /// The community directories you browse, and what they last listed.
     pub directory: Directory,
-    /// A newer version of Stoop, and getting it (Settings > About, and a
+    /// A newer version of Stoop, and getting it (Settings > Updates, and a
     /// line across the top while one is waiting).
     pub update: Update,
 }

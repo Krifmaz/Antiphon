@@ -1,7 +1,9 @@
-//! Settings > Account & backup: how not to lose your account.
+//! Settings > Account & backup and Settings > Devices: how not to lose
+//! your account.
 //!
 //! There is no server to sign back in to, so this section is the whole
-//! story, in the order people need it:
+//! story, in the order people need it (moving lives under Devices, the
+//! rest in Account & backup's tabs):
 //!
 //! 1. **Move to another device** -- the easy path when the old device is
 //!    still in hand: a link and QR code, the new device opens it.
@@ -21,39 +23,71 @@ use crate::theme::{self, Btn};
 use crate::widgets::*;
 use crate::{Action, Dialog, El, Model, Msg, Ui, MIN_PASSPHRASE_CHARS};
 
-/// The section's cards.
-pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let a = &m.account;
-    let idle = a.busy.is_none();
+/// A warning while a backup, restore or move is under way, or nothing.
+fn busy_note<'a>(m: &'a Model) -> Option<El<'a, Msg>> {
+    m.account.busy.as_ref().map(|busy| warn_box(t(busy.as_str()).size(13.5)))
+}
+
+/// The cards of Account & backup's tab `tab` (see
+/// [`crate::Section::tabs`]): 0 your identity, 1 backup files, 2 the
+/// recovery phrase.
+pub fn view<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
+    let idle = m.account.busy.is_none();
     let mut cards = column![].spacing(16);
-    if let Some(busy) = &a.busy {
-        cards = cards.push(warn_box(t(busy.as_str()).size(13.5)));
+    if let Some(note) = busy_note(m) {
+        cards = cards.push(note);
+    }
+    let cards = match tab {
+        1 => cards
+            .push(titled_card(
+                "Back up to a file",
+                Some("Your identity, contacts, profile and settings in one file, locked with a passphrase. Keep it somewhere other than this device."),
+                backup(ui, m, idle),
+            ))
+            .push(titled_card("Restore from a backup file", Some("Replaces this device's account with the one in the file."), import(ui, idle))),
+        2 => cards
+            .push(titled_card(
+                "Recovery phrase",
+                Some("24 words that bring back who you are on any device, so your contacts still recognise you. They don't bring back contacts or settings; a backup file does. Anyone who has them can be you."),
+                phrase(m),
+            ))
+            .push(titled_card(
+                "Restore from a phrase",
+                Some("Type the 24 words, or paste enough recovery shares, one per line. Your contacts and settings here stay."),
+                restore(ui),
+            )),
+        _ => cards.push(identity(m)),
+    };
+    cards.into()
+}
+
+/// The fingerprint of the key that proves who you are, with ways to
+/// share it.
+fn identity<'a>(m: &'a Model) -> El<'a, Msg> {
+    let body = column![
+        container(t(m.me.fingerprint.as_str()).size(12.5).font(theme::mono()).color(theme::look().muted)).padding([10, 12]).width(Length::Fill).style(theme::inset),
+        row![
+            btn_icon(Icon::Copy, "Copy fingerprint", Btn::Default, Some(Msg::Copy(m.me.fingerprint.clone(), "Fingerprint"))),
+            btn_icon(Icon::Qr, "Show invite", Btn::Ghost, Some(Msg::Dialog(Some(Dialog::Invite)))),
+        ]
+        .spacing(8),
+    ]
+    .spacing(12);
+    titled_card("Your identity", Some("Made on this device and never sent anywhere. People who verified you know this fingerprint."), body)
+}
+
+/// Settings > Devices: moving this account to another device.
+pub fn devices<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    let idle = m.account.busy.is_none();
+    let mut cards = column![].spacing(16);
+    if let Some(note) = busy_note(m) {
+        cards = cards.push(note);
     }
     cards
         .push(titled_card(
             "Move to another device",
             Some("Old device still with you? Open this here, then open the link on the new one. Both need to be on the same Wi-Fi."),
             moving(ui, m, idle),
-        ))
-        .push(titled_card(
-            "Back up to a file",
-            Some("Your identity, contacts, profile and settings in one file, locked with a passphrase. Keep it somewhere other than this device."),
-            backup(ui, m, idle),
-        ))
-        .push(titled_card(
-            "Restore from a backup file",
-            Some("Replaces this device's account with the one in the file."),
-            import(ui, idle),
-        ))
-        .push(titled_card(
-            "Recovery phrase",
-            Some("24 words that bring back who you are on any device, so your contacts still recognise you. They don't bring back contacts or settings; a backup file does. Anyone who has them can be you."),
-            phrase(m),
-        ))
-        .push(titled_card(
-            "Restore from a phrase",
-            Some("Type the 24 words, or paste enough recovery shares, one per line. Your contacts and settings here stay."),
-            restore(ui),
         ))
         .into()
 }

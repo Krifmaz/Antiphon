@@ -1,5 +1,5 @@
 //! A newer version of Stoop: the line across the top while one is waiting,
-//! and the Updates card in Settings > About.
+//! and the card in Settings > Updates.
 //!
 //! Both draw [`crate::Update`], which the app fills in from its updater;
 //! every button sends one of the `Action::Update*` actions back.
@@ -71,7 +71,7 @@ pub fn banner<'a>(m: &'a Model, narrow: bool) -> Option<El<'a, Msg>> {
     )
 }
 
-/// Settings > About's Updates card: where things stand, the button for the
+/// The card in Settings > Updates: where things stand, the button for the
 /// next step, and the switch for looking automatically. Nothing when this
 /// copy cannot look for updates.
 pub fn card<'a>(m: &'a Model) -> Option<El<'a, Msg>> {

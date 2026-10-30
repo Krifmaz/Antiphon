@@ -1,5 +1,15 @@
-//! Settings: a short list of sections on the left, cards of settings on
-//! the right. On a phone the sections stack in one scroll.
+//! Settings, laid out the way Discord's are.
+//!
+//! - **Wide window** ([`view`]): a sidebar of sections gathered under
+//!   group headings ([`Group`]), and the chosen section beside it: its
+//!   title, a row of tabs when it has more than one page
+//!   ([`Section::tabs`]), then its cards.
+//! - **Phone** ([`menu`], then [`page`]): you at the top, then a grouped
+//!   list of sections, each row opening that section on its own screen
+//!   with the same tabs.
+//!
+//! Every section's cards come from one function each below, shared by
+//! both layouts.
 
 use iced_core::{Alignment, Length};
 use iced_widget::{button, column, container, progress_bar, row, scrollable};
@@ -9,57 +19,141 @@ use crate::icons::{icon, logo, Icon};
 use crate::a11y::Role;
 use crate::theme::{self, Btn, ACCENTS, FONTS, THEMES};
 use crate::widgets::*;
-use crate::{Action, CheckState, Dialog, El, Model, Msg, Route, Section, Transmit, Ui};
+use crate::{Action, CheckState, El, Group, Model, Msg, Route, Section, Transmit, Ui};
 
-/// Settings on a wide window: the section list beside the chosen section.
+/// Settings on a wide window: the grouped section list beside the chosen
+/// section.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
     let p = theme::look();
-    let mut nav = column![container(h2("Settings")).padding(pad(6.0, 0.0, 12.0, 10.0))].spacing(2);
-    for s in Section::ALL.into_iter().filter(|s| shown(m, *s)) {
-        let on = s == section;
-        nav = nav.push(
-            pressable(
-                row![icon(s.icon(), 16.0, if on { p.text } else { p.muted }), t(s.label()).size(14).font(theme::semibold())].spacing(10).align_y(Alignment::Center),
-                Role::Tab,
-                s.label(),
-                on,
-                if on { Btn::RowOn } else { Btn::Row },
-                Msg::Nav(Route::Settings(s)),
-            )
-            .width(Length::Fill)
-            .padding([8, 10]),
-        );
+    let mut nav = column![container(h2("Settings")).padding(pad(0.0, 0.0, 14.0, 10.0))].spacing(2);
+    for (g, group) in Group::ALL.into_iter().enumerate() {
+        let mut sections = group.sections().filter(|s| shown(m, *s)).peekable();
+        if sections.peek().is_none() {
+            continue;
+        }
+        // The group's heading, with more room above it than between its
+        // rows, so the groups read as blocks.
+        nav = nav.push(container(label(group.label())).padding(pad(if g == 0 { 0.0 } else { 16.0 }, 10.0, 6.0, 10.0)));
+        for s in sections {
+            let on = s == section;
+            nav = nav.push(
+                pressable(
+                    row![icon(s.icon(), 16.0, if on { p.text } else { p.muted }), t(s.label()).size(14).font(theme::semibold())].spacing(10).align_y(Alignment::Center),
+                    Role::Tab,
+                    s.label(),
+                    on,
+                    if on { Btn::RowOn } else { Btn::Row },
+                    Msg::Nav(Route::Settings(s)),
+                )
+                .width(Length::Fill)
+                .padding([7, 10]),
+            );
+        }
     }
-    let body = scrollable(container(section_view(ui, m, section)).padding([30, 36]).max_width(760)).height(Length::Fill).style(theme::scroll);
-    row![container(nav).width(220).padding([24, 14]).height(Length::Fill), vdivider(), body].into()
+    let nav = scrollable(container(nav).padding([24, 14])).height(Length::Fill).style(theme::scroll);
+    let body = scrollable(container(page_body(ui, m, section, true)).padding([30, 36]).max_width(760)).height(Length::Fill).style(theme::scroll);
+    row![container(nav).width(232).height(Length::Fill), vdivider(), body].into()
 }
 
-/// Every section, one after another, for the phone.
-pub fn stacked<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let mut col = column![].spacing(28);
-    for s in Section::ALL.into_iter().filter(|s| shown(m, *s)) {
-        col = col.push(section_view(ui, m, s));
+/// The phone's settings list: you at the top, then each group's sections
+/// as rows in a rounded block, each opening [`Route::Settings`].
+pub fn menu<'a>(m: &'a Model) -> El<'a, Msg> {
+    let p = theme::look();
+    let status = if m.me.status.is_empty() { "Your profile" } else { m.me.status.as_str() };
+    let me = pressable(
+        row![
+            avatar(&m.me.name, &m.me.id, 48.0),
+            column![t(m.me.name.as_str()).size(16).font(theme::bold()), faint(status).size(12.5)].spacing(2).width(Length::Fill),
+            icon(Icon::Chevron, 14.0, p.faint),
+        ]
+        .spacing(14)
+        .align_y(Alignment::Center),
+        Role::Button,
+        "Your profile",
+        false,
+        Btn::Row,
+        Msg::Nav(Route::Profile(None)),
+    )
+    .width(Length::Fill)
+    .padding([12, 12]);
+    let mut col = column![container(me).padding(2).style(theme::card_raised)];
+    for group in Group::ALL {
+        let mut rows = column![];
+        for (i, s) in group.sections().filter(|s| shown(m, *s)).enumerate() {
+            if i > 0 {
+                // A hairline between rows, indented past the icon as a
+                // phone's lists are.
+                rows = rows.push(container(divider()).padding(pad(0.0, 0.0, 0.0, 44.0)));
+            }
+            rows = rows.push(
+                pressable(
+                    row![icon(s.icon(), 18.0, p.muted), t(s.label()).size(15).width(Length::Fill), icon(Icon::Chevron, 14.0, p.faint)]
+                        .spacing(14)
+                        .align_y(Alignment::Center),
+                    Role::Button,
+                    s.label(),
+                    false,
+                    Btn::Row,
+                    Msg::Nav(Route::Settings(s)),
+                )
+                .width(Length::Fill)
+                .padding([13, 12]),
+            );
+        }
+        col = col.push(container(label(group.label())).padding(pad(20.0, 0.0, 8.0, 6.0)));
+        col = col.push(container(rows).padding(2).style(theme::card_raised));
     }
-    scrollable(container(col).padding([18, 14])).height(Length::Fill).style(theme::scroll).into()
+    col = col.push(container(faint(format!("Stoop {}", m.settings.version)).size(12)).padding(pad(18.0, 0.0, 0.0, 6.0)));
+    scrollable(container(col).padding([14, 12])).height(Length::Fill).style(theme::scroll).into()
 }
 
-/// Whether this device has section `s`: the phone's own section only on a phone.
+/// One section on a phone, under the screen's own title bar: its tabs,
+/// then its cards.
+pub fn page<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
+    scrollable(container(page_body(ui, m, section, false)).padding([16, 14])).height(Length::Fill).style(theme::scroll).into()
+}
+
+/// A section's page: its title (when `title`; a phone's title bar already
+/// says it), its tabs when it has more than one page, then the cards of
+/// the tab on view.
+fn page_body<'a>(ui: &'a Ui, m: &'a Model, section: Section, title: bool) -> El<'a, Msg> {
+    let names = section.tabs(!m.device.phone);
+    // The index can outlive the tab it named (the plugins tab is not on a
+    // phone), so keep it inside the list.
+    let tab = ui.settings_tab.min(names.len().saturating_sub(1));
+    let mut col = column![].spacing(18);
+    if title {
+        col = col.push(h1(section.label()));
+    }
+    if !names.is_empty() {
+        let items = names.iter().enumerate().map(|(i, name)| (*name, Msg::SettingsTab(i))).collect();
+        col = col.push(tabs(items, tab));
+    }
+    col.push(section_view(ui, m, section, tab)).into()
+}
+
+/// Whether this device has section `s`: Updates only where this copy can
+/// update itself.
 fn shown(m: &Model, s: Section) -> bool {
-    s != Section::Phone || m.phone.is_some()
+    s != Section::Updates || m.update.available
 }
 
-/// The cards for one section.
-fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section) -> El<'a, Msg> {
-    let body = match section {
+/// The cards for one section, on tab `tab` (see [`Section::tabs`]).
+fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section, tab: usize) -> El<'a, Msg> {
+    match section {
         Section::Profile => profile(ui, m),
-        Section::Account => super::account::view(ui, m),
-        Section::Appearance => appearance(ui, m),
-        Section::Voice => voice(m),
+        Section::Account => super::account::view(ui, m, tab),
+        Section::Devices => super::account::devices(ui, m),
+        Section::Privacy => privacy(ui, m),
+        Section::Notifications => notifications(m),
+        Section::Voice => voice(m, tab),
+        Section::Appearance => appearance(ui, m, tab),
+        Section::Data => data(ui, m),
         Section::Network => network(ui, m),
+        Section::Relays => relays(ui, m, tab),
+        Section::Updates => updates(m),
         Section::About => about(m),
-        Section::Phone => phone(ui, m),
-    };
-    column![h1(section.label()), body].spacing(18).into()
+    }
 }
 
 /// An input named `name` (widget id `id`) that saves on Enter, with a Save
@@ -74,9 +168,8 @@ fn edit_box<'a>(name: &str, id: &'static str, placeholder: &'a str, edited: &'a 
     r.into()
 }
 
-/// Your name, status, and the key that proves who you are.
+/// Your picture, name, pronouns, status, About line and colour.
 fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let p = theme::look();
     let mut picture_buttons = row![btn_icon(Icon::Edit, if m.me.has_picture { "Change picture" } else { "Add a picture" }, Btn::Default, Some(Msg::Do(Action::PickAvatar)))].spacing(8);
     if m.me.has_picture {
         picture_buttons = picture_buttons.push(btn_icon(Icon::Trash, "Remove", Btn::Ghost, Some(Msg::Do(Action::RemoveAvatar))));
@@ -115,31 +208,22 @@ fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         faint("Your picture, pronouns, About line and colour go to the people you call. They stay on your devices and theirs.").size(12),
     ]
     .spacing(14);
-    let identity = column![
-        container(t(m.me.fingerprint.as_str()).size(12.5).font(theme::mono()).color(p.muted)).padding([10, 12]).width(Length::Fill).style(theme::inset),
-        row![
-            btn_icon(Icon::Copy, "Copy fingerprint", Btn::Default, Some(Msg::Copy(m.me.fingerprint.clone(), "Fingerprint"))),
-            btn_icon(Icon::Qr, "Show invite", Btn::Ghost, Some(Msg::Dialog(Some(Dialog::Invite)))),
-        ]
-        .spacing(8),
-    ]
-    .spacing(12);
+    card(column![me, fields].spacing(20)).into()
+}
+
+/// Which notifications Stoop shows.
+fn notifications<'a>(m: &'a Model) -> El<'a, Msg> {
     let notify = setting(
         "Message notifications",
         Some("Show a notification when a message arrives and Stoop is in the background."),
         switch("Message notifications", m.settings.notify_messages, |on| Msg::Do(Action::NotifyMessages(on))),
     );
-    column![
-        card(column![me, fields].spacing(20)),
-        titled_card("Your identity", Some("Made on this device and never sent anywhere. People who verified you know this fingerprint."), identity),
-        card(notify),
-    ]
-    .spacing(14)
-    .into()
+    card(notify).into()
 }
 
-/// Theme, accent colour, reading font, motion, and theme files.
-fn appearance<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+/// Appearance's tab `tab`: 0 the theme, accent colour and theme files;
+/// 1 the reading font and motion.
+fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
     let p = theme::look();
     let mut themes = row![].spacing(10);
     for (id, name) in THEMES {
@@ -225,11 +309,17 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         btn_icon(Icon::Palette, "Import theme…", Btn::Ghost, Some(Msg::Do(Action::ImportTheme))),
     ]
     .spacing(8);
+    if tab == 1 {
+        return column![
+            titled_card("Reading font", Some("OpenDyslexic's heavier letter bottoms help some people with dyslexia keep letters in place."), fonts),
+            card(motion),
+        ]
+        .spacing(14)
+        .into();
+    }
     column![
         titled_card("Theme", None, themes),
         titled_card("Accent", Some("Buttons, highlights and the glow behind a call."), accent_body),
-        titled_card("Reading font", Some("OpenDyslexic's heavier letter bottoms help some people with dyslexia keep letters in place."), fonts),
-        card(motion),
         titled_card(
             "Theme files",
             Some("Save your theme, accent and reading font to a file to share or keep, or load one. A theme file is plain settings: it can't run anything."),
@@ -249,8 +339,10 @@ fn flat(c: iced_core::Color, r: f32) -> iced_widget::container::Style {
     }
 }
 
-/// Microphone, speakers, how you talk (voice or push to talk), clean-up and output volume.
-fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
+/// Voice & video's tab `tab`: 0 the microphone, speakers, volume, the
+/// microphone test and how you talk (voice or push to talk); 1 clean-up
+/// and presets; 2 (computers only) audio plugins.
+fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     let s = &m.settings;
     let device = |label: &'a str, list: &'a [String], chosen: &'a str, f: fn(String) -> Action| -> El<'a, Msg> {
         let selected = if chosen.is_empty() { None } else { Some(chosen.to_string()) };
@@ -302,12 +394,6 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         setting("Echo cancellation", Some("Stops them hearing themselves when you use speakers."), switch("Echo cancellation", s.echo_cancel, |on| Msg::Do(Action::EchoCancel(on)))),
         divider(),
         setting("Automatic level", Some("Keeps your voice at an even loudness."), switch("Automatic level", s.auto_gain, |on| Msg::Do(Action::AutoGain(on)))),
-        divider(),
-        setting(
-            "Low data calls",
-            Some("Voice only, at the least data that stays clear. Calls already lower their quality by themselves when the connection is poor."),
-            switch("Low data calls", s.low_data, |on| Msg::Do(Action::LowData(on))),
-        ),
     ]
     .spacing(12);
     if !m.device.phone {
@@ -328,25 +414,26 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     }
 
     let mut cards = column![].spacing(14);
-    // A phone's microphone and speaker are the system's to choose.
-    if m.phone.is_none() {
-        cards = cards.push(titled_card("Devices", None, devices));
+    // Without the microphone there is nothing to set, so asking for it
+    // comes first on every tab.
+    if m.phone.as_ref().is_some_and(|ph| !ph.mic_allowed) {
+        cards = cards.push(card(setting("Microphone", Some("Stoop needs it to send your voice. Nothing is recorded."), btn("Allow", Btn::Primary, Some(Msg::Do(Action::RequestMic))))));
     }
-    let mut cards = cards.push(
-        column![
-            titled_card("Microphone test", None, test),
-            titled_card("When to send your voice", None, talk),
-            titled_card("Processing", None, processing),
-        ]
-        .spacing(14),
-    );
-    if !m.device.phone {
-        cards = cards.push(titled_card(
+    let cards = match tab {
+        1 => cards.push(titled_card("Processing", None, processing)),
+        2 if !m.device.phone => cards.push(titled_card(
             "Plugins",
-            Some("Your own LADSPA, LV2 and VST3 effects, run on your microphone after the processing above. A plugin is a program: add only ones you trust."),
+            Some("Your own LADSPA, LV2 and VST3 effects, run on your microphone after the processing. A plugin is a program: add only ones you trust."),
             plugins(&s.plugins),
-        ));
-    }
+        )),
+        _ => {
+            // A phone's microphone and speaker are the system's to choose.
+            if m.phone.is_none() {
+                cards = cards.push(titled_card("Devices", None, devices));
+            }
+            cards.push(titled_card("Microphone test", None, test)).push(titled_card("When to send your voice", None, talk))
+        }
+    };
     cards.into()
 }
 
@@ -416,7 +503,7 @@ fn plugins<'a>(p: &'a crate::Plugins) -> El<'a, Msg> {
     body.into()
 }
 
-/// Whether people can reach you, the port, and the relay to fall back on.
+/// Whether people can reach you, and the port your door listens on.
 fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
     let mut checks = column![].spacing(10);
@@ -454,26 +541,25 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         setting("Open my door when Stoop starts", None, switch("Open my door when Stoop starts", m.settings.open_on_start, |on| Msg::Do(Action::OpenOnStart(on)))),
     ]
     .spacing(12);
-    let mut relay = column![field("Relay", edit_box("Relay", "stoop-relay", "relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave))].spacing(12);
-    if !m.network.relay_note.is_empty() {
-        relay = relay.push(faint(m.network.relay_note.as_str()).size(12.5));
+    column![card(check_card), titled_card("Your door", None, listen)].spacing(14).into()
+}
+
+/// Relays & mailboxes' tab `tab`: 0 the relay to fall back on and
+/// lending it; 1 the mailbox nodes that hold sealed mail.
+fn relays<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
+    let p = theme::look();
+    if tab == 0 {
+        let mut relay = column![field("Relay", edit_box("Relay", "stoop-relay", "relay.example.org:7100", &ui.relay_edit, &m.network.relay, Msg::RelayEdit, Msg::RelaySave))].spacing(12);
+        if !m.network.relay_note.is_empty() {
+            relay = relay.push(faint(m.network.relay_note.as_str()).size(12.5));
+        }
+        relay = relay.push(divider()).push(setting(
+            "Let contacts use my relay",
+            Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
+            switch("Let contacts use my relay", m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
+        ));
+        return titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay);
     }
-    relay = relay.push(divider()).push(setting(
-        "Let contacts use my relay",
-        Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
-        switch("Let contacts use my relay", m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
-    ));
-    let anonymity = column![
-        setting(
-            "Anonymity mode",
-            Some("Calls go through two or three relays, each knowing only the step before and after it. The strongest privacy, with noticeable delay. Needs at least two hops."),
-            switch("Anonymity mode", m.network.anonymity, |on| Msg::Do(Action::Anonymity(on))),
-        ),
-        divider(),
-        field("Hops", edit_box("Hops", "stoop-hops", "hop1.example:3479, hop2.example:3479#key", &ui.hops_edit, &m.network.hops, Msg::HopsEdit, Msg::HopsSave)),
-        faint("Add #key after an address to pin the hop's key (shown when its operator starts it). Without one, the first key a hop gives is remembered and a different one is refused.").size(12.5),
-    ]
-    .spacing(12);
     let mut nodes = column![].spacing(8);
     if m.network.mailboxes.is_empty() {
         nodes = nodes.push(faint("None yet: mail for you waits until you're online, and yours until they are.").size(12.5));
@@ -515,14 +601,24 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         );
     }
     nodes = nodes.push(faint("A node prints its link and QR code when it starts. Pick a picture of the code (a screenshot or a photo) to add it.").size(12));
-    let mut cards = column![
-        card(check_card),
-        titled_card("Your door", None, listen),
-        titled_card("Mailboxes", Some("Nodes that hold sealed mail for you while you're away. They can't read it."), nodes),
-        titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay),
-        titled_card("Anonymity", None, anonymity),
+    titled_card("Mailboxes", Some("Nodes that hold sealed mail for you while you're away. They can't read it."), nodes)
+}
+
+/// Anonymity routing, and whether programs on this computer may act as
+/// you.
+fn privacy<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    let anonymity = column![
+        setting(
+            "Anonymity mode",
+            Some("Calls go through two or three relays, each knowing only the step before and after it. The strongest privacy, with noticeable delay. Needs at least two hops."),
+            switch("Anonymity mode", m.network.anonymity, |on| Msg::Do(Action::Anonymity(on))),
+        ),
+        divider(),
+        field("Hops", edit_box("Hops", "stoop-hops", "hop1.example:3479, hop2.example:3479#key", &ui.hops_edit, &m.network.hops, Msg::HopsEdit, Msg::HopsSave)),
+        faint("Add #key after an address to pin the hop's key (shown when its operator starts it). Without one, the first key a hop gives is remembered and a different one is refused.").size(12.5),
     ]
-    .spacing(14);
+    .spacing(12);
+    let mut cards = column![titled_card("Anonymity", None, anonymity)].spacing(14);
     if !m.device.phone {
         let mut api = column![setting(
             "Local API",
@@ -538,10 +634,10 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     cards.into()
 }
 
-/// Version, updates, and where your data lives.
+/// Version, and where your data lives.
 fn about<'a>(m: &'a Model) -> El<'a, Msg> {
     let s = &m.settings;
-    let mut cards = column![card(
+    let cards = column![card(
         row![
             logo(56.0),
             column![t("Stoop").size(20).font(theme::bold()), faint(format!("Version {}", s.version)).size(12.5), muted("Calls and messages that go straight to the people you talk to.").size(13)].spacing(4),
@@ -550,10 +646,6 @@ fn about<'a>(m: &'a Model) -> El<'a, Msg> {
         .align_y(Alignment::Center)
     )]
     .spacing(14);
-    // Updates sit next to the version they would replace.
-    if let Some(updates) = super::update::card(m) {
-        cards = cards.push(updates);
-    }
     cards
         .push(titled_card(
             "Your data",
@@ -569,18 +661,22 @@ fn about<'a>(m: &'a Model) -> El<'a, Msg> {
         .into()
 }
 
-/// The phone's own settings: the microphone permission, listening in the
-/// background and mobile data. (The recovery phrase is under Account.)
-fn phone<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let Some(ph) = m.phone.as_ref() else { return column![].into() };
-    let mut cards = column![].spacing(14);
-    if !ph.mic_allowed {
-        cards = cards.push(card(setting(
-            "Microphone",
-            Some("Stoop needs it to send your voice. Nothing is recorded."),
-            btn("Allow", Btn::Primary, Some(Msg::Do(Action::RequestMic))),
-        )));
-    }
+/// Settings > Updates: the updater's card. The section is only listed
+/// where this copy can update itself (see [`shown`]).
+fn updates<'a>(m: &'a Model) -> El<'a, Msg> {
+    super::update::card(m).unwrap_or_else(|| card(faint("This copy of Stoop is updated by the system that installed it.").size(13)).into())
+}
+
+/// Data & battery: low data calls everywhere, and on a phone, listening
+/// in the background and mobile data.
+fn data<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    let low_data = setting(
+        "Low data calls",
+        Some("Voice only, at the least data that stays clear. Calls already lower their quality by themselves when the connection is poor."),
+        switch("Low data calls", m.settings.low_data, |on| Msg::Do(Action::LowData(on))),
+    );
+    let cards = column![titled_card("Calls", None, low_data)].spacing(14);
+    let Some(ph) = m.phone.as_ref() else { return cards.into() };
     let background = column![
         setting(
             "Take calls in the background",

@@ -26,7 +26,7 @@ use super::{call, clip, community, conversation, fill, presence_color, settings,
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
-use crate::{Action, Dialog, El, Model, Msg, Person, Route, Section, Ui};
+use crate::{Action, Dialog, El, Model, Msg, Person, Route, Ui};
 
 /// Width of the rail of places down the left edge.
 const RAIL: f32 = 68.0;
@@ -56,7 +56,8 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             Some(person) => chat(ui, m, person),
             None => home(ui, m, messages_pane(ui, m)),
         },
-        Route::Settings(_) => column![top_bar("Settings", true), divider(), settings::stacked(ui, m)].into(),
+        Route::SettingsMenu => column![top_bar("Settings", true), divider(), settings::menu(m)].into(),
+        Route::Settings(section) => column![top_bar(section.label(), true), divider(), settings::page(ui, m, *section)].into(),
         Route::Spaces => home(ui, m, community::list(ui, m, true)),
         Route::Community(id, channel) => community::phone(ui, m, id, *channel),
         Route::Profile(None) => my_profile(m, banner_top),
@@ -327,7 +328,7 @@ fn you_bar<'a>(m: &'a Model) -> El<'a, Msg> {
     let r = row![
         me,
         switch("Door open", open, |on| Msg::Do(Action::Door(on))),
-        icon_btn(Icon::Gear, "Settings", Some(Msg::Nav(Route::Settings(Section::Profile)))),
+        icon_btn(Icon::Gear, "Settings", Some(Msg::Nav(Route::SettingsMenu))),
     ]
     .spacing(6)
     .align_y(Alignment::Center);

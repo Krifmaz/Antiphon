@@ -61,6 +61,10 @@ pub enum Route {
     Person(String),
     /// A part of Settings.
     Settings(Section),
+    /// The phone's list of settings sections, grouped, each opening its
+    /// [`Route::Settings`] page. A wide window has no such page: it shows
+    /// the list beside a section, so it draws this as the first section.
+    SettingsMenu,
     /// Group chats and communities: the list, invitations, and making one.
     Spaces,
     /// One channel of a group chat or community: (its id, the channel).
@@ -76,39 +80,104 @@ pub enum Route {
     ProfileEdit,
 }
 
-/// A part of Settings.
+/// A part of Settings. The sections sit in [`Group`]s, as Discord's
+/// settings do: a sidebar of grouped sections on a wide window, a grouped
+/// list on a phone. Some sections split their cards into tabs (see
+/// [`Section::tabs`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
-    /// Your name and status.
+    /// Your name, pronouns, status, About line, picture and colour.
     Profile,
-    /// Keeping the account: recovery phrase, backup file, moving devices.
+    /// Keeping the account: your identity, backup files and the recovery
+    /// phrase.
     Account,
-    /// Theme, accent and motion.
-    Appearance,
-    /// Devices, how your voice is sent, and processing.
+    /// Moving the account to another device.
+    Devices,
+    /// Anonymity routing and what may act as you (the local API).
+    Privacy,
+    /// Which notifications Stoop shows.
+    Notifications,
+    /// Devices, how your voice is sent, processing and plugins.
     Voice,
-    /// Whether people can reach you: port, relay, the reachability check.
+    /// Theme, accent, reading font and motion.
+    Appearance,
+    /// Low data calls, and on a phone, battery and mobile data.
+    Data,
+    /// Whether people can reach you: the reachability check and the port.
     Network,
+    /// The relay to fall back on and the mailbox nodes that hold mail.
+    Relays,
+    /// Looking for and installing newer versions.
+    Updates,
     /// Version and where data is kept.
     About,
-    /// Battery and mobile data; phones only.
-    Phone,
+}
+
+/// A heading that gathers related [`Section`]s in the settings navigation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// Who you are and how you keep your account.
+    User,
+    /// How the app looks, sounds and behaves on this device.
+    App,
+    /// How you reach people and they reach you.
+    Connection,
+    /// The app itself: updates and version.
+    Stoop,
+}
+
+impl Group {
+    /// Every group, in the order the navigation lists them.
+    pub const ALL: [Group; 4] = [Group::User, Group::App, Group::Connection, Group::Stoop];
+
+    /// The group's heading.
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::User => "User settings",
+            Group::App => "App settings",
+            Group::Connection => "Connection",
+            Group::Stoop => "Stoop",
+        }
+    }
+
+    /// The group's sections, in order.
+    pub fn sections(self) -> impl Iterator<Item = Section> {
+        Section::ALL.into_iter().filter(move |s| s.group() == self)
+    }
 }
 
 impl Section {
     /// Every section, in the order the navigation lists them.
-    pub const ALL: [Section; 7] = [Section::Profile, Section::Account, Section::Appearance, Section::Voice, Section::Network, Section::Phone, Section::About];
+    pub const ALL: [Section; 12] = [
+        Section::Profile,
+        Section::Account,
+        Section::Devices,
+        Section::Privacy,
+        Section::Notifications,
+        Section::Voice,
+        Section::Appearance,
+        Section::Data,
+        Section::Network,
+        Section::Relays,
+        Section::Updates,
+        Section::About,
+    ];
 
     /// The section's name as the navigation shows it.
     pub fn label(self) -> &'static str {
         match self {
             Section::Profile => "Profile",
             Section::Account => "Account & backup",
+            Section::Devices => "Devices",
+            Section::Privacy => "Privacy",
+            Section::Notifications => "Notifications",
+            Section::Voice => "Voice & video",
             Section::Appearance => "Appearance",
-            Section::Voice => "Voice & audio",
+            Section::Data => "Data & battery",
             Section::Network => "Network",
+            Section::Relays => "Relays & mailboxes",
+            Section::Updates => "Updates",
             Section::About => "About",
-            Section::Phone => "Battery & data",
         }
     }
 
@@ -117,11 +186,40 @@ impl Section {
         match self {
             Section::Profile => icons::Icon::Users,
             Section::Account => icons::Icon::Lock,
+            Section::Devices => icons::Icon::Screen,
+            Section::Privacy => icons::Icon::Shield,
+            Section::Notifications => icons::Icon::Bell,
+            Section::Voice => icons::Icon::Mic,
             Section::Appearance => icons::Icon::Palette,
-            Section::Voice => icons::Icon::Sliders,
+            Section::Data => icons::Icon::Sliders,
             Section::Network => icons::Icon::Globe,
+            Section::Relays => icons::Icon::Door,
+            Section::Updates => icons::Icon::Download,
             Section::About => icons::Icon::Info,
-            Section::Phone => icons::Icon::Phone,
+        }
+    }
+
+    /// The group the section is listed under.
+    pub fn group(self) -> Group {
+        match self {
+            Section::Profile | Section::Account | Section::Devices | Section::Privacy => Group::User,
+            Section::Notifications | Section::Voice | Section::Appearance | Section::Data => Group::App,
+            Section::Network | Section::Relays => Group::Connection,
+            Section::Updates | Section::About => Group::Stoop,
+        }
+    }
+
+    /// The tabs the section's cards are split into, by name; empty when
+    /// the section is short enough to be one page. `desktop` adds the
+    /// tabs only a computer has (audio plugins).
+    pub fn tabs(self, desktop: bool) -> &'static [&'static str] {
+        match self {
+            Section::Account => &["Identity", "Backup file", "Recovery phrase"],
+            Section::Voice if desktop => &["Input & output", "Processing", "Plugins"],
+            Section::Voice => &["Input & output", "Processing"],
+            Section::Appearance => &["Theme", "Text & motion"],
+            Section::Relays => &["Relay", "Mailboxes"],
+            _ => &[],
         }
     }
 }
@@ -719,6 +817,9 @@ pub enum Msg {
     Frame(Instant),
     /// Go to a screen.
     Nav(Route),
+    /// Pick a tab of the settings section on view, by index into
+    /// [`Section::tabs`].
+    SettingsTab(usize),
     /// Back: the phone layout's back arrow, the mouse's back button, Escape.
     Back,
     /// The people search box changed.
@@ -1017,6 +1118,9 @@ pub struct Ui {
     /// The message (by id) whose tools are in the keyboard's list, because
     /// focus is on it or on one of them.
     active_message: Option<u64>,
+    /// The tab on view in the settings section on screen, by index into
+    /// [`Section::tabs`]; back to the first whenever the screen changes.
+    settings_tab: usize,
 }
 
 impl Default for Ui {
@@ -1031,6 +1135,7 @@ impl Ui {
         let now = Instant::now();
         Ui {
             route: Route::Home,
+            settings_tab: 0,
             dialog: None,
             dialog_shown: None,
             dialog_anim: Animation::new(false).duration(Duration::from_millis(180)).easing(Easing::EaseOutCubic),
@@ -1207,6 +1312,10 @@ impl Ui {
         self.editing = None;
         self.menu = None;
         self.replying = None;
+        // A new screen (or another section) opens on its first tab.
+        if self.route != route {
+            self.settings_tab = 0;
+        }
         let open = match &route {
             Route::Person(id) => vec![Action::Open(id.clone())],
             Route::Community(id, channel) => vec![Action::OpenChannel { community: id.clone(), channel: *channel }],
@@ -1233,6 +1342,10 @@ impl Ui {
                 Vec::new()
             }
             Msg::Nav(route) => self.go(route),
+            Msg::SettingsTab(i) => {
+                self.settings_tab = i;
+                Vec::new()
+            }
             Msg::Back => {
                 if self.menu.is_some() {
                     self.menu = None;
@@ -1252,6 +1365,10 @@ impl Ui {
                     self.bio_edit = None;
                     self.pronouns_edit = None;
                     self.route = Route::Profile(None);
+                } else if matches!(self.route, Route::Settings(_)) && self.narrow() {
+                    // A phone opens a section from the settings list, so
+                    // back is that list.
+                    return self.go(Route::SettingsMenu);
                 } else if let Route::Profile(Some(id)) = &self.route {
                     // A contact's profile is opened from their conversation.
                     let id = id.clone();
@@ -2056,5 +2173,35 @@ mod tests {
         assert!(ui.narrow());
         ui.update(Msg::Resized(Size::new(1400.0, 800.0)), &Model::default());
         assert!(!ui.narrow());
+    }
+
+    #[test]
+    fn every_settings_section_is_in_exactly_one_group() {
+        let listed: Vec<Section> = Group::ALL.into_iter().flat_map(Group::sections).collect();
+        assert_eq!(listed, Section::ALL, "the groups list every section once, in order");
+    }
+
+    #[test]
+    fn settings_tabs_reset_on_a_new_section() {
+        let (mut ui, m) = (Ui::new(), Model::default());
+        ui.update(Msg::Nav(Route::Settings(Section::Account)), &m);
+        ui.update(Msg::SettingsTab(2), &m);
+        assert_eq!(ui.settings_tab, 2);
+        ui.update(Msg::Nav(Route::Settings(Section::Account)), &m);
+        assert_eq!(ui.settings_tab, 2, "the same section keeps its tab");
+        ui.update(Msg::Nav(Route::Settings(Section::Voice)), &m);
+        assert_eq!(ui.settings_tab, 0);
+    }
+
+    #[test]
+    fn phone_back_from_a_settings_section_is_the_list() {
+        let (mut ui, m) = (Ui::new(), Model::default());
+        ui.update(Msg::Resized(Size::new(400.0, 800.0)), &m);
+        ui.update(Msg::Nav(Route::SettingsMenu), &m);
+        ui.update(Msg::Nav(Route::Settings(Section::Privacy)), &m);
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.route(), &Route::SettingsMenu);
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.route(), &Route::Home);
     }
 }

@@ -13,7 +13,7 @@ import android.util.Log;
  * confirmation screen (which, the first time, also asks to let Stoop
  * install apps), and is started here. Success replaces the app, which
  * Android restarts; a failure or a cancelled confirmation is logged, and
- * the person can look for the update again from Settings > About.
+ * the person can look for the update again from Settings > Updates.
  *
  * Not exported: only the system's installer, through the PendingIntent the
  * activity made, sends to it.

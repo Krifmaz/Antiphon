@@ -193,7 +193,8 @@ const TOUR: &[Step] = &[
             app.go(Route::Person(Demo::robin()));
         },
     },
-    Step { name: "phone-settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Phone)) },
+    Step { name: "phone-settings", size: (400.0, 820.0), setup: |app| app.go(Route::SettingsMenu) },
+    Step { name: "phone-settings-account", size: (400.0, 820.0), setup: |app| app.go(Route::Settings(Section::Account)) },
     Step {
         name: "light",
         size: (1280.0, 820.0),

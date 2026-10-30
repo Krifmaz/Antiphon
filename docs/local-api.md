@@ -7,7 +7,7 @@ on your machine acting as an Antiphon identity.
 
 ## Turning it on
 
-- In the app: **Settings > Network > Scripts and bots > Local API**.
+- In the app: **Settings > Privacy > Scripts and bots > Local API**.
 - Or start the app with `--api`.
 - For a bot with an identity of its own, with no window:
   `antiphon --profile mybot --headless`. This opens the door and starts the
