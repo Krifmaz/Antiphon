@@ -89,7 +89,13 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           echo "BUILD_TOOLS_VERSION=35.0.0" >> "$GITHUB_ENV"
       - name: Clippy (Android)
-        run: cargo clippy -p antiphon-android -p antiphon-mobile --target aarch64-linux-android --locked -- -D warnings
+        # The NDK's clang as the C compiler, as build-apk.sh sets it: the updater's TLS (rustls on ring)
+        # has C and assembly to build for the phone.
+        run: |
+          NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          cargo clippy -p antiphon-android -p antiphon-mobile --target aarch64-linux-android --locked -- -D warnings
       - name: Signing key
         # A release APK must be signed. With the ANDROID_KEYSTORE_BASE64 and
         # ANDROID_KEYSTORE_PASSWORD secrets set, every build is signed with
