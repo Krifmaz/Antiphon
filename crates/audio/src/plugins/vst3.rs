@@ -469,7 +469,7 @@ impl Buses {
     fn new(counts: &[usize]) -> Self {
         let channels: Vec<Vec<Vec<f32>>> = counts.iter().map(|&n| vec![vec![0.0; MAX_BLOCK]; n]).collect();
         let mut buses = Self { channels, pointers: Vec::new(), buffers: Vec::new() };
-        buses.pointers = buses.channels.iter_mut().map(|bus| bus.iter_mut().map(|c| c.as_mut_ptr()).collect()).collect();
+        buses.pointers = buses.channels.iter_mut().map(|bus| bus.iter_mut().map(Vec::as_mut_ptr).collect()).collect();
         buses.buffers = buses
             .pointers
             .iter_mut()

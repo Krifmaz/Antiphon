@@ -59,7 +59,7 @@ enum IdentityAction {
 
 /// Saves a restored identity, refusing to silently replace a different one.
 fn restore_identity(seed: [u8; 32], force: bool) -> Result<()> {
-    let restored = antiphon_crypto::IdentityKeyPair::from_master_seed(seed);
+    let restored = IdentityKeyPair::from_master_seed(seed);
 
     let dir = dirs_config_dir().ok_or_else(|| anyhow::anyhow!("no config directory"))?;
     let path = antiphon_crypto::store::identity_path(&dir);

@@ -14,7 +14,7 @@
 /// nothing constructs them -- they exist so the discriminants line up with
 /// `settings-category` in the UI, and so a future indexed section in
 /// either one has an obvious home.
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Category {
     General = 0,
@@ -161,7 +161,7 @@ mod tests {
     use super::*;
 
     fn order(ids: &[&str]) -> Vec<String> {
-        ids.iter().map(|s| s.to_string()).collect()
+        ids.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

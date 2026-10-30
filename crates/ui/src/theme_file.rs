@@ -94,7 +94,7 @@ impl ThemeFile {
             ("accent".to_string(), Value::Ident(self.accent.clone())),
         ];
         // Written only with the custom accent, as the JSON form did.
-        if let Some(c) = crate::theme::parse_hex(&self.custom_accent).filter(|_| !self.custom_accent.is_empty()) {
+        if let Some(c) = theme::parse_hex(&self.custom_accent).filter(|_| !self.custom_accent.is_empty()) {
             props.push(("custom-accent".to_string(), Value::Color(c)));
         }
         props.push(("font".to_string(), Value::Ident(self.font.clone())));
@@ -132,7 +132,7 @@ impl ThemeFile {
             version: doc.uint("version").ok_or("The theme file has no version.")?,
             theme: word("theme")?,
             accent: word("accent")?,
-            custom_accent: doc.color("custom-accent").map(crate::theme::to_hex).unwrap_or_default(),
+            custom_accent: doc.color("custom-accent").map(theme::to_hex).unwrap_or_default(),
             font: doc.text("font").map(str::to_string).unwrap_or_else(default_font),
         })
     }

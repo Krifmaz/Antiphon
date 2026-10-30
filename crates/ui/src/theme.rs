@@ -90,12 +90,12 @@ static FACE: RwLock<Font> = RwLock::new(FONT);
 
 /// Makes the reading font with this id (see [`FONTS`]) the one all text uses.
 pub fn set_font(id: &str) {
-    *FACE.write().unwrap_or_else(|e| e.into_inner()) = font_for(id);
+    *FACE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = font_for(id);
 }
 
 /// The reading face in use: Inter until [`set_font`] picks another.
 pub fn font() -> Font {
-    *FACE.read().unwrap_or_else(|e| e.into_inner())
+    *FACE.read().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The colour tokens of one theme with one accent.
@@ -326,12 +326,12 @@ static LOOK: RwLock<Option<Palette>> = RwLock::new(None);
 
 /// Makes `p` the look every style reads.
 pub fn set(p: Palette) {
-    *LOOK.write().unwrap_or_else(|e| e.into_inner()) = Some(p);
+    *LOOK.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(p);
 }
 
 /// The active look (Stoop with the cream accent before [`set`] was called).
 pub fn look() -> Palette {
-    (*LOOK.read().unwrap_or_else(|e| e.into_inner())).unwrap_or_else(|| palette("stoop", "logo", "", true))
+    (*LOOK.read().unwrap_or_else(std::sync::PoisonError::into_inner)).unwrap_or_else(|| palette("stoop", "logo", "", true))
 }
 
 /// An iced theme built from the look, so built-in widgets without our
@@ -500,7 +500,7 @@ fn button_style(kind: Btn, status: button::Status) -> button::Style {
             ..base
         },
     };
-    if let Disabled = status {
+    if status == Disabled {
         style.text_color = style.text_color.scale_alpha(0.45);
         if let Some(Background::Color(c)) = style.background {
             style.background = Some(Background::Color(c.scale_alpha(0.5)));

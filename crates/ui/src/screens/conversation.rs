@@ -67,7 +67,7 @@ pub fn header<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -> 
         r = r.push(container(who).width(Length::Fill).clip(true));
     }
     let on_this_call = m.call.with(&person.id);
-    if !on_this_call && m.call.phase == crate::Phase::Connected {
+    if !on_this_call && m.call.phase == Phase::Connected {
         // On a call with someone else: this one can be brought into it.
         let add = Some(Msg::Do(Action::AddToCall(person.id.clone())));
         if phone {
@@ -671,7 +671,7 @@ pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         ))
         .width(Length::Fill)
         .padding(0)
-        .style(focus_style(|_, _| iced_widget::button::Style::default(), focused))
+        .style(focus_style(|_, _| button::Style::default(), focused))
         .on_press(Msg::ToggleQueue);
         let mut rows = column![head].spacing(4);
         let last = n - 1;

@@ -191,7 +191,7 @@ impl GroupKeys {
     /// Identity keys of everyone in our MLS group, us included.
     pub fn members(&self) -> Vec<[u8; 32]> {
         let mut keys: Vec<_> = self.index.lock().unwrap().keys().copied().collect();
-        keys.sort();
+        keys.sort_unstable();
         keys
     }
 

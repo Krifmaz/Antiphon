@@ -43,7 +43,7 @@ static RECEIVER: Mutex<Option<UnboundedReceiver<(u64, ReaderAction)>>> = Mutex::
 fn sender() -> &'static UnboundedSender<(u64, ReaderAction)> {
     SENDER.get_or_init(|| {
         let (tx, rx) = unbounded();
-        *RECEIVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
+        *RECEIVER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
         tx
     })
 }
@@ -53,7 +53,7 @@ struct Activation;
 
 impl ActivationHandler for Activation {
     fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
-        LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        LATEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
@@ -126,7 +126,7 @@ pub fn install(window: &dyn iced::window::Window) {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = window;
-        let mut adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
+        let mut adapter = ADAPTER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if adapter.is_none() {
             *adapter = Some(accesskit_unix::Adapter::new(Activation, Actions, Deactivation));
         }
@@ -138,7 +138,7 @@ pub fn install(window: &dyn iced::window::Window) {
 pub fn publish(title: &str) {
     let tree = a11y::tree(title);
     {
-        let mut latest = LATEST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut latest = LATEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if latest.as_ref() == Some(&tree) {
             return;
         }
@@ -153,7 +153,7 @@ pub fn publish(title: &str) {
         }
     });
     #[cfg(all(unix, not(target_os = "macos")))]
-    if let Some(adapter) = ADAPTER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(adapter) = ADAPTER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
         adapter.update_if_active(|| tree);
     }
 }
@@ -170,7 +170,7 @@ pub fn window_focused(focused: bool) {
         }
     });
     #[cfg(all(unix, not(target_os = "macos")))]
-    if let Some(adapter) = ADAPTER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(adapter) = ADAPTER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
         adapter.update_window_focus_state(focused);
     }
     #[cfg(windows)]
@@ -186,7 +186,7 @@ pub fn requests() -> iced::Subscription<Msg> {
 /// nothing if it was already taken.
 fn request_stream() -> impl Stream<Item = Msg> {
     let _ = sender();
-    let rx = RECEIVER.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let rx = RECEIVER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
     match rx {
         Some(rx) => rx.map(|(id, act)| Msg::Reader(id, act)).boxed(),
         None => stream::pending().boxed(),

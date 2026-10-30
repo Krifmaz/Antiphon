@@ -337,7 +337,7 @@ pub async fn run_node_full(
 /// Every service on one socket, and federation with other relays if
 /// `federation` is given (see [`federation`]). Each call bridged to a peer
 /// relay gets a socket of its own, read by a small task like an onion exit's.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn run_node_with_federation(
     socket: Arc<UdpSocket>,
     relay: Arc<std::sync::Mutex<Relay>>,
@@ -470,7 +470,7 @@ pub async fn run_node_with_federation(
             continue;
         } else {
             let out = relay.lock().unwrap().handle(from, &buf[..n], now);
-            match (&federation, antiphon_net::relay::Message::decode(&buf[..n])) {
+            match (&federation, Message::decode(&buf[..n])) {
                 // Nobody here under that token: ask the peer relays before
                 // saying so.
                 (Some(f), Some(Message::Dial(token))) if out == [(from, Message::NotFound.encode())] => {

@@ -670,7 +670,7 @@ fn on_event(event: Event, status: event::Status, window: window::Id) -> Option<M
             Some(Message::Ui(msg))
         }
         Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), .. }) if free && c.as_str() == " " => Some(Message::Ui(Msg::Activate)),
-        Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(key::Named::Escape), .. }) => Some(Message::Escape),
+        Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(Named::Escape), .. }) => Some(Message::Escape),
         Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), modifiers, .. })
             if modifiers.command() && (c.as_str() == "k" || c.as_str() == "f") && status == event::Status::Ignored =>
         {

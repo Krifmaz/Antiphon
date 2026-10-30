@@ -240,7 +240,7 @@ impl Sfu {
 
     /// How many members `room` holds, for JOINED.
     fn room_size(&self, room: &RoomToken) -> u16 {
-        self.rooms.get(room).map_or(0, |m| m.len()) as u16
+        self.rooms.get(room).map_or(0, Vec::len) as u16
     }
 
     /// The room's roster, to every member in it.

@@ -512,7 +512,7 @@ pub mod vst {
 
     #[no_mangle]
     extern "system" fn GetPluginFactory() -> *mut IPluginFactory {
-        ComWrapper::new(Factory).to_com_ptr::<IPluginFactory>().map_or(ptr::null_mut(), |f| f.into_raw())
+        ComWrapper::new(Factory).to_com_ptr::<IPluginFactory>().map_or(ptr::null_mut(), vst3::ComPtr::into_raw)
     }
 
     #[cfg(target_os = "linux")]

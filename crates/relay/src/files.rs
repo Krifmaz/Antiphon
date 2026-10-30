@@ -191,7 +191,7 @@ impl FileStore {
     }
 
     /// Starts holding a file whose hashes are known and checked.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn begin(
         &mut self,
         id: FileId,

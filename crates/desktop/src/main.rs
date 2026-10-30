@@ -53,7 +53,7 @@ fn install_crash_hook() {
             let message = info
                 .payload()
                 .downcast_ref::<&str>()
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panicked".to_string());
             let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();

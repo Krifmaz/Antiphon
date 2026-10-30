@@ -622,9 +622,9 @@ mod tests {
         for p in [&alice, &bob, &carol] {
             assert_eq!(p.mls.epoch().unwrap(), epoch2);
             let mut keys: Vec<_> = p.mls.members().unwrap().into_iter().map(|(_, k)| k).collect();
-            keys.sort();
+            keys.sort_unstable();
             let mut want = vec![alice.key, bob.key, carol.key];
-            want.sort();
+            want.sort_unstable();
             assert_eq!(keys, want);
         }
         // Same exported secret everywhere, so the same SFrame keys.

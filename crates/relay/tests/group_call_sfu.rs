@@ -158,7 +158,7 @@ async fn rooms_are_isolated_from_each_other() {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].1, b"for room a only");
     }
-    for m in b.iter_mut() {
+    for m in &mut b {
         assert!(collect(m, Duration::from_millis(300), 0).await.is_empty(), "room b heard room a");
         assert!(m.client.roster().iter().all(|t| !a.iter().any(|x| x.client.member() == *t)));
     }

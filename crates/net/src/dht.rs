@@ -1526,7 +1526,7 @@ mod tests {
         for body in [
             Reply::Pong { observed: addr(1, 1, 5) },
             Reply::Nodes(nodes.clone()),
-            Reply::Value { record: Some(record), nodes: nodes.clone() },
+            Reply::Value { record: Some(record), nodes: nodes },
             Reply::Value { record: None, nodes: vec![] },
             Reply::Stored(StoreResult::Stale),
             Reply::Listing {
@@ -1628,7 +1628,7 @@ mod tests {
         let v1 = DhtRecord::seal(&alice, 1, 1, b"old").unwrap();
         assert_eq!(node.store_record(v2.clone(), &from, now), StoreResult::Stored);
         assert_eq!(node.store_record(v1, &from, now), StoreResult::Stale);
-        let mut forged = v2.clone();
+        let mut forged = v2;
         forged.sequence = 3;
         assert_eq!(node.store_record(forged, &from, now), StoreResult::Invalid);
         let bob = antiphon_crypto::IdentityKeyPair::generate();

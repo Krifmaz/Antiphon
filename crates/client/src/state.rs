@@ -738,7 +738,7 @@ impl ActiveCall {
     /// sample rate to write it out at.
     /// Labels for the kept clips, newest first (spec §2 replay history).
     pub fn replay_clip_labels(&self) -> Vec<String> {
-        self.replay_clips.lock().unwrap().clips().map(|c| c.label()).collect()
+        self.replay_clips.lock().unwrap().clips().map(super::replay_history::Clip::label).collect()
     }
 
     /// One kept clip's audio, for playing it back.
@@ -1030,7 +1030,7 @@ pub struct PortMapHandle {
     /// a different one (spec §6), and this follows it so the DHT record
     /// is republished with the new address.
     current_external: Arc<std::sync::atomic::AtomicU16>,
-    renewal: tokio::task::JoinHandle<()>,
+    renewal: JoinHandle<()>,
 }
 
 impl PortMapHandle {
@@ -1046,7 +1046,7 @@ impl PortMapHandle {
 
     /// The forwarded port as of the latest renewal.
     pub fn current_external_port(&self) -> u16 {
-        self.current_external.load(std::sync::atomic::Ordering::Relaxed)
+        self.current_external.load(Ordering::Relaxed)
     }
 
     /// Stops renewing and asks the router to drop the mapping, without
@@ -1071,7 +1071,7 @@ impl PortMapHandle {
         let (gateway, port) = self.stop();
         runtime.block_on(async move {
             let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(900),
+                Duration::from_millis(900),
                 antiphon_net::port_map::release_mapping(gateway, port),
             )
             .await;
@@ -1100,14 +1100,14 @@ pub async fn open_port_automatically(local_port: u16) -> Result<PortMapHandle> {
             match antiphon_net::port_map::request_mapping(gateway, local_port).await {
                 Ok(renewed) => {
                     interval = renewed.renew_after();
-                    follow.store(renewed.external_port, std::sync::atomic::Ordering::Relaxed);
+                    follow.store(renewed.external_port, Ordering::Relaxed);
                 }
                 // Kept trying rather than given up on: a router that was
                 // rebooting a moment ago will answer the next one, and
                 // stopping here would silently end the user's
                 // reachability. Backed off so a router that is simply
                 // gone is not hammered.
-                Err(_) => interval = interval.max(std::time::Duration::from_secs(60)),
+                Err(_) => interval = interval.max(Duration::from_secs(60)),
             }
         }
     });
@@ -1327,7 +1327,7 @@ pub fn start_loopback(
 /// keep going (settings can change mid-call, mute/deafen can toggle, etc).
 // One call site, and every argument is a distinct live handle the call
 // needs -- a parameter struct would only move the list.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn start_pipeline(
     peer: PeerConnection,
     config: ChainConfig,
@@ -1570,7 +1570,7 @@ pub fn start_pipeline(
     let send_ptt = ptt_active.clone();
     let send_chain = chain.clone();
     let send_level = mic_level.clone();
-    let send_transmit = transmit.clone();
+    let send_transmit = transmit;
     let send_monitor = monitor_enabled.clone();
     let send_resend_cache = resend_cache.clone();
     // Spec §1: far-end audio waiting to be used as the echo canceller's
@@ -1587,7 +1587,7 @@ pub fn start_pipeline(
     let send_soundboard = soundboard_queue.clone();
     let send_aec = echo_canceller.clone();
     let send_aec_far = aec_far.clone();
-    let send_echo_cancel = echo_cancel.clone();
+    let send_echo_cancel = echo_cancel;
     let send_monitor_sink = monitor_sink.clone();
     let send_task = tokio::spawn(async move {
         // Spec §2: Opus, its bitrate set by the link's reports, with its
@@ -1655,7 +1655,7 @@ pub fn start_pipeline(
             {
                 let mut queue = send_soundboard.lock().unwrap();
                 if !queue.is_empty() {
-                    for sample in samples.iter_mut() {
+                    for sample in &mut samples {
                         let Some(clip) = queue.pop_front() else { break };
                         *sample = (*sample + clip).clamp(-1.0, 1.0);
                     }
@@ -1753,7 +1753,7 @@ pub fn start_pipeline(
     let recv_chat_rev = chat_rev.clone();
     let recv_reactions = reactions.clone();
     let recv_history = history.clone();
-    let recv_resend_cache = resend_cache.clone();
+    let recv_resend_cache = resend_cache;
     let recv_resend_peer = peer.clone();
     let recv_silent = peer_wants_silent.clone();
     let recv_ring = peer_wants_ring.clone();
@@ -1964,8 +1964,8 @@ pub fn start_pipeline(
     // spans them: it needs the tail of the last frame to line up against.
     let mut catch_up = antiphon_audio::TimeCompressor::new(sample_rate);
     let mut catch_up_out: Vec<f32> = Vec::new();
-    let drain_aec_far = aec_far.clone();
-    let drain_screen_played = screen_played.clone();
+    let drain_aec_far = aec_far;
+    let drain_screen_played = screen_played;
     let mut clip_cutter = crate::replay_history::ClipCutter::default();
     // Samples drained since the call started, which is what a clip's
     // timestamp is measured against. Counted here rather than read from a
@@ -1980,12 +1980,12 @@ pub fn start_pipeline(
     let drain_nack_peer = peer.clone();
     // Current ducking amount in dB, ramped toward its target each frame.
     let mut duck_level = 0.0f32;
-    let drain_peer_volume = peer_volume_db.clone();
-    let drain_replay_seconds = replay_seconds.clone();
-    let drain_duck_db = duck_db.clone();
-    let drain_peer_eq = peer_eq.clone();
+    let drain_peer_volume = peer_volume_db;
+    let drain_replay_seconds = replay_seconds;
+    let drain_duck_db = duck_db;
+    let drain_peer_eq = peer_eq;
     let drain_ptt = ptt_active.clone();
-    let drain_peer_muted = peer_muted.clone();
+    let drain_peer_muted = peer_muted;
     let drain_group = group.clone();
     // Spec §2 automatic bandwidth: reports go out from this loop, and the
     // video budget follows the plan.

@@ -324,7 +324,7 @@ impl Updater {
                     // offline is not news.
                     Err(_) => Status::Idle,
                 };
-                shared.lock().unwrap_or_else(|e| e.into_inner()).status = status;
+                shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status = status;
             })
             .map(drop)
             .unwrap_or_else(|e| self.lock().status = Status::Failed(format!("Couldn't look for updates: {e}.")));
@@ -346,7 +346,7 @@ impl Updater {
         std::thread::Builder::new()
             .name("update download".into())
             .spawn(move || {
-                let lock = || shared.lock().unwrap_or_else(|e| e.into_inner());
+                let lock = || shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let progress = |done: u64, total: Option<u64>| {
                     if let Status::Downloading { done: d, total: t, .. } = &mut lock().status {
                         *d = done;
@@ -369,7 +369,7 @@ impl Updater {
 
     /// The shared state, even after a worker thread panicked holding it.
     fn lock(&self) -> MutexGuard<'_, Shared> {
-        self.shared.lock().unwrap_or_else(|e| e.into_inner())
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Saves the setting; a failure only means it is asked again next time.

@@ -122,7 +122,7 @@ fn moving<'a>(ui: &'a Ui, m: &'a Model, idle: bool) -> El<'a, Msg> {
     let code: El<'a, Msg> = match mv.qr.as_deref() {
         Some(data) => container(qr_code(data).cell_size(4).style(|_| qr_code::Style { cell: Color::from_rgb8(22, 22, 23), background: Color::WHITE }))
             .padding(12)
-            .style(|_| iced_widget::container::Style {
+            .style(|_| container::Style {
                 background: Some(iced_core::Background::Color(Color::WHITE)),
                 border: iced_core::Border { radius: 14.0.into(), ..Default::default() },
                 ..Default::default()

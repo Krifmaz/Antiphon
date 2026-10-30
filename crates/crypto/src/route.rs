@@ -290,7 +290,7 @@ mod tests {
         let id = IdentityKeyPair::generate();
         let signed = record_for(&id, 1, sample_routes()).sign(&id).unwrap();
 
-        let mut forged = signed.clone();
+        let mut forged = signed;
         forged.record.routes[1].address = "attacker.example:9000".to_string();
 
         // Redirecting someone's mail to a node they never authorized is

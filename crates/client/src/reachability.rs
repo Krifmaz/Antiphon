@@ -281,7 +281,7 @@ fn default_route_interface() -> Option<String> {
             .lines()
             .find_map(|l| l.trim().strip_prefix("interface:").map(|s| s.trim().to_string()));
     }
-    #[allow(unreachable_code)]
+    #[expect(unreachable_code)]
     None
 }
 

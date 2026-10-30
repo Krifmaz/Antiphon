@@ -637,13 +637,13 @@ impl Manifest {
             return bad("emoji");
         }
         let mut names: Vec<_> = self.emoji.iter().map(|e| e.name.as_str()).collect();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         if names.len() != self.emoji.len() {
             return bad("an emoji name is used twice");
         }
         let mut ids: Vec<_> = self.channels.iter().map(|c| c.id).collect();
-        ids.sort();
+        ids.sort_unstable();
         ids.dedup();
         if ids.len() != self.channels.len() || self.channels.iter().any(|c| c.name.chars().count() > MAX_NAME) {
             return bad("channels");
@@ -942,7 +942,7 @@ mod tests {
         let decoded = SignedManifest::decode(&w.signed.encode()).unwrap();
         assert_eq!(decoded.open().unwrap(), w.m);
         assert_eq!(accept_first(&decoded).unwrap(), w.m);
-        let mut bad = decoded.clone();
+        let mut bad = decoded;
         let at = bad.body.iter().position(|b| *b == b'C').unwrap();
         bad.body[at] = b'K'; // "Choir" -> "Khoir"
         assert_eq!(bad.open(), Err(Denied::BadSignature));
@@ -1023,7 +1023,7 @@ mod tests {
     #[test]
     fn a_manifest_without_emoji_reads_as_before() {
         let w = community();
-        let json = String::from_utf8(w.signed.body.clone()).unwrap();
+        let json = String::from_utf8(w.signed.body).unwrap();
         assert!(!json.contains("emoji"), "an empty set isn't written, so older apps see the same manifest");
     }
 
@@ -1101,7 +1101,7 @@ mod tests {
         assert_eq!(rebuilt, w.signed);
         // On the wrong base, or tampered with, it rebuilds nothing.
         assert_eq!(delta.apply(&w.signed, &w.m), None);
-        let mut forged = delta.clone();
+        let mut forged = delta;
         forged.upserted[0].role = 0;
         assert_eq!(forged.apply(&base, &base_m), None);
     }
@@ -1115,7 +1115,7 @@ mod tests {
         assert_eq!(m.max_members(), MAX_BOARD_COMMUNITY_MEMBERS);
         // Setting one is a settings change, for those who manage the community.
         let mut plain = w.m.next(&w.signed);
-        plain.nodes.board = m.nodes.board.clone();
+        plain.nodes.board = m.nodes.board;
         assert!(check_transition(&w.m, &w.signed, &SignedManifest::sign(&plain, &w.owner)).is_ok());
         let json = String::from_utf8(SignedManifest::sign(&w.m, &w.owner).body).unwrap();
         assert!(!json.contains("board"), "left out while unset");

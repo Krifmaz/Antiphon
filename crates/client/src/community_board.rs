@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(open(&board, &keys, &seal(&board, &key(6, 9), &me, "x")), Opened::Ahead(6));
         assert_eq!(open(&board, &keys, &seal(&board, &key(2, 9), &me, "x")), Opened::Unreadable);
         // A damaged one.
-        let mut bad = entry.clone();
+        let mut bad = entry;
         *bad.last_mut().unwrap() ^= 1;
         assert_eq!(open(&board, &keys, &bad), Opened::Unreadable);
     }

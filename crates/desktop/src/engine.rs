@@ -453,7 +453,7 @@ impl Engine {
         }
         discovery::set_local(discovery::Local {
             listen_port: if self.door { self.cfg.stoop.port } else { 0 },
-            mapped_port: self.state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()),
+            mapped_port: self.state.port_map.lock().unwrap().as_ref().map(state::PortMapHandle::current_external_port),
             stun_public: self.public.clone(),
             relay: self.my_relay(),
         });
@@ -559,7 +559,7 @@ impl Engine {
         };
         let identity = self.state.identity.clone();
         let events = self.events.clone();
-        let name = contact.name.clone();
+        let name = contact.name;
         self.state.runtime.spawn(async move {
             let connected = match plan {
                 connection_mode::Plan::Direct { address } => match state::resolve(&address).await {
@@ -646,7 +646,7 @@ impl Engine {
         self.finding_nodes = true;
         let events = self.events.clone();
         self.state.runtime.spawn(async move {
-            let found = delivery::discover(std::time::Duration::from_secs(2)).await;
+            let found = delivery::discover(Duration::from_secs(2)).await;
             Self::push(&events, Event::NodesFound(found.into_iter().map(|a| a.to_string()).collect()));
         });
     }
@@ -1379,7 +1379,7 @@ impl Engine {
 
     /// The invite link and its QR code, from the address known now.
     fn refresh_invite(&mut self) {
-        let port = self.state.port_map.lock().unwrap().as_ref().map(|h| h.current_external_port()).unwrap_or(self.cfg.stoop.port);
+        let port = self.state.port_map.lock().unwrap().as_ref().map(state::PortMapHandle::current_external_port).unwrap_or(self.cfg.stoop.port);
         let address = self.public.as_ref().map(|ip| if ip.contains(':') { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }).unwrap_or_default();
         let mut invite = antiphon_crypto::Invite::new(self.state.identity.public().identity_key, address);
         let relay = self.my_relay();
@@ -1989,7 +1989,7 @@ impl Engine {
                 self.save();
             }
             A::BrowseDirectories => self.browse_directories(),
-            A::AskToJoin(link) => match antiphon_client::community::Store::app().ok_or_else(|| "Your identity isn't loaded yet".to_string()).and_then(|s| s.knock(&link)) {
+            A::AskToJoin(link) => match community::Store::app().ok_or_else(|| "Your identity isn't loaded yet".to_string()).and_then(|s| s.knock(&link)) {
                 Ok(()) => self.toast("Asked to join. Its invitation shows up under Invitations once its host's app answers.", ToastKind::Ok),
                 Err(e) => self.toast(e, ToastKind::Warn),
             },
@@ -2171,7 +2171,7 @@ impl Engine {
                 if !known(self, with) {
                     return Err("no contact with that id".into());
                 }
-                let limit = body.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
+                let limit = body.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(50) as usize;
                 let lines = self.stored_lines(with);
                 let start = lines.len().saturating_sub(limit);
                 Ok(lines[start..]
@@ -2204,12 +2204,12 @@ impl Engine {
                 Ok(serde_json::Value::Null)
             }
             "mute" => {
-                let on = body.get("on").and_then(|v| v.as_bool()).ok_or("'on' is missing")?;
+                let on = body.get("on").and_then(serde_json::Value::as_bool).ok_or("'on' is missing")?;
                 self.act(ui::Action::Mute(on), open);
                 Ok(serde_json::Value::Null)
             }
             "door" => {
-                let on = body.get("open").and_then(|v| v.as_bool()).ok_or("'open' is missing")?;
+                let on = body.get("open").and_then(serde_json::Value::as_bool).ok_or("'open' is missing")?;
                 self.act(ui::Action::Door(on), open);
                 Ok(serde_json::Value::Null)
             }
@@ -2946,7 +2946,7 @@ impl Engine {
     /// The settings screen's values.
     fn settings(&self) -> ui::Settings {
         let mut presets = vec![NATURAL.to_string()];
-        presets.extend(antiphon_audio::eq_preset_names().iter().map(|s| s.to_string()));
+        presets.extend(antiphon_audio::eq_preset_names().iter().map(ToString::to_string));
         let preset = if self.cfg.chain.eq_bands.is_empty() || !presets.contains(&self.cfg.chain.name) { NATURAL.to_string() } else { self.cfg.chain.name.clone() };
         ui::Settings {
             theme: self.cfg.stoop.theme.clone(),
@@ -2999,7 +2999,7 @@ impl Engine {
             self.conv = Some(ConvCache { person: id.to_string(), live, rev, lines });
         }
         let mut lines = self.conv.as_ref().map(|c| c.lines.clone()).unwrap_or_default();
-        for line in lines.iter_mut() {
+        for line in &mut lines {
             if let Some(clip) = line.voice.as_mut() {
                 clip.playing = self.playing.as_ref().is_some_and(|(p, i, ..)| p == id && *i == line.id);
                 clip.fetching = self.voice_waiting.as_ref().is_some_and(|(p, i, _)| p == id && *i == line.id);
@@ -3361,14 +3361,14 @@ pub fn start_state(runtime: tokio::runtime::Handle) -> anyhow::Result<Arc<AppSta
         transmit,
         output_gain_db: Arc::new(Mutex::new(loaded.output_gain_db)),
         loopback: Mutex::new(None),
-        voice_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        voice_stop: Arc::new(AtomicBool::new(false)),
         replay_seconds: Arc::new(std::sync::atomic::AtomicU32::new(loaded.replay_seconds)),
         duck_db: Arc::new(std::sync::atomic::AtomicU32::new(loaded.duck_db)),
         peer_eq: Arc::new(Mutex::new(None)),
-        echo_cancel: Arc::new(std::sync::atomic::AtomicBool::new(loaded.echo_cancel)),
+        echo_cancel: Arc::new(AtomicBool::new(loaded.echo_cancel)),
         echo_canceller: Arc::new(Mutex::new(antiphon_audio::EchoCanceller::new(48_000))),
         peer_volume_db: Arc::new(Mutex::new(0.0)),
-        peer_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        peer_muted: Arc::new(AtomicBool::new(false)),
         punch_socket: Mutex::new(None),
         port_map: Mutex::new(None),
         identity,

@@ -128,7 +128,7 @@ pub fn listening_tokens(
     if let Some(secret) = invite_secret {
         tokens.extend(days.iter().map(|&d| relay_token::from_invite_secret(&secret, d)));
     }
-    tokens.sort();
+    tokens.sort_unstable();
     tokens.dedup();
     tokens
 }

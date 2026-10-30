@@ -263,7 +263,7 @@ impl Parser<'_> {
     fn predicate_objects(&mut self, subject: &Term) -> Result<(), String> {
         loop {
             self.space();
-            let predicate = if self.peek() == Some(b'a') && self.src.get(self.at + 1).is_some_and(|c| c.is_ascii_whitespace()) {
+            let predicate = if self.peek() == Some(b'a') && self.src.get(self.at + 1).is_some_and(u8::is_ascii_whitespace) {
                 self.at += 1;
                 RDF_TYPE.to_string()
             } else {
@@ -282,7 +282,7 @@ impl Parser<'_> {
             // A trailing `;` before `.` or `]` is allowed.
             while self.eat(b';') {}
             self.space();
-            if matches!(self.peek(), Some(b'.') | Some(b']')) {
+            if matches!(self.peek(), Some(b'.' | b']')) {
                 return Ok(());
             }
         }
@@ -302,7 +302,7 @@ impl Parser<'_> {
             }
             Some(b'(') => self.collection(),
             Some(b'_') if self.src.get(self.at + 1) == Some(&b':') => self.blank_label(),
-            Some(b'"') | Some(b'\'') => self.literal(),
+            Some(b'"' | b'\'') => self.literal(),
             Some(c) if c.is_ascii_digit() || c == b'-' || c == b'+' || c == b'.' => Ok(Term::Literal(self.number())),
             _ if self.starts_with_bare("true") => {
                 self.at += 4;

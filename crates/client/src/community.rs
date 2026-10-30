@@ -2127,7 +2127,7 @@ impl JoinLink {
         raw.extend_from_slice(&(public.len() as u16).to_be_bytes());
         raw.extend_from_slice(&public);
         raw.extend_from_slice(&routes);
-        format!("{JOIN_PREFIX}{}", crate::file_transfer::encode_b64(&raw).replace('+', "-").replace('/', "_").trim_end_matches('='))
+        format!("{JOIN_PREFIX}{}", encode_b64(&raw).replace('+', "-").replace('/', "_").trim_end_matches('='))
     }
 
     /// Reads one back; `None` for anything that isn't a valid join link.
@@ -3417,7 +3417,7 @@ mod tests {
         }
         /// The key they're in their space as.
         fn here(&self) -> [u8; 32] {
-            self.space.as_ref().map_or(self.key(), |s| s.me())
+            self.space.as_ref().map_or(self.key(), super::Space::me)
         }
         /// Who they act as in their space.
         fn acting(&self) -> IdentityKeyPair {
@@ -3443,7 +3443,7 @@ mod tests {
 
     /// Delivers everything, in memory, until nothing more is sent. What
     /// `divert` picks is not delivered but handed back.
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     fn run_holding(people: &mut [&mut Person], mut outs: Vec<(usize, Out)>, divert: &dyn Fn(&Out) -> bool) -> (Vec<Vec<Event>>, Vec<(usize, Out)>) {
         let mut events = vec![Vec::new(); people.len()];
         let mut diverted = Vec::new();
@@ -3510,9 +3510,9 @@ mod tests {
         assert!(ev[2].contains(&Event::Joined));
         for p in [&alice, &bob, &carol] {
             let mut r = p.space.as_ref().unwrap().readers();
-            r.sort();
+            r.sort_unstable();
             let mut want = vec![alice.key(), bob.key(), carol.key()];
-            want.sort();
+            want.sort_unstable();
             assert_eq!(r, want, "{} sees everyone", p.name);
         }
         (alice, bob, carol)

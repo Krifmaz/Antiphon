@@ -295,7 +295,7 @@ impl Group {
                             Some(ControlMessage::Hello(h)) => *profile.lock().unwrap() = Some(h),
                             Some(ControlMessage::GroupLeave) => left.store(true, Ordering::Relaxed),
                             Some(ControlMessage::LinkReport { loss_pct, sent_ms, echo_ms, held_ms }) => {
-                                group.link.on_report(id + 1, loss_pct, sent_ms, echo_ms, held_ms)
+                                group.link.on_report(id + 1, loss_pct, sent_ms, echo_ms, held_ms);
                             }
                             Some(m) if is_group_message(&m) => group.inbox.lock().unwrap().push((Link::Leg(id), m)),
                             _ => {}
@@ -882,7 +882,7 @@ mod tests {
         // one MLS epoch with all three in it.
         let all = {
             let mut k = keys.to_vec();
-            k.sort();
+            k.sort_unstable();
             k
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);

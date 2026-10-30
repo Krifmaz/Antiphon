@@ -395,7 +395,7 @@ pub async fn claim(
 }
 
 /// Uploads a sealed copy to a node (spec §5 "Pinning").
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn put(
     socket: &impl Datagram,
     node: SocketAddr,

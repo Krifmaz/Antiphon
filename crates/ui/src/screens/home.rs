@@ -92,7 +92,7 @@ pub fn starts<'a>(m: &'a Model, stacked: bool) -> El<'a, Msg> {
         } else {
             column![badge, words].spacing(14).into()
         };
-        let focused = crate::widgets::reg_button(crate::a11y::Role::Button, title, Some(&msg));
+        let focused = reg_button(crate::a11y::Role::Button, title, Some(&msg));
         button(crate::a11y::mark(face, focused))
         .width(Length::Fill)
         .padding(if stacked { 14 } else { 18 })

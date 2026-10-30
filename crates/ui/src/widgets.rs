@@ -452,7 +452,7 @@ pub fn percent_to_db(percent: f32) -> f32 {
 /// A volume slider on the percentage scale, with its value beside it.
 /// Named `name` for the keyboard and screen readers; the arrow keys step it
 /// by 5%.
-pub fn volume_slider<'a, M: Clone + 'static>(name: &str, db: f32, width: iced_core::Length, on: impl Fn(f32) -> M + 'a) -> El<'a, M> {
+pub fn volume_slider<'a, M: Clone + 'static>(name: &str, db: f32, width: Length, on: impl Fn(f32) -> M + 'a) -> El<'a, M> {
     let pct = db_to_percent(db).round();
     let up = on(percent_to_db((pct + 5.0).min(200.0)));
     let down = on(percent_to_db((pct - 5.0).max(0.0)));
@@ -462,7 +462,7 @@ pub fn volume_slider<'a, M: Clone + 'static>(name: &str, db: f32, width: iced_co
         faint(format!("{pct:.0}%")).size(12).width(40),
     ]
     .spacing(10)
-    .align_y(iced_core::Alignment::Center)
+    .align_y(Alignment::Center)
     .into()
 }
 

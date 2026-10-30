@@ -18,7 +18,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
     let head = stack![
         column![container(space()).width(Length::Fill).height(84).style(theme::banner), space().height(42)],
         container(
-            container(avatar(&person.name, &person.id, 76.0)).padding(5).style(move |_| iced_widget::container::Style {
+            container(avatar(&person.name, &person.id, 76.0)).padding(5).style(move |_| container::Style {
                 background: Some(iced_core::Background::Color(p.panel)),
                 border: iced_core::Border { radius: 99.0.into(), ..Default::default() },
                 ..Default::default()

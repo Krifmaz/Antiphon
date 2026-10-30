@@ -270,7 +270,7 @@ impl Demo {
             Action::OpenChannel { community, channel } => self.open_channel(&community, channel),
             Action::PlayVoice { id, .. } => {
                 if let Some(c) = self.model.conversation.as_mut() {
-                    for l in c.lines.iter_mut() {
+                    for l in &mut c.lines {
                         if let Some(v) = l.voice.as_mut() {
                             v.playing = l.id == id && !v.playing;
                         }

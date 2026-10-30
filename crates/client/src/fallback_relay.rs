@@ -48,7 +48,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
 /// project's if you allow them. Blank entries and repeats are dropped.
 pub fn candidates(own: &str, fallbacks: &[String], use_project: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let project = PROJECT_RELAYS.iter().map(|s| s.to_string());
+    let project = PROJECT_RELAYS.iter().map(ToString::to_string);
     let listed = std::iter::once(own.to_string())
         .chain(fallbacks.iter().cloned())
         .chain(project.filter(|_| use_project));

@@ -599,20 +599,20 @@ fn submitted_path(directory: &std::path::Path) -> std::path::PathBuf {
 /// Reads the submitted entries back: one per line, `key | name |
 /// description | link`. A line that doesn't read is skipped (the operator
 /// may have edited the file).
-fn load_submitted(path: &std::path::Path) -> Vec<([u8; 32], antiphon_net::dht::ListingEntry)> {
+fn load_submitted(path: &std::path::Path) -> Vec<([u8; 32], ListingEntry)> {
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     text.lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.splitn(4, '|').map(str::trim).collect();
             let [key, name, description, invite] = parts[..] else { return None };
             let key: [u8; 32] = (0..32).map(|i| u8::from_str_radix(key.get(i * 2..i * 2 + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?.try_into().ok()?;
-            Some((key, antiphon_net::dht::ListingEntry { name: name.into(), description: description.into(), invite: invite.into() }))
+            Some((key, ListingEntry { name: name.into(), description: description.into(), invite: invite.into() }))
         })
         .collect()
 }
 
 /// Writes the submitted entries, in the form [`load_submitted`] reads.
-fn save_submitted(path: &std::path::Path, entries: &[([u8; 32], antiphon_net::dht::ListingEntry)]) -> std::io::Result<()> {
+fn save_submitted(path: &std::path::Path, entries: &[([u8; 32], ListingEntry)]) -> std::io::Result<()> {
     let clean = |s: &str| s.replace(['|', '\n', '\r'], " ");
     let text: String = entries
         .iter()

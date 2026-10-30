@@ -150,7 +150,7 @@ mod tests {
         let a = "a".repeat(64);
         let b = "B".repeat(64);
         let sums = format!("{a}  Stoop-0.3.1-linux-x86_64.AppImage\n{b} *Stoop-android-0.3.1.apk\n{a}  linux/antiphon\nnonsense\n");
-        assert_eq!(sum_for(&sums, "Stoop-0.3.1-linux-x86_64.AppImage"), Some(a.clone()));
+        assert_eq!(sum_for(&sums, "Stoop-0.3.1-linux-x86_64.AppImage"), Some(a));
         assert_eq!(sum_for(&sums, "Stoop-android-0.3.1.apk"), Some("b".repeat(64)));
         assert_eq!(sum_for(&sums, "antiphon"), None);
         assert_eq!(sum_for("abc  short", "short"), None);

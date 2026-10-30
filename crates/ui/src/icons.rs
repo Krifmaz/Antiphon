@@ -206,7 +206,7 @@ impl Icon {
     /// building one per frame would rehash every icon on every redraw.
     fn handle(self) -> Handle {
         static CACHE: OnceLock<Mutex<HashMap<Icon, Handle>>> = OnceLock::new();
-        let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         cache
             .entry(self)
             .or_insert_with(|| {

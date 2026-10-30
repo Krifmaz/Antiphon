@@ -789,10 +789,10 @@ mod tests {
         while let Some((from, action)) = queue.pop_front() {
             match action {
                 Action::Send(to, bytes) if to == addr(1) => {
-                    queue.extend(a.handle(from, &bytes, &relay, now).into_iter().map(|x| (addr(1), x)))
+                    queue.extend(a.handle(from, &bytes, &relay, now).into_iter().map(|x| (addr(1), x)));
                 }
                 Action::Send(to, bytes) if to == addr(2) => {
-                    queue.extend(b.handle(from, &bytes, &relay, now).into_iter().map(|x| (addr(2), x)))
+                    queue.extend(b.handle(from, &bytes, &relay, now).into_iter().map(|x| (addr(2), x)));
                 }
                 x => other.push(x),
             }

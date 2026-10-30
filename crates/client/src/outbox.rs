@@ -113,7 +113,7 @@ pub fn outbox_path(config_dir: &Path, identity_key_hex: &str) -> PathBuf {
     // handshake, but it becomes a filename, so anything that is not hex is
     // dropped rather than trusted as a path component.
     let safe: String =
-        identity_key_hex.chars().filter(|c| c.is_ascii_hexdigit()).take(64).collect();
+        identity_key_hex.chars().filter(char::is_ascii_hexdigit).take(64).collect();
     outbox_dir(config_dir).join(format!("{safe}.outbox"))
 }
 

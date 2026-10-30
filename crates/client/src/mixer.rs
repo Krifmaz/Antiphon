@@ -91,7 +91,7 @@ impl Mixer {
         let ducked = 10f32.powf(-self.duck_db / 20.0);
 
         let mut out = vec![0.0f32; n];
-        for (id, s) in self.sources.iter_mut() {
+        for (id, s) in &mut self.sources {
             let target = match loudest {
                 Some(l) if l != *id => ducked,
                 _ => 1.0,

@@ -445,7 +445,7 @@ impl Decoder {
 
     /// Forgets every picture, when a call ends.
     pub fn clear(&mut self) {
-        for s in self.canvases.keys().copied().collect::<Vec<_>>() {
+        for s in self.canvases.keys().copied() {
             self.reassembler.clear(s);
         }
         self.canvases.clear();
@@ -604,7 +604,7 @@ mod tests {
         let frames: Vec<Frame> = (0..Profile::CAMERA.fps * 3)
             .map(|_| {
                 let mut f = Frame::solid(640, 480, [0, 0, 0, 255]);
-                for b in f.rgba.iter_mut() {
+                for b in &mut f.rgba {
                     seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     *b = (seed >> 24) as u8;
                 }
@@ -628,7 +628,7 @@ mod tests {
         let mut seed = 1u32;
         for _ in 0..(Profile::SCREEN.fps * 3) {
             let mut f = Frame::solid(1920, 1080, [0, 0, 0, 255]);
-            for b in f.rgba.iter_mut() {
+            for b in &mut f.rgba {
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 *b = (seed >> 24) as u8;
             }

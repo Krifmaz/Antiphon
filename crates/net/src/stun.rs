@@ -229,11 +229,11 @@ pub fn classify_mapping(first: SocketAddr, second: SocketAddr) -> NatMapping {
 /// classifies the mapping. Errors when fewer than two servers answer --
 /// one answer says nothing about the mapping, and guessing would put the
 /// wrong line in front of people.
-pub async fn discover_mapping(socket: &impl crate::Datagram) -> Result<(SocketAddr, NatMapping), NetError> {
+pub async fn discover_mapping(socket: &impl Datagram) -> Result<(SocketAddr, NatMapping), NetError> {
     let mut seen: Vec<(SocketAddr, SocketAddr)> = Vec::new();
     for name in DEFAULT_STUN_SERVERS {
         let Ok(addrs) = tokio::net::lookup_host(name).await else { continue };
-        for server in addrs.filter(|a| a.is_ipv4()) {
+        for server in addrs.filter(SocketAddr::is_ipv4) {
             // Two servers on the same IP would share a mapping on some
             // NATs that are in fact symmetric per destination *address*.
             if seen.iter().any(|(s, _)| s.ip() == server.ip()) {

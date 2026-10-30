@@ -309,7 +309,7 @@ pub fn lookup_hash(token: &[u8; 32]) -> [u8; 32] {
 /// for another nonce, and it cannot be relayed on behalf of another relay
 /// because its key is inside.
 pub fn have_proof(token: &[u8; 32], nonce: &[u8; 16], responder: &[u8; 32]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(token).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(token).expect("HMAC accepts any key length");
     mac.update(HAVE_DOMAIN);
     mac.update(nonce);
     mac.update(responder);
@@ -318,7 +318,7 @@ pub fn have_proof(token: &[u8; 32], nonce: &[u8; 16], responder: &[u8; 32]) -> [
 
 /// Checks a [`have_proof`] in constant time.
 pub fn check_have_proof(token: &[u8; 32], nonce: &[u8; 16], responder: &[u8; 32], proof: &[u8; 32]) -> bool {
-    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(token).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(token).expect("HMAC accepts any key length");
     mac.update(HAVE_DOMAIN);
     mac.update(nonce);
     mac.update(responder);

@@ -97,7 +97,7 @@ impl CaptionTap {
         let frame = Frame { source, rate, samples: samples.to_vec() };
         match self.tx.try_send(frame) {
             Ok(()) => true,
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                 self.stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
                 false
             }
@@ -309,7 +309,7 @@ mod tests {
         }
         wait_for(|| got.lock().unwrap().len() >= 2);
         let mut sources: Vec<_> = got.lock().unwrap().iter().map(|c| c.source).collect();
-        sources.sort();
+        sources.sort_unstable();
         assert_eq!(sources, vec![1, 2]);
     }
 

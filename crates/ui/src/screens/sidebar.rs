@@ -273,14 +273,14 @@ fn me_bar<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     // apps; the door below the name stays its own switch.
     let face = pressable(
         avatar_dot(&m.me.name, &m.me.id, 34.0, Some(if open { p.ok } else { p.faint }), p.bg),
-        crate::a11y::Role::Button,
+        Role::Button,
         "Your profile",
         matches!(ui.route, Route::Profile(None) | Route::ProfileEdit),
         Btn::Row,
         Msg::Nav(Route::Profile(None)),
     )
     .padding(2);
-    let name = pressable(t(clip(&m.me.name, 16)).size(13.5).font(theme::semibold()).wrapping(Wrapping::None), crate::a11y::Role::Button, "Your profile", false, Btn::Row, Msg::Nav(Route::Profile(None)))
+    let name = pressable(t(clip(&m.me.name, 16)).size(13.5).font(theme::semibold()).wrapping(Wrapping::None), Role::Button, "Your profile", false, Btn::Row, Msg::Nav(Route::Profile(None)))
         .padding(0);
     let me = row![
         with_tip(face, "Your profile", iced_widget::tooltip::Position::Top),
@@ -302,7 +302,7 @@ fn me_bar<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     .spacing(4)
     .align_y(Alignment::Center);
     container(column![divider(), container(me).padding([10, 10])])
-        .style(move |_| iced_widget::container::Style {
+        .style(move |_| container::Style {
             background: Some(iced_core::Background::Color(p.bg)),
             ..Default::default()
         })

@@ -242,7 +242,7 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
         .spacing(8);
         let tile = button(crate::a11y::mark(
             column![
-                container(preview).padding(10).width(Length::Fill).style(move |_| iced_widget::container::Style {
+                container(preview).padding(10).width(Length::Fill).style(move |_| container::Style {
                     background: Some(iced_core::Background::Color(look.panel)),
                     border: iced_core::Border { color: look.border, width: 1.0, radius: 10.0.into() },
                     ..Default::default()
@@ -331,8 +331,8 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
 }
 
 /// A plain filled box of colour `c` with corner radius `r`, for swatches.
-fn flat(c: iced_core::Color, r: f32) -> iced_widget::container::Style {
-    iced_widget::container::Style {
+fn flat(c: iced_core::Color, r: f32) -> container::Style {
+    container::Style {
         background: Some(iced_core::Background::Color(c)),
         border: iced_core::Border { radius: r.into(), ..Default::default() },
         ..Default::default()

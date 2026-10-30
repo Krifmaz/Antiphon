@@ -786,15 +786,15 @@ pub const CALL_SECTION_IDS: &[&str] =
     &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "captions", "discovery", "callparticipants", "outbox", "calladvanced", "vpn"];
 
 fn default_audio_order() -> Vec<String> {
-    AUDIO_SECTION_IDS.iter().map(|s| s.to_string()).collect()
+    AUDIO_SECTION_IDS.iter().map(ToString::to_string).collect()
 }
 
 fn default_appearance_order() -> Vec<String> {
-    APPEARANCE_SECTION_IDS.iter().map(|s| s.to_string()).collect()
+    APPEARANCE_SECTION_IDS.iter().map(ToString::to_string).collect()
 }
 
 fn default_profile_order() -> Vec<String> {
-    PROFILE_SECTION_IDS.iter().map(|s| s.to_string()).collect()
+    PROFILE_SECTION_IDS.iter().map(ToString::to_string).collect()
 }
 
 fn default_replay_seconds() -> u32 {
@@ -804,7 +804,7 @@ fn default_replay_seconds() -> u32 {
 }
 
 fn default_call_order() -> Vec<String> {
-    CALL_SECTION_IDS.iter().map(|s| s.to_string()).collect()
+    CALL_SECTION_IDS.iter().map(ToString::to_string).collect()
 }
 
 /// Keeps `loaded` from ever being able to drop a section out of the UI:
@@ -1008,7 +1008,7 @@ pub fn set_profile(requested: Option<&str>) -> Option<String> {
     // A second call is ignored rather than panicking: losing the race
     // would mean some config had already been read under the other name,
     // and swapping underneath it would be worse than the mismatch.
-    let _ = PROFILE.set(cleaned.clone());
+    let _ = PROFILE.set(cleaned);
     PROFILE.get().cloned().flatten()
 }
 
@@ -1281,7 +1281,7 @@ mod tests {
         let pre_lpf: Vec<String> = AUDIO_SECTION_IDS
             .iter()
             .filter(|id| **id != "lpf")
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let merged = sanitize_order(pre_lpf, AUDIO_SECTION_IDS);
         assert!(merged.contains(&"lpf".to_string()));

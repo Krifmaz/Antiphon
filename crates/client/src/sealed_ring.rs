@@ -91,7 +91,7 @@ impl SealedRing {
         let source = |at: usize| samples[at - position];
         let mut at = self.dropped;
         let mut blocks = std::mem::take(&mut self.blocks);
-        for block in blocks.iter_mut() {
+        for block in &mut blocks {
             let block_end = at + block.samples;
             if block_end > start && at < end {
                 let mut audio = self.open(block).unwrap_or_else(|| vec![0.0; block.samples]);

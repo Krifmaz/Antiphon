@@ -95,7 +95,7 @@ impl AudioChain {
                 stages.push(ChainStage {
                     enabled: *enabled,
                     stage: Box::new(AutoGain::new(sample_rate, *target_db, *min_gain_db, *max_gain_db, *adapt_time_ms)),
-                })
+                });
             }
         }
 

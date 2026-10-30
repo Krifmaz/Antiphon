@@ -92,7 +92,7 @@ impl Stage for Reverb {
         for s in samples.iter_mut() {
             let input = *s;
             let mut wet = self.combs.iter_mut().fold(0.0, |acc, comb| acc + comb.process(input));
-            for allpass in self.allpasses.iter_mut() {
+            for allpass in &mut self.allpasses {
                 wet = allpass.process(wet);
             }
             *s = input * self.dry + wet * 0.25 * self.wet;

@@ -71,7 +71,7 @@ pub struct Decoded {
 /// `previous` when there is one.
 pub fn encode(sequence: u32, primary: &[f32], previous: Option<&[f32]>) -> Vec<u8> {
     let backup: Vec<i8> = previous.map(quantize).unwrap_or_default();
-    let original_len = previous.map(|p| p.len()).unwrap_or(0);
+    let original_len = previous.map(<[f32]>::len).unwrap_or(0);
 
     let mut out = Vec::with_capacity(HEADER_LEN + primary.len() * 4 + 4 + backup.len());
     out.push(VERSION);

@@ -432,7 +432,7 @@ pub fn search<'a>(listed: &'a [Listed], query: &str) -> Vec<&'a Listed> {
 /// Asks the directory at `directory` to list a community (an entry with
 /// an empty link takes it off), signed by `identity`, which alone can
 /// change it later. Says how it went.
-pub async fn submit(directory: &str, entry: ListingEntry, identity: &antiphon_crypto::IdentityKeyPair) -> Result<(), String> {
+pub async fn submit(directory: &str, entry: ListingEntry, identity: &IdentityKeyPair) -> Result<(), String> {
     let addr = crate::delivery::resolve(antiphon_net::vpn::TrafficKind::Voice, directory.trim()).await.ok_or_else(|| format!("{directory} doesn't resolve"))?;
     let socket = UdpSocket::bind(unspecified_for(&[addr])).await.map_err(|e| e.to_string())?;
     let key = identity.public().identity_key;

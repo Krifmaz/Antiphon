@@ -212,11 +212,11 @@ pub fn decode_b64(text: &str) -> Option<Vec<u8>> {
 static CALL_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_call_active(active: bool) {
-    CALL_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+    CALL_ACTIVE.store(active, Ordering::Relaxed);
 }
 
 fn in_call() -> bool {
-    CALL_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+    CALL_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// Offers `source` to the peer, waits (up to 30s) for acceptance, then
@@ -281,8 +281,8 @@ pub async fn send_file(
             // Pausing before the other side has even accepted still just
             // waits: the acceptance deadline is about *them* not
             // answering, and holding your own send does not change that.
-            Some(OutgoingStatus::Pending) | Some(OutgoingStatus::Paused) => {
-                tokio::time::sleep(Duration::from_millis(100)).await
+            Some(OutgoingStatus::Pending | OutgoingStatus::Paused) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -689,7 +689,7 @@ fn start_verification(
                     incoming.error = Some(
                         "The received data didn't match its checksum -- the file is corrupted or incomplete"
                             .to_string(),
-                    )
+                    );
                 }
                 Err(e) => incoming.error = Some(format!("Couldn't store the received file: {e}")),
             }
@@ -813,7 +813,7 @@ pub fn request_missing_chunks_if_needed(state: &Arc<Mutex<FileTransferState>>, p
     if !due {
         return;
     }
-    let Some(missing) = s.reassembly.as_mut().map(|r| r.chunks_to_request()) else { return };
+    let Some(missing) = s.reassembly.as_mut().map(DiskReassembly::chunks_to_request) else { return };
     if missing.is_empty() {
         return;
     }
@@ -1016,7 +1016,7 @@ mod integration_tests {
                             if drop_chunk(index) && seen.lock().unwrap().insert(index) {
                                 return;
                             }
-                            handle_file_chunk(&bytes, &state, &peer)
+                            handle_file_chunk(&bytes, &state, &peer);
                         }
                         Received::Audio { .. } | Received::Video(_) => {}
                     })
@@ -1025,7 +1025,7 @@ mod integration_tests {
         }
         // The repair requests come from the drain task in the real app.
         {
-            let (peer, state) = (peer_b.clone(), state_b.clone());
+            let (peer, state) = (peer_b, state_b.clone());
             tokio::spawn(async move {
                 loop {
                     request_missing_chunks_if_needed(&state, &peer);
@@ -1101,7 +1101,7 @@ mod integration_tests {
         drop(data);
 
         let pair = connected_pair(dir.join("store"), |_| false).await;
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let stored = run_transfer(&pair, &source, 600).await;
         let secs = started.elapsed().as_secs_f64();
         println!("64 MB in {secs:.1}s = {:.1} MB/s", 64.0 / secs);

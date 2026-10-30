@@ -55,7 +55,7 @@ pub fn named_color(id: &str) -> Option<Color> {
 /// `(width, height, pixels)`, and is only called when `source` changed.
 /// An empty `source` means no picture.
 pub fn set(id: &str, source: &str, color: &str, decode: impl FnOnce(&str) -> Option<(u32, u32, Vec<u8>)>) {
-    let mut looks = looks().lock().unwrap_or_else(|e| e.into_inner());
+    let mut looks = looks().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let look = looks.entry(id.to_string()).or_default();
     look.color = named_color(color);
     if look.source != source {
@@ -72,12 +72,12 @@ pub fn emoji_id(community: &str, name: &str) -> String {
 
 /// `id`'s picture, if one is registered.
 pub fn picture(id: &str) -> Option<Handle> {
-    looks().lock().unwrap_or_else(|e| e.into_inner()).get(id).and_then(|l| l.picture.clone())
+    looks().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).and_then(|l| l.picture.clone())
 }
 
 /// `id`'s chosen colour, if they chose one.
 pub fn color(id: &str) -> Option<Color> {
-    looks().lock().unwrap_or_else(|e| e.into_inner()).get(id).and_then(|l| l.color)
+    looks().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).and_then(|l| l.color)
 }
 
 #[cfg(test)]
