@@ -462,6 +462,14 @@ pub struct AppConfig {
     /// Off by default -- calls adapt by themselves anyway.
     #[serde(default)]
     pub low_data_calls: bool,
+    /// Send a shared screen's sound along with it (spec §5). On by
+    /// default, as people sharing a video expect it to be heard.
+    #[serde(default = "default_true")]
+    pub share_screen_audio: bool,
+    /// Spec §11 "Bots / API, local-first": serve the local API for the
+    /// user's own scripts (see the desktop's `api.rs`). Off by default.
+    #[serde(default)]
+    pub local_api: bool,
     /// How far to lower the other side while you talk, in dB (spec §1
     /// "Ducking"). Zero is off.
     #[serde(default)]
@@ -874,6 +882,8 @@ impl Default for AppConfig {
             start_call_silently: false,
             echo_cancel: true,
             low_data_calls: false,
+            share_screen_audio: true,
+            local_api: false,
             duck_db: 0,
             presence: 0,
             crash_reporting: false,

@@ -13,6 +13,7 @@
 
 mod a11y;
 mod account;
+mod api;
 mod app;
 mod demo;
 mod engine;
@@ -63,6 +64,25 @@ fn install_crash_hook() {
     }));
 }
 
+/// Runs with no window: the engine, its door and the local API, for a bot
+/// (spec §11 "Bots / API, local-first"). Usually with a profile of its
+/// own, so the bot is a separate identity: `--profile mybot --headless`.
+/// What the window would show as a toast is printed instead. Runs until
+/// the process is stopped.
+fn headless(state: std::sync::Arc<antiphon_client::state::AppState>) -> anyhow::Result<()> {
+    let mut engine = engine::Engine::new(state);
+    engine.headless();
+    loop {
+        engine.tick(None);
+        for out in std::mem::take(&mut engine.out) {
+            if let engine::Out::Toast(text, _) = out {
+                println!("{text}");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// The swirl, for the title bar and taskbar.
 fn window_icon() -> Option<iced::window::Icon> {
     let img = image::load_from_memory(include_bytes!("../../gui/ui/logo.png")).ok()?.into_rgba8();
@@ -79,6 +99,11 @@ fn main() -> anyhow::Result<()> {
     // window is open; it lives until the process does.
     let handle = runtime.handle().clone();
     std::mem::forget(runtime);
+
+    if has_flag("--headless") {
+        let _guard = handle.enter();
+        return headless(engine::start_state(handle.clone())?);
+    }
 
     let mode = if let Some(dir) = flag_value("--screenshot-tour") {
         let dir = PathBuf::from(dir);

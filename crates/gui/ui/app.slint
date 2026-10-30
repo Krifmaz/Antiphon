@@ -2022,6 +2022,7 @@ export component MainWindow inherits Window {
     in-out property <bool> space-can-manage: false;
     in-out property <bool> space-can-manage-channels: false;
     in-out property <bool> space-server-hosted: false;
+    in-out property <bool> space-full-scale: false;
     /// 0 = your default, then RingRule + 1 (always, silent only, never).
     in-out property <int> space-ring-rule: 0;
     in-out property <string> space-mailbox-node: "";
@@ -3902,6 +3903,14 @@ export component MainWindow inherits Window {
                         reduced-motion: reduced-motion;
                         text-scale: text-scale;
                         help: "Off by default. When on, a file shared in this community is also uploaded, encrypted, to its file node, so it stays fetchable when the person who shared it is offline. The node holds bytes it cannot read.";
+                    }
+                    if space-is-community : ToggleSwitch {
+                        text: "Full scale";
+                        enabled: space-can-manage && space-mailbox-node != "";
+                        checked <=> space-full-scale;
+                        reduced-motion: reduced-motion;
+                        text-scale: text-scale;
+                        help: "Messages for everyone are posted once to a board on its mailbox node, and members read them from there, instead of a copy to each member. Needed past 250 members, up to 5,000. The node can't read them.";
                     }
                     if space-is-community && space-can-manage : Button { text: "Save community settings"; clicked => { space-save-settings(); } }
                     if space-is-community && space-mailbox-node != "" : Button { text: "Use its mailbox for my mail"; clicked => { space-use-nodes(); } }

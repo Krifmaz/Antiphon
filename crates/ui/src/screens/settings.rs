@@ -155,7 +155,7 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             .width(Length::Fill),
         ]
         .spacing(8);
-        let tile = button(
+        let tile = button(crate::a11y::mark(
             column![
                 container(preview).padding(10).width(Length::Fill).style(move |_| iced_widget::container::Style {
                     background: Some(iced_core::Background::Color(look.panel)),
@@ -166,7 +166,8 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             ]
             .spacing(8)
             .align_x(Alignment::Center),
-        )
+            focused,
+        ))
         .width(Length::Fill)
         .padding(8)
         .style(move |th, st| {
@@ -252,7 +253,7 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     let s = &m.settings;
     let device = |label: &'a str, list: &'a [String], chosen: &'a str, f: fn(String) -> Action| -> El<'a, Msg> {
         let selected = if chosen.is_empty() { None } else { Some(chosen.to_string()) };
-        field(label, choice(label, list, selected, "System default", move |v| Msg::Do(f(v))).width(Length::Fill).padding([9, 12]).text_size(14))
+        field(label, choice(label, list, selected, "System default", move |v| Msg::Do(f(v)), |p| p.width(Length::Fill).padding([9, 12]).text_size(14)))
     };
     let devices = column![
         row![device("Microphone", &s.inputs, &s.input, Action::Input), device("Speakers or headphones", &s.outputs, &s.output, Action::Output)].spacing(14),
@@ -308,12 +309,20 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
         ),
     ]
     .spacing(12);
+    if !m.device.phone {
+        processing = processing.push(divider());
+        processing = processing.push(setting(
+            "Share screen audio",
+            Some("When you share your screen, they hear what your computer plays too. Your call itself is taken back out."),
+            switch("Share screen audio", s.screen_audio, |on| Msg::Do(Action::ScreenAudio(on))),
+        ));
+    }
     if !s.presets.is_empty() {
         processing = processing.push(divider());
         processing = processing.push(setting(
             "Voice preset",
             Some("A starting point for the whole chain."),
-            choice("Voice preset", s.presets.as_slice(), (!s.preset.is_empty()).then(|| s.preset.clone()), "Custom", |v| Msg::Do(Action::Preset(v))).padding([8, 12]).text_size(13.5),
+            choice("Voice preset", s.presets.as_slice(), (!s.preset.is_empty()).then(|| s.preset.clone()), "Custom", |v| Msg::Do(Action::Preset(v)), |p| p.padding([8, 12]).text_size(13.5)),
         ));
     }
 
@@ -322,14 +331,88 @@ fn voice<'a>(m: &'a Model) -> El<'a, Msg> {
     if m.phone.is_none() {
         cards = cards.push(titled_card("Devices", None, devices));
     }
-    cards
-        .push(column![
-        titled_card("Microphone test", None, test),
-        titled_card("When to send your voice", None, talk),
-        titled_card("Processing", None, processing),
-    ]
-    .spacing(14))
-    .into()
+    let mut cards = cards.push(
+        column![
+            titled_card("Microphone test", None, test),
+            titled_card("When to send your voice", None, talk),
+            titled_card("Processing", None, processing),
+        ]
+        .spacing(14),
+    );
+    if !m.device.phone {
+        cards = cards.push(titled_card(
+            "Plugins",
+            Some("Your own LADSPA, LV2 and VST3 effects, run on your microphone after the processing above. A plugin is a program: add only ones you trust."),
+            plugins(&s.plugins),
+        ));
+    }
+    cards.into()
+}
+
+/// Spec §1 "Plugin Host": the chain's plugins with their controls, and
+/// what can be added.
+fn plugins<'a>(p: &'a crate::Plugins) -> El<'a, Msg> {
+    let mut body = column![].spacing(12);
+    if p.chain.is_empty() {
+        body = body.push(faint("No plugins in your chain.").size(13));
+    }
+    for (i, plugin) in p.chain.iter().enumerate() {
+        let mut head = row![
+            column![t(plugin.name.as_str()).size(14).font(theme::semibold()), faint(plugin.format.as_str()).size(12)].spacing(2).width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if i > 0 {
+            head = head.push(icon_btn(Icon::Up, "Run earlier", Some(Msg::Do(Action::PluginEarlier(i)))));
+        }
+        head = head
+            .push(switch(&plugin.name, plugin.enabled, move |on| Msg::Do(Action::PluginOn(i, on))))
+            .push(icon_btn(Icon::Trash, "Remove", Some(Msg::Do(Action::RemovePlugin(i)))));
+        let mut item = column![head].spacing(8);
+        if let Some(problem) = &plugin.problem {
+            item = item.push(error_box(problem));
+        }
+        for param in &plugin.params {
+            let id = param.id.clone();
+            let control: El<'a, Msg> = if param.toggle {
+                switch(&param.name, param.value >= 0.5, move |on| Msg::Do(Action::PluginParam(i, id.clone(), if on { 1.0 } else { 0.0 })))
+            } else {
+                let step = ((param.max - param.min) / 100.0).max(f32::EPSILON);
+                row![
+                    iced_widget::slider(param.min..=param.max, param.value, move |v| Msg::Do(Action::PluginParam(i, id.clone(), v)))
+                        .step(step)
+                        .width(Length::Fill)
+                        .style(theme::slider_style),
+                    faint(format!("{:.2}", param.value)).size(12).width(52),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .into()
+            };
+            item = item.push(field(param.name.as_str(), control));
+        }
+        body = body.push(container(item).padding(10).style(theme::tabs_frame));
+    }
+    match &p.found {
+        None => {
+            body = body.push(btn_icon(Icon::Search, if p.scanning { "Looking…" } else { "Find plugins" }, Btn::Default, (!p.scanning).then_some(Msg::Do(Action::FindPlugins))));
+        }
+        Some(found) if found.is_empty() => {
+            body = body.push(faint("No plugins were found in the usual folders.").size(13));
+        }
+        Some(found) => {
+            let mut list = column![faint("Found on this computer").size(12.5)].spacing(6);
+            for (i, name) in found.iter().enumerate() {
+                list = list.push(
+                    row![t(name.as_str()).size(13).width(Length::Fill), btn_sm("Add", Btn::Ghost, Some(Msg::Do(Action::AddPlugin(i))))]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                );
+            }
+            body = body.push(scrollable(list).height(Length::Shrink));
+        }
+    }
+    body.into()
 }
 
 /// Whether people can reach you, the port, and the relay to fall back on.
@@ -390,14 +473,68 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         faint("Add #key after an address to pin the hop's key (shown when its operator starts it). Without one, the first key a hop gives is remembered and a different one is refused.").size(12.5),
     ]
     .spacing(12);
-    column![
+    let mut nodes = column![].spacing(8);
+    if m.network.mailboxes.is_empty() {
+        nodes = nodes.push(faint("None yet: mail for you waits until you're online, and yours until they are.").size(12.5));
+    }
+    for n in &m.network.mailboxes {
+        let sub = if n.status.is_empty() { n.route.clone() } else { format!("{} · {}", n.route, n.status) };
+        nodes = nodes.push(
+            row![
+                icon(Icon::Door, 15.0, p.faint),
+                column![t(n.address.as_str()).size(13.5).font(theme::semibold()), faint(sub).size(12)].spacing(1).width(Length::Fill),
+                icon_btn(Icon::Trash, "Remove", Some(Msg::Do(Action::RemoveNode(n.address.clone())))),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    nodes = nodes.push(divider());
+    nodes = nodes.push(
+        row![
+            input("Mailbox node to add", "stoop-node-add", "mail.example.org:7000 or stoop://node/…", &ui.node_edit).on_input(Msg::NodeEdit).on_submit(Msg::NodeAdd).padding([9, 12]).size(13.5),
+            btn("Add", Btn::Primary, (!ui.node_edit.trim().is_empty()).then_some(Msg::NodeAdd)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    let finding = m.network.finding_nodes;
+    nodes = nodes.push(
+        row![
+            btn_icon(Icon::Qr, "Add by QR code", Btn::Ghost, Some(Msg::Do(Action::AddNodeFromQr))),
+            btn_icon(Icon::Wifi, if finding { "Looking…" } else { "Find nodes on my network" }, Btn::Ghost, (!finding).then_some(Msg::Do(Action::FindNodes))),
+        ]
+        .spacing(8),
+    );
+    for found in m.network.found_nodes.iter().filter(|f| !m.network.mailboxes.iter().any(|n| n.address == **f)) {
+        nodes = nodes.push(
+            row![faint(format!("Found {found}")).size(12.5).width(Length::Fill), btn_sm("Add", Btn::Ghost, Some(Msg::Do(Action::AddNode(found.clone()))))]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+    }
+    nodes = nodes.push(faint("A node prints its link and QR code when it starts. Pick a picture of the code (a screenshot or a photo) to add it.").size(12));
+    let mut cards = column![
         card(check_card),
         titled_card("Your door", None, listen),
+        titled_card("Mailboxes", Some("Nodes that hold sealed mail for you while you're away. They can't read it."), nodes),
         titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay),
         titled_card("Anonymity", None, anonymity),
     ]
-    .spacing(14)
-    .into()
+    .spacing(14);
+    if !m.device.phone {
+        let mut api = column![setting(
+            "Local API",
+            Some("Lets your own scripts and bots on this computer read and send messages and place calls as you. Only programs on this computer can reach it, and only with the key in the file below."),
+            switch("Local API", m.network.local_api, |on| Msg::Do(Action::LocalApi(on))),
+        )]
+        .spacing(12);
+        if m.network.local_api && !m.network.api_file.is_empty() {
+            api = api.push(faint(format!("Port and key: {}", m.network.api_file)).size(12.5));
+        }
+        cards = cards.push(titled_card("Scripts and bots", None, api));
+    }
+    cards.into()
 }
 
 /// Version, where your data lives, and the crash-report switch.

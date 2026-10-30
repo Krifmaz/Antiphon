@@ -441,7 +441,7 @@ impl VoiceReceiver {
 /// A streaming linear-interpolation resampler: enough for speech between
 /// 44.1 and 48 kHz, where the two rates are close and the voice band sits
 /// far below either Nyquist limit.
-struct Resampler {
+pub struct Resampler {
     /// Input samples per output sample.
     step: f64,
     /// Where the next output sample falls, in input samples, counted from
@@ -452,16 +452,19 @@ struct Resampler {
 }
 
 impl Resampler {
-    fn new(from: u32, to: u32) -> Self {
+    /// Converts `from` Hz to `to` Hz.
+    pub fn new(from: u32, to: u32) -> Self {
         Self { step: from as f64 / to as f64, position: 0.0, previous: 0.0 }
     }
 
-    fn reset(&mut self) {
+    /// Forgets the previous block, for a stream that starts over.
+    pub fn reset(&mut self) {
         self.position = 0.0;
         self.previous = 0.0;
     }
 
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+    /// Appends `input`, resampled, to `out`.
+    pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
         if input.is_empty() {
             return;
         }

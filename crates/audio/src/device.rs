@@ -8,6 +8,8 @@ pub enum AudioError {
     NoInputDevice,
     #[error("no default output device found")]
     NoOutputDevice,
+    #[error("this system cannot record what it plays")]
+    NoLoopback,
     #[error(transparent)]
     Cpal(#[from] cpal::Error),
 }
@@ -156,11 +158,69 @@ pub fn start_capture(
 /// [`start_capture`] through cpal, which every platform supports.
 fn start_cpal_capture(
     device_name: Option<&str>,
-    mut on_frame: impl FnMut(&[f32]) + Send + 'static,
+    on_frame: impl FnMut(&[f32]) + Send + 'static,
 ) -> Result<CaptureHandle, AudioError> {
     let host = host();
     let device = find_input_device(&host, device_name).ok_or(AudioError::NoInputDevice)?;
     let config = device.default_input_config()?;
+    capture_from(device, config, on_frame)
+}
+
+/// Starts recording **what this computer plays** -- the system's output
+/// mix -- for sharing a screen's sound (spec §5). `on_frame` gets mono
+/// samples as [`start_capture`] does.
+///
+/// - **Linux:** a PipeWire stream that captures the default sink, the same
+///   thing pavucontrol's "Monitor of ..." records. Needs PipeWire (every
+///   current desktop); on plain ALSA there is no loopback, so
+///   [`AudioError::NoLoopback`].
+/// - **Windows:** WASAPI loopback on the default output device.
+/// - **macOS:** CoreAudio's process tap on the default output device
+///   (macOS 14.2 and later), which asks for permission the first time.
+///
+/// The mix includes the call itself: whoever records it must take the
+/// call's own playback back out (the client does, with an echo canceller
+/// fed what the call played).
+pub fn start_system_capture(on_frame: impl FnMut(&[f32]) + Send + 'static) -> Result<CaptureHandle, AudioError> {
+    #[cfg(target_os = "linux")]
+    let host = cpal::host_from_id(cpal::HostId::PipeWire).map_err(|_| AudioError::NoLoopback)?;
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let host = cpal::default_host();
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        drop(on_frame);
+        Err(AudioError::NoLoopback)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // cpal's PipeWire host lists the default sink as a device that
+        // both plays and records; recording from it captures the sink.
+        let device = host
+            .devices()
+            .map_err(|_| AudioError::NoLoopback)?
+            .filter(|d| d.supports_input() && d.supports_output())
+            .min_by_key(|d| d.description().map(|desc| desc.name() != "default_sink").unwrap_or(true))
+            .ok_or(AudioError::NoLoopback)?;
+        let config = device.default_input_config()?;
+        capture_from(device, config, on_frame)
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        // An output device opened for input is loopback on both: the
+        // stream takes the output's own format.
+        let device = host.default_output_device().ok_or(AudioError::NoOutputDevice)?;
+        let config = device.default_output_config()?;
+        capture_from(device, config, on_frame)
+    }
+}
+
+/// Records from `device` (a microphone, or an output device opened for
+/// loopback) in `config`, mixed down to mono.
+fn capture_from(
+    device: cpal::Device,
+    config: cpal::SupportedStreamConfig,
+    mut on_frame: impl FnMut(&[f32]) + Send + 'static,
+) -> Result<CaptureHandle, AudioError> {
     let sample_rate = config.sample_rate();
     let channels = config.channels() as usize;
     let stream_config: cpal::StreamConfig = config.into();

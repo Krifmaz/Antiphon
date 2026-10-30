@@ -1564,6 +1564,11 @@ pub fn start_pipeline(
     let aec_far: Arc<Mutex<std::collections::VecDeque<f32>>> =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
 
+    // Spec §5: what the call played, for taking it back out of a shared
+    // screen's sound (see `screen_audio`).
+    let screen_played = crate::screen_audio::Played::default();
+    let send_screen_played = screen_played.clone();
+
     let send_soundboard = soundboard_queue.clone();
     let send_aec = echo_canceller.clone();
     let send_aec_far = aec_far.clone();
@@ -1575,7 +1580,36 @@ pub fn start_pipeline(
         // It numbers the packets itself (the application sequence,
         // independent of the crypto counter).
         let mut voice = antiphon_net::voice::VoiceSender::new(sample_rate);
+        // Spec §5: the shared screen's sound, recording only while a screen
+        // is being shared and the switch is on; checked every 50 blocks.
+        let mut screen_audio: Option<crate::screen_audio::ScreenAudio> = None;
+        let mut screen_check = 0u32;
+        let mut screen_failed = false;
         while let Some(mut samples) = rx.recv().await {
+            screen_check = screen_check.wrapping_add(1);
+            if screen_check % 50 == 1 {
+                let sharing = crate::screen_audio::enabled()
+                    && send_group
+                        .video
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|v| v.sending(antiphon_video::Stream::Screen));
+                if sharing && screen_audio.is_none() && !screen_failed {
+                    match crate::screen_audio::ScreenAudio::start(sample_rate, send_screen_played.clone()) {
+                        Ok(audio) => screen_audio = Some(audio),
+                        // Not retried for this share: a system that can't
+                        // record its output won't start to a second later.
+                        Err(e) => {
+                            eprintln!("[audio] screen audio unavailable: {e}");
+                            screen_failed = true;
+                        }
+                    }
+                } else if !sharing {
+                    screen_audio = None;
+                    screen_failed = false;
+                }
+            }
             // Spec §1 echo cancellation, before the mic chain: the
             // gate and compressor are tuned for a voice, and running them
             // over a signal that still has the far end mixed into it
@@ -1623,13 +1657,23 @@ pub fn start_pipeline(
                 MODE_OPEN_MIC => true,
                 _ => send_ptt.load(Ordering::Relaxed),
             };
-            if should_send && !send_muted.load(Ordering::Relaxed) {
+            let mic_sends = should_send && !send_muted.load(Ordering::Relaxed);
+            // The screen's sound goes out whether or not the mic does:
+            // muting yourself shouldn't silence the video you're showing.
+            let screen = screen_audio.as_mut().and_then(|a| a.take(samples.len()));
+            if mic_sends || screen.is_some() {
                 // Spec §7: your own words in the captions, only if asked
                 // for, and only what actually went out.
-                if crate::captions::own_voice() {
+                if mic_sends && crate::captions::own_voice() {
                     if let Some(tap) = crate::captions::tap() {
                         tap.push(crate::captions::OWN_VOICE, sample_rate, &samples);
                     }
+                }
+                if !mic_sends {
+                    samples.fill(0.0);
+                }
+                if let Some(screen) = &screen {
+                    crate::screen_audio::mix_into(&mut samples, screen);
                 }
                 // Spec §2 automatic bandwidth: the tier and FEC the
                 // link's reports call for, then whatever packets this
@@ -1908,6 +1952,7 @@ pub fn start_pipeline(
     let mut catch_up = antiphon_audio::TimeCompressor::new(sample_rate);
     let mut catch_up_out: Vec<f32> = Vec::new();
     let drain_aec_far = aec_far.clone();
+    let drain_screen_played = screen_played.clone();
     let mut clip_cutter = crate::replay_history::ClipCutter::default();
     // Samples drained since the call started, which is what a clip's
     // timestamp is measured against. Counted here rather than read from a
@@ -2175,6 +2220,7 @@ pub fn start_pipeline(
                 // and therefore what comes back. Feeding it the raw
                 // received audio instead would have it hunting for an
                 // echo of a signal nobody played.
+                drain_screen_played.push(&out, sample_rate);
                 let mut far = drain_aec_far.lock().unwrap();
                 far.extend(out.iter().copied());
                 while far.len() > AEC_REFERENCE_SAMPLES {

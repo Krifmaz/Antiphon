@@ -46,6 +46,35 @@ pub struct Model {
     /// The channel on screen, once the app has loaded it (after
     /// [`crate::Action::OpenChannel`]).
     pub channel: Option<ChannelView>,
+    /// The community directories you browse, and what they last listed.
+    pub directory: Directory,
+}
+
+/// Community directories (spec §4 "Opt-in directories for public
+/// communities only"): the ones you added, and what they list.
+#[derive(Clone, Debug, Default)]
+pub struct Directory {
+    /// Each directory's address, as added.
+    pub directories: Vec<String>,
+    /// Everything they listed at the last look, in their order.
+    pub listed: Vec<Listing>,
+    /// What went wrong with any of them at the last look.
+    pub problems: Vec<String>,
+    /// A look is under way.
+    pub browsing: bool,
+}
+
+/// One community a directory lists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// Its name.
+    pub name: String,
+    /// What it says about itself.
+    pub description: String,
+    /// Its join link (or, from an older directory, its host's invite).
+    pub link: String,
+    /// The directory that listed it.
+    pub directory: String,
 }
 
 /// Settings > Account: everything about not losing the account.
@@ -439,6 +468,28 @@ pub struct Network {
     pub anonymity: bool,
     /// Its hops, comma-separated `host:port[#key]`.
     pub hops: String,
+    /// The mailbox nodes on your delivery routes, in the order mail
+    /// tries them.
+    pub mailboxes: Vec<Mailbox>,
+    /// Mailbox nodes found on this network at the last look, by address.
+    pub found_nodes: Vec<String>,
+    /// A look for nodes on this network is under way.
+    pub finding_nodes: bool,
+    /// The local API for scripts and bots is on (desktop only).
+    pub local_api: bool,
+    /// Where a script finds its port and token, while it is on.
+    pub api_file: String,
+}
+
+/// A mailbox node on your delivery routes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mailbox {
+    /// `host:port`.
+    pub address: String,
+    /// Which route it is on ("A node you trust", "Community node").
+    pub route: String,
+    /// How it answered at the last courier round, if it has.
+    pub status: String,
 }
 
 /// One line of the reachability check.
@@ -498,6 +549,10 @@ pub struct Settings {
     /// "Low data" calls (spec §2 automatic bandwidth): voice held at
     /// 8 kbit/s and no video. On a phone, the data saver.
     pub low_data: bool,
+    /// A shared screen's sound is sent with it (desktop only).
+    pub screen_audio: bool,
+    /// The plugin host's list (desktop only).
+    pub plugins: Plugins,
     /// Automatic level is on.
     pub auto_gain: bool,
     /// The voice preset in use ("Natural", "Broadcast", ...).
@@ -518,6 +573,42 @@ pub struct Settings {
     pub version: String,
     /// Where settings and history are kept, for About.
     pub data_dir: String,
+}
+
+/// Spec §1 "Plugin Host", as Settings shows it (desktop only).
+#[derive(Clone, Debug, Default)]
+pub struct Plugins {
+    /// The plugins in the microphone chain, in the order they run.
+    pub chain: Vec<PluginRow>,
+    /// What was found on this computer, as "Name · Format", once looked
+    /// for; `None` before.
+    pub found: Option<Vec<String>>,
+    /// Looking is under way.
+    pub scanning: bool,
+}
+
+/// One plugin in the chain.
+#[derive(Clone, Debug, Default)]
+pub struct PluginRow {
+    pub name: String,
+    /// "LADSPA", "LV2" or "VST3".
+    pub format: String,
+    pub enabled: bool,
+    /// Why it isn't running, when it isn't (gone, failed to start).
+    pub problem: Option<String>,
+    pub params: Vec<PluginParam>,
+}
+
+/// One of a plugin's parameters.
+#[derive(Clone, Debug, Default)]
+pub struct PluginParam {
+    pub id: String,
+    pub name: String,
+    pub min: f32,
+    pub max: f32,
+    pub value: f32,
+    /// An on/off switch rather than a range.
+    pub toggle: bool,
 }
 
 /// How the microphone decides to send.
@@ -590,6 +681,9 @@ pub struct Community {
     pub slow_mode_secs: u32,
     /// You may turn slow mode on or off (the community's settings).
     pub can_set_slow_mode: bool,
+    /// The mailbox node its board is on, if it has one (spec §11
+    /// "Communities at full scale").
+    pub board: Option<String>,
     /// You can act on reports: an owner, or allowed to remove messages or
     /// people.
     pub moderator: bool,
@@ -597,6 +691,12 @@ pub struct Community {
     pub reports: Vec<Report>,
     /// Invitations you sent that haven't been answered.
     pub pending_invites: Vec<PendingInvite>,
+    /// The voice channel of this community you are in, if any.
+    pub voice_room: Option<u32>,
+    /// Anyone with its join link may ask to join (it can be listed).
+    pub listed: bool,
+    /// Its join link, when it is listed and you may invite people.
+    pub join_link: Option<String>,
     /// Which of its messages notify you.
     pub notify: Notify,
     /// Its custom emoji's names, written `:name:`; their pictures are
@@ -604,6 +704,25 @@ pub struct Community {
     pub emoji: Vec<String>,
     /// You may change its settings, its emoji among them.
     pub can_manage: bool,
+    /// The spaces it shares with other communities.
+    pub shared_spaces: Vec<SharedSpace>,
+    /// On a shared space: how many communities share it; 0 for an
+    /// ordinary community.
+    pub sharing: usize,
+    /// The last link made for another community's admin to bring their
+    /// community into a space this one shares.
+    pub ally_link: Option<String>,
+}
+
+/// A space a community shares with other communities (spec §12 Q4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SharedSpace {
+    /// Its id (hex).
+    pub id: String,
+    /// What it is called.
+    pub name: String,
+    /// You are in it.
+    pub joined: bool,
 }
 
 /// Messages a member reported to the moderators.
@@ -697,6 +816,10 @@ pub struct Channel {
     /// Who can read a private channel, by member id (hex); empty for an
     /// open one.
     pub readers: Vec<String>,
+    /// A voice channel: a standing call people drop into.
+    pub voice: bool,
+    /// Who is in it now, by name, for a voice channel.
+    pub in_voice: Vec<String>,
 }
 
 /// Someone in a group chat or community.

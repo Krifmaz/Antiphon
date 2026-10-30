@@ -1,0 +1,12 @@
+[package]
+name = "antiphon-test-plugins"
+edition.workspace = true
+version.workspace = true
+publish = false
+description = "A gain plugin in LADSPA, LV2 and VST3 form, for testing antiphon-audio's plugin host"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vst3 = "0.3.0"

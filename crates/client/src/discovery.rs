@@ -416,6 +416,34 @@ pub async fn browse(directories: &[String], pins: &mut Vec<String>) -> (Vec<List
     (listed, problems)
 }
 
+/// The listed communities whose name or description has every word of
+/// `query` in it, ignoring case; all of them for an empty query.
+pub fn search<'a>(listed: &'a [Listed], query: &str) -> Vec<&'a Listed> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    listed
+        .iter()
+        .filter(|l| {
+            let text = format!("{} {}", l.entry.name, l.entry.description).to_lowercase();
+            words.iter().all(|w| text.contains(w.as_str()))
+        })
+        .collect()
+}
+
+/// Asks the directory at `directory` to list a community (an entry with
+/// an empty link takes it off), signed by `identity`, which alone can
+/// change it later. Says how it went.
+pub async fn submit(directory: &str, entry: ListingEntry, identity: &antiphon_crypto::IdentityKeyPair) -> Result<(), String> {
+    let addr = crate::delivery::resolve(antiphon_net::vpn::TrafficKind::Voice, directory.trim()).await.ok_or_else(|| format!("{directory} doesn't resolve"))?;
+    let socket = UdpSocket::bind(unspecified_for(&[addr])).await.map_err(|e| e.to_string())?;
+    let key = identity.public().identity_key;
+    match dht::submit_listing(&socket, addr, entry, key, |b| identity.sign(b), Duration::from_secs(4)).await {
+        Ok(dht::StoreResult::Stored) => Ok(()),
+        Ok(dht::StoreResult::Full) => Err("That directory is full, or has as many from your network as it takes".into()),
+        Ok(_) => Err("That directory doesn't take submissions (its operator lists communities by hand)".into()),
+        Err(_) => Err(format!("{directory} didn't answer (is it a directory node?)")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +517,17 @@ mod tests {
         assert!(lookup(&me.public().identity_key, &nodes[4..5], None, now, LookupOptions::default()).await.is_none());
         // And a record we already have isn't "found" again.
         assert!(lookup(&key, &nodes[2..3], Some(sequence), now, LookupOptions::default()).await.is_none());
+    }
+
+    #[test]
+    fn a_listing_is_searched_by_every_word() {
+        let listed: Vec<Listed> = [("Chess club", "Thursdays in Leeds"), ("Choir", "Sunday singing"), ("Leeds runners", "")]
+            .iter()
+            .map(|(n, d)| Listed { directory: "d".into(), entry: ListingEntry { name: (*n).into(), description: (*d).into(), invite: String::new() } })
+            .collect();
+        let names = |q: &str| search(&listed, q).iter().map(|l| l.entry.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names("leeds"), ["Chess club", "Leeds runners"]);
+        assert_eq!(names("LEEDS chess"), ["Chess club"]);
+        assert_eq!(names("").len(), 3);
     }
 }

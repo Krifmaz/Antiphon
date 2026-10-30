@@ -255,6 +255,12 @@ impl App {
                 tasks.push(iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus()));
                 false
             }
+            Action::RevealFocus(input) => {
+                // Runs on the frame drawn after this update, where the
+                // newly focused control carries its marker.
+                tasks.push(iced::advanced::widget::operate(ui::a11y::reveal(*input)));
+                false
+            }
             _ => true,
         });
         tasks.push(self.run(actions));

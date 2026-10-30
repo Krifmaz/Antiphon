@@ -179,6 +179,7 @@ const OP_FIND_NODE: u8 = 0x02;
 const OP_FIND_VALUE: u8 = 0x03;
 const OP_STORE: u8 = 0x04;
 const OP_GET_LISTING: u8 = 0x05;
+const OP_SUBMIT: u8 = 0x06;
 const OP_PONG: u8 = 0x81;
 const OP_NODES: u8 = 0x82;
 const OP_VALUE: u8 = 0x83;
@@ -200,7 +201,9 @@ pub struct ListingEntry {
 
 const MAX_NAME: usize = 64;
 const MAX_DESCRIPTION: usize = 240;
-const MAX_INVITE: usize = 400;
+/// Long enough for a community's join link, which carries its host's
+/// route list so a stranger's request to join can reach them.
+const MAX_INVITE: usize = 600;
 /// Entry bytes per page, so a page and its signature fit in a datagram.
 const PAGE_BYTES: usize = 1000;
 
@@ -271,7 +274,29 @@ pub enum Request {
     Store(DhtRecord),
     /// A page of the node's community directory, if it keeps one.
     GetListing { page: u8 },
+    /// A community asking to be listed (or, with an empty invite link,
+    /// to be taken off), signed by whoever submits it: one entry per key,
+    /// so a later submission replaces the earlier one.
+    Submit { entry: ListingEntry, key: [u8; 32], signature: [u8; 64] },
 }
+
+/// What a submission's signature covers.
+const SUBMIT_CONTEXT: &[u8] = b"antiphon/directory/submit/v1";
+
+/// The bytes a submitter signs for `entry`: a context string, then each
+/// field length-prefixed, so no two entries sign the same.
+pub fn submission_bytes(entry: &ListingEntry) -> Vec<u8> {
+    let mut out = SUBMIT_CONTEXT.to_vec();
+    for field in [&entry.name, &entry.description, &entry.invite] {
+        out.extend_from_slice(&(field.len() as u16).to_be_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+/// Submissions a node takes from at most this many keys per network
+/// (a /24 or /48), so one machine can't fill the directory.
+const SUBMISSIONS_PER_NETWORK: usize = 5;
 
 /// What a node says to a [`Request::Store`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -399,9 +424,25 @@ impl<'a> Reader<'a> {
         Some(out)
     }
 
+    fn entry(&mut self) -> Option<ListingEntry> {
+        let mut field = || -> Option<String> {
+            let len = u16::from_be_bytes(self.take(2)?.try_into().ok()?) as usize;
+            String::from_utf8(self.take(len)?.to_vec()).ok()
+        };
+        let (name, description, invite) = (field()?, field()?, field()?);
+        Some(ListingEntry { name, description, invite })
+    }
+
     fn record(&mut self) -> Option<DhtRecord> {
         let len = u16::from_be_bytes(self.take(2)?.try_into().ok()?) as usize;
         DhtRecord::decode(self.take(len)?).ok()
+    }
+}
+
+fn put_entry(out: &mut Vec<u8>, e: &ListingEntry) {
+    for field in [&e.name, &e.description, &e.invite] {
+        out.extend_from_slice(&(field.len() as u16).to_be_bytes());
+        out.extend_from_slice(field.as_bytes());
     }
 }
 
@@ -426,6 +467,7 @@ impl Message {
             Request::FindValue(_) => OP_FIND_VALUE,
             Request::Store(_) => OP_STORE,
             Request::GetListing { .. } => OP_GET_LISTING,
+            Request::Submit { .. } => OP_SUBMIT,
         });
         out.extend_from_slice(&txid);
         match sender {
@@ -441,6 +483,11 @@ impl Message {
             Request::FindNode(t) | Request::FindValue(t) => out.extend_from_slice(t),
             Request::Store(r) => put_record(&mut out, r),
             Request::GetListing { page } => out.push(*page),
+            Request::Submit { entry, key, signature } => {
+                out.extend_from_slice(key);
+                out.extend_from_slice(signature);
+                put_entry(&mut out, entry);
+            }
         }
         out
     }
@@ -476,10 +523,7 @@ impl Message {
                 out.push(*pages);
                 out.push(entries.len() as u8);
                 for e in entries {
-                    for field in [&e.name, &e.description, &e.invite] {
-                        out.extend_from_slice(&(field.len() as u16).to_be_bytes());
-                        out.extend_from_slice(field.as_bytes());
-                    }
+                    put_entry(&mut out, e);
                 }
             }
         }
@@ -507,6 +551,11 @@ impl Message {
                 OP_FIND_VALUE => Request::FindValue(r.arr32()?),
                 OP_STORE => Request::Store(r.record()?),
                 OP_GET_LISTING => Request::GetListing { page: r.u8()? },
+                OP_SUBMIT => {
+                    let key = r.arr32()?;
+                    let signature: [u8; 64] = r.take(64)?.try_into().ok()?;
+                    Request::Submit { entry: r.entry()?, key, signature }
+                }
                 _ => return None,
             };
             Message::Request { txid, sender, body }
@@ -536,12 +585,7 @@ impl Message {
                     let count = r.u8()? as usize;
                     let mut entries = Vec::with_capacity(count);
                     for _ in 0..count {
-                        let mut field = || -> Option<String> {
-                            let len = u16::from_be_bytes(r.take(2)?.try_into().ok()?) as usize;
-                            String::from_utf8(r.take(len)?.to_vec()).ok()
-                        };
-                        let (name, description, invite) = (field()?, field()?, field()?);
-                        entries.push(ListingEntry { name, description, invite });
+                        entries.push(r.entry()?);
                     }
                     Reply::Listing { page, pages, entries }
                 }
@@ -757,6 +801,20 @@ pub struct DhtNode {
     last_refresh: Option<Instant>,
     stores_refused: u64,
     listing: Vec<ListingEntry>,
+    /// Communities that listed themselves, by the key that signed each:
+    /// `None` while the node takes no submissions (the default).
+    submitted: Option<Submitted>,
+}
+
+/// What communities submitted to a directory node.
+#[derive(Default)]
+struct Submitted {
+    /// The most it holds.
+    max: usize,
+    /// Each submitter's entry and the network it came from, oldest first.
+    entries: Vec<([u8; 32], ListingEntry, Vec<u8>)>,
+    /// Changed since [`DhtNode::take_submitted_changes`] last looked.
+    changed: bool,
 }
 
 pub type Out = Vec<(SocketAddr, Vec<u8>)>;
@@ -775,7 +833,58 @@ impl DhtNode {
             last_refresh: None,
             stores_refused: 0,
             listing: Vec::new(),
+            submitted: None,
         }
+    }
+
+    /// Takes communities' own submissions, up to `max` of them, as well as
+    /// the operator's listing. Each is signed by its submitter, who alone
+    /// can replace or withdraw it; a network can hold a few at most.
+    pub fn accept_submissions(&mut self, max: usize, saved: Vec<([u8; 32], ListingEntry)>) {
+        let entries = saved.into_iter().filter(|(_, e)| e.fits()).take(max).map(|(k, e)| (k, e, Vec::new())).collect();
+        self.submitted = Some(Submitted { max, entries, changed: false });
+    }
+
+    /// The submitted entries, by key, when they changed since the last
+    /// call (for the operator's copy on disk); `None` when they didn't.
+    pub fn take_submitted_changes(&mut self) -> Option<Vec<([u8; 32], ListingEntry)>> {
+        let s = self.submitted.as_mut().filter(|s| s.changed)?;
+        s.changed = false;
+        Some(s.entries.iter().map(|(k, e, _)| (*k, e.clone())).collect())
+    }
+
+    /// Takes one submission: checked, then added, replacing the key's
+    /// earlier one, or (with an empty link) withdrawn.
+    fn submit(&mut self, entry: ListingEntry, key: [u8; 32], signature: [u8; 64], from: &SocketAddr) -> StoreResult {
+        let Some(s) = self.submitted.as_mut() else { return StoreResult::Invalid };
+        let Ok(vk) = VerifyingKey::from_bytes(&key) else { return StoreResult::Invalid };
+        if vk.verify_strict(&submission_bytes(&entry), &Signature::from_bytes(&signature)).is_err() {
+            return StoreResult::Invalid;
+        }
+        s.entries.retain(|(k, _, _)| *k != key);
+        s.changed = true;
+        if entry.invite.is_empty() {
+            return StoreResult::Stored; // withdrawn
+        }
+        if !entry.fits() {
+            return StoreResult::Invalid;
+        }
+        let net = subnet(from);
+        if s.entries.len() >= s.max || s.entries.iter().filter(|(_, _, n)| *n == net).count() >= SUBMISSIONS_PER_NETWORK {
+            return StoreResult::Full;
+        }
+        s.entries.push((key, entry, net));
+        StoreResult::Stored
+    }
+
+    /// What the directory serves: the operator's entries, then the
+    /// submitted ones.
+    fn whole_listing(&self) -> Vec<ListingEntry> {
+        let mut all = self.listing.clone();
+        if let Some(s) = &self.submitted {
+            all.extend(s.entries.iter().map(|(_, e, _)| e.clone()));
+        }
+        all
     }
 
     /// Sets the community directory this node serves. Empty -- the
@@ -841,8 +950,10 @@ impl DhtNode {
                         nodes: self.table.closest(&key, K),
                     },
                     Request::Store(record) => Reply::Stored(self.store_record(record, &from, now)),
+                    Request::Submit { entry, key, signature } => Reply::Stored(self.submit(entry, key, signature, &from)),
                     Request::GetListing { page } => {
-                        let pages = pages(&self.listing);
+                        let all = self.whole_listing();
+                        let pages = pages(&all);
                         Reply::Listing {
                             page,
                             pages: pages.len() as u8,
@@ -1300,6 +1411,39 @@ pub async fn observe(socket: &UdpSocket, node: SocketAddr, timeout: Duration) ->
     None
 }
 
+/// Asks a directory node to list `entry` (or, with an empty invite link,
+/// to take it off), signed by `key` through `sign` -- the submitter's
+/// identity, which alone can change it later.
+pub async fn submit_listing(
+    socket: &UdpSocket,
+    node: SocketAddr,
+    entry: ListingEntry,
+    key: [u8; 32],
+    sign: impl Fn(&[u8]) -> [u8; 64],
+    timeout: Duration,
+) -> Result<StoreResult, NetError> {
+    let signature = sign(&submission_bytes(&entry));
+    let txid = new_txid();
+    let request = Message::encode_request(txid, None, &Request::Submit { entry, key, signature });
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut buf = vec![0u8; 65_536];
+    while tokio::time::Instant::now() < deadline {
+        socket.send_to(&request, node).await?;
+        let wait = (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline);
+        while let Ok(Ok((n, from))) = tokio::time::timeout_at(wait, socket.recv_from(&mut buf)).await {
+            if from != node {
+                continue;
+            }
+            if let Some(Message::Reply { txid: t, body: Reply::Stored(result), .. }) = Message::decode(&buf[..n]) {
+                if t == txid {
+                    return Ok(result);
+                }
+            }
+        }
+    }
+    Err(NetError::DhtUnreachable)
+}
+
 /// Reads a node's whole community directory. Returns the node's public
 /// key with it: every page is signed by that key, so a caller that pins
 /// it on first use (as the app does) notices if a different machine
@@ -1553,5 +1697,45 @@ mod tests {
         let (signer, got) = fetch_listing(&client, at, Duration::from_secs(2)).await.unwrap();
         assert_eq!(signer, public);
         assert_eq!(got, entries);
+    }
+
+    #[tokio::test]
+    async fn a_community_lists_itself_and_only_it_can_change_that() {
+        let mut node = DhtNode::new(NodeKey::generate(TEST_BITS), Config { pow_bits: TEST_BITS, ..Config::default() });
+        node.set_listing(vec![ListingEntry { name: "Operator's".into(), description: String::new(), invite: "antiphon://op".into() }]);
+        node.accept_submissions(10, Vec::new());
+        let node = Arc::new(Mutex::new(node));
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let at = socket.local_addr().unwrap();
+        tokio::spawn(serve(socket, node.clone()));
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let owner = antiphon_crypto::IdentityKeyPair::generate();
+        let key = owner.public().identity_key;
+        let wait = Duration::from_secs(2);
+        let entry = |invite: &str| ListingEntry { name: "Chess club".into(), description: "Thursdays".into(), invite: invite.into() };
+
+        let r = submit_listing(&client, at, entry("stoop://join/a"), key, |b| owner.sign(b), wait).await.unwrap();
+        assert_eq!(r, StoreResult::Stored);
+        let (_, got) = fetch_listing(&client, at, wait).await.unwrap();
+        assert_eq!(got.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Operator's", "Chess club"]);
+        // A newer submission replaces it; nobody else's key can.
+        submit_listing(&client, at, entry("stoop://join/b"), key, |b| owner.sign(b), wait).await.unwrap();
+        let mallory = antiphon_crypto::IdentityKeyPair::generate();
+        let forged = submit_listing(&client, at, entry(""), key, |b| mallory.sign(b), wait).await.unwrap();
+        assert_eq!(forged, StoreResult::Invalid);
+        let (_, got) = fetch_listing(&client, at, wait).await.unwrap();
+        assert_eq!(got[1].invite, "stoop://join/b");
+        assert!(node.lock().unwrap().take_submitted_changes().is_some_and(|s| s.len() == 1));
+        // An empty link withdraws it.
+        submit_listing(&client, at, entry(""), key, |b| owner.sign(b), wait).await.unwrap();
+        let (_, got) = fetch_listing(&client, at, wait).await.unwrap();
+        assert_eq!(got.len(), 1);
+        // One network can't fill the directory.
+        let mut results = Vec::new();
+        for _ in 0..SUBMISSIONS_PER_NETWORK + 1 {
+            let k = antiphon_crypto::IdentityKeyPair::generate();
+            results.push(submit_listing(&client, at, entry("stoop://join/c"), k.public().identity_key, |b| k.sign(b), wait).await.unwrap());
+        }
+        assert_eq!(results.last(), Some(&StoreResult::Full));
     }
 }

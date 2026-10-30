@@ -148,6 +148,8 @@ impl App {
             noise_suppression: chain.noise_suppress.enabled,
             echo_cancel: false,
             low_data: self.settings.data_saver,
+            screen_audio: false,
+            plugins: Default::default(),
             auto_gain: matches!(chain.gain, antiphon_audio::GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -212,6 +214,7 @@ impl App {
             communities: Vec::new(),
             space_invites: Vec::new(),
             channel: None,
+            directory: Default::default(),
         }
     }
 
@@ -437,6 +440,8 @@ impl App {
                 }
             }
             Action::Call(id) => self.update(Message::CallContact(id)),
+            // Bringing someone into a call isn't on the phone yet.
+            Action::AddToCall(_) => {}
             Action::CallAddress(address) => self.start_call(address.trim()),
             Action::Hangup => self.update(Message::Stop),
             Action::Mute(on) => {
@@ -543,6 +548,8 @@ impl App {
             // Anonymity mode runs on the desktop's call path; the phone
             // doesn't offer it yet.
             Action::Anonymity(_) | Action::AnonymityHops(_) => {}
+            // The local API is a desktop's.
+            Action::LocalApi(_) => {}
             // Hidden on the phone (`Device::communities` is off), so these
             // never come.
             Action::OpenChannel { .. }
@@ -558,6 +565,14 @@ impl App {
             | Action::AddEmoji(_)
             | Action::RemoveEmoji { .. }
             | Action::ManageSpace { .. }
+            | Action::AddNode(_)
+            | Action::AddNodeFromQr
+            | Action::RemoveNode(_)
+            | Action::FindNodes
+            | Action::AddDirectory(_)
+            | Action::RemoveDirectory(_)
+            | Action::BrowseDirectories
+            | Action::AskToJoin(_)
             | Action::LeaveSpace(_) => {}
             Action::Copy(text) => crate::platform::copy_to_clipboard(&text),
             Action::SetName(name) | Action::Welcome(name) => self.update(Message::DisplayName(name)),
@@ -603,7 +618,7 @@ impl App {
             },
             // A phone moves the typing cursor with touch; keyboard focus is
             // a desktop matter.
-            Action::FocusInput(_) => {}
+            Action::FocusInput(_) | Action::RevealFocus(_) => {}
             Action::ReducedMotion(on) => {
                 self.settings.reduced_motion = on;
                 self.save();
@@ -612,6 +627,15 @@ impl App {
             Action::NoiseSuppression(on) => self.update(Message::Toggle(super::Stage::NoiseSuppress, on)),
             Action::AutoGain(on) => self.update(Message::Toggle(super::Stage::AutoGain, on)),
             Action::EchoCancel(_) => {}
+            // A phone has no screen share to send the sound of.
+            Action::ScreenAudio(_) => {}
+            // Plugins are a desktop's: the phone never shows them.
+            Action::FindPlugins
+            | Action::AddPlugin(_)
+            | Action::RemovePlugin(_)
+            | Action::PluginOn(..)
+            | Action::PluginEarlier(_)
+            | Action::PluginParam(..) => {}
             // The phone's data saver is its "Low data" switch.
             Action::LowData(on) => self.update(Message::DataSaver(on)),
             Action::Preset(name) if name == NATURAL => self.update(Message::ResetChain),

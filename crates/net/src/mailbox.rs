@@ -89,7 +89,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    fn code(self) -> u8 {
+    pub(crate) fn code(self) -> u8 {
         match self {
             Refusal::UnknownLabel => 1,
             Refusal::Full => 2,
@@ -102,7 +102,7 @@ impl Refusal {
         }
     }
 
-    fn from_code(c: u8) -> Option<Self> {
+    pub(crate) fn from_code(c: u8) -> Option<Self> {
         Some(match c {
             1 => Refusal::UnknownLabel,
             2 => Refusal::Full,

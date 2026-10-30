@@ -80,6 +80,8 @@ impl Demo {
                 noise_suppression: true,
                 echo_cancel: true,
                 low_data: false,
+                screen_audio: true,
+                plugins: Default::default(),
                 auto_gain: true,
                 preset: "Natural".into(),
                 presets: ["Natural", "Warm", "Clear", "Broadcast", "Thin Mic Rescue"].map(String::from).to_vec(),
@@ -98,6 +100,7 @@ impl Demo {
             communities: communities(),
             space_invites: vec![ui::SpaceInvite { name: "Bass players".into(), detail: "Community · from June Alvarez · Mon".into() }],
             channel: None,
+            directory: ui::Directory::default(),
         };
         // Chosen colours, as the engine registers saved ones.
         ui::avatars::set(&model.me.id, "", &model.me.color, |_| None);
@@ -335,6 +338,13 @@ impl Demo {
             Action::EchoCancel(on) => self.model.settings.echo_cancel = on,
             Action::AutoGain(on) => self.model.settings.auto_gain = on,
             Action::LowData(on) => self.model.settings.low_data = on,
+            Action::ScreenAudio(on) => self.model.settings.screen_audio = on,
+            Action::FindPlugins
+            | Action::AddPlugin(_)
+            | Action::RemovePlugin(_)
+            | Action::PluginOn(..)
+            | Action::PluginEarlier(_)
+            | Action::PluginParam(..) => {}
             Action::ReducedMotion(on) => self.model.settings.reduced_motion = on,
             Action::SetName(n) => self.model.me.name = n,
             Action::SetStatus(s) => self.model.me.status = s,
@@ -452,6 +462,7 @@ fn communities() -> Vec<ui::Community> {
             can_manage_channels: true,
             can_manage: true,
             emoji: vec!["vinyl".into(), "porch".into(), "yes".into()],
+            shared_spaces: vec![ui::SharedSpace { id: "5ba7ed0000000000000000000000000000000000000000000000000000000000".into(), name: "Porch & Basement shows".into(), joined: false }],
             ..ui::Community::default()
         },
     ]

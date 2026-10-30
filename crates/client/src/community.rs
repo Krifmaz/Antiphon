@@ -95,6 +95,7 @@ use antiphon_crypto::{BackupKey, IdentityKeyPair, PublicIdentity, SignedRouteRec
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::community_board::{self, EpochKey};
 use crate::delivery::hex;
 use crate::file_transfer::{decode_b64, encode_b64};
 
@@ -205,6 +206,48 @@ impl Card {
 
 // ---- what travels --------------------------------------------------------
 
+/// That whoever asks into a shared space is a member of one of the
+/// communities sharing it (spec §12 Q4): their key there, and its
+/// signature over the shared space and the key they ask with. The member
+/// it goes to checks that key against their own copy of that community.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Proof {
+    /// The community they come from.
+    pub community: Key,
+    /// Their encoded public identity there, hex.
+    pub public: String,
+    /// Its signature over [`proof_bytes`], hex.
+    pub signature: String,
+}
+
+/// What a [`Proof`] signs: it is for this shared space and this asker
+/// only, so it can't be replayed into another or by someone else.
+fn proof_bytes(shared: &Key, community: &Key, asker: &[u8; 32]) -> Vec<u8> {
+    let mut b = b"stoop-shared-space-v1".to_vec();
+    b.extend_from_slice(&shared.0);
+    b.extend_from_slice(&community.0);
+    b.extend_from_slice(asker);
+    b
+}
+
+impl Proof {
+    /// `home` (as the identity we are in `community` with) vouching that
+    /// `asker` may ask into `shared` on its behalf.
+    pub fn make(home: &IdentityKeyPair, community: Key, shared: &Key, asker: &[u8; 32]) -> Self {
+        let signature = home.sign(&proof_bytes(shared, &community, asker));
+        Self { community, public: hex(&home.public().encode()), signature: hex(&signature) }
+    }
+
+    /// The key it proves membership for, if the signature holds for this
+    /// shared space and asker.
+    pub fn check(&self, shared: &Key, asker: &[u8; 32]) -> Option<[u8; 32]> {
+        let identity = PublicIdentity::decode(&unhex(&self.public)?).ok()?;
+        let signature: [u8; 64] = unhex(&self.signature)?.try_into().ok()?;
+        antiphon_crypto::verify_signature(&identity.identity_key, &proof_bytes(shared, &self.community, asker), &signature).ok()?;
+        Some(identity.identity_key)
+    }
+}
+
 /// One message between members. Byte fields are base64.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "t")]
@@ -220,8 +263,26 @@ pub enum Wire {
     Commit { community: Key, commit: String, manifest: String, #[serde(default)] cards: Vec<Card> },
     /// An MLS application message: a [`Post`].
     App { community: Key, data: String },
+    /// "I'd like to join": a stranger, from a listed community's join
+    /// link, to the member who made it. `card` is how to answer them.
+    /// Asking into a shared space, `proof` shows which community they
+    /// come from, and a founding community's admin brings the `ticket`
+    /// they were given.
+    Knock {
+        community: Key,
+        card: Card,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof: Option<Proof>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<Key>,
+    },
     /// "I have version `since`; send me what came after."
     ManifestRequest { community: Key, since: u64 },
+    /// For a newcomer to a community with a board, whose Welcome was too
+    /// big for mailboxes: it is on the board after entry `since`, sealed
+    /// under the epoch they join in, whose key and token (hex) these are
+    /// -- theirs to have, as they are in that epoch from now on.
+    BoardWelcome { community: Key, board: cm::BoardRef, epoch: u64, key: String, token: String, since: u64 },
     Manifests { community: Key, list: Vec<String> },
 }
 
@@ -230,11 +291,13 @@ impl Wire {
         match self {
             Wire::Invite { .. } => None,
             Wire::Join { community, .. }
+            | Wire::Knock { community, .. }
             | Wire::Welcome { community, .. }
             | Wire::Commit { community, .. }
             | Wire::App { community, .. }
             | Wire::ManifestRequest { community, .. }
-            | Wire::Manifests { community, .. } => Some(*community),
+            | Wire::Manifests { community, .. }
+            | Wire::BoardWelcome { community, .. } => Some(*community),
         }
     }
 }
@@ -262,6 +325,9 @@ pub enum Post {
     Manifest { manifest: String },
     /// Messages reported to the moderators, sent only to them.
     Report { id: u64, channel: u32, reason: String, excerpts: Vec<Excerpt>, at_secs: u64 },
+    /// "I'm in this voice channel" (`here`), or "I've left it", with how
+    /// to reach me for the call. Sent to the channel's readers.
+    Voice { channel: u32, here: bool, invite: String, at_secs: u64 },
 }
 
 /// Something to send: `wire` to the member `to`.
@@ -331,7 +397,23 @@ struct Offer {
     /// What we call them, for the manifest if they join as themselves.
     name: String,
     at_secs: u64,
+    /// They asked, from the join link, rather than being invited.
+    #[serde(default)]
+    knocked: bool,
+    /// They brought their community into this shared space with a
+    /// ticket, and become one of its owners when they join.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    founder: Option<Key>,
 }
+
+/// Most tickets for founding a shared space held at once.
+const MAX_TICKETS: usize = 8;
+/// How long a ticket for founding a shared space lasts: a week.
+const TICKET_LIFETIME_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Most open invitations made in answer to strangers asking, so a flood
+/// of them can't push out the ones members sent.
+const MAX_KNOCKS: usize = 50;
 
 const MAX_OFFERS: usize = 200;
 /// How long an invitation can be answered: a Join after this is refused
@@ -403,6 +485,26 @@ pub struct Excerpt {
     pub at_secs: u64,
 }
 
+/// Someone in a voice channel, by their last word on it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Presence {
+    /// The voice channel.
+    pub channel: u32,
+    /// Who (their key in the space).
+    pub key: Key,
+    /// How to reach them for the call: their invite link, which carries
+    /// their main identity key and their relay.
+    pub invite: String,
+    /// When they last said they were there, by their clock.
+    pub at_secs: u64,
+}
+
+/// How often someone in a voice channel says they still are.
+pub const VOICE_HEARTBEAT_SECS: u64 = 120;
+/// How long after their last word someone counts as still there: two
+/// heartbeats and a little, so one lost one doesn't drop them.
+pub const VOICE_TTL_SECS: u64 = 2 * VOICE_HEARTBEAT_SECS + 30;
+
 /// Most messages in one report.
 pub const MAX_EXCERPTS: usize = 10;
 /// Most reports a moderator keeps waiting.
@@ -431,6 +533,12 @@ struct Saved {
     pace: Vec<Pace>,
     #[serde(default)]
     reports: Vec<Report>,
+    #[serde(default)]
+    voice: Vec<Presence>,
+    #[serde(default)]
+    tickets: Vec<(Key, u64)>,
+    #[serde(default)]
+    board_keys: Vec<EpochKey>,
 }
 
 pub struct Space {
@@ -452,6 +560,15 @@ pub struct Space {
     pace: Vec<Pace>,
     /// Reports moderators were sent and haven't dealt with, newest last.
     reports: Vec<Report>,
+    /// Who said they are in which voice channel, and when.
+    voice: Vec<Presence>,
+    /// Tickets we gave out for another community to join this shared
+    /// space, and when.
+    tickets: Vec<(Key, u64)>,
+    /// The recent epochs' board keys and tokens, oldest first, for
+    /// reading and posting to the community's board (kept whether or not
+    /// it has one, so they are there the moment it does).
+    board_keys: Vec<EpochKey>,
 }
 
 /// The identity to act as in a space: `main`, or the separate one derived
@@ -485,6 +602,13 @@ impl Space {
             offers: Vec::new(),
             pace: Vec::new(),
             reports: Vec::new(),
+            voice: Vec::new(),
+            tickets: Vec::new(),
+            board_keys: Vec::new(),
+        })
+        .map(|mut space| {
+            space.note_epoch();
+            space
         })
     }
 
@@ -529,6 +653,9 @@ impl Space {
             offers: Vec::new(),
             pace: Vec::new(),
             reports: Vec::new(),
+            voice: Vec::new(),
+            tickets: Vec::new(),
+            board_keys: Vec::new(),
         };
         space.learn(invite.card.clone());
         let out = Out { to: invite.from.0, wire: Wire::Join { community, key_package: b64(&key_package), card } };
@@ -548,6 +675,9 @@ impl Space {
             offers: self.offers.clone(),
             pace: self.pace.clone(),
             reports: self.reports.clone(),
+            voice: self.voice.clone(),
+            tickets: self.tickets.clone(),
+            board_keys: self.board_keys.clone(),
         };
         serde_json::to_vec(&saved).expect("a space always serializes")
     }
@@ -581,6 +711,9 @@ impl Space {
             offers: saved.offers,
             pace: saved.pace,
             reports: saved.reports,
+            voice: saved.voice,
+            tickets: saved.tickets,
+            board_keys: saved.board_keys,
         })
     }
 
@@ -598,6 +731,55 @@ impl Space {
 
     pub fn epoch(&self) -> Option<u64> {
         self.mls.epoch().ok()
+    }
+
+    /// The community's board, if it has one.
+    pub fn board(&self) -> Option<&cm::BoardRef> {
+        self.manifest().nodes.board.as_ref()
+    }
+
+    /// The recent epochs' board keys, oldest first; the last is the
+    /// current epoch's.
+    pub fn board_keys(&self) -> &[EpochKey] {
+        &self.board_keys
+    }
+
+    /// The board, once every member knows of it: the version before this
+    /// one named it too (or we joined with this version, which the others
+    /// already had). The version that first names a board still goes by
+    /// mail, or nobody would know to look there.
+    pub fn settled_board(&self) -> Option<&cm::BoardRef> {
+        let board = self.board()?;
+        let Some(before) = self.chain.len().checked_sub(2).map(|i| &self.chain[i].1) else { return Some(board) };
+        (before.nodes.board.as_ref() == Some(board)).then_some(board)
+    }
+
+    /// The board key an entry for `epoch` is sealed under.
+    pub fn board_key(&self, epoch: u64) -> Option<&EpochKey> {
+        self.board_keys.iter().find(|k| k.epoch == epoch)
+    }
+
+    /// Remembers the current epoch's board key. Called whenever the epoch
+    /// may have moved, before and after, so a commit can still be sealed
+    /// under the epoch it was made in.
+    fn note_epoch(&mut self) {
+        if self.mls.in_group() {
+            let id = self.id();
+            community_board::note_epoch(&mut self.board_keys, &self.mls, &id);
+        }
+    }
+
+    /// The current manifest as a commit or post carries it: in a community
+    /// with a board, as the change from the version before (a
+    /// [`cm::ManifestDelta`], marked `d:`), which stays small however many
+    /// members there are; otherwise whole.
+    fn manifest_text(&self) -> String {
+        if self.board().is_some() && self.chain.len() >= 2 {
+            if let Some(delta) = self.signed().delta_from(&self.chain[self.chain.len() - 2].0) {
+                return format!("d:{}", b64(&delta.encode()));
+            }
+        }
+        b64(&self.signed().encode())
     }
 
     /// Who can read what is sent now: the MLS group's members.
@@ -697,7 +879,8 @@ impl Space {
 
     /// A manifest change: tell everyone, then bring the group in line.
     fn publish(&mut self, signed: &SignedManifest) -> Result<Vec<Out>, String> {
-        let mut outs = self.send(&Post::Manifest { manifest: b64(&signed.encode()) })?;
+        let manifest = if *signed == *self.signed() { self.manifest_text() } else { b64(&signed.encode()) };
+        let mut outs = self.send(&Post::Manifest { manifest })?;
         outs.extend(self.converge(true));
         Ok(outs)
     }
@@ -727,24 +910,28 @@ impl Space {
         // Everyone before the removal hears of it, the removed included,
         // so they know rather than just going quiet.
         let before = self.others_in_group();
+        self.note_epoch();
         let state = b64(&self.mls.save());
         let epoch = self.mls.epoch().map_err(|e| e.to_string())?;
         let c = self.mls.remove(keys).map_err(|e| e.to_string())?;
+        self.note_epoch();
         self.previous = Some(Previous {
             epoch,
             mls: state,
             commit: sha(&c.commit),
             redo: Some(Redo::Remove { keys: keys.iter().map(|k| Key(*k)).collect() }),
         });
-        let wire = Wire::Commit { community: self.id(), commit: b64(&c.commit), manifest: b64(&self.signed().encode()), cards: Vec::new() };
+        let wire = Wire::Commit { community: self.id(), commit: b64(&c.commit), manifest: self.manifest_text(), cards: Vec::new() };
         Ok(before.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
     }
 
     fn commit_add(&mut self, key_package: &[u8], card: Card) -> Result<Vec<Out>, String> {
         let before = self.others_in_group();
+        self.note_epoch();
         let state = b64(&self.mls.save());
         let epoch = self.mls.epoch().map_err(|e| e.to_string())?;
         let c = self.mls.add(&[key_package]).map_err(|e| e.to_string())?;
+        self.note_epoch();
         self.previous = Some(Previous {
             epoch,
             mls: state,
@@ -752,11 +939,12 @@ impl Space {
             redo: Some(Redo::Add { key_package: b64(key_package), card: card.clone() }),
         });
         let manifest = b64(&self.signed().encode());
+        let change = self.manifest_text();
         let id = self.id();
         let mut outs: Vec<Out> = before
             .into_iter()
             .filter(|k| *k != card.key.0)
-            .map(|to| Out { to, wire: Wire::Commit { community: id, commit: b64(&c.commit), manifest: manifest.clone(), cards: vec![card.slim()] } })
+            .map(|to| Out { to, wire: Wire::Commit { community: id, commit: b64(&c.commit), manifest: change.clone(), cards: vec![card.slim()] } })
             .collect();
         if let Some(welcome) = c.welcome {
             outs.push(Out {
@@ -792,7 +980,7 @@ impl Space {
             if self.offers.len() >= MAX_OFFERS {
                 self.offers.remove(0);
             }
-            self.offers.push(Offer { key: Key(who), name: name.chars().take(80).collect(), at_secs: now_secs() });
+            self.offers.push(Offer { key: Key(who), name: name.chars().take(80).collect(), at_secs: now_secs(), knocked: false, founder: None });
         }
         // Slim: the invitee learns the picture once they are in.
         let card = self.card(&self.me).map(Card::slim).ok_or("no card of your own")?;
@@ -813,9 +1001,15 @@ impl Space {
         // for them would say who it is.
         let name = if card.key.0 == from { offer.name } else { card.name.clone() };
         let key = card.key;
+        // A founding community's admin owns the shared space with us; if
+        // we can't make them one, they join as anyone does.
+        let owner = offer.founder.is_some() && self.manifest().is_owner(&self.me);
         self.change(identity, |m| {
             let role = m.default_role();
             m.members.push(cm::Member { key, role, name: name.chars().take(80).collect() });
+            if owner {
+                m.owners.push(key);
+            }
         })?;
         self.offers.retain(|o| o.key.0 != from);
         Ok(())
@@ -882,6 +1076,49 @@ impl Space {
         self.send_in(channel, &post)
     }
 
+    // ---- voice channels ----
+
+    /// Says we are in voice channel `channel` (or still are): everyone who
+    /// can read it learns how to reach us for the call. `invite` is our
+    /// invite link. Not under a separate identity, since the call itself
+    /// is made with the main key and would tie the two together.
+    pub fn voice_join(&mut self, channel: u32, invite: &str) -> Result<Vec<Out>, String> {
+        if self.persona {
+            return Err("Voice channels aren't available while you're here under a separate identity: the call would show who you are".into());
+        }
+        let m = self.manifest();
+        if !m.channel(channel).is_some_and(|c| c.voice) {
+            return Err("that isn't a voice channel".into());
+        }
+        if !m.can_read(channel, &self.me) {
+            return Err("that channel is private and you're not one of its readers".into());
+        }
+        let at_secs = now_secs();
+        let me = Key(self.me);
+        self.voice.retain(|p| p.key != me);
+        self.voice.push(Presence { channel, key: me, invite: invite.to_string(), at_secs });
+        self.send_in(Some(channel), &Post::Voice { channel, here: true, invite: invite.to_string(), at_secs })
+    }
+
+    /// Says we left voice channel `channel`.
+    pub fn voice_leave(&mut self, channel: u32) -> Result<Vec<Out>, String> {
+        let me = Key(self.me);
+        self.voice.retain(|p| p.key != me);
+        self.send_in(Some(channel), &Post::Voice { channel, here: false, invite: String::new(), at_secs: now_secs() })
+    }
+
+    /// Who is in voice channel `channel` now, ourselves included, by when
+    /// each last said so.
+    pub fn voice_here(&self, channel: u32) -> Vec<Presence> {
+        let now = now_secs();
+        let m = self.manifest();
+        self.voice
+            .iter()
+            .filter(|p| p.channel == channel && now.saturating_sub(p.at_secs) <= VOICE_TTL_SECS && m.can_read(channel, &p.key.0))
+            .cloned()
+            .collect()
+    }
+
     // ---- moderation without reading anything ----
 
     /// The invitations we sent that are still open, oldest first.
@@ -907,6 +1144,75 @@ impl Space {
     /// go sealed only to members who can act on them (remove messages,
     /// remove or ban people) and the owners. Nothing goes anywhere else;
     /// there is no one else to send it to.
+    /// A ticket another community's admin brings to join this shared
+    /// space as one of the communities sharing it. Only an owner gives
+    /// them, and each works once, within a week.
+    pub fn new_ticket(&mut self) -> Result<Key, String> {
+        if !self.manifest().is_owner(&self.me) {
+            return Err("only its owners can bring in another community".into());
+        }
+        let mut t = [0u8; 32];
+        getrandom::fill(&mut t).expect("OS randomness is unavailable");
+        let now = now_secs();
+        self.tickets.retain(|(_, at)| now.saturating_sub(*at) <= TICKET_LIFETIME_SECS);
+        if self.tickets.len() >= MAX_TICKETS {
+            self.tickets.remove(0);
+        }
+        self.tickets.push((Key(t), now));
+        Ok(Key(t))
+    }
+
+    /// Someone asking into this shared space with a [`Proof`] of the
+    /// community they come from. `vouched` is whether the app found the
+    /// proved key in its own copy of that community. With a ticket we
+    /// gave out, their community joins the ones sharing this space and
+    /// they become an owner of it once they join; without one, their
+    /// community must be sharing it already. Either way they are invited,
+    /// and accept as anyone does.
+    pub fn ally_knock(&mut self, identity: &IdentityKeyPair, from: [u8; 32], card: &Card, proof: &Proof, ticket: Option<Key>, vouched: bool) -> Result<Vec<Out>, String> {
+        let shared = self.id();
+        // A ticket we gave out is its own authority: whoever brings it
+        // names the community they bring. Otherwise one of that
+        // community's members has to recognise them.
+        if proof.check(&shared, &from).is_none() || (!vouched && ticket.is_none()) {
+            return Err("they couldn't show which community they come from".into());
+        }
+        let m = self.manifest();
+        if m.is_banned(&from) || card.key.0 != from || !card.valid() {
+            return Err("they can't join".into());
+        }
+        if self.readers().contains(&from) {
+            return Ok(Vec::new());
+        }
+        let community = proof.community;
+        let mut outs = Vec::new();
+        let founder = match ticket {
+            Some(t) => {
+                let now = now_secs();
+                let Some(at) = self.tickets.iter().position(|(k, at)| *k == t && now.saturating_sub(*at) <= TICKET_LIFETIME_SECS) else {
+                    return Err("that ticket isn't one of ours, or it ran out".into());
+                };
+                if !m.alliance.contains(&community) {
+                    if m.alliance.len() >= cm::MAX_ALLIANCE {
+                        return Err("as many communities share it as can".into());
+                    }
+                    outs = self.update(identity, |m| m.alliance.push(community))?;
+                }
+                self.tickets.remove(at);
+                Some(community)
+            }
+            None if m.alliance.contains(&community) => None,
+            None => return Err("their community doesn't share this space".into()),
+        };
+        let name: String = card.name.chars().take(80).collect();
+        outs.append(&mut self.invite(identity, from, &name)?);
+        if let Some(o) = self.offers.iter_mut().find(|o| o.key.0 == from) {
+            o.knocked = true;
+            o.founder = founder;
+        }
+        Ok(outs)
+    }
+
     pub fn report(&mut self, channel: u32, reason: &str, excerpts: Vec<Excerpt>) -> Result<Vec<Out>, String> {
         if excerpts.is_empty() {
             return Err("pick at least one message to report".into());
@@ -1060,7 +1366,10 @@ impl Space {
         if self.removed {
             return h;
         }
-        match self.handle_inner(identity, from, wire, &mut h) {
+        self.note_epoch();
+        let result = self.handle_inner(identity, from, wire, &mut h);
+        self.note_epoch();
+        match result {
             Ok(()) => {
                 if h.events.iter().any(|e| matches!(e, Event::Joined | Event::Changed)) || h.outs.iter().any(|o| matches!(o.wire, Wire::Commit { .. })) {
                     self.replay_held(identity, &mut h);
@@ -1082,7 +1391,36 @@ impl Space {
             return Ok(());
         }
         match wire {
-            Wire::Invite { .. } => Ok(()),
+            // The app fetches it (`Store::receive`).
+            Wire::Invite { .. } | Wire::BoardWelcome { .. } => Ok(()),
+            // Asking into a shared space: only the app can check which
+            // community they come from, against its own copy of it
+            // (`Store::receive`, then `ally_knock`).
+            Wire::Knock { proof: Some(_), .. } => Ok(()),
+            Wire::Knock { card, .. } => {
+                // A stranger from the join link: let in only while the
+                // community is listed, by someone allowed to invite, and
+                // never someone banned. They still accept as anyone does.
+                let m = self.manifest();
+                if !m.listed || !m.can(&self.me, perm::INVITE, None) || m.is_banned(&from) || card.key.0 != from || !card.valid() {
+                    return Ok(());
+                }
+                if self.readers().contains(&from) {
+                    return Ok(());
+                }
+                let knocked = self.offers.iter().filter(|o| o.knocked).count();
+                if knocked >= MAX_KNOCKS && !self.offers.iter().any(|o| o.key.0 == from) {
+                    return Ok(());
+                }
+                let name: String = card.name.chars().take(80).collect();
+                let mut outs = self.invite(identity, from, &name)?;
+                if let Some(o) = self.offers.iter_mut().find(|o| o.key.0 == from) {
+                    o.knocked = true;
+                }
+                h.outs.append(&mut outs);
+                h.events.push(Event::Notice(format!("{name} asked to join from its listing and was invited")));
+                Ok(())
+            }
             Wire::Join { key_package, card, .. } => {
                 // `from` is who we invited, proved by the transport; the
                 // card is who they join as -- themselves, or a separate
@@ -1301,8 +1639,25 @@ impl Space {
     /// current. A gap: ask them for what we missed. Competing with ours:
     /// the lower hash stays.
     fn take_manifest(&mut self, _identity: &IdentityKeyPair, from: [u8; 32], manifest: &str, h: &mut Handled) -> Result<(), String> {
-        let signed = SignedManifest::decode(&unb64(manifest)?).map_err(|e| e.to_string())?;
         let head = self.manifest().version;
+        let signed = match manifest.strip_prefix("d:") {
+            // A change from a version we should hold: rebuilt, then
+            // judged like any other. Not holding it, ask for what we
+            // missed, whole.
+            Some(delta) => {
+                let delta = cm::ManifestDelta::decode(&unb64(delta)?).ok_or("a malformed manifest change")?;
+                match self.chain.iter().find(|(s, _)| s.hash() == delta.base).and_then(|(s, m)| delta.apply(s, m)) {
+                    Some(signed) => signed,
+                    None => {
+                        if delta.version() > head {
+                            h.outs.push(Out { to: from, wire: Wire::ManifestRequest { community: self.id(), since: head } });
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            None => SignedManifest::decode(&unb64(manifest)?).map_err(|e| e.to_string())?,
+        };
         let Ok(incoming) = signed.open() else { return Err("a manifest with a bad signature".into()) };
         if incoming.id != self.id() {
             return Err("a manifest for another community".into());
@@ -1389,6 +1744,24 @@ impl Space {
                 self.take_manifest(identity, sender, &manifest, h)?;
                 h.outs.extend(self.converge(false));
             }
+            Post::Voice { channel, here, invite, at_secs } => {
+                // Stale ones (mail that waited while we were away) say
+                // nothing about now; one from the future is a lie.
+                let now = now_secs();
+                if !m.channel(channel).is_some_and(|c| c.voice) || !m.can_read(channel, &sender) || at_secs > now + FUTURE_SLACK_SECS {
+                    return Ok(());
+                }
+                let key = Key(sender);
+                if self.voice.iter().any(|p| p.key == key && p.at_secs > at_secs) {
+                    return Ok(());
+                }
+                self.voice.retain(|p| p.key != key);
+                if here && now.saturating_sub(at_secs) <= VOICE_TTL_SECS && invite.len() <= 2048 {
+                    self.voice.push(Presence { channel, key, invite, at_secs });
+                }
+                self.voice.retain(|p| now.saturating_sub(p.at_secs) <= VOICE_TTL_SECS);
+                h.events.push(Event::Changed);
+            }
             Post::Report { id, channel, reason, excerpts, at_secs } => {
                 // Only a moderator keeps it; and a flood of reports is still
                 // a flood.
@@ -1438,7 +1811,9 @@ fn random_id() -> u64 {
 /// Bytes of a [`Wire`] per fragment: with its header, base64 and the
 /// mail body around it, a sealed fragment fits `mailbox::MAX_BLOB`.
 pub const FRAGMENT_BYTES: usize = 540;
-const MAX_FRAGMENTS: usize = 400;
+/// Most fragments in one message: a Welcome into a community of thousands
+/// (which goes by its board) carries the whole group's tree and cards.
+const MAX_FRAGMENTS: usize = 4000;
 const MAX_PARTIAL: usize = 128;
 
 /// A [`Wire`] as base64 fragments: `msg id (8) | part (2) | parts (2) | data`.
@@ -1579,6 +1954,67 @@ struct Queued {
     persona: Option<Key>,
 }
 
+/// One entry waiting to be posted to a community's board.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct BoardQueued {
+    space: Key,
+    /// The sealed entry, base64.
+    entry: String,
+    /// On the first entry of a Welcome posted for a newcomer: who to tell
+    /// where it starts once it is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    welcome: Option<WelcomePointer>,
+}
+
+/// Where a Welcome on the board starts, for its newcomer: who, and the
+/// epoch key it is sealed under.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct WelcomePointer {
+    to: Key,
+    key: EpochKey,
+}
+
+/// How far we are with one community's board.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct BoardState {
+    /// Which board this is about: when the community moves to another,
+    /// reading starts afresh there.
+    #[serde(default)]
+    board: Option<Key>,
+    /// The last entry read; `None` before the first look.
+    seen: Option<u64>,
+    /// The newest epoch whose token the node is known to accept.
+    allowed: Option<u64>,
+    /// Looks spent waiting at an entry from an epoch we haven't reached.
+    stuck: u32,
+}
+
+/// A newcomer's Welcome on a board (from [`Wire::BoardWelcome`]), to fetch
+/// while the space is still joining.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct BoardPointer {
+    space: Key,
+    from: Key,
+    board: cm::BoardRef,
+    key: EpochKey,
+    since: u64,
+    at_secs: u64,
+}
+
+/// A Welcome longer than this many fragments goes by the board, when the
+/// community has one.
+const WELCOME_INLINE: usize = if cfg!(test) { 0 } else { 8 };
+/// Most board entries waiting to be posted, across communities.
+const MAX_BOARD_OUT: usize = 20_000;
+/// Pages read from one board per look, so one busy community can't hold
+/// up the courier; the rest comes next time.
+const BOARD_PAGES_PER_LOOK: usize = 32;
+/// How many looks an entry from an epoch we haven't reached is waited
+/// for before it is skipped (its commit never came, or we lost it).
+const BOARD_STUCK_LOOKS: u32 = 20;
+/// How long a newcomer keeps trying to fetch a Welcome from a board.
+const BOARD_WELCOME_LIFETIME_SECS: u64 = 14 * 86_400;
+
 /// How you appear in one group chat or community (spec §7 "per-community
 /// identity"). Empty fields mean "as in my profile".
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -1619,6 +2055,107 @@ struct Hub {
     /// channel). Yours alone, like `ring`.
     #[serde(default)]
     notify: HashMap<String, Notify>,
+    /// Cards of people outside our spaces we need to mail: a stranger who
+    /// asked to join, or the host of a join link we used. Newest last.
+    #[serde(default)]
+    introduced: Vec<Card>,
+    /// Communities we asked to join from a join link, and when: their
+    /// invitation is taken from a stranger for a while.
+    #[serde(default)]
+    knocked: Vec<(Key, u64)>,
+    /// Shared spaces we asked into for one of our communities with a
+    /// ticket: (shared space, our community). Once we accept its
+    /// invitation, the shared space goes on our community's list.
+    #[serde(default)]
+    allying: Vec<(Key, Key)>,
+    /// Entries waiting for their community's board, oldest first.
+    #[serde(default)]
+    board_out: Vec<BoardQueued>,
+    /// How far we are with each board, by community id hex.
+    #[serde(default)]
+    boards: HashMap<String, BoardState>,
+    /// Welcomes waiting on a board for us.
+    #[serde(default)]
+    board_welcomes: Vec<BoardPointer>,
+}
+
+/// Keeps a stranger's card, newest last, replacing an older one of theirs.
+fn remember_card(hub: &mut Hub, card: Card) {
+    hub.introduced.retain(|c| c.key != card.key);
+    hub.introduced.push(card);
+    if hub.introduced.len() > MAX_INTRODUCED {
+        hub.introduced.remove(0);
+    }
+}
+
+/// Cards of strangers kept, for answering them.
+const MAX_INTRODUCED: usize = 64;
+/// How long after asking to join an invitation from its host is taken.
+const KNOCK_LIFETIME_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// A listed community's join link, as a directory shows it: which
+/// community, and the card of the member who made it, so a stranger can
+/// mail them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinLink {
+    /// The community.
+    pub community: Key,
+    /// Who answers: their key, identity and route list.
+    pub host: Card,
+}
+
+/// How a join link starts.
+pub const JOIN_PREFIX: &str = "stoop://join/";
+/// How a link for another community's admin to join a shared space
+/// starts: then the ticket in hex, a dot, and the join link's body.
+pub const ALLY_PREFIX: &str = "stoop://ally/";
+
+/// The ticket and join link in a link for a shared space.
+pub fn parse_ally_link(link: &str) -> Option<(Key, JoinLink)> {
+    let (ticket, body) = link.trim().strip_prefix(ALLY_PREFIX)?.split_once('.')?;
+    let ticket = Key(unhex(ticket)?.try_into().ok()?);
+    Some((ticket, JoinLink::parse(&format!("{JOIN_PREFIX}{body}"))?))
+}
+
+impl JoinLink {
+    /// `stoop://join/` and, in URL-safe base64: the community's id, the
+    /// host's encoded identity (length-prefixed), and their route list.
+    pub fn to_link(&self) -> String {
+        let public = unhex(&self.host.public).unwrap_or_default();
+        let routes = unhex(&self.host.routes).unwrap_or_default();
+        let mut raw = self.community.0.to_vec();
+        raw.extend_from_slice(&(public.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&public);
+        raw.extend_from_slice(&routes);
+        format!("{JOIN_PREFIX}{}", crate::file_transfer::encode_b64(&raw).replace('+', "-").replace('/', "_").trim_end_matches('='))
+    }
+
+    /// Reads one back; `None` for anything that isn't a valid join link.
+    pub fn parse(link: &str) -> Option<Self> {
+        let body = link.trim().strip_prefix(JOIN_PREFIX)?;
+        let mut b64 = body.replace('-', "+").replace('_', "/");
+        while b64.len() % 4 != 0 {
+            b64.push('=');
+        }
+        let raw = decode_b64(&b64)?;
+        if raw.len() < 34 {
+            return None;
+        }
+        let community = Key(raw[..32].try_into().ok()?);
+        let n = u16::from_be_bytes(raw[32..34].try_into().ok()?) as usize;
+        let public = raw.get(34..34 + n)?;
+        let routes = &raw[34 + n..];
+        let identity = PublicIdentity::decode(public).ok()?;
+        let host = Card {
+            key: Key(identity.identity_key),
+            public: hex(public),
+            routes: hex(routes),
+            name: String::new(),
+            status: String::new(),
+            avatar: None,
+        };
+        host.valid().then_some(Self { community, host })
+    }
 }
 
 const MAX_OUTBOX: usize = 20_000;
@@ -1791,6 +2328,53 @@ impl Store {
         }
     }
 
+    /// Takes what goes to everyone in a community with a board off `outs`
+    /// and queues it for the board instead: sealed once, posted once.
+    /// Returns what still goes member by member (a private channel's
+    /// readers, someone joining, a reply to one person).
+    ///
+    /// A commit is sealed under the epoch it was made in, which everyone
+    /// it is for (the removed included) can still read; a message under
+    /// its own epoch; a big Welcome under the epoch its newcomer joins in,
+    /// whose key goes to them by mail ([`Wire::BoardWelcome`]).
+    fn to_board(&self, hub: &mut Hub, space: &Space, identity: &IdentityKeyPair, outs: Vec<Out>) -> Vec<Out> {
+        let Some(board) = space.settled_board() else { return outs };
+        if space.removed || space.joining.is_some() || crate::config::load().strict_mode {
+            return outs;
+        }
+        let everyone = space.others_in_group();
+        let mut groups: Vec<(Wire, Vec<[u8; 32]>)> = Vec::new();
+        for out in outs {
+            match groups.iter_mut().find(|(w, _)| *w == out.wire) {
+                Some((_, to)) => to.push(out.to),
+                None => groups.push((out.wire, vec![out.to])),
+            }
+        }
+        let mut rest = Vec::new();
+        for (wire, to) in groups {
+            let epoch_of = |b64: &str| decode_b64(b64).and_then(|b| GroupMember::message_epoch(&b));
+            let (epoch, welcome) = match &wire {
+                Wire::Commit { commit, .. } => (epoch_of(commit), None),
+                Wire::App { data, .. } if !everyone.is_empty() && everyone.iter().all(|k| to.contains(k)) => (epoch_of(data), None),
+                Wire::Welcome { .. } if to.len() == 1 && fragments(&wire).len() > WELCOME_INLINE => (space.epoch(), Some(Key(to[0]))),
+                _ => (None, None),
+            };
+            let Some(key) = epoch.and_then(|e| space.board_key(e)).cloned() else {
+                rest.extend(to.into_iter().map(|to| Out { to, wire: wire.clone() }));
+                continue;
+            };
+            for (i, fragment) in fragments(&wire).into_iter().enumerate() {
+                if hub.board_out.len() >= MAX_BOARD_OUT {
+                    break;
+                }
+                let entry = b64(&community_board::seal(&board.id, &key, identity, &fragment));
+                let welcome = welcome.filter(|_| i == 0).map(|to| WelcomePointer { to, key: key.clone() });
+                hub.board_out.push(BoardQueued { space: space.id(), entry, welcome });
+            }
+        }
+        rest
+    }
+
     /// Records what a space reported: messages into channel history,
     /// edits and deletes checked against who wrote what.
     fn record(&self, space: &Space, events: &[Event], hub: &mut Hub) {
@@ -1886,6 +2470,7 @@ impl Store {
         self.save(&space).map_err(|e| e.to_string())?;
         let mut hub = self.hub();
         self.record(&space, &events, &mut hub);
+        let outs = self.to_board(&mut hub, &space, &identity, outs);
         self.queue(&mut hub, outs, space.me(), space.persona.then_some(space.id()));
         self.save_hub(&hub);
         drop(_guard);
@@ -1939,8 +2524,16 @@ impl Store {
         }
         self.save(&space).map_err(|e| e.to_string())?;
         self.queue(&mut hub, vec![out], space.me(), None);
+        let home = hub.allying.iter().find(|(s, _)| *s == id).map(|(_, h)| *h);
+        hub.allying.retain(|(s, _)| *s != id);
         self.save_hub(&hub);
         drop(_guard);
+        // We brought our community into a shared space: list it there.
+        if let Some(home) = home {
+            if let Err(why) = self.list_shared_space(&home, &id) {
+                crate::delivery::notice(format!("Couldn't list the shared space on your community: {why}"));
+            }
+        }
         bump();
         crate::delivery::kick();
         Ok(space.id())
@@ -2096,6 +2689,56 @@ impl Store {
     pub fn receive(&self, from: [u8; 32], wire: Wire) {
         match wire {
             Wire::Invite { manifest, card } => self.receive_invite(from, manifest, card),
+            Wire::Knock { community, card, proof, ticket } => {
+                if self.load(&community).is_none() || card.key.0 != from || !card.valid() {
+                    return;
+                }
+                // Into a shared space: checked against our own copy of the
+                // community they say they come from.
+                if let Some(proof) = proof {
+                    let vouched = proof.check(&community, &from).is_some_and(|key| {
+                        self.load(&proof.community).is_some_and(|home| !home.removed && home.joining.is_none() && home.manifest().is_member(&key))
+                    });
+                    {
+                        let _guard = LOCK.lock().unwrap();
+                        let mut hub = self.hub();
+                        remember_card(&mut hub, card.clone());
+                        self.save_hub(&hub);
+                    }
+                    let _ = self.with_space(&community, |space, identity| {
+                        let outs = space.ally_knock(identity, from, &card, &proof, ticket, vouched)?;
+                        Ok(((), outs, vec![Event::Notice(format!("{} asked in from an allied community and was invited", card.name.chars().take(80).collect::<String>()))]))
+                    });
+                    return;
+                }
+                // Kept so the invitation that answers them can be mailed.
+                {
+                    let _guard = LOCK.lock().unwrap();
+                    let mut hub = self.hub();
+                    remember_card(&mut hub, card.clone());
+                    self.save_hub(&hub);
+                }
+                let _ = self.with_space(&community, |space, identity| {
+                    let h = space.handle(identity, from, Wire::Knock { community, card, proof: None, ticket: None });
+                    Ok(((), h.outs, h.events))
+                });
+            }
+            Wire::BoardWelcome { community, board, epoch, key, token, since } => {
+                // Only from whoever we are waiting to be let in by.
+                let Some(space) = self.load(&community) else { return };
+                let (Some(key), Some(token)) = (crate::connection_mode::decode_hex32(&key), crate::connection_mode::decode_hex32(&token)) else { return };
+                if space.joining != Some(from) {
+                    return;
+                }
+                let _guard = LOCK.lock().unwrap();
+                let mut hub = self.hub();
+                hub.board_welcomes.retain(|p| p.space != community);
+                let key = EpochKey { epoch, key: Key(key), token: Key(token) };
+                hub.board_welcomes.push(BoardPointer { space: community, from: Key(from), board, key, since, at_secs: now_secs() });
+                self.save_hub(&hub);
+                drop(_guard);
+                crate::delivery::kick();
+            }
             other => {
                 let Some(id) = other.community() else { return };
                 if self.load(&id).is_none() {
@@ -2113,13 +2756,17 @@ impl Store {
     /// contact or someone already in a community with us, so a stranger
     /// can't fill the list.
     fn receive_invite(&self, from: [u8; 32], manifest: String, card: Card) {
-        let known = crate::config::load().contacts.iter().any(|c| c.identity_key.eq_ignore_ascii_case(&hex(&from)))
+        let Some(signed) = unb64(&manifest).ok().and_then(|b| SignedManifest::decode(&b).ok()) else { return };
+        let Ok(m) = cm::accept_first(&signed) else { return };
+        // Or the answer to our asking to join from its listing.
+        let now = now_secs();
+        let asked = self.hub().knocked.iter().any(|(c, at)| *c == m.id && now.saturating_sub(*at) <= KNOCK_LIFETIME_SECS);
+        let known = asked
+            || crate::config::load().contacts.iter().any(|c| c.identity_key.eq_ignore_ascii_case(&hex(&from)))
             || self.ids().iter().filter_map(|id| self.load(id)).any(|s| s.manifest().is_member(&from));
         if !known || card.key.0 != from || !card.valid() {
             return;
         }
-        let Some(signed) = unb64(&manifest).ok().and_then(|b| SignedManifest::decode(&b).ok()) else { return };
-        let Ok(m) = cm::accept_first(&signed) else { return };
         // Listed already (from an older build), or offered by someone
         // allowed to invite: we are written in when we answer.
         if !m.is_member(&self.identity.public().identity_key) && !m.can(&from, perm::INVITE, None) {
@@ -2139,6 +2786,158 @@ impl Store {
         bump();
     }
 
+    /// The join link for a listed community we may invite people to: a
+    /// directory lists it, and a stranger who uses it is invited by us.
+    pub fn join_link(&self, id: &Key) -> Result<String, String> {
+        let space = self.load(id).ok_or("couldn't open it")?;
+        let m = space.manifest();
+        if !m.listed {
+            return Err("It isn't open to people asking to join; turn that on first".into());
+        }
+        if !m.can(&space.me(), perm::INVITE, None) {
+            return Err("You can't invite people there, so you can't answer them".into());
+        }
+        let identity = self.identity_in(&space);
+        let host = self.card_for(id, &identity);
+        Ok(JoinLink { community: *id, host }.to_link())
+    }
+
+    /// Asks to join the community a join link names. Its host's app
+    /// invites us if it is still open, and the invitation shows up with
+    /// the others, to accept or not.
+    pub fn knock(&self, link: &str) -> Result<(), String> {
+        let join = JoinLink::parse(link).ok_or("That isn't a join link")?;
+        self.knock_with(join, None, None)
+    }
+
+    /// Sends a Knock to a join link's host, with a proof of where we come
+    /// from and a ticket when asking into a shared space.
+    fn knock_with(&self, join: JoinLink, from: Option<Key>, ticket: Option<Key>) -> Result<(), String> {
+        if self.load(&join.community).is_some_and(|s| !s.removed) {
+            return Err("You're already in it".into());
+        }
+        let me = self.identity.public().identity_key;
+        let proof = match from {
+            Some(home) => {
+                let space = self.load(&home).ok_or("couldn't open your community")?;
+                Some(Proof::make(&self.identity_in(&space), home, &join.community, &me))
+            }
+            None => None,
+        };
+        let card = self.card_for(&join.community, &self.identity);
+        let to = join.host.key.0;
+        {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            remember_card(&mut hub, join.host);
+            hub.knocked.retain(|(c, _)| *c != join.community);
+            hub.knocked.push((join.community, now_secs()));
+            if hub.knocked.len() > MAX_INTRODUCED {
+                hub.knocked.remove(0);
+            }
+            if let (Some(home), Some(_)) = (from, ticket) {
+                hub.allying.retain(|(s, _)| *s != join.community);
+                hub.allying.push((join.community, home));
+                if hub.allying.len() > MAX_INTRODUCED {
+                    hub.allying.remove(0);
+                }
+            }
+            self.queue(&mut hub, vec![Out { to, wire: Wire::Knock { community: join.community, card, proof, ticket } }], me, None);
+            self.save_hub(&hub);
+        }
+        bump();
+        crate::delivery::kick();
+        Ok(())
+    }
+
+    // ---- shared spaces (spec §12 Q4, federation) ----
+
+    /// Starts a space shared with another community, for `home` (which we
+    /// must be allowed to manage): a new space that `home`'s members may
+    /// ask into, listed on `home`. Returns the link to give the other
+    /// community's admin; it works once, within a week.
+    pub fn start_shared_space(&self, home: &Key, name: &str) -> Result<String, String> {
+        let space = self.load(home).ok_or("couldn't open it")?;
+        if space.manifest().kind != Kind::Community || !space.manifest().alliance.is_empty() {
+            return Err("Only a community can share a space".into());
+        }
+        if !space.manifest().can(&space.me(), perm::MANAGE_COMMUNITY, None) {
+            return Err("You can't manage this community".into());
+        }
+        if space.manifest().allies.len() >= cm::MAX_ALLIES {
+            return Err("It shares as many spaces as it can".into());
+        }
+        let shared = self.create(Kind::Community, name, space.persona)?;
+        let home_id = *home;
+        let ticket = self.with_space(&shared, |s, identity| {
+            let outs = s.update(identity, |m| m.alliance.push(home_id))?;
+            Ok((s.new_ticket()?, outs, Vec::new()))
+        })?;
+        self.list_shared_space(home, &shared)?;
+        let link = self.shared_space_link(&shared)?;
+        Ok(format!("{ALLY_PREFIX}{}.{}", hex(&ticket.0), link.trim_start_matches(JOIN_PREFIX)))
+    }
+
+    /// Another link for the other community's admin, for a shared space
+    /// we own.
+    pub fn new_ally_link(&self, shared: &Key) -> Result<String, String> {
+        let ticket = self.with_space(shared, |s, _| Ok((s.new_ticket()?, Vec::new(), Vec::new())))?;
+        let link = self.shared_space_link(shared)?;
+        Ok(format!("{ALLY_PREFIX}{}.{}", hex(&ticket.0), link.trim_start_matches(JOIN_PREFIX)))
+    }
+
+    /// Brings `home` into the shared space a link from another
+    /// community's admin names: asks in with its ticket, and once we
+    /// accept the invitation that answers, lists it on `home`.
+    pub fn join_shared_space(&self, home: &Key, link: &str) -> Result<(), String> {
+        let (ticket, join) = parse_ally_link(link).ok_or("That isn't a link for a shared space")?;
+        let space = self.load(home).ok_or("couldn't open it")?;
+        if !space.manifest().can(&space.me(), perm::MANAGE_COMMUNITY, None) {
+            return Err("You can't manage this community".into());
+        }
+        if space.manifest().allies.iter().any(|a| a.space == join.community) {
+            return Err("It already shares that space".into());
+        }
+        self.knock_with(join, Some(*home), Some(ticket))
+    }
+
+    /// Asks into a shared space `home` lists, as one of its members.
+    pub fn ask_into_shared_space(&self, home: &Key, shared: &Key) -> Result<(), String> {
+        let space = self.load(home).ok_or("couldn't open it")?;
+        let ally = space.manifest().allies.iter().find(|a| a.space == *shared).ok_or("It doesn't share that space any more")?;
+        let join = JoinLink::parse(&ally.link).ok_or("Its link is broken; ask an admin to list it again")?;
+        self.knock_with(join, Some(*home), None)
+    }
+
+    /// Takes a shared space off `home`'s list. Members already in it stay.
+    pub fn unlist_shared_space(&self, home: &Key, shared: &Key) -> Result<(), String> {
+        let shared = *shared;
+        self.with_space(home, |s, identity| Ok(((), s.update(identity, |m| m.allies.retain(|a| a.space != shared))?, Vec::new())))
+    }
+
+    /// Lists `shared` (which we are in) on `home`, with a join link we
+    /// host, so `home`'s members ask us and we can tell they are members.
+    fn list_shared_space(&self, home: &Key, shared: &Key) -> Result<(), String> {
+        let space = self.load(shared).ok_or("couldn't open it")?;
+        let name = space.manifest().name.clone();
+        let link = self.shared_space_link(shared)?;
+        let ally = cm::Ally { space: *shared, name, link };
+        self.with_space(home, |s, identity| {
+            let outs = s.update(identity, |m| {
+                m.allies.retain(|a| a.space != ally.space);
+                m.allies.push(ally);
+            })?;
+            Ok(((), outs, Vec::new()))
+        })
+    }
+
+    /// A shared space's join link, hosted by us.
+    fn shared_space_link(&self, shared: &Key) -> Result<String, String> {
+        let space = self.load(shared).ok_or("couldn't open it")?;
+        let identity = self.identity_in(&space);
+        Ok(JoinLink { community: *shared, host: self.card_for(shared, &identity) }.to_link())
+    }
+
     /// How to mail a member: a contact's prekey and routes, or their card.
     fn reach(&self, to: &[u8; 32]) -> Option<([u8; 32], SignedRouteRecord)> {
         let config = crate::config::load();
@@ -2155,7 +2954,8 @@ impl Store {
                 }
             }
         }
-        None
+        let card = self.hub().introduced.into_iter().rev().find(|c| c.key.0 == *to)?;
+        Some((card.prekey()?, card.record()?))
     }
 
     /// Sends what is queued: over a live call to that person if there is
@@ -2218,6 +3018,285 @@ impl Store {
 
     pub fn queued(&self) -> usize {
         self.hub().outbox.len()
+    }
+
+    /// Fragments that arrived together (a page of a board), taken in one
+    /// pass: one save of what is waiting for the rest, then each whole
+    /// message handled.
+    fn take_fragments(&self, fragments: Vec<([u8; 32], String)>) {
+        if fragments.is_empty() {
+            return;
+        }
+        let wires: Vec<([u8; 32], Wire)> = {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            hub.reassembly.expire(now_secs());
+            let wires = fragments.into_iter().filter_map(|(from, f)| Some((from, hub.reassembly.feed(from, &f)?))).collect();
+            self.save_hub(&hub);
+            wires
+        };
+        for (from, wire) in wires {
+            // Invitations come by mail, never by a board.
+            if !matches!(wire, Wire::Invite { .. }) {
+                self.receive(from, wire);
+            }
+        }
+    }
+
+    /// Gives a community a board on the mailbox node `addr`, or (with
+    /// `None`) takes it away. A setting like any other: it needs Manage
+    /// community, and travels as a new manifest version.
+    pub fn set_board(&self, id: &Key, addr: Option<String>) -> Result<(), String> {
+        let board = match addr.map(|a| a.trim().to_string()) {
+            Some(a) if a.is_empty() => return Err("Give the node's address.".into()),
+            Some(addr) => {
+                let mut board = [0u8; 32];
+                getrandom::fill(&mut board).expect("OS randomness is unavailable");
+                Some(cm::BoardRef { addr, id: Key(board) })
+            }
+            None => None,
+        };
+        self.with_space(id, |s, identity| {
+            if board.is_none() && s.manifest().members.len() > cm::MAX_COMMUNITY_MEMBERS {
+                return Err(format!("It has more than {} members, which it can only have with a board.", cm::MAX_COMMUNITY_MEMBERS));
+            }
+            let outs = s.update(identity, |m| m.nodes.board = board)?;
+            Ok(((), outs, vec![Event::Changed]))
+        })?;
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        hub.boards.remove(&hex(&id.0));
+        self.save_hub(&hub);
+        Ok(())
+    }
+
+    /// Spec §11 "Communities at full scale": for each community with a
+    /// board, makes sure the node takes our current epoch's token, posts
+    /// what is waiting, and reads what is new, a page at a time. Also
+    /// fetches a Welcome waiting on a board for a community we are joining.
+    /// Returns how many entries were read.
+    pub async fn sync_boards(&self) -> usize {
+        let mut read = 0;
+        let pointers = {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            let now = now_secs();
+            let before = hub.board_welcomes.len();
+            hub.board_welcomes.retain(|p| now.saturating_sub(p.at_secs) < BOARD_WELCOME_LIFETIME_SECS);
+            if hub.board_welcomes.len() != before {
+                self.save_hub(&hub);
+            }
+            hub.board_welcomes
+        };
+        for p in pointers {
+            read += self.fetch_welcome(p).await;
+        }
+        for id in self.ids() {
+            let Some(space) = self.load(&id) else { continue };
+            if space.removed || space.joining.is_some() || space.board().is_none() {
+                continue;
+            }
+            read += self.sync_board(space).await;
+        }
+        read
+    }
+
+    /// The node's address, and a socket to reach it the way messages go
+    /// (through the VPN when they are routed there, spec §6).
+    async fn board_node(board: &cm::BoardRef) -> Option<(antiphon_net::AppSocket, std::net::SocketAddr)> {
+        use antiphon_net::vpn::TrafficKind;
+        let addr = crate::delivery::resolve(TrafficKind::Messages, &board.addr).await?;
+        let socket = crate::vpn::bind(TrafficKind::Messages, 0).await.ok()?;
+        Some((socket, addr))
+    }
+
+    async fn sync_board(&self, space: Space) -> usize {
+        use antiphon_net::board as nb;
+        use antiphon_net::mailbox::Refusal;
+        use antiphon_net::NetError;
+        let id = space.id();
+        let board = space.board().expect("checked by the caller").clone();
+        let Some(current) = space.board_keys().last().cloned() else { return 0 };
+        let Some((socket, node)) = Self::board_node(&board).await else { return 0 };
+        let timeout = crate::delivery::NODE_TIMEOUT;
+        let mut state = self.hub().boards.get(&hex(&id.0)).cloned().filter(|s| s.board == Some(board.id)).unwrap_or_default();
+        state.board = Some(board.id);
+
+        // 1. The node takes our current token: we made the board, or it
+        //    already knows this epoch, or we tell it, proving an older one.
+        if state.allowed != Some(current.epoch) {
+            let allowed = match nb::open(&socket, node, board.id.0, &current.token.0, timeout).await {
+                Ok(()) => true,
+                Err(NetError::MailboxRefused(Refusal::WrongSecret)) => {
+                    let mut ok = false;
+                    for older in space.board_keys().iter().rev().skip(1) {
+                        if nb::rekey(&socket, node, board.id.0, &older.token.0, &current.token.0, timeout).await.is_ok() {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    ok
+                }
+                Err(_) => return 0,
+            };
+            if !allowed {
+                return 0;
+            }
+            state.allowed = Some(current.epoch);
+        }
+
+        // 2. What is waiting to go up, in order.
+        let waiting: Vec<BoardQueued> = self.hub().board_out.into_iter().filter(|q| q.space == id).collect();
+        let mut posted = 0;
+        for q in &waiting {
+            let Ok(entry) = unb64(&q.entry) else {
+                posted += 1;
+                continue;
+            };
+            match nb::post(&socket, node, board.id.0, &current.token.0, &entry, timeout).await {
+                Ok(seq) => {
+                    posted += 1;
+                    if let Some(w) = &q.welcome {
+                        let wire = Wire::BoardWelcome {
+                            community: id,
+                            board: board.clone(),
+                            epoch: w.key.epoch,
+                            key: hex(&w.key.key.0),
+                            token: hex(&w.key.token.0),
+                            since: seq - 1,
+                        };
+                        let _guard = LOCK.lock().unwrap();
+                        let mut hub = self.hub();
+                        self.queue(&mut hub, vec![Out { to: w.to.0, wire }], space.me(), space.persona.then_some(id));
+                        self.save_hub(&hub);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if posted > 0 {
+            let _guard = LOCK.lock().unwrap();
+            let mut hub = self.hub();
+            let mut left = posted;
+            hub.board_out.retain(|q| {
+                if q.space == id && left > 0 {
+                    left -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            self.save_hub(&hub);
+        }
+
+        // 3. What is new. A first look starts a page back from the newest,
+        //    not at the beginning: older entries are from epochs before
+        //    we were in, which we couldn't read anyway.
+        let mut since = match state.seen {
+            Some(s) => s,
+            None => match nb::fetch(&socket, node, board.id.0, &current.token.0, 0, 1, timeout).await {
+                Ok(page) => page.last.saturating_sub(nb::MAX_PAGE as u64),
+                Err(_) => return 0,
+            },
+        };
+        let mut read = 0;
+        'pages: for _ in 0..BOARD_PAGES_PER_LOOK {
+            let Ok(page) = nb::fetch(&socket, node, board.id.0, &current.token.0, since, nb::MAX_PAGE, timeout).await else { break };
+            if page.entries.is_empty() {
+                since = since.max(page.next.min(page.last));
+                break;
+            }
+            let mut batch = Vec::new();
+            for (seq, entry) in page.entries {
+                // Each page is opened with the keys as they stand: a commit
+                // earlier on it may have moved us on.
+                let keys = self.load(&id).map(|s| s.board_keys().to_vec()).unwrap_or_default();
+                match community_board::open(&board.id, &keys, &entry) {
+                    community_board::Opened::Fragment { from, fragment } => {
+                        if from != space.me() {
+                            batch.push((from, fragment));
+                        }
+                    }
+                    community_board::Opened::Ahead(_) if !batch.is_empty() => {
+                        // Handle what came before it first: the commit that
+                        // gets us there may be in this batch.
+                        self.take_fragments(std::mem::take(&mut batch));
+                        let keys = self.load(&id).map(|s| s.board_keys().to_vec()).unwrap_or_default();
+                        if let community_board::Opened::Fragment { from, fragment } = community_board::open(&board.id, &keys, &entry) {
+                            if from != space.me() {
+                                batch.push((from, fragment));
+                            }
+                        } else {
+                            state.stuck += 1;
+                            if state.stuck < BOARD_STUCK_LOOKS {
+                                break 'pages;
+                            }
+                        }
+                    }
+                    community_board::Opened::Ahead(_) => {
+                        state.stuck += 1;
+                        if state.stuck < BOARD_STUCK_LOOKS {
+                            break 'pages;
+                        }
+                    }
+                    community_board::Opened::Unreadable => {}
+                }
+                since = seq;
+                state.stuck = 0;
+                read += 1;
+                if batch.len() >= 16 {
+                    self.take_fragments(std::mem::take(&mut batch));
+                }
+            }
+            self.take_fragments(batch);
+            if since >= page.last {
+                break;
+            }
+        }
+        state.seen = Some(since);
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        hub.boards.insert(hex(&id.0), state);
+        self.save_hub(&hub);
+        read
+    }
+
+    /// Fetches a Welcome left on a board for us, and what follows it in
+    /// the same epoch, until we are in. From then on the board is read
+    /// as usual, from where this left off.
+    async fn fetch_welcome(&self, p: BoardPointer) -> usize {
+        use antiphon_net::board as nb;
+        let Some((socket, node)) = Self::board_node(&p.board).await else { return 0 };
+        let timeout = crate::delivery::NODE_TIMEOUT;
+        let mut since = p.since;
+        let mut read = 0;
+        let mut joined = false;
+        for _ in 0..BOARD_PAGES_PER_LOOK {
+            let Ok(page) = nb::fetch(&socket, node, p.board.id.0, &p.key.token.0, since, nb::MAX_PAGE, timeout).await else { break };
+            let mut batch = Vec::new();
+            for (seq, entry) in &page.entries {
+                if let community_board::Opened::Fragment { from, fragment } = community_board::open(&p.board.id, std::slice::from_ref(&p.key), entry) {
+                    batch.push((from, fragment));
+                }
+                since = *seq;
+                read += 1;
+            }
+            self.take_fragments(batch);
+            joined = self.load(&p.space).is_some_and(|s| s.joining.is_none());
+            if joined || page.entries.is_empty() || since >= page.last {
+                break;
+            }
+        }
+        let _guard = LOCK.lock().unwrap();
+        let mut hub = self.hub();
+        if joined {
+            hub.board_welcomes.retain(|q| q.space != p.space);
+            hub.boards.insert(hex(&p.space.0), BoardState { board: Some(p.board.id), seen: Some(since), allowed: None, stuck: 0 });
+        } else if let Some(q) = hub.board_welcomes.iter_mut().find(|q| q.space == p.space) {
+            q.since = since;
+        }
+        self.save_hub(&hub);
+        read
     }
 }
 
@@ -2572,6 +3651,114 @@ mod tests {
         let bob_key = bob.key();
         run(&mut [&mut alice, &mut bob, &mut carol], vec![(2, Out { to: bob_key, wire: post })]);
         assert!(bob.space().reports().is_empty());
+    }
+
+    #[test]
+    fn a_voice_channel_says_who_is_in_it() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice
+            .space()
+            .update(&alice_id, |m| m.channels.push(antiphon_crypto::community::Channel { id: 1, name: "lounge".into(), voice: true, ..Default::default() }))
+            .unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert!(bob.space().voice_join(0, "stoop://x").is_err(), "a text channel has no call");
+        let outs = bob.space().voice_join(1, "stoop://bob").unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        let here = alice.space().voice_here(1);
+        assert_eq!(here.len(), 1);
+        assert_eq!((here[0].key.0, here[0].invite.as_str()), (bob.key(), "stoop://bob"));
+        // Word that waited in a mailbox says nothing about now.
+        let stale = carol.space().encrypt(&Post::Voice { channel: 1, here: true, invite: "stoop://carol".into(), at_secs: now_secs() - VOICE_TTL_SECS - 5 }).unwrap();
+        let alice_key = alice.key();
+        run(&mut [&mut alice, &mut bob, &mut carol], vec![(2, Out { to: alice_key, wire: stale })]);
+        assert_eq!(alice.space().voice_here(1).len(), 1);
+        let outs = bob.space().voice_leave(1).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert!(alice.space().voice_here(1).is_empty());
+    }
+
+    #[test]
+    fn a_stranger_joins_a_listed_community_by_asking() {
+        let (mut alice, mut bob, mut carol) = three();
+        let mut dave = person("Dave");
+        let community = alice.space().id();
+        let knock = vec![(3, Out { to: alice.key(), wire: Wire::Knock { community, card: dave.card(), proof: None, ticket: None } })];
+        // Not listed: asking does nothing.
+        run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], knock.clone());
+        assert!(dave.space.is_none());
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice.space().update(&alice_id, |m| m.listed = true).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], outs.into_iter().map(|o| (0, o)).collect());
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol, &mut dave], knock);
+        assert!(ev[3].contains(&Event::Joined), "{ev:?}");
+        assert!(bob.space().manifest().is_member(&dave.key()));
+    }
+
+    #[test]
+    fn two_communities_meet_in_a_shared_space() {
+        // Alice runs the shared space for her community A; Bob is an
+        // admin of community B, Carol a member of B.
+        let (mut alice, mut bob, mut carol) = (person("Alice"), person("Bob"), person("Carol"));
+        let (a, b, shared) = (Key([1; 32]), Key([2; 32]), Key([4; 32]));
+        alice.space = Some(Space::create(&alice.id, shared, Kind::Community, "A and B", alice.card(), false).unwrap());
+        let alice_id = alice.acting();
+        alice.space().update(&alice_id, |m| m.alliance.push(a)).unwrap();
+        let ticket = alice.space().new_ticket().unwrap();
+        let bob_card = bob.card();
+
+        // Without a ticket or anyone to vouch for them, B can't come in.
+        let proof = Proof::make(&bob.id, b, &shared, &bob.key());
+        assert!(alice.space().ally_knock(&alice_id, bob.key(), &bob_card, &proof, None, false).is_err());
+        // A proof for another space, or by someone else, doesn't hold.
+        let elsewhere = Proof::make(&bob.id, b, &Key([8; 32]), &bob.key());
+        assert!(alice.space().ally_knock(&alice_id, bob.key(), &bob_card, &elsewhere, Some(ticket), false).is_err());
+        // With the ticket, Bob brings B in and becomes an owner.
+        let outs = alice.space().ally_knock(&alice_id, bob.key(), &bob_card, &proof, Some(ticket), false).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert!(ev[1].contains(&Event::Joined), "{ev:?}");
+        assert_eq!(alice.space().manifest().alliance, vec![a, b]);
+        assert!(alice.space().manifest().is_owner(&bob.key()));
+        // The ticket worked once.
+        let again = Proof::make(&carol.id, b, &shared, &carol.key());
+        assert!(alice.space().ally_knock(&alice_id, carol.key(), &carol.card(), &again, Some(ticket), false).is_err());
+
+        // Carol asks Bob, who finds her in B: she's let in, and all three
+        // talk there though she is in neither A nor Alice's contacts.
+        let bob_id = bob.acting();
+        let outs = bob.space().ally_knock(&bob_id, carol.key(), &carol.card(), &again, None, true).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+        assert!(ev[2].contains(&Event::Joined), "{ev:?}");
+        let (outs, _) = carol.space().post(0, "hello from B", None).unwrap();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
+        assert_eq!(texts(&ev[0]), ["hello from B"]);
+        // A community that doesn't share it gets nowhere, vouched or not.
+        let dave = person("Dave");
+        let outsider = Proof::make(&dave.id, Key([6; 32]), &shared, &dave.key());
+        assert!(bob.space().ally_knock(&bob_id, dave.key(), &dave.card(), &outsider, None, true).is_err());
+        assert!(dave.space.is_none());
+    }
+
+    #[test]
+    fn a_shared_space_link_round_trips() {
+        let alice = person("Alice");
+        let join = JoinLink { community: Key([7; 32]), host: alice.card() };
+        let link = format!("{ALLY_PREFIX}{}.{}", hex(&[5; 32]), join.to_link().trim_start_matches(JOIN_PREFIX));
+        let (ticket, back) = parse_ally_link(&link).unwrap();
+        assert_eq!((ticket, back.community, back.host.key), (Key([5; 32]), join.community, join.host.key));
+        assert!(parse_ally_link(&join.to_link()).is_none());
+    }
+
+    #[test]
+    fn a_join_link_round_trips() {
+        let alice = person("Alice");
+        let link = JoinLink { community: Key([7; 32]), host: alice.card() };
+        let text = link.to_link();
+        assert!(text.starts_with(JOIN_PREFIX) && text.len() < 600, "{text}");
+        // The name isn't carried: the directory entry gives one.
+        let back = JoinLink::parse(&text).unwrap();
+        assert_eq!((back.community, back.host.key, &back.host.public), (link.community, link.host.key, &link.host.public));
+        assert_eq!(JoinLink::parse("stoop://join/AAAA"), None);
     }
 
     #[test]
@@ -3039,5 +4226,160 @@ mod tests {
         let main_count = alice_froms.iter().filter(|k| **k == bob.public().identity_key).count();
         assert!(main_count >= 1);
         assert!(alice_froms.iter().all(|k| *k == robin || *k == bob.public().identity_key));
+    }
+
+    #[test]
+    fn with_a_board_manifest_changes_travel_as_deltas() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let board = cm::BoardRef { addr: "node.example".into(), id: Key([8; 32]) };
+        let outs = alice.space().update(&alice_id, |m| m.nodes.board = Some(board.clone())).unwrap();
+        // Naming the board is itself a whole version, as nobody knew of it.
+        assert!(outs.iter().all(|o| !matches!(&o.wire, Wire::App { .. }) || alice.space.as_ref().unwrap().settled_board().is_none()));
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert_eq!(bob.space().board(), Some(&board));
+        assert_eq!(bob.space().manifest().max_members(), cm::MAX_BOARD_COMMUNITY_MEMBERS);
+
+        // Now a ban: the commit carries only the change, and everyone ends
+        // on the same signed version.
+        let outs = alice.space().ban(&alice_id, carol.key(), "spam").unwrap();
+        let commit = outs.iter().find_map(|o| if let Wire::Commit { manifest, .. } = &o.wire { Some(manifest.clone()) } else { None }).unwrap();
+        assert!(commit.starts_with("d:"), "a delta");
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert!(carol.space().removed);
+        assert_eq!(bob.space().signed(), alice.space().signed());
+        assert!(bob.space().manifest().is_banned(&carol.key()));
+        // Both hold the same board key for the epoch they're in, and
+        // Carol, out of the group, never learns it.
+        let (a, b) = (alice.space().board_keys().last().cloned().unwrap(), bob.space().board_keys().last().cloned().unwrap());
+        assert_eq!(a, b);
+        assert_eq!(Some(a.epoch), alice.space().epoch());
+        assert!(carol.space().board_keys().iter().all(|k| k.epoch < a.epoch));
+    }
+
+    #[test]
+    fn a_delta_on_a_version_we_lack_asks_for_the_whole() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice.space().update(&alice_id, |m| m.nodes.board = Some(cm::BoardRef { addr: "n".into(), id: Key([8; 32]) })).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        // Two changes; Bob misses the first.
+        let bob_key = bob.key();
+        let outs = alice.space().update(&alice_id, |m| m.name = "Choir II".into()).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().filter(|o| o.to != bob_key).map(|o| (0, o)).collect());
+        let outs = alice.space().update(&alice_id, |m| m.description = "We sing".into()).unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        assert_eq!(bob.space().manifest().description, "We sing");
+        assert_eq!(bob.space().signed(), alice.space().signed());
+    }
+
+    /// A store of one's own in a fresh folder, as the app has.
+    fn store(dir: &Path, name: &str) -> Store {
+        let dir = dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = crate::history::load_or_create_backup_key(&dir).unwrap();
+        Store { dir, key, identity: Arc::new(IdentityKeyPair::generate()) }
+    }
+
+    /// Hands what `from` has queued for `to` over, as mail would.
+    fn deliver(from: &Store, to: &Store) -> usize {
+        let them = Key(to.identity.public().identity_key);
+        let mut hub = from.hub();
+        let (theirs, rest): (Vec<Queued>, Vec<Queued>) = hub.outbox.into_iter().partition(|q| q.to == them);
+        hub.outbox = rest;
+        from.save_hub(&hub);
+        for q in &theirs {
+            to.receive_fragment(from.identity.public().identity_key, &q.fragment);
+        }
+        theirs.len()
+    }
+
+    fn said(store: &Store, id: &Key) -> Vec<String> {
+        crate::history::load(&store.dir, &channel_log(id, 0), &store.key).into_iter().map(|m| m.text).collect()
+    }
+
+    /// Invites `who` by mail and has them accept; the inviter's answer
+    /// (the Welcome, or with a board a pointer to it) is left queued.
+    fn invite_in(owner: &Store, id: &Key, who: &Store, name: &str) {
+        let key = who.identity.public().identity_key;
+        owner.with_space(id, |s, identity| Ok(((), s.invite(identity, key, name)?, Vec::new()))).unwrap();
+        // As if they had asked from its join link: an invitation from a
+        // stranger is otherwise dropped.
+        let mut hub = who.hub();
+        hub.knocked.push((*id, now_secs()));
+        who.save_hub(&hub);
+        deliver(owner, who);
+        who.accept_invite(0, false).unwrap();
+        deliver(who, owner);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_community_with_a_board_posts_once_and_everyone_reads_it() {
+        let dir = std::env::temp_dir().join(format!("antiphon-board-{}", random_id()));
+        // A mailbox node with boards, on this machine.
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let node = socket.local_addr().unwrap().to_string();
+        let mailbox = antiphon_relay::mailbox::Mailbox::new(antiphon_relay::mailbox::MailboxLimits { enabled: true, ..Default::default() });
+        let mailbox = Arc::new(Mutex::new(mailbox));
+        let relay = Arc::new(Mutex::new(antiphon_relay::Relay::new(Default::default())));
+        tokio::spawn(antiphon_relay::run_node(socket, relay, Some(mailbox.clone()), None));
+
+        let (alice, bob, carol) = (store(&dir, "alice"), store(&dir, "bob"), store(&dir, "carol"));
+        let id = alice.create(Kind::Community, "Big", false).unwrap();
+        invite_in(&alice, &id, &bob, "Bob");
+        deliver(&alice, &bob);
+        assert!(bob.load(&id).unwrap().joining.is_none(), "Bob is in");
+
+        // The board is named by mail; from then on, it carries what is for
+        // everyone.
+        alice.set_board(&id, Some(node.clone())).unwrap();
+        deliver(&alice, &bob);
+        assert!(bob.load(&id).unwrap().settled_board().is_none());
+        alice.with_space(&id, |s, identity| Ok(((), s.update(identity, |m| m.description = "big".into())?, Vec::new()))).unwrap();
+        assert_eq!(deliver(&alice, &bob), 0, "the next change goes by the board");
+        alice.sync_boards().await;
+        bob.sync_boards().await;
+        assert!(bob.load(&id).unwrap().settled_board().is_some());
+
+        alice.with_space(&id, |s, _| {
+            let (outs, e) = s.post(0, "one upload", None)?;
+            Ok(((), outs, vec![e]))
+        })
+        .unwrap();
+        assert_eq!(alice.hub().outbox.len(), 0, "nothing by mail");
+        assert_eq!(alice.hub().board_out.len(), 1);
+        alice.sync_boards().await;
+        assert!(alice.hub().board_out.is_empty());
+        assert!(bob.sync_boards().await >= 1);
+        assert_eq!(said(&bob, &id), ["one upload"]);
+        assert_eq!(mailbox.lock().unwrap().stats().boards, 1);
+
+        // Carol joins: the commit and her Welcome go on the board, and she
+        // is told by mail where it starts.
+        invite_in(&alice, &id, &carol, "Carol");
+        assert!(alice.hub().outbox.is_empty(), "the Welcome waits for the board");
+        alice.sync_boards().await;
+        assert_eq!(deliver(&alice, &carol), 1, "the pointer");
+        carol.sync_boards().await;
+        assert!(carol.load(&id).unwrap().joining.is_none(), "Carol is in");
+        bob.sync_boards().await;
+        let (a, b, c) = (alice.load(&id).unwrap(), bob.load(&id).unwrap(), carol.load(&id).unwrap());
+        assert_eq!(b.readers().len(), 3, "Bob took the commit from the board");
+        assert_eq!(b.signed(), a.signed(), "and its manifest change");
+        assert_eq!((b.epoch(), c.epoch()), (a.epoch(), a.epoch()));
+
+        // A new epoch: the node lets its token in once someone proves an
+        // older one, and everyone reads on.
+        carol.with_space(&id, |s, _| {
+            let (outs, e) = s.post(0, "hi from Carol", None)?;
+            Ok(((), outs, vec![e]))
+        })
+        .unwrap();
+        carol.sync_boards().await;
+        alice.sync_boards().await;
+        bob.sync_boards().await;
+        assert_eq!(said(&alice, &id), ["one upload", "hi from Carol"]);
+        assert_eq!(said(&bob, &id), ["one upload", "hi from Carol"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

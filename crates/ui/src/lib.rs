@@ -40,6 +40,8 @@ pub type El<'a, M> = iced_core::Element<'a, M, iced_core::Theme, iced_widget::Re
 
 /// The composer's widget id, so an app can focus it when a conversation opens.
 pub const COMPOSER: &str = "stoop-composer";
+/// The message edit box's widget id, focused when an edit starts.
+pub const EDIT_BOX: &str = "stoop-edit";
 /// The people search box's widget id, for a find shortcut.
 pub const SEARCH: &str = "stoop-search";
 
@@ -146,6 +148,10 @@ pub enum Dialog {
     Roles(String),
     /// Slow mode, reports and open invitations in this community (by id).
     Moderation(String),
+    /// The spaces this community shares with other communities (by id).
+    SharedSpaces(String),
+    /// Find communities in the directories you added.
+    Directory,
     /// Report a message (community id, channel, message id) and any others
     /// picked with it.
     Report(String, u32, u64),
@@ -205,6 +211,8 @@ pub enum Action {
     Door(bool),
     /// Call a contact.
     Call(String),
+    /// Bring a contact into the call that is running (spec §3 group calls).
+    AddToCall(String),
     /// Call an address that is not a contact.
     CallAddress(String),
     /// Leave the call, or stop placing it.
@@ -349,6 +357,9 @@ pub enum Action {
     /// Put the typing cursor in the text box with this widget id, or take
     /// it out of every box (`None`): keyboard focus moved.
     FocusInput(Option<&'static str>),
+    /// Scroll the focused control into view: the one marked by
+    /// [`a11y::mark`], or the text box with this widget id.
+    RevealFocus(Option<&'static str>),
     /// Use this microphone; empty is the system default.
     Input(String),
     /// Use these speakers or headphones; empty is the system default.
@@ -363,6 +374,20 @@ pub enum Action {
     EchoCancel(bool),
     /// "Low data" calls on or off.
     LowData(bool),
+    /// Sending a shared screen's sound on or off.
+    ScreenAudio(bool),
+    /// Look for plugins installed on this computer.
+    FindPlugins,
+    /// Add the found plugin at this index to the end of the chain.
+    AddPlugin(usize),
+    /// Take the chain's plugin at this index out.
+    RemovePlugin(usize),
+    /// Turn the chain's plugin at this index on or off.
+    PluginOn(usize, bool),
+    /// Move the chain's plugin at this index one place earlier.
+    PluginEarlier(usize),
+    /// Set a parameter (by id) of the chain's plugin at this index.
+    PluginParam(usize, String, f32),
     /// Automatic level on or off.
     AutoGain(bool),
     /// Use a voice preset by name.
@@ -385,6 +410,8 @@ pub enum Action {
     Anonymity(bool),
     /// The hops for anonymity mode, comma-separated `host:port[#key]`.
     AnonymityHops(String),
+    /// The local API for scripts and bots on or off.
+    LocalApi(bool),
     /// The port the door listens on.
     Port(u16),
     /// Re-run the reachability check.
@@ -503,9 +530,27 @@ pub enum Action {
         community: String,
         /// Its name, without the hash.
         name: String,
+        /// A voice channel rather than a text one.
+        voice: bool,
     },
     /// Leave a group chat or community (the dialog already asked).
     LeaveSpace(String),
+    /// Add a mailbox node: a node link or a `host:port`.
+    AddNode(String),
+    /// Add a mailbox node by a picture of its QR code (a file is picked).
+    AddNodeFromQr,
+    /// Take a mailbox node off your routes.
+    RemoveNode(String),
+    /// Look for mailbox nodes on this network.
+    FindNodes,
+    /// Add a community directory (`host:port`) to browse.
+    AddDirectory(String),
+    /// Stop browsing a directory.
+    RemoveDirectory(String),
+    /// Read every directory again.
+    BrowseDirectories,
+    /// Ask to join a community from its listing (its join link).
+    AskToJoin(String),
     /// Choose a picture to add as one of this community's emoji (by id);
     /// its name comes from the file's.
     AddEmoji(String),
@@ -579,6 +624,34 @@ pub enum SpaceChange {
     },
     /// Set slow mode: the fewest seconds between one member's posts, 0 off.
     SlowMode(u32),
+    /// Give it a board on this mailbox node (`host[:port]`), so a message
+    /// for everyone is posted once and it can grow to thousands; or, with
+    /// `None`, take the board away.
+    Board(Option<String>),
+    /// Open it to people asking to join from its join link, or close it.
+    Listed(bool),
+    /// Ask a directory (`host:port`) to list it, with this description.
+    SubmitListing {
+        /// The directory's address.
+        directory: String,
+        /// What it says about itself.
+        description: String,
+    },
+    /// Ask a directory to take it off.
+    WithdrawListing(String),
+    /// Start a space shared with another community, with this name; a
+    /// link for the other community's admin comes back.
+    StartShared(String),
+    /// Bring this community into the shared space a link from another
+    /// community's admin names.
+    JoinShared(String),
+    /// Ask into a shared space this community lists (its id, hex).
+    AskIntoShared(String),
+    /// Take a shared space off this community's list (its id, hex).
+    UnlistShared(String),
+    /// Make another link for another community's admin to join this
+    /// shared space, which you own.
+    NewAllyLink,
     /// Withdraw the invitation you sent to someone (their id, hex).
     WithdrawInvite(String),
     /// Take a report off the list.
@@ -590,6 +663,11 @@ pub enum SpaceChange {
         /// Ban rather than only remove.
         ban: bool,
     },
+    /// Join a voice channel: say you're there, and be connected to the
+    /// call of whoever else is.
+    JoinVoice(u32),
+    /// Leave the voice channel you are in.
+    LeaveVoice(u32),
     /// Report messages in a channel to the moderators.
     Report {
         /// The channel.
@@ -701,10 +779,38 @@ pub enum Msg {
     ChannelName(String),
     /// Add the channel named in the box to this community (by id).
     ChannelCreate(String),
+    /// Make the new channel a voice channel, or a text one.
+    ChannelVoice(bool),
     /// Show or hide the files waiting to be sent.
     ToggleQueue,
     /// Put `:name:` (a custom emoji) at the end of the composer's text.
     InsertEmoji(String),
+    /// The box for a mailbox node to add changed.
+    NodeEdit(String),
+    /// Add the node typed in the box.
+    NodeAdd,
+    /// The directory search box changed.
+    DirectoryQuery(String),
+    /// The box for a directory to add changed.
+    DirectoryAddress(String),
+    /// Add the directory typed in the box.
+    DirectoryAdd,
+    /// The directory box in a community's listing settings changed.
+    ListingDirectory(String),
+    /// The node box in a community's board settings changed.
+    BoardNode(String),
+    /// The description box in a community's listing settings changed.
+    ListingDescription(String),
+    /// Send the listing typed in the boxes (community id).
+    ListingSubmit(String),
+    /// The name box for a new shared space changed.
+    SharedName(String),
+    /// The box for another community's shared space link changed.
+    SharedLink(String),
+    /// Start the shared space named in the box (community id).
+    SharedStart(String),
+    /// Join the shared space whose link is in the box (community id).
+    SharedJoin(String),
     /// Pick or unpick a message to report with the others.
     ReportPick(u64),
     /// The report's reason box changed.
@@ -809,11 +915,29 @@ pub struct Ui {
     space_group: bool,
     /// The new channel's name box.
     channel_name: String,
+    /// The new channel is a voice channel.
+    channel_voice: bool,
     /// The list of files waiting to be sent is open (it starts folded,
     /// so a long queue never pushes the messages off screen).
     queue_open: bool,
     /// The new role's name box.
     role_name: String,
+    /// The box for a mailbox node to add.
+    node_edit: String,
+    /// The directory search box.
+    directory_query: String,
+    /// The box for a directory to add.
+    directory_address: String,
+    /// The directory a community is to be listed in.
+    listing_directory: String,
+    /// The mailbox node a community's board is to be on.
+    board_node: String,
+    /// What the listing is to say.
+    listing_description: String,
+    /// The name for a new shared space.
+    shared_name: String,
+    /// Another community's link for a shared space.
+    shared_link: String,
     /// The messages picked to report.
     report_pick: Vec<u64>,
     /// Why they are being reported.
@@ -847,6 +971,9 @@ pub struct Ui {
     /// The key of the control with keyboard focus (see [`a11y`]); `None`
     /// until Tab is first pressed.
     focus: Option<String>,
+    /// The message (by id) whose tools are in the keyboard's list, because
+    /// focus is on it or on one of them.
+    active_message: Option<u64>,
 }
 
 impl Default for Ui {
@@ -891,9 +1018,18 @@ impl Ui {
             space_name: String::new(),
             space_group: false,
             channel_name: String::new(),
+            channel_voice: false,
             queue_open: false,
             role_name: String::new(),
             report_pick: Vec::new(),
+            directory_query: String::new(),
+            node_edit: String::new(),
+            directory_address: String::new(),
+            listing_directory: String::new(),
+            board_node: String::new(),
+            shared_name: String::new(),
+            shared_link: String::new(),
+            listing_description: String::new(),
             report_reason: String::new(),
             toasts: Vec::new(),
             next_toast: 1,
@@ -907,6 +1043,7 @@ impl Ui {
             insets: (0.0, 0.0),
             accent_edit: None,
             focus: None,
+            active_message: None,
         }
     }
 
@@ -1077,7 +1214,12 @@ impl Ui {
                     self.report_pick = vec![*id];
                     self.report_reason.clear();
                 }
+                // Opening the directories reads them again.
+                let browse = d == Some(Dialog::Directory);
                 self.set_dialog(d);
+                if browse {
+                    return vec![Action::BrowseDirectories];
+                }
                 Vec::new()
             }
             Msg::TogglePanel => {
@@ -1107,7 +1249,9 @@ impl Ui {
             }
             Msg::EditStart(id, text) => {
                 self.editing = Some((id, text));
-                Vec::new()
+                // Straight into the box, whether Edit was clicked or pressed.
+                self.focus = Some(format!("{:?}|Edit message|0", a11y::Role::Input));
+                vec![Action::FocusInput(Some(EDIT_BOX))]
             }
             Msg::EditDraft(s) => {
                 if let Some((_, text)) = self.editing.as_mut() {
@@ -1304,6 +1448,10 @@ impl Ui {
                 }
                 vec![Action::CreateSpace { name, group: self.space_group }]
             }
+            Msg::ChannelVoice(on) => {
+                self.channel_voice = on;
+                Vec::new()
+            }
             Msg::ChannelName(s) => {
                 // Channel names read like words joined by dashes, as people
                 // expect from other apps: no spaces, no hash, short.
@@ -1317,7 +1465,8 @@ impl Ui {
                 }
                 self.channel_name.clear();
                 self.set_dialog(None);
-                vec![Action::AddChannel { community, name }]
+                let voice = std::mem::take(&mut self.channel_voice);
+                vec![Action::AddChannel { community, name, voice }]
             }
             Msg::InsertEmoji(name) => {
                 if let Some(key) = self.draft_key() {
@@ -1333,6 +1482,73 @@ impl Ui {
             Msg::ToggleQueue => {
                 self.queue_open = !self.queue_open;
                 Vec::new()
+            }
+            Msg::NodeEdit(s) => {
+                self.node_edit = s;
+                Vec::new()
+            }
+            Msg::NodeAdd => {
+                let text = std::mem::take(&mut self.node_edit).trim().to_string();
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::AddNode(text)]
+            }
+            Msg::DirectoryQuery(s) => {
+                self.directory_query = s;
+                Vec::new()
+            }
+            Msg::DirectoryAddress(s) => {
+                self.directory_address = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::DirectoryAdd => {
+                let address = std::mem::take(&mut self.directory_address);
+                if address.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::AddDirectory(address), Action::BrowseDirectories]
+            }
+            Msg::ListingDirectory(s) => {
+                self.listing_directory = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::BoardNode(s) => {
+                self.board_node = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::SharedName(s) => {
+                self.shared_name = s.chars().take(80).collect();
+                Vec::new()
+            }
+            Msg::SharedLink(s) => {
+                self.shared_link = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::SharedStart(community) => {
+                let name = std::mem::take(&mut self.shared_name).trim().to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::ManageSpace { community, change: SpaceChange::StartShared(name) }]
+            }
+            Msg::SharedJoin(community) => {
+                let link = std::mem::take(&mut self.shared_link);
+                if link.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::ManageSpace { community, change: SpaceChange::JoinShared(link) }]
+            }
+            Msg::ListingDescription(s) => {
+                self.listing_description = s.chars().take(240).collect();
+                Vec::new()
+            }
+            Msg::ListingSubmit(community) => {
+                if self.listing_directory.is_empty() {
+                    return Vec::new();
+                }
+                let change = SpaceChange::SubmitListing { directory: self.listing_directory.clone(), description: self.listing_description.trim().to_string() };
+                vec![Action::ManageSpace { community, change }]
             }
             Msg::ReportPick(id) => {
                 if let Some(at) = self.report_pick.iter().position(|x| *x == id) {
@@ -1390,9 +1606,8 @@ impl Ui {
             },
             Msg::Focus(step) => {
                 let nodes = a11y::nodes();
-                self.focus = a11y::next_stop(&nodes, self.focus.as_deref(), step);
-                let input = self.focus.as_deref().and_then(|k| nodes.iter().find(|n| n.key == k)).and_then(|n| n.input);
-                vec![Action::FocusInput(input)]
+                let next = a11y::next_stop(&nodes, self.focus.as_deref(), step);
+                self.move_focus(next, &nodes)
             }
             Msg::Activate => match self.focused().and_then(|n| n.activate) {
                 Some(msg) => self.update(msg, model),
@@ -1410,8 +1625,7 @@ impl Ui {
                 let Some(node) = a11y::nodes().into_iter().find(|n| n.id().0 == id) else { return vec![] };
                 let mut actions = Vec::new();
                 if node.role.focusable() {
-                    self.focus = Some(node.key.clone());
-                    actions.push(Action::FocusInput(node.input));
+                    actions.extend(self.move_focus(Some(node.key.clone()), &a11y::nodes()));
                 }
                 let msg = match act {
                     a11y::ReaderAction::Focus => None,
@@ -1427,7 +1641,7 @@ impl Ui {
             }
             Msg::Do(action) => {
                 match &action {
-                    Action::Call(_) => self.menu = None,
+                    Action::Call(_) | Action::AddToCall(_) => self.menu = None,
                     Action::Remove(_) | Action::Block(_) => {
                         self.set_dialog(None);
                         self.route = Route::Home;
@@ -1462,6 +1676,18 @@ impl Ui {
         // The controls register themselves as the view is built; see `a11y`.
         a11y::begin(self.focus.as_deref());
         screens::view(self, model)
+    }
+
+    /// Puts keyboard focus on the node with key `key` (or nowhere): the
+    /// typing cursor follows into or out of text boxes, the control is
+    /// scrolled into view, and a message keeps its tools while focus is on
+    /// it or them.
+    fn move_focus(&mut self, key: Option<String>, nodes: &[a11y::Node]) -> Vec<Action> {
+        let node = key.as_deref().and_then(|k| nodes.iter().find(|n| n.key == k));
+        let input = node.and_then(|n| n.input);
+        self.active_message = node.and_then(|n| n.group);
+        self.focus = key;
+        vec![Action::FocusInput(input), Action::RevealFocus(input)]
     }
 
     /// The control with keyboard focus, as the last frame drew it.
@@ -1601,7 +1827,7 @@ mod tests {
         let mut ui = Ui::new();
         let m = Model::default();
         ui.update(Msg::ChannelName("#Band Practice".into()), &m);
-        assert_eq!(ui.update(Msg::ChannelCreate("c1".into()), &m), vec![Action::AddChannel { community: "c1".into(), name: "band-practice".into() }]);
+        assert_eq!(ui.update(Msg::ChannelCreate("c1".into()), &m), vec![Action::AddChannel { community: "c1".into(), name: "band-practice".into(), voice: false }]);
         assert!(ui.update(Msg::ChannelCreate("c1".into()), &m).is_empty(), "the box is cleared once used");
         ui.update(Msg::RoleName("  Helper ".into()), &m);
         let add = Action::ManageSpace { community: "c1".into(), change: SpaceChange::AddRole("Helper".into()) };
@@ -1634,6 +1860,35 @@ mod tests {
         assert_eq!(layer, Some(1), "focus moved into the dialog, away from {behind:?}");
         ui.update(Msg::Back, &m);
         assert_eq!(ui.dialog, None);
+    }
+
+    #[test]
+    fn focusing_a_message_brings_its_tools_into_reach() {
+        let mut m = Model::default();
+        m.people.push(Person { id: "ab".into(), name: "Robin".into(), ..Default::default() });
+        m.conversation = Some(Conversation {
+            person: "ab".into(),
+            lines: vec![Line { id: 5, mine: true, text: "hello".into(), ..Default::default() }],
+            ..Default::default()
+        });
+        let mut ui = Ui::new();
+        ui.update(Msg::Nav(Route::Person("ab".into())), &m);
+        let _ = ui.view(&m);
+        let has_edit = |ui: &Ui| a11y::tab_stops(&a11y::nodes()).iter().any(|n| n.label == "Edit" && n.group == Some(5)) && ui.focus_key().is_some();
+        assert!(!a11y::nodes().iter().any(|n| n.label == "Edit"), "tools stay out until the message has focus");
+        let at = a11y::tab_stops(&a11y::nodes()).iter().position(|n| n.role == a11y::Role::Message).expect("the message is a stop");
+        for _ in 0..=at {
+            ui.update(Msg::Focus(1), &m);
+        }
+        let actions = ui.update(Msg::Focus(0), &m);
+        assert!(actions.contains(&Action::RevealFocus(None)), "a focus move scrolls it into view");
+        let _ = ui.view(&m);
+        assert!(has_edit(&ui), "its tools follow it");
+        // Tab to Edit and press it: editing starts with the cursor in the box.
+        while !ui.focus_key().is_some_and(|k| k.contains("|Edit|")) {
+            ui.update(Msg::Focus(1), &m);
+        }
+        assert_eq!(ui.update(Msg::Activate, &m), vec![Action::FocusInput(Some(EDIT_BOX))]);
     }
 
     #[test]

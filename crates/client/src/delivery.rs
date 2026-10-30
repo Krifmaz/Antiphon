@@ -630,6 +630,11 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
     // mode keeps everything off mailboxes -- to members' mailboxes.
     if let Some(c) = &community {
         c.flush(config.route_fan_out, !config.strict_mode).await;
+        // Communities with a board (spec §11 "full scale"): one upload per
+        // message out, a page at a time in. Off the network in strict mode.
+        if !config.strict_mode {
+            c.sync_boards().await;
+        }
     }
 
     // Then the outbox, for everyone not on a live call.

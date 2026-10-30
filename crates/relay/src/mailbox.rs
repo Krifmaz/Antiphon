@@ -32,6 +32,10 @@
 //! for senders ([`Message::Wake`]), which it can neither open nor link to
 //! anyone. Both are rate-limited, per inbox and per endpoint and address,
 //! so a node can't be used to make a phone buzz all day.
+//!
+//! **Community boards** ([`crate::board`]) are served alongside, on the
+//! same port and magic: a community's one-upload-per-message log. Board
+//! bytes count toward the node's storage cap together with inbox mail.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -39,6 +43,8 @@ use std::time::{Duration, Instant};
 
 use antiphon_net::mailbox::{InboxStatus, Label, MailId, Message, Refusal};
 use antiphon_push::{RateLimit, Target, Transport};
+
+use crate::board::{BoardLimits, Boards};
 
 /// How many blobs one fetch hands back before its count. The rest come
 /// on the next fetch, after these are acknowledged.
@@ -63,6 +69,8 @@ pub struct MailboxLimits {
     /// takes this code. Depositing never does -- anyone may write to a
     /// member, which is the point of a mailbox.
     pub member_code: Option<Vec<u8>>,
+    /// Community boards' own limits.
+    pub boards: BoardLimits,
 }
 
 impl Default for MailboxLimits {
@@ -76,6 +84,7 @@ impl Default for MailboxLimits {
             registration_ttl: Duration::from_secs(7 * 86_400),
             max_inboxes: 100_000,
             member_code: None,
+            boards: BoardLimits::default(),
         }
     }
 }
@@ -89,6 +98,9 @@ pub struct MailboxStats {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub refused: u64,
+    /// Community boards, and the bytes they hold.
+    pub boards: usize,
+    pub board_bytes: u64,
 }
 
 struct Held {
@@ -151,11 +163,13 @@ pub struct Mailbox {
     /// `None` until [`Mailbox::enable_push`]; push requests are refused
     /// with [`Refusal::NoPush`] until then.
     push: Option<Push>,
+    boards: Boards,
 }
 
 impl Mailbox {
     pub fn new(limits: MailboxLimits) -> Self {
-        Self { limits, inboxes: HashMap::new(), held_bytes: 0, stats: MailboxStats::default(), push: None }
+        let boards = Boards::new(limits.boards.clone());
+        Self { limits, inboxes: HashMap::new(), held_bytes: 0, stats: MailboxStats::default(), push: None, boards }
     }
 
     /// Lets owners register push endpoints and senders forward wake-ups.
@@ -201,11 +215,16 @@ impl Mailbox {
             inboxes: self.inboxes.len(),
             held: self.inboxes.values().map(|i| i.mail.len()).sum(),
             held_bytes: self.held_bytes,
+            boards: self.boards.count(),
+            board_bytes: self.boards.bytes(),
             ..self.stats
         }
     }
 
     pub fn handle(&mut self, from: SocketAddr, bytes: &[u8], now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
+        if let Some(request) = antiphon_net::board::Message::decode(bytes) {
+            return self.handle_board(from, bytes.len(), request, now);
+        }
         let Some(request) = Message::decode(bytes) else { return Vec::new() };
         self.stats.bytes_in += bytes.len() as u64;
         let replies = if !self.limits.enabled {
@@ -217,6 +236,29 @@ impl Mailbox {
             .into_iter()
             .map(|m| {
                 if matches!(m, Message::Refused(_)) {
+                    self.stats.refused += 1;
+                }
+                let out = m.encode();
+                self.stats.bytes_out += out.len() as u64;
+                (from, out)
+            })
+            .collect()
+    }
+
+    /// A community board request, answered by [`Boards`].
+    fn handle_board(&mut self, from: SocketAddr, len: usize, request: antiphon_net::board::Message, now: Instant) -> Vec<(SocketAddr, Vec<u8>)> {
+        use antiphon_net::board::Message as Board;
+        self.stats.bytes_in += len as u64;
+        let replies = if !self.limits.enabled {
+            vec![Board::Refused(Refusal::Disabled)]
+        } else {
+            let room = self.limits.storage_cap.saturating_sub(self.held_bytes + self.boards.bytes());
+            self.boards.answer(request, room, now)
+        };
+        replies
+            .into_iter()
+            .map(|m| {
+                if matches!(m, Board::Refused(_)) {
                     self.stats.refused += 1;
                 }
                 let out = m.encode();
@@ -275,7 +317,7 @@ impl Mailbox {
                     return one(Message::Refused(Refusal::RateLimited));
                 }
                 let size = blob.len() as u64;
-                if inbox.bytes + size > self.limits.inbox_cap || self.held_bytes + size > self.limits.storage_cap {
+                if inbox.bytes + size > self.limits.inbox_cap || self.held_bytes + self.boards.bytes() + size > self.limits.storage_cap {
                     return one(Message::Refused(Refusal::Full));
                 }
                 inbox.recent.push_back(now);
@@ -392,6 +434,7 @@ impl Mailbox {
             inbox.registered_until > now || !inbox.mail.is_empty()
         });
         self.held_bytes -= freed;
+        self.boards.sweep(now);
         if let Some(push) = self.push.as_mut() {
             push.per_inbox.forget_refilled(now);
             push.per_endpoint.forget_refilled(now);
@@ -642,5 +685,27 @@ mod tests {
             ask(&mut m, Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![0; 10] }, now);
         }
         assert_eq!(m.stats().held, 1);
+    }
+
+    #[test]
+    fn boards_share_the_port_and_the_storage_cap() {
+        use antiphon_net::board::{token_hash, Message as Board};
+        let ask_board = |m: &mut Mailbox, msg: Board| -> Board {
+            Board::decode(&m.handle(FROM, &msg.encode(), Instant::now()).remove(0).1).unwrap()
+        };
+        let mut off = Mailbox::new(MailboxLimits::default());
+        assert_eq!(ask_board(&mut off, Board::Open { board: [1; 32], token_hash: [2; 32] }), Board::Refused(Refusal::Disabled));
+
+        let mut m = Mailbox::new(MailboxLimits { enabled: true, storage_cap: 1000, ..Default::default() });
+        let token = [3; 32];
+        assert_eq!(ask_board(&mut m, Board::Open { board: [1; 32], token_hash: token_hash(&token) }), Board::Opened { board: [1; 32] });
+        let posted = ask_board(&mut m, Board::Post { board: [1; 32], token, entry: vec![0; 900] });
+        assert_eq!(posted, Board::Posted { board: [1; 32], seq: 1 });
+        assert_eq!((m.stats().boards, m.stats().board_bytes), (1, 900));
+        // The board's bytes leave less room for inbox mail.
+        let label = [5; 32];
+        ask(&mut m, Message::Register { label, fetch_hash: antiphon_crypto::mail::fetch_hash(&[6; 32]), code: vec![] }, Instant::now());
+        let deposit = ask(&mut m, Message::Deposit { label, id: [0; 16], blob: vec![0; 200] }, Instant::now());
+        assert_eq!(deposit, vec![Message::Refused(Refusal::Full)]);
     }
 }

@@ -20,8 +20,8 @@ use antiphon_client::transfer_queue::TransferQueue;
 use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
-    caps_lock, config, connection_mode, delivery, discovery, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
-    moderation, notify, outbox, presence, profile, push_wake, reachability, reactions, sharing, video_capture, vpn,
+    caps_lock, community, config, connection_mode, delivery, discovery, node_picker, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
+    group, moderation, notify, outbox, presence, profile, push_wake, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
 use antiphon_ui::{self as ui, ToastKind};
@@ -75,6 +75,8 @@ enum Event {
     Avatar(Result<String, String>),
     /// Files picked to send to this contact (id), for the queue.
     Queue(Vec<PathBuf>, String),
+    /// The plugin search finished (spec §1 "Plugin Host").
+    PluginsFound(Vec<antiphon_audio::plugins::PluginInfo>),
     /// A voice message was left (or why it couldn't be).
     VoiceSent(Result<(), String>),
     /// A picture picked to be a community's emoji: (community, file name,
@@ -82,6 +84,13 @@ enum Event {
     EmojiPicked(Result<(String, String, String), String>),
     /// A theme file was chosen and read: use what it says.
     Theme(ui::theme_file::ThemeFile),
+    /// The directories were read: what they list, what went wrong, and
+    /// the keys pinned for them.
+    Directory(Vec<discovery::Listed>, Vec<String>, Vec<String>),
+    /// The look for mailbox nodes on this network finished: their addresses.
+    NodesFound(Vec<String>),
+    /// A node read from a QR code picture, or why none was.
+    NodePicked(Result<node_picker::NodeLink, String>),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -190,6 +199,18 @@ struct ConvCache {
 pub struct Engine {
     /// Shared state the audio pipeline and network tasks also hold.
     state: Arc<AppState>,
+    /// The local API for scripts and bots, while it is on.
+    api: Option<crate::api::Api>,
+    /// Clients that asked for events.
+    api_listeners: Vec<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+    /// The last message seen per contact, and the call's phase, so events
+    /// go out once per change.
+    api_seen: HashMap<String, (String, u64)>,
+    api_phase: String,
+    /// Plugins found on this computer, once looked for.
+    plugins_found: Option<Vec<antiphon_audio::plugins::PluginInfo>>,
+    /// The plugin search is running.
+    plugins_scanning: bool,
     /// Results from background tasks, drained on each tick.
     events: Arc<Mutex<Vec<Event>>>,
     /// What the app should do in the interface; the app takes these.
@@ -239,6 +260,10 @@ pub struct Engine {
     peer_relay_saved: String,
     /// The VPN routes the peer last told us about, saved to their contact.
     peer_routes_saved: String,
+    /// Mailbox nodes found on this network at the last look.
+    found_nodes: Vec<String>,
+    /// A look for mailbox nodes on this network is under way.
+    finding_nodes: bool,
     /// The peer's meter level, decaying between frames.
     their_level: f32,
     /// True while a STUN check is running.
@@ -272,7 +297,26 @@ pub struct Engine {
     playing: Option<(String, u64, antiphon_audio::PlaybackHandle, Instant)>,
     /// Settings > Account & backup: phrase, backup files, moving devices.
     account: crate::account::AccountState,
+    /// The voice channel we are in, if any.
+    voice: Option<VoiceRoom>,
+    /// What the community directories listed at the last look.
+    directory: ui::Directory,
 }
+
+/// Being in a community's voice channel.
+struct VoiceRoom {
+    /// The community's id.
+    community: String,
+    /// The voice channel.
+    channel: u32,
+    /// When we last said we are here.
+    said_at: Instant,
+    /// Whom we last tried to put through, by main key (hex), and when.
+    dialed: HashMap<String, Instant>,
+}
+
+/// How long before trying again to put someone through to a voice channel.
+const VOICE_REDIAL: Duration = Duration::from_secs(45);
 
 impl Engine {
     /// Builds the engine around a started [`AppState`].
@@ -302,10 +346,18 @@ impl Engine {
             inputs: antiphon_audio::list_input_devices(),
             outputs: antiphon_audio::list_output_devices(),
             ptt_capturing: false,
+            plugins_found: None,
+            plugins_scanning: false,
+            api: None,
+            api_listeners: Vec::new(),
+            api_seen: HashMap::new(),
+            api_phase: String::new(),
             delivery_seen: 0,
             discovery_seen: 0,
             peer_relay_saved: String::new(),
             peer_routes_saved: String::new(),
+            found_nodes: Vec::new(),
+            finding_nodes: false,
             their_level: 0.0,
             checking: false,
             tiles: HashMap::new(),
@@ -319,8 +371,12 @@ impl Engine {
             voice_waiting: None,
             playing: None,
             account: Default::default(),
+            voice: None,
+            directory: ui::Directory::default(),
         };
         engine.load_previews();
+        engine.api_seen = engine.previews.clone();
+        engine.set_api(engine.cfg.local_api || crate::has_flag("--api"));
         engine.refresh_invite();
         if engine.cfg.stoop.door_on_start {
             engine.set_door(true);
@@ -365,6 +421,7 @@ impl Engine {
         for e in events {
             self.on_event(e);
         }
+        self.serve_api(open);
 
         // The far end hung up, or the connection died under us.
         let ended = self.state.call.lock().unwrap().as_ref().is_some_and(|a| !a.is_live());
@@ -379,7 +436,7 @@ impl Engine {
         }
 
         // An open door with nothing on the line goes back to listening.
-        if self.door && self.task.as_ref().is_none_or(|(_, t)| t.is_finished()) && self.state.call.lock().unwrap().is_none() && self.call.phase != ui::Phase::Dialing {
+        if (self.door || self.voice.is_some()) && self.task.as_ref().is_none_or(|(_, t)| t.is_finished()) && self.state.call.lock().unwrap().is_none() && self.call.phase != ui::Phase::Dialing {
             self.task = None;
             self.listen();
         }
@@ -429,8 +486,314 @@ impl Engine {
         }
 
         self.watch_call(open);
+        self.group_upkeep();
+        self.voice_room_upkeep();
         self.pump_queue();
         self.voice_upkeep();
+    }
+
+    // ---------------------------------------------------------- group calls
+
+    /// What acting on group-call messages needs (spec §3), for the call
+    /// that is running.
+    fn group_context(&self, active: &state::ActiveCall) -> group::Context {
+        let relay = self.my_relay();
+        group::Context {
+            group: active.group.clone(),
+            primary: active.peer.clone(),
+            identity: self.state.identity.clone(),
+            hello: self.hello(),
+            relay: (!relay.is_empty()).then_some(relay),
+            is_blocked: Arc::new(|key: &[u8; 32]| moderation::is_blocked(&config::load().blocked, &connection_mode::encode_hex32(key))),
+        }
+    }
+
+    /// Spec §3 group calls, on every tick of a call: act on introductions,
+    /// keep the MLS keys current, and say who left.
+    fn group_upkeep(&mut self) {
+        let (ctx, notices) = {
+            let call = self.state.call.lock().unwrap();
+            let Some(a) = call.as_ref() else { return };
+            let busy = !a.group.inbox.lock().unwrap().is_empty() || ((a.group.people() >= 3 || a.group.keys.in_group()) && a.group.keys.poll_due());
+            let mut notices: Vec<String> = a.group.remove_departed().into_iter().map(|(_, name)| format!("{name} left the call")).collect();
+            let notice = std::mem::take(&mut *a.group.notice.lock().unwrap());
+            if !notice.is_empty() {
+                notices.push(notice);
+            }
+            (busy.then(|| self.group_context(a)), notices)
+        };
+        if let Some(ctx) = ctx {
+            ctx.poll(&self.state.runtime);
+        }
+        for n in notices {
+            self.toast(n, ToastKind::Info);
+        }
+    }
+
+    /// Brings `contact` into the running call, reaching them the way a
+    /// call to them on its own would; everyone else in it is then
+    /// introduced to them (or the call moves to the relay's SFU past five).
+    fn add_to_call(&mut self, contact: config::Contact) {
+        let ctx = {
+            let call = self.state.call.lock().unwrap();
+            let Some(a) = call.as_ref() else { return };
+            let has_relay = !self.my_relay().is_empty();
+            if a.group.is_full() && (a.group.sfu_call().is_some() || !has_relay) {
+                let most = if a.group.sfu_call().is_some() { antiphon_client::sfu_call::MAX_PEOPLE } else { group::MAX_PEOPLE };
+                drop(call);
+                self.toast(format!("A group call holds up to {most} people"), ToastKind::Warn);
+                return;
+            }
+            self.group_context(a)
+        };
+        if moderation::is_blocked(&self.cfg.blocked, &contact.identity_key) {
+            self.toast(format!("{} is blocked", contact.name), ToastKind::Warn);
+            return;
+        }
+        let plan = match connection_mode::plan(&contact, &self.state.identity, now_secs()) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                self.toast(reason, ToastKind::Warn);
+                return;
+            }
+        };
+        let identity = self.state.identity.clone();
+        let events = self.events.clone();
+        let name = contact.name.clone();
+        self.state.runtime.spawn(async move {
+            let connected = match plan {
+                connection_mode::Plan::Direct { address } => match state::resolve(&address).await {
+                    Ok(addr) => state::establish_call(addr, 0, identity).await.map(|p| (p, false)),
+                    Err(e) => Err(e),
+                },
+                connection_mode::Plan::Relay { relay, token } => async {
+                    let addr = state::resolve(&relay).await?;
+                    state::establish_relayed_call(addr, token, 0, identity).await
+                }
+                .await
+                .map(|p| (p, true)),
+            };
+            let (text, kind) = match connected {
+                Ok((peer, relayed)) => match ctx.add_person(peer, relayed).await {
+                    Ok(m) => (m, ToastKind::Ok),
+                    Err(e) => (e, ToastKind::Warn),
+                },
+                Err(e) => (format!("Couldn't add {name}: {e}"), ToastKind::Warn),
+            };
+            Self::push(&events, Event::Toast(text, kind));
+        });
+    }
+
+    /// Everyone on the running call, by main key (hex): whoever it started
+    /// with, the mesh legs, and the people in its SFU room.
+    fn on_call_keys(&self) -> HashSet<String> {
+        let call = self.state.call.lock().unwrap();
+        let Some(a) = call.as_ref() else { return HashSet::new() };
+        let mut keys: HashSet<String> = a.group.leg_keys().iter().map(connection_mode::encode_hex32).collect();
+        keys.insert(connection_mode::encode_hex32(&a.peer.peer_identity().identity_key));
+        if let Some(sfu) = a.group.sfu_call() {
+            keys.extend(sfu.member_keys().iter().map(connection_mode::encode_hex32));
+        }
+        keys
+    }
+
+    // ---------------------------------------------------------- mailboxes
+
+    /// Puts a mailbox node on the delivery routes and says where it went.
+    fn add_node(&mut self, node: &node_picker::NodeLink) {
+        match node_picker::add(&mut self.cfg.routes, node) {
+            Ok(kind) => {
+                self.found_nodes.retain(|a| a != &node.address);
+                self.save_routes();
+                self.toast(format!("Added {} as {}", node.address, kind.title().to_lowercase()), ToastKind::Ok);
+            }
+            Err(why) => self.toast(why, ToastKind::Warn),
+        }
+    }
+
+    /// Saves a changed route list: bumps its sequence so contacts take the
+    /// new one over the old, refreshes the cards members see, and wakes
+    /// the courier.
+    fn save_routes(&mut self) {
+        delivery::normalize(&mut self.cfg.routes);
+        self.cfg.route_sequence = (self.cfg.route_sequence + 1).max(now_secs());
+        self.save();
+        std::thread::spawn(community::refresh_cards);
+        delivery::kick();
+    }
+
+    /// Asks for a picture of a node's QR code and reads it, off the
+    /// window's thread.
+    fn node_from_qr(&self) {
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Choose a picture of the node's QR code")
+                .add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                .pick_file()
+            else {
+                return;
+            };
+            Engine::push(&events, Event::NodePicked(node_picker::read_qr(&path)));
+        });
+    }
+
+    /// Looks for mailbox nodes answering on this network, in the background.
+    fn find_nodes(&mut self) {
+        if self.finding_nodes {
+            return;
+        }
+        self.finding_nodes = true;
+        let events = self.events.clone();
+        self.state.runtime.spawn(async move {
+            let found = delivery::discover(std::time::Duration::from_secs(2)).await;
+            Self::push(&events, Event::NodesFound(found.into_iter().map(|a| a.to_string()).collect()));
+        });
+    }
+
+    /// The mailbox nodes on the routes, with how each answered last.
+    fn mailboxes(&self) -> Vec<ui::Mailbox> {
+        let report = delivery::node_report();
+        self.cfg
+            .routes
+            .iter()
+            .flat_map(|r| r.nodes.iter().map(move |n| (r.kind, n)))
+            .map(|(kind, address)| ui::Mailbox {
+                address: address.clone(),
+                route: kind.title().to_string(),
+                status: report.iter().find(|(a, _)| a == address).map(|(_, s)| s.clone()).unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    // ---------------------------------------------------------- directories
+
+    /// Reads every directory added, in the background.
+    fn browse_directories(&mut self) {
+        if self.directory.browsing || self.cfg.directories.is_empty() {
+            return;
+        }
+        self.directory.browsing = true;
+        let (dirs, mut pins) = (self.cfg.directories.clone(), self.cfg.directory_pins.clone());
+        let events = self.events.clone();
+        self.state.runtime.spawn(async move {
+            let (listed, problems) = discovery::browse(&dirs, &mut pins).await;
+            Self::push(&events, Event::Directory(listed, problems, pins));
+        });
+    }
+
+    /// Asks `directory` to list a community with `description` (`None`
+    /// takes it off), signed by the key we are in it as, which alone can
+    /// change it later.
+    fn submit_listing(&mut self, community: String, directory: String, description: Option<String>) {
+        let made = self.spaces.listing(&community, description.as_deref());
+        let (entry, identity) = match made {
+            Ok(made) => made,
+            Err(e) => {
+                self.toast(e, ToastKind::Warn);
+                return;
+            }
+        };
+        let events = self.events.clone();
+        let listing = description.is_some();
+        self.state.runtime.spawn(async move {
+            let (text, kind) = match discovery::submit(&directory, entry, &identity).await {
+                Ok(()) if listing => (format!("Listed in {directory}"), ToastKind::Ok),
+                Ok(()) => (format!("Taken off {directory}"), ToastKind::Ok),
+                Err(e) => (e, ToastKind::Warn),
+            };
+            Self::push(&events, Event::Toast(text, kind));
+        });
+    }
+
+    // -------------------------------------------------------- voice channels
+
+    /// Joins a voice channel: says so to its readers, with our invite link
+    /// so whoever is there can put us through, and starts taking calls.
+    fn join_voice(&mut self, community: String, channel: u32) {
+        if self.voice.as_ref().is_some_and(|r| r.community == community && r.channel == channel) {
+            return;
+        }
+        if self.voice.is_none() && self.state.call.lock().unwrap().is_some() {
+            self.toast("Hang up first: you're on a call", ToastKind::Warn);
+            return;
+        }
+        if let Some(room) = self.voice.take() {
+            self.leave_voice(&room);
+            self.teardown("Left the voice channel".into());
+        }
+        self.refresh_invite();
+        match self.spaces.voice_join(&community, channel, &self.invite) {
+            Ok(()) => {
+                self.voice = Some(VoiceRoom { community, channel, said_at: Instant::now(), dialed: HashMap::new() });
+                self.spaces.set_voice_room(self.voice.as_ref().map(|r| (r.community.clone(), r.channel)));
+            }
+            Err(e) => self.toast(e, ToastKind::Warn),
+        }
+    }
+
+    /// Says we left a voice channel.
+    fn leave_voice(&mut self, room: &VoiceRoom) {
+        if let Err(e) = self.spaces.voice_leave(&room.community, room.channel) {
+            self.toast(e, ToastKind::Warn);
+        }
+        self.spaces.set_voice_room(None);
+    }
+
+    /// While in a voice channel: say we still are now and then, and put
+    /// people through. One person does the dialing so two don't call each
+    /// other at once: whoever has the lowest key among those there. They
+    /// call the first person, then add each one after to the call, which
+    /// connects everyone to everyone (or moves to the relay's SFU).
+    fn voice_room_upkeep(&mut self) {
+        let Some(room) = self.voice.as_mut() else { return };
+        let (community, channel) = (room.community.clone(), room.channel);
+        if room.said_at.elapsed() >= Duration::from_secs(community::VOICE_HEARTBEAT_SECS) {
+            room.said_at = Instant::now();
+            let invite = self.invite.clone();
+            if let Err(e) = self.spaces.voice_join(&community, channel, &invite) {
+                self.toast(e, ToastKind::Warn);
+            }
+        }
+        if self.call.phase == ui::Phase::Dialing {
+            return;
+        }
+        let me = connection_mode::encode_hex32(&self.state.identity.public().identity_key);
+        let there: Vec<antiphon_crypto::Invite> = self
+            .spaces
+            .voice_here(&community, channel)
+            .iter()
+            .filter_map(|p| antiphon_crypto::Invite::parse(&p.invite).ok())
+            .filter(|i| connection_mode::encode_hex32(&i.identity_key) != me)
+            .collect();
+        let lowest = there.iter().map(|i| connection_mode::encode_hex32(&i.identity_key)).min();
+        if lowest.is_some_and(|k| k < me) {
+            return; // theirs to dial
+        }
+        let on_call = self.on_call_keys();
+        let Some(room) = self.voice.as_mut() else { return };
+        let next = there.into_iter().find(|i| {
+            let key = connection_mode::encode_hex32(&i.identity_key);
+            !on_call.contains(&key) && room.dialed.get(&key).is_none_or(|at| at.elapsed() >= VOICE_REDIAL)
+        });
+        let Some(invite) = next else { return };
+        let key = connection_mode::encode_hex32(&invite.identity_key);
+        room.dialed.insert(key.clone(), Instant::now());
+        let name = self.cfg.contacts.iter().find(|c| c.identity_key == key).map(|c| c.name.clone()).unwrap_or_else(|| "someone in the voice channel".into());
+        let contact = config::Contact {
+            name,
+            address: invite.address.clone(),
+            identity_key: key,
+            relay: invite.relay.clone(),
+            relay_secret: invite.relay_secret.as_ref().map(connection_mode::encode_hex32).unwrap_or_default(),
+            lends_relay: invite.lends_relay,
+            ..Default::default()
+        };
+        if self.state.call.lock().unwrap().is_some() {
+            self.add_to_call(contact);
+        } else {
+            self.dial(contact);
+        }
     }
 
     /// Reads a yes/no from the running call; false when there is none.
@@ -747,6 +1110,29 @@ impl Engine {
                 }
             }
             Event::Toast(text, kind) => self.toast(text, kind),
+            Event::NodesFound(found) => {
+                self.finding_nodes = false;
+                if found.is_empty() {
+                    self.toast("No mailbox nodes answered on this network", ToastKind::Warn);
+                }
+                self.found_nodes = found;
+            }
+            Event::NodePicked(Ok(node)) => self.add_node(&node),
+            Event::NodePicked(Err(why)) => self.toast(why, ToastKind::Err),
+            Event::Directory(listed, problems, pins) => {
+                self.cfg.directory_pins = pins;
+                self.save();
+                self.directory.browsing = false;
+                self.directory.problems = problems;
+                self.directory.listed = listed
+                    .into_iter()
+                    .map(|l| ui::Listing { name: l.entry.name, description: l.entry.description, link: l.entry.invite, directory: l.directory })
+                    .collect();
+            }
+            Event::PluginsFound(found) => {
+                self.plugins_scanning = false;
+                self.plugins_found = Some(found);
+            }
             Event::Theme(file) => {
                 self.cfg.stoop.theme = file.theme;
                 self.cfg.stoop.accent = file.accent;
@@ -1015,6 +1401,13 @@ impl Engine {
             return;
         }
         let Some(contact) = find_contact(&self.cfg, id).cloned() else { return };
+        self.dial(contact);
+    }
+
+    /// Calls `contact` (saved, or made up from an invite link) by the route
+    /// it says: direct, DHT lookup or relay.
+    fn dial(&mut self, contact: config::Contact) {
+        let id = contact.identity_key.clone();
         if moderation::is_blocked(&self.cfg.blocked, &contact.identity_key) {
             self.toast(format!("{} is blocked", contact.name), ToastKind::Warn);
             return;
@@ -1027,7 +1420,7 @@ impl Engine {
             }
         };
         self.stop_task();
-        self.call = CallInfo { phase: ui::Phase::Dialing, peer: Some(id.to_string()), name: contact.name.clone(), ..CallInfo::default() };
+        self.call = CallInfo { phase: ui::Phase::Dialing, peer: Some(id), name: contact.name.clone(), ..CallInfo::default() };
         let args = self.pipeline_args();
         let identity = self.state.identity.clone();
         let lookup = self.cfg.dht_enabled && !contact.identity_key.is_empty();
@@ -1087,6 +1480,10 @@ impl Engine {
 
     /// Ends the call (or the attempt) from this side.
     fn hangup(&mut self) {
+        // Hanging up in a voice channel is leaving it.
+        if let Some(room) = self.voice.take() {
+            self.leave_voice(&room);
+        }
         if self.call.phase == ui::Phase::Dialing {
             self.stop_task();
             self.end("Stopped calling".into());
@@ -1143,6 +1540,12 @@ impl Engine {
                 self.save();
             }
             A::Call(id) => self.call_contact(&id),
+            A::AddToCall(id) => {
+                if let Some(contact) = find_contact(&self.cfg, &id).cloned() {
+                    self.toast(format!("Adding {}...", contact.name), ToastKind::Info);
+                    self.add_to_call(contact);
+                }
+            }
             A::CallAddress(address) => self.call_address(address),
             A::Hangup => self.hangup(),
             A::Mute(on) => {
@@ -1326,6 +1729,16 @@ impl Engine {
                 self.profile_changed();
             }
             A::PickAvatar => self.pick_avatar(),
+            A::AddNode(text) => match node_picker::parse(&text) {
+                Some(node) => self.add_node(&node),
+                None => self.toast("That isn't a node address (host:port) or node link", ToastKind::Err),
+            },
+            A::AddNodeFromQr => self.node_from_qr(),
+            A::RemoveNode(address) => {
+                node_picker::remove(&mut self.cfg.routes, &address);
+                self.save_routes();
+            }
+            A::FindNodes => self.find_nodes(),
             A::RemoveAvatar => {
                 self.cfg.profile.avatar.clear();
                 self.profile_changed();
@@ -1358,7 +1771,7 @@ impl Engine {
             A::ExportTheme => self.export_theme(),
             A::ImportTheme => self.import_theme(),
             // Moving the typing cursor is the window's job; the app does it.
-            A::FocusInput(_) => {}
+            A::FocusInput(_) | A::RevealFocus(_) => {}
             A::Input(name) => {
                 let device = (!name.is_empty()).then_some(name);
                 if let Some(Err(e)) = self.with_call(|a| a.swap_input_device(device.as_deref())) {
@@ -1403,6 +1816,37 @@ impl Engine {
                 antiphon_client::link_quality::set_low_data(on);
                 self.save();
             }
+            A::FindPlugins => self.find_plugins(),
+            A::AddPlugin(i) => self.add_plugin(i),
+            A::RemovePlugin(i) => {
+                if i < self.cfg.chain.plugins.len() {
+                    self.cfg.chain.plugins.remove(i);
+                    self.chain_changed();
+                }
+            }
+            A::PluginOn(i, on) => {
+                if let Some(p) = self.cfg.chain.plugins.get_mut(i) {
+                    p.enabled = on;
+                    self.chain_changed();
+                }
+            }
+            A::PluginEarlier(i) => {
+                if i > 0 && i < self.cfg.chain.plugins.len() {
+                    self.cfg.chain.plugins.swap(i - 1, i);
+                    self.chain_changed();
+                }
+            }
+            A::PluginParam(i, id, value) => {
+                if let Some(p) = self.cfg.chain.plugins.get_mut(i) {
+                    p.set_param(&id, value);
+                    self.chain_changed();
+                }
+            }
+            A::ScreenAudio(on) => {
+                self.cfg.share_screen_audio = on;
+                antiphon_client::screen_audio::set_enabled(on);
+                self.save();
+            }
             A::AutoGain(on) => {
                 self.cfg.chain.gain = if on { GainConfig::default() } else { GainConfig::Fixed { enabled: false, gain_db: 0.0 } };
                 self.chain_changed();
@@ -1429,6 +1873,11 @@ impl Engine {
             A::OpenOnStart(on) => {
                 self.cfg.stoop.door_on_start = on;
                 self.save();
+            }
+            A::LocalApi(on) => {
+                self.cfg.local_api = on;
+                self.save();
+                self.set_api(on);
             }
             A::Anonymity(on) => {
                 self.cfg.anonymity_mode = on;
@@ -1496,6 +1945,42 @@ impl Engine {
             | A::KeepListening(_)
             | A::ListenOnSaver(_) => {}
             A::OpenChannel { community, channel } => self.viewing = Some((community, channel)),
+            A::ManageSpace { community, change: ui::SpaceChange::JoinVoice(channel) } => self.join_voice(community, channel),
+            A::ManageSpace { community, change: ui::SpaceChange::SubmitListing { directory, description } } => self.submit_listing(community, directory, Some(description)),
+            A::ManageSpace { community, change: ui::SpaceChange::WithdrawListing(directory) } => self.submit_listing(community, directory, None),
+            A::ManageSpace {
+                community,
+                change: change @ (ui::SpaceChange::StartShared(_) | ui::SpaceChange::JoinShared(_) | ui::SpaceChange::AskIntoShared(_) | ui::SpaceChange::UnlistShared(_) | ui::SpaceChange::NewAllyLink),
+            } => {
+                let (text, kind) = match self.spaces.shared(&community, change) {
+                    Ok(said) => (said, ToastKind::Ok),
+                    Err(e) => (e, ToastKind::Warn),
+                };
+                self.toast(text, kind);
+                delivery::kick();
+            }
+            A::AddDirectory(address) => {
+                if !self.cfg.directories.iter().any(|d| d.eq_ignore_ascii_case(&address)) {
+                    self.cfg.directories.push(address);
+                    self.save();
+                }
+            }
+            A::RemoveDirectory(address) => {
+                self.cfg.directories.retain(|d| *d != address);
+                self.directory.listed.retain(|l| l.directory != address);
+                self.save();
+            }
+            A::BrowseDirectories => self.browse_directories(),
+            A::AskToJoin(link) => match antiphon_client::community::Store::app().ok_or_else(|| "Your identity isn't loaded yet".to_string()).and_then(|s| s.knock(&link)) {
+                Ok(()) => self.toast("Asked to join. Its invitation shows up under Invitations once its host's app answers.", ToastKind::Ok),
+                Err(e) => self.toast(e, ToastKind::Warn),
+            },
+            A::ManageSpace { change: ui::SpaceChange::LeaveVoice(_), .. } => {
+                if let Some(room) = self.voice.take() {
+                    self.leave_voice(&room);
+                    self.teardown("Left the voice channel".into());
+                }
+            }
             a @ (A::CreateSpace { .. }
             | A::AcceptSpaceInvite(_)
             | A::DeclineSpaceInvite(_)
@@ -1573,6 +2058,207 @@ impl Engine {
     }
 
     /// Applies the edited voice chain to a running call and saves it.
+    /// Set up for running with no window: the API on and the door open, so
+    /// the bot can be reached and driven. Says where the API's details are.
+    pub fn headless(&mut self) {
+        self.set_api(true);
+        self.set_door(true);
+        match (&self.api, &self.dir) {
+            (Some(_), Some(dir)) => println!("Local API on; port and key in {}", dir.join("api.json").display()),
+            _ => println!("The local API didn't start"),
+        }
+    }
+
+    /// Starts or stops the local API (see `api.rs`).
+    fn set_api(&mut self, on: bool) {
+        if !on {
+            self.api = None;
+            self.api_listeners.clear();
+            return;
+        }
+        if self.api.is_some() {
+            return;
+        }
+        let Some(dir) = self.dir.clone() else { return };
+        match crate::api::start(&dir, &self.state.runtime) {
+            Ok(api) => self.api = Some(api),
+            Err(e) => self.toast(format!("The local API couldn't start: {e}"), ToastKind::Err),
+        }
+    }
+
+    /// Answers waiting API commands and sends events to subscribers.
+    fn serve_api(&mut self, open: Option<&str>) {
+        let mut requests = Vec::new();
+        if let Some(api) = &mut self.api {
+            while let Ok(r) = api.requests.try_recv() {
+                requests.push(r);
+            }
+        }
+        for r in requests {
+            let answer = self.api_call(&r.body, open);
+            if r.body.get("cmd").and_then(|c| c.as_str()) == Some("subscribe") && answer.is_ok() {
+                self.api_listeners.push(r.events);
+            }
+            let _ = r.reply.send(answer);
+        }
+        if self.api_listeners.is_empty() {
+            self.api_seen = self.previews.clone();
+            return;
+        }
+        let mut events = Vec::new();
+        let changed: Vec<String> =
+            self.previews.iter().filter(|(id, p)| self.api_seen.get(*id) != Some(p)).map(|(id, _)| id.clone()).collect();
+        for id in changed {
+            if self.last_from_them(&id) {
+                let (Some(dir), Some(key)) = (&self.dir, &self.key) else { break };
+                if let Some(m) = history::load(dir, &id, key).last() {
+                    let name = self.cfg.contacts.iter().find(|c| c.identity_key == id).map(|c| c.name.clone()).unwrap_or_default();
+                    events.push(serde_json::json!({ "event": "message", "from": id, "name": name, "text": m.text, "at": m.at_secs }));
+                }
+            }
+        }
+        self.api_seen = self.previews.clone();
+        let phase = format!("{:?}", self.call.phase);
+        if phase != self.api_phase {
+            events.push(serde_json::json!({ "event": "call", "phase": api_phase(&self.call.phase), "with": self.call.peer }));
+            self.api_phase = phase;
+        }
+        for e in events {
+            self.api_listeners.retain(|l| l.send(e.clone()).is_ok());
+        }
+    }
+
+    /// One API command, done the way the matching button does it.
+    fn api_call(&mut self, body: &serde_json::Value, open: Option<&str>) -> Result<serde_json::Value, String> {
+        use crate::api::arg;
+        use serde_json::json;
+        let known = |e: &Self, id: &str| e.cfg.contacts.iter().any(|c| c.identity_key == id);
+        match arg(body, "cmd")? {
+            "me" => {
+                let me = self.me();
+                Ok(json!({ "id": me.id, "name": me.name, "status": me.status, "invite": me.invite, "door_open": me.door_open }))
+            }
+            "contacts" => Ok(self
+                .people()
+                .iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id, "name": p.name, "online": p.presence == ui::Presence::Online,
+                        "verified": p.verified, "unread": p.unread, "last": p.last,
+                    })
+                })
+                .collect()),
+            "messages" => {
+                let with = arg(body, "with")?;
+                if !known(self, with) {
+                    return Err("no contact with that id".into());
+                }
+                let limit = body.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
+                let lines = self.stored_lines(with);
+                let start = lines.len().saturating_sub(limit);
+                Ok(lines[start..]
+                    .iter()
+                    .filter(|l| !l.deleted)
+                    .map(|l| json!({ "id": l.id, "mine": l.mine, "author": l.author, "text": l.text, "time": l.time, "edited": l.edited }))
+                    .collect())
+            }
+            "send" => {
+                let (to, text) = (arg(body, "to")?.to_string(), arg(body, "text")?.to_string());
+                if !known(self, &to) {
+                    return Err("no contact with that id".into());
+                }
+                if text.trim().is_empty() {
+                    return Err("nothing to send".into());
+                }
+                self.act(ui::Action::Send { to, text }, open);
+                Ok(serde_json::Value::Null)
+            }
+            "call" => {
+                let to = arg(body, "to")?.to_string();
+                if !known(self, &to) {
+                    return Err("no contact with that id".into());
+                }
+                self.act(ui::Action::Call(to), open);
+                Ok(serde_json::Value::Null)
+            }
+            "hangup" => {
+                self.act(ui::Action::Hangup, open);
+                Ok(serde_json::Value::Null)
+            }
+            "mute" => {
+                let on = body.get("on").and_then(|v| v.as_bool()).ok_or("'on' is missing")?;
+                self.act(ui::Action::Mute(on), open);
+                Ok(serde_json::Value::Null)
+            }
+            "door" => {
+                let on = body.get("open").and_then(|v| v.as_bool()).ok_or("'open' is missing")?;
+                self.act(ui::Action::Door(on), open);
+                Ok(serde_json::Value::Null)
+            }
+            "status" => Ok(json!({ "phase": api_phase(&self.call.phase), "with": self.call.peer, "name": self.call.name, "code": self.call.code })),
+            "subscribe" => Ok(serde_json::Value::Null),
+            other => Err(format!("unknown command '{other}'")),
+        }
+    }
+
+    /// Looks for installed plugins in the background (it opens every
+    /// plugin library, which can take a while).
+    fn find_plugins(&mut self) {
+        if self.plugins_scanning {
+            return;
+        }
+        self.plugins_scanning = true;
+        let events = self.events.clone();
+        self.state.runtime.spawn_blocking(move || {
+            Self::push(&events, Event::PluginsFound(antiphon_audio::plugins::scan()));
+        });
+    }
+
+    /// Adds found plugin `i` to the end of the chain, if it starts.
+    fn add_plugin(&mut self, i: usize) {
+        let Some(info) = self.plugins_found.as_ref().and_then(|f| f.get(i)) else { return };
+        let config = info.to_config();
+        // Tried once here, so a plugin that won't start says so now rather
+        // than leaving the chain silently without it.
+        if let Err(e) = antiphon_audio::plugins::load(&config, 48_000) {
+            self.toast(format!("{} couldn't start: {e}", info.name), ToastKind::Err);
+            return;
+        }
+        self.toast(format!("{} added", info.name), ToastKind::Ok);
+        self.cfg.chain.plugins.push(config);
+        self.chain_changed();
+    }
+
+    /// The plugin list as Settings shows it.
+    fn plugins_model(&self) -> ui::Plugins {
+        let chain = self
+            .cfg
+            .chain
+            .plugins
+            .iter()
+            .map(|p| ui::PluginRow {
+                name: p.name.clone(),
+                format: p.format.label().to_string(),
+                enabled: p.enabled,
+                problem: (!p.path.exists()).then(|| format!("{} isn't installed any more", p.path.display())),
+                params: p
+                    .described
+                    .iter()
+                    .map(|d| ui::PluginParam {
+                        id: d.id.clone(),
+                        name: d.name.clone(),
+                        min: d.min,
+                        max: d.max,
+                        value: p.param(&d.id).unwrap_or(d.default),
+                        toggle: d.toggle,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let found = self.plugins_found.as_ref().map(|f| f.iter().map(|p| format!("{} · {}", p.name, p.format.label())).collect());
+        ui::Plugins { chain, found, scanning: self.plugins_scanning }
+    }
+
     fn chain_changed(&mut self) {
         let chain = self.cfg.chain.clone();
         self.with_call(|a| a.apply_chain_config(chain));
@@ -1904,6 +2590,7 @@ impl Engine {
             communities,
             space_invites,
             channel,
+            directory: ui::Directory { directories: self.cfg.directories.clone(), ..self.directory.clone() },
         }
     }
 
@@ -2225,6 +2912,11 @@ impl Engine {
             lend_relay: self.cfg.lend_relay,
             anonymity: self.cfg.anonymity_mode,
             hops: self.cfg.anonymity_hops.join(", "),
+            mailboxes: self.mailboxes(),
+            found_nodes: self.found_nodes.iter().filter(|a| !self.cfg.routes.iter().any(|r| r.nodes.contains(a))).cloned().collect(),
+            finding_nodes: self.finding_nodes,
+            local_api: self.api.is_some(),
+            api_file: self.dir.as_ref().map(|d| d.join("api.json").display().to_string()).unwrap_or_default(),
         }
     }
 
@@ -2252,6 +2944,8 @@ impl Engine {
             noise_suppression: self.cfg.chain.noise_suppress.enabled,
             echo_cancel: self.cfg.echo_cancel,
             low_data: self.cfg.low_data_calls,
+            screen_audio: self.cfg.share_screen_audio,
+            plugins: self.plugins_model(),
             auto_gain: matches!(self.cfg.chain.gain, GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
@@ -2629,6 +3323,7 @@ fn relay_invite_secret() -> [u8; 32] {
 pub fn start_state(runtime: tokio::runtime::Handle) -> anyhow::Result<Arc<AppState>> {
     let loaded = config::load();
     antiphon_client::link_quality::set_low_data(loaded.low_data_calls);
+    antiphon_client::screen_audio::set_enabled(loaded.share_screen_audio);
     let ptt_key = Keycode::from_str(&loaded.ptt_key).or_else(|_| Keycode::from_str(caps_lock::default_ptt_key())).unwrap_or(Keycode::Space);
     let mode = transmit_mode(loaded.transmit_mode);
     let transmit = Arc::new(TransmitSettings::new(ptt_key, mode, loaded.va_threshold));
@@ -2806,6 +3501,16 @@ fn open_folder(path: &std::path::Path) {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let program = "xdg-open";
     let _ = std::process::Command::new(program).arg(path).spawn();
+}
+
+/// A call phase as the API names it.
+fn api_phase(phase: &ui::Phase) -> &'static str {
+    match phase {
+        ui::Phase::Idle => "idle",
+        ui::Phase::Dialing => "dialing",
+        ui::Phase::Connected => "connected",
+        ui::Phase::Ended(_) => "ended",
+    }
 }
 
 #[cfg(test)]

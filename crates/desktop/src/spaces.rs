@@ -29,6 +29,11 @@ pub struct Spaces {
     invites: Vec<ui::SpaceInvite>,
     /// The open channel's messages.
     channel: Option<ui::ChannelView>,
+    /// The voice channel we are in, as (space id, channel).
+    voice_room: Option<(String, u32)>,
+    /// The last link made for another community's admin, by the space
+    /// (hex) it was made from.
+    ally_links: std::collections::HashMap<String, String>,
 }
 
 impl Spaces {
@@ -43,6 +48,84 @@ impl Spaces {
             self.built_for = viewing_owned;
         }
         (self.communities.clone(), self.invites.clone(), self.channel.clone())
+    }
+
+    /// A change to the spaces `community` shares with other communities
+    /// (spec §12 Q4). Returns what to tell the person.
+    pub fn shared(&mut self, community: &str, change: ui::SpaceChange) -> Result<String, String> {
+        use ui::SpaceChange as C;
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        let id = key(community)?;
+        let said = match change {
+            C::StartShared(name) => {
+                let link = store.start_shared_space(&id, &name)?;
+                self.ally_links.insert(community.to_string(), link);
+                "Shared space started. Copy the link for the other community's admin.".to_string()
+            }
+            C::NewAllyLink => {
+                let link = store.new_ally_link(&id)?;
+                self.ally_links.insert(community.to_string(), link);
+                "Link made. Copy it for the other community's admin.".to_string()
+            }
+            C::JoinShared(link) => {
+                store.join_shared_space(&id, &link)?;
+                "Asked to join. Their invitation shows up with your others; once you accept, it's on this community's list.".to_string()
+            }
+            C::AskIntoShared(space) => {
+                store.ask_into_shared_space(&id, &key(&space)?)?;
+                "Asked to join. The invitation shows up with your others.".to_string()
+            }
+            C::UnlistShared(space) => {
+                store.unlist_shared_space(&id, &key(&space)?)?;
+                "Taken off the list. Members already in it stay.".to_string()
+            }
+            _ => return Err("not a change to shared spaces".into()),
+        };
+        self.built_at = None;
+        Ok(said)
+    }
+
+    /// Notes which voice channel we are in, for the screens.
+    pub fn set_voice_room(&mut self, room: Option<(String, u32)>) {
+        if self.voice_room != room {
+            self.voice_room = room;
+            self.built_at = None;
+        }
+    }
+
+    /// Says we are in voice channel `channel` of `community`, with our
+    /// invite link to be reached by.
+    pub fn voice_join(&mut self, community: &str, channel: u32, invite: &str) -> Result<(), String> {
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        store.with_space(&key(community)?, |space, _| Ok(((), space.voice_join(channel, invite)?, Vec::new())))
+    }
+
+    /// Says we left voice channel `channel` of `community`.
+    pub fn voice_leave(&mut self, community: &str, channel: u32) -> Result<(), String> {
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        store.with_space(&key(community)?, |space, _| Ok(((), space.voice_leave(channel)?, Vec::new())))
+    }
+
+    /// Who is in voice channel `channel` of `community` now, us included.
+    pub fn voice_here(&self, community: &str, channel: u32) -> Vec<community::Presence> {
+        let (Some(store), Ok(id)) = (Store::app(), key(community)) else { return Vec::new() };
+        store.load(&id).map(|s| s.voice_here(channel)).unwrap_or_default()
+    }
+
+    /// A directory entry for `community` saying `description` (`None` for
+    /// one that takes it off), and the key to sign it with: the one we are
+    /// in it as.
+    pub fn listing(&self, community: &str, description: Option<&str>) -> Result<(antiphon_net::dht::ListingEntry, antiphon_crypto::IdentityKeyPair), String> {
+        let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+        let id = key(community)?;
+        let space = store.load(&id).ok_or("couldn't open it")?;
+        let name: String = space.manifest().name.chars().take(60).collect();
+        let invite = match description {
+            Some(_) => store.join_link(&id)?,
+            None => String::new(),
+        };
+        let entry = antiphon_net::dht::ListingEntry { name, description: description.unwrap_or("").chars().take(240).collect(), invite };
+        Ok((entry, store.identity_in(&space)))
     }
 
     /// Reads every space again from disk.
@@ -67,7 +150,9 @@ impl Spaces {
                 } else {
                     store.unread(&s.id())
                 };
-                community_model(&store, s, unread)
+                let mut c = community_model(&store, s, unread, self.voice_room.as_ref());
+                c.ally_link = self.ally_links.get(&id).cloned();
+                c
             })
             .collect();
         self.invites = store
@@ -136,14 +221,14 @@ impl Spaces {
                 let name = contact.name.clone();
                 store.with_space(&id, |space, identity| Ok(((), space.invite(identity, who, &name)?, vec![Event::Changed])))?;
             }
-            A::AddChannel { community, name } => {
+            A::AddChannel { community, name, voice } => {
                 let id = key(&community)?;
                 store.with_space(&id, |space, identity| {
                     let outs = space.update(identity, |m| {
                         // One past the highest, so a removed channel's
                         // number is never reused for a different one.
                         let next = m.channels.iter().map(|c| c.id).max().map_or(0, |n| n + 1);
-                        m.channels.push(antiphon_crypto::community::Channel { id: next, name: name.clone(), ..Default::default() });
+                        m.channels.push(antiphon_crypto::community::Channel { id: next, name: name.clone(), voice, ..Default::default() });
                     })?;
                     Ok(((), outs, vec![Event::Changed]))
                 })?;
@@ -175,6 +260,7 @@ impl Spaces {
                     .collect();
                 store.with_space(&id, |space, _| Ok(((), space.report(channel, &reason, excerpts)?, Vec::new())))?;
             }
+            A::ManageSpace { community, change: ui::SpaceChange::Board(node) } => store.set_board(&key(&community)?, node)?,
             A::ManageSpace { community, change } => {
                 let id = key(&community)?;
                 store.with_space(&id, |space, identity| {
@@ -313,6 +399,13 @@ fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyP
                 }
             })
         }
+        C::Listed(on) => space.update(identity, |m| m.listed = on),
+        // The engine's: they go to a directory, not to the members.
+        C::SubmitListing { .. } | C::WithdrawListing(_) => Ok(Vec::new()),
+        // Handled by `Spaces::shared`: they span more than one space.
+        C::StartShared(_) | C::JoinShared(_) | C::AskIntoShared(_) | C::UnlistShared(_) | C::NewAllyLink => Ok(Vec::new()),
+        // `Store::set_board`: it also starts reading the new board afresh.
+        C::Board(_) => Ok(Vec::new()),
         C::SlowMode(secs) => space.update(identity, |m| m.slow_mode_secs = secs.min(antiphon_crypto::community::MAX_SLOW_MODE_SECS)),
         C::WithdrawInvite(who) => {
             let who = member_key(&who)?;
@@ -333,6 +426,8 @@ fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyP
         }
         // Built from history before the space is opened (see `act`).
         C::Report { .. } => Ok(Vec::new()),
+        // The engine's, which also puts the call through.
+        C::JoinVoice(_) | C::LeaveVoice(_) => Ok(Vec::new()),
         C::MemberRole { member, role } => {
             let who = member_key(&member)?;
             space.update(identity, |m| {
@@ -368,7 +463,7 @@ fn from_ui(n: ui::Notify) -> community::Notify {
 }
 
 /// One space as the screens show it.
-fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Community {
+fn community_model(store: &Store, s: &community::Space, unread: u32, voice_room: Option<&(String, u32)>) -> ui::Community {
     let m = s.manifest();
     let me = s.me();
     let joined = s.joining.is_none() && !s.removed;
@@ -431,6 +526,8 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
                 topic: c.topic.clone(),
                 private: c.readers.is_some(),
                 readers: c.readers.iter().flatten().map(|k| delivery::hex(&k.0)).collect(),
+                voice: c.voice,
+                in_voice: if c.voice { s.voice_here(c.id).iter().map(|p| s.name_of(&p.key.0)).collect() } else { Vec::new() },
                 notify: store.notify_setting(&s.id(), Some(c.id)).map(to_ui),
             })
             .collect(),
@@ -467,6 +564,7 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
         can_assign_roles: assigns,
         slow_mode_secs: m.slow_mode_secs,
         can_set_slow_mode: joined && !group && m.can(&me, perm::MANAGE_COMMUNITY, None),
+        board: m.nodes.board.as_ref().map(|b| b.addr.clone()),
         moderator: joined && community::is_moderator(m, &me),
         reports: s
             .reports()
@@ -496,6 +594,16 @@ fn community_model(store: &Store, s: &community::Space, unread: u32) -> ui::Comm
                     .collect(),
             })
             .collect(),
+        listed: m.listed,
+        shared_spaces: m
+            .allies
+            .iter()
+            .map(|a| ui::SharedSpace { id: delivery::hex(&a.space.0), name: a.name.clone(), joined: store.load(&a.space).is_some_and(|x| !x.removed) })
+            .collect(),
+        sharing: m.alliance.len(),
+        ally_link: None,
+        join_link: (m.listed && joined && m.can(&me, perm::INVITE, None)).then(|| store.join_link(&s.id()).ok()).flatten(),
+        voice_room: voice_room.filter(|(id, _)| *id == delivery::hex(&s.id().0)).map(|(_, ch)| *ch),
         pending_invites: s
             .pending_invites()
             .into_iter()

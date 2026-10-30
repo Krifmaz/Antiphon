@@ -14,6 +14,7 @@ mod jitter;
 mod peer;
 pub mod port_map;
 pub mod blob;
+pub mod board;
 pub mod dht;
 pub mod mailbox;
 pub mod media_seal;

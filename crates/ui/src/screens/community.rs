@@ -34,6 +34,7 @@ pub fn list<'a>(ui: &'a Ui, m: &'a Model, phone: bool) -> El<'a, Msg> {
                 column![h1("Group chats & communities"), muted("Talk with several people at once. Nothing sits on a server: each member's app keeps the conversation.").size(13.5)]
                     .spacing(6)
                     .width(Length::Fill),
+                btn_icon(Icon::Search, "Find", Btn::Default, Some(Msg::Dialog(Some(Dialog::Directory)))),
                 btn_icon(Icon::Plus, "New", Btn::Primary, Some(Msg::Dialog(Some(Dialog::NewSpace)))),
             ]
             .spacing(16)
@@ -77,7 +78,12 @@ pub fn list<'a>(ui: &'a Ui, m: &'a Model, phone: bool) -> El<'a, Msg> {
         .height(Length::Fill)
         .style(theme::scroll);
     if phone {
-        let bar = row![t("Spaces").size(18).font(theme::bold()), fill(), icon_btn(Icon::Plus, "Start one", Some(Msg::Dialog(Some(Dialog::NewSpace))))]
+        let bar = row![
+            t("Spaces").size(18).font(theme::bold()),
+            fill(),
+            icon_btn(Icon::Search, "Find communities", Some(Msg::Dialog(Some(Dialog::Directory)))),
+            icon_btn(Icon::Plus, "Start one", Some(Msg::Dialog(Some(Dialog::NewSpace)))),
+        ]
             .spacing(8)
             .align_y(Alignment::Center);
         column![container(bar).height(56).padding([0, 16]).align_y(Alignment::Center), divider(), body].into()
@@ -132,7 +138,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, M
     let main = column![
         header(c, ch, false),
         divider(),
-        voice_bar(m, c),
+        voice_bar(c, ch),
         container(messages(ui, m, c, ch, false)).height(Length::Fill),
         container(composer(ui, c, ch)).padding(pad(4.0, 20.0, 18.0, 20.0)),
     ]
@@ -166,7 +172,7 @@ pub fn phone<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, 
         }
         col = col.push(scrollable(container(chips).padding([8, 10])).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0))));
     }
-    col = col.push(voice_bar(m, c));
+    col = col.push(voice_bar(c, ch));
     col = col.push(container(messages(ui, m, c, ch, true)).height(Length::Fill));
     col = col.push(container(composer(ui, c, ch)).padding(pad(4.0, 10.0, 12.0, 10.0)));
     col.into()
@@ -197,6 +203,9 @@ fn header<'a>(c: &'a Community, ch: Option<&'a Channel>, phone: bool) -> El<'a, 
         let tip = if c.reports.is_empty() { "Moderation" } else { "Moderation: reports waiting" };
         let kind = if c.reports.is_empty() { Btn::Icon } else { Btn::RowOn };
         r = r.push(icon_btn_kind(Icon::ShieldCheck, tip, kind, Some(Msg::Dialog(Some(Dialog::Moderation(c.id.clone()))))));
+    }
+    if !c.group && (c.can_manage || c.sharing > 0 || !c.shared_spaces.is_empty()) {
+        r = r.push(icon_btn(Icon::Globe, "Shared with other communities", Some(Msg::Dialog(Some(Dialog::SharedSpaces(c.id.clone()))))));
     }
     let invite = c.can_invite.then(|| Msg::Dialog(Some(Dialog::InviteToSpace(c.id.clone()))));
     if phone {
@@ -243,7 +252,13 @@ fn side<'a>(ui: &'a Ui, c: &'a Community, channel: u32) -> El<'a, Msg> {
         for x in &c.channels {
             let on = x.id == channel;
             // A private channel shows a lock where the others show a hash.
-            let mark = if x.private { Icon::Lock } else { Icon::Hash };
+            let mark = if x.voice {
+                Icon::Volume
+            } else if x.private {
+                Icon::Lock
+            } else {
+                Icon::Hash
+            };
             let name = if x.private { format!("#{}, private", x.name) } else { format!("#{}", x.name) };
             let entry = pressable(
                 row![icon(mark, 15.0, if on { p.text } else { p.faint }), t(clip(&x.name, 20)).size(13.5).font(theme::semibold()).color(if on { p.text } else { p.muted })]
@@ -293,9 +308,32 @@ fn member_row<'a>(member: &'a Member) -> El<'a, Msg> {
     .into()
 }
 
-/// Where a community's voice room goes, above its messages. Nothing yet.
-pub fn voice_bar<'a>(_m: &'a Model, _c: &'a Community) -> El<'a, Msg> {
-    space().height(0).into()
+/// Over a voice channel's messages: who is in it ("Voice active · 3
+/// people"), and Join or Leave. Nothing over a text channel.
+pub fn voice_bar<'a>(c: &'a Community, ch: Option<&'a Channel>) -> El<'a, Msg> {
+    let p = theme::look();
+    let Some(ch) = ch.filter(|x| x.voice) else { return space().height(0).into() };
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let n = ch.in_voice.len();
+    let (title, names) = if n == 0 {
+        ("Nobody's here yet".to_string(), "Join, and whoever joins next is put through to you.".to_string())
+    } else {
+        (format!("Voice active · {n} {}", if n == 1 { "person" } else { "people" }), clip(&ch.in_voice.join(", "), 80))
+    };
+    let here = c.voice_room == Some(ch.id);
+    let action = if here {
+        btn_icon(Icon::PhoneOff, "Leave", Btn::Danger, Some(change(SpaceChange::LeaveVoice(ch.id))))
+    } else {
+        btn_icon(Icon::Phone, "Join", Btn::Primary, (c.waiting.is_none()).then(|| change(SpaceChange::JoinVoice(ch.id))))
+    };
+    let bar = row![
+        icon(Icon::Volume, 18.0, if n > 0 { p.ok } else { p.faint }),
+        column![t(title).size(13.5).font(theme::semibold()), faint(names).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill),
+        action,
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    column![container(bar).padding([10, 20]).width(Length::Fill).style(theme::inset), divider()].into()
 }
 
 /// A member's role, after their name, unless it is the plain one
@@ -354,15 +392,26 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 /// One message, everyone's on the left: the author's avatar and name on
 /// the first of a run, then the words. Actions appear under the pointer.
 fn message<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first: bool, phone: bool) -> El<'a, Msg> {
+    // Its own keyboard group, as in a conversation (see `a11y::group`).
+    crate::a11y::group(Some(line.id));
+    let el = message_body(ui, c, channel, line, first, phone);
+    crate::a11y::pause(false);
+    crate::a11y::group(None);
+    el
+}
+
+/// [`message`]'s drawing, inside its keyboard group.
+fn message_body<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first: bool, phone: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
     // Read out as "who: what", in the order the channel runs.
     let who = if line.mine { "You" } else { line.author.as_str() };
     let said = if line.deleted { format!("{who}: message deleted") } else { format!("{who}: {}", line.text) };
-    let _ = Spec::new(Role::Text, said).add();
+    let focused = Spec::new(Role::Message, said).add();
+    let active = ui.active_message == Some(line.id);
     let content: El<'a, Msg> = if let Some((_, draft)) = editing {
         column![
-            input("Edit message", "stoop-edit", "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
+            input("Edit message", crate::EDIT_BOX, "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(14),
             row![faint("Enter to save · Esc to cancel").size(11), fill(), btn_sm("Cancel", Btn::Ghost, Some(Msg::EditCancel)), btn_sm("Save", Btn::Primary, Some(Msg::EditSave))]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -389,9 +438,9 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first
     if editing.is_some() || phone || line.deleted {
         return row_el.into();
     }
-    // Pointer-only tools, built for every message: kept out of the
-    // keyboard's list, as in a conversation.
-    crate::a11y::pause(true);
+    // Tools built for every message: in the keyboard's list only for the
+    // message with focus, as in a conversation.
+    crate::a11y::pause(!active);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
     tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
     if !line.mine && c.waiting.is_none() && !c.group {
@@ -408,7 +457,12 @@ fn message<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, first
     crate::a11y::pause(false);
     let bar = container(tools).padding(3).style(theme::menu_pop);
     let overlay = container(bar).width(Length::Fill).align_x(Alignment::End).padding([0, 6]);
-    hover(row_el, overlay)
+    let row_el = crate::a11y::ring(row_el, focused, 10.0);
+    if active {
+        iced_widget::stack![row_el, overlay].into()
+    } else {
+        hover(row_el, overlay)
+    }
 }
 
 /// Where a channel's messages are typed.
@@ -631,6 +685,7 @@ pub fn emoji_manager<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
 pub fn add_channel<'a>(ui: &'a Ui, id: &'a str) -> El<'a, Msg> {
     column![
         muted("Everyone in the community can read and post in it. You can make it private afterwards, from its gear.").size(13.5),
+        setting("Voice channel", Some("A standing call people drop in and out of, as well as messages."), switch("Voice channel", ui.channel_voice, Msg::ChannelVoice)),
         field(
             "Name",
             input("Channel name", "stoop-channel-name", "band-practice", &ui.channel_name).on_input(Msg::ChannelName).on_submit(Msg::ChannelCreate(id.to_string())).padding([10, 12]).size(14)
@@ -755,8 +810,9 @@ pub fn report<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a,
     col.into()
 }
 
-/// Slow mode, the reports waiting, and the invitations you sent.
-pub fn moderation<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
+/// Slow mode, being listed, the reports waiting, and the invitations you
+/// sent.
+pub fn moderation<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
     let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
     let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
     let mut col = column![].spacing(14);
@@ -771,6 +827,68 @@ pub fn moderation<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         .spacing(8));
     } else if c.slow_mode_secs > 0 {
         col = col.push(faint(format!("Slow mode is on: one post every {} seconds.", c.slow_mode_secs)).size(12.5));
+    }
+    if c.can_set_slow_mode && !c.group {
+        let listed = c.listed;
+        let mut listing = column![setting(
+            "Open to people asking",
+            Some("Anyone with its join link can ask to join, and is invited without anyone having to say yes. A directory can list the link."),
+            switch("Open to people asking", listed, move |on| change(SpaceChange::Listed(on))),
+        )]
+        .spacing(8);
+        if let Some(link) = c.join_link.as_ref().filter(|_| listed) {
+            listing = listing.push(
+                row![faint(clip(link, 48)).size(12).font(theme::mono()).width(Length::Fill), btn_sm("Copy link", Btn::Ghost, Some(Msg::Copy(link.clone(), "Join link")))]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            );
+            listing = listing.push(
+                row![
+                    input("Directory address", "stoop-listing-directory", "directory.example.org:7000", &ui.listing_directory).on_input(Msg::ListingDirectory).padding([8, 10]).size(13).width(Length::FillPortion(2)),
+                    input("What it says about itself", "stoop-listing-description", "What it's about", &ui.listing_description).on_input(Msg::ListingDescription).padding([8, 10]).size(13).width(Length::FillPortion(3)),
+                ]
+                .spacing(8),
+            );
+            let dir = (!ui.listing_directory.is_empty()).then(|| ui.listing_directory.clone());
+            listing = listing.push(
+                row![
+                    faint("A directory that takes submissions lists it straight away; only you can change or withdraw it.").size(12).width(Length::Fill),
+                    btn_sm("Withdraw", Btn::Ghost, dir.clone().map(|d| change(SpaceChange::WithdrawListing(d)))),
+                    btn_sm("List it", Btn::Primary, dir.map(|_| Msg::ListingSubmit(c.id.clone()))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(listing);
+        let mut board = column![].spacing(8);
+        match &c.board {
+            Some(node) => {
+                board = board.push(setting(
+                    "Full scale",
+                    Some("Messages for everyone are posted once to a board on a mailbox node, and members read them from there, so it can have thousands of members. The node can't read them."),
+                    switch("Full scale", true, move |_| change(SpaceChange::Board(None))),
+                ));
+                board = board.push(faint(format!("Board on {node}.")).size(12));
+            }
+            None => {
+                board = board.push(setting(
+                    "Full scale",
+                    Some("Post messages for everyone once, to a board on a mailbox node, instead of a copy to each member: needed past 250 members, up to 5,000. The node can't read them."),
+                    space().width(0),
+                ));
+                let node = (!ui.board_node.is_empty()).then(|| ui.board_node.clone());
+                board = board.push(
+                    row![
+                        input("Mailbox node address", "stoop-board-node", "mail.example.org:7000", &ui.board_node).on_input(Msg::BoardNode).padding([8, 10]).size(13).width(Length::Fill),
+                        btn_sm("Use a board", Btn::Primary, node.map(|n| change(SpaceChange::Board(Some(n))))),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+        col = col.push(board);
     }
     if c.moderator {
         let mut reports = column![label("Reports")].spacing(8);
@@ -829,4 +947,124 @@ pub fn moderation<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         col = col.push(invites);
     }
     scrollable(col).height(Length::Shrink).style(theme::scroll).into()
+}
+
+/// The spaces a community shares with other communities (spec §12 Q4):
+/// ask into one, and, for whoever manages it, start one or bring it into
+/// another community's.
+pub fn shared_spaces<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
+    let Some(c) = m.communities.iter().find(|c| c.id == id) else { return faint("It's gone.").into() };
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let mut col = column![muted("A shared space is a community of its own whose members come from several communities, so you can talk and call with another community without joining it. Its members see your name and picture there, as anywhere.").size(13)].spacing(12);
+    if c.sharing > 0 {
+        col = col.push(faint(format!("This is a shared space: {} communities' members can ask in.", c.sharing)).size(12.5));
+    }
+    let mut list = column![].spacing(6);
+    if c.shared_spaces.is_empty() && c.sharing == 0 {
+        list = list.push(faint("It doesn't share any spaces yet.").size(12.5));
+    }
+    for s in &c.shared_spaces {
+        let ask = if s.joined { btn_sm("You're in it", Btn::Ghost, None) } else { btn_sm("Ask to join", Btn::Primary, Some(change(SpaceChange::AskIntoShared(s.id.clone())))) };
+        let mut r = row![avatar(&s.name, &s.id, 30.0), t(s.name.as_str()).size(13.5).font(theme::semibold()).width(Length::Fill), ask].spacing(10).align_y(Alignment::Center);
+        if c.can_manage {
+            r = r.push(icon_btn(Icon::Trash, "Take it off this community's list", Some(change(SpaceChange::UnlistShared(s.id.clone())))));
+        }
+        list = list.push(r);
+    }
+    col = col.push(list);
+    if c.can_manage && c.sharing == 0 {
+        col = col.push(label("Share a space with another community"));
+        col = col.push(
+            row![
+                input("Name of the shared space", "stoop-shared-name", "Both choirs", &ui.shared_name).on_input(Msg::SharedName).on_submit(Msg::SharedStart(c.id.clone())).padding([8, 10]).size(13),
+                btn_sm("Start it", Btn::Primary, (!ui.shared_name.trim().is_empty()).then(|| Msg::SharedStart(c.id.clone()))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        col = col.push(
+            row![
+                input("Link from the other community", "stoop-shared-link", "stoop://ally/…", &ui.shared_link).on_input(Msg::SharedLink).on_submit(Msg::SharedJoin(c.id.clone())).padding([8, 10]).size(13),
+                btn_sm("Join theirs", Btn::Ghost, (!ui.shared_link.is_empty()).then(|| Msg::SharedJoin(c.id.clone()))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        col = col.push(faint("Starting one gives you a link for the other community's admin; it works once, within a week. Joining theirs needs the link their admin gave you.").size(12));
+    }
+    if c.sharing > 0 && c.can_manage {
+        col = col.push(
+            row![faint("Bring in another community: make a link for its admin.").size(12.5).width(Length::Fill), btn_sm("Make a link", Btn::Ghost, Some(change(SpaceChange::NewAllyLink)))].spacing(8).align_y(Alignment::Center),
+        );
+    }
+    if let Some(link) = &c.ally_link {
+        col = col.push(
+            row![faint(clip(link, 48)).size(12).font(theme::mono()).width(Length::Fill), btn_sm("Copy link", Btn::Ghost, Some(Msg::Copy(link.clone(), "Shared space link")))]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+    }
+    scrollable(col).height(Length::Shrink).style(theme::scroll).into()
+}
+
+/// Communities the directories you added list: a search over them, the
+/// way to add a directory, and Ask to join.
+pub fn directory<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
+    let d = &m.directory;
+    let mut col = column![muted("A directory lists only communities that asked to be listed, never people. Add one someone told you about.").size(13)].spacing(12);
+    let mut dirs = column![].spacing(4);
+    for addr in &d.directories {
+        dirs = dirs.push(
+            row![icon(Icon::Globe, 14.0, theme::look().faint), t(addr.as_str()).size(13).width(Length::Fill), icon_btn(Icon::Trash, "Stop browsing it", Some(Msg::Do(Action::RemoveDirectory(addr.clone()))))]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+    }
+    col = col.push(dirs);
+    col = col.push(
+        row![
+            input("Directory to add", "stoop-directory-add", "directory.example.org:7000", &ui.directory_address).on_input(Msg::DirectoryAddress).on_submit(Msg::DirectoryAdd).padding([8, 10]).size(13),
+            btn_sm("Add", Btn::Ghost, (!ui.directory_address.is_empty()).then_some(Msg::DirectoryAdd)),
+            btn_sm(if d.browsing { "Looking…" } else { "Refresh" }, Btn::Ghost, (!d.browsing && !d.directories.is_empty()).then_some(Msg::Do(Action::BrowseDirectories))),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    for problem in &d.problems {
+        col = col.push(faint(problem.as_str()).size(12));
+    }
+    if !d.listed.is_empty() {
+        col = col.push(input("Search the listings", "stoop-directory-search", "Search by name or what it's about", &ui.directory_query).on_input(Msg::DirectoryQuery).padding([8, 10]).size(13.5));
+    }
+    let words: Vec<String> = ui.directory_query.split_whitespace().map(str::to_lowercase).collect();
+    let mut list = column![].spacing(6);
+    let mut shown = 0;
+    for l in &d.listed {
+        let text = format!("{} {}", l.name, l.description).to_lowercase();
+        if !words.iter().all(|w| text.contains(w.as_str())) {
+            continue;
+        }
+        shown += 1;
+        let join = if l.link.starts_with("stoop://join/") {
+            btn_sm("Ask to join", Btn::Primary, Some(Msg::Do(Action::AskToJoin(l.link.clone()))))
+        } else {
+            btn_sm("Add host", Btn::Ghost, Some(Msg::Do(Action::AddPerson { name: l.name.clone(), invite: l.link.clone() })))
+        };
+        list = list.push(
+            row![
+                avatar(&l.name, &l.link, 30.0),
+                column![t(l.name.as_str()).size(13.5).font(theme::semibold()), faint(format!("{} · {}", if l.description.is_empty() { "No description" } else { l.description.as_str() }, l.directory)).size(12)]
+                    .spacing(1)
+                    .width(Length::Fill),
+                join,
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
+    }
+    if !d.listed.is_empty() && shown == 0 {
+        list = list.push(faint("Nothing listed matches that.").size(12.5));
+    }
+    col = col.push(scrollable(list).height(Length::Fixed(300.0)).style(theme::scroll));
+    col.into()
 }

@@ -163,6 +163,7 @@ fn main() -> anyhow::Result<()> {
         peer_eq: Arc::new(Mutex::new(None)),
         echo_cancel: {
             antiphon_client::link_quality::set_low_data(loaded.low_data_calls);
+            antiphon_client::screen_audio::set_enabled(loaded.share_screen_audio);
             Arc::new(std::sync::atomic::AtomicBool::new(loaded.echo_cancel))
         },
         // Built once for the process, not once per call: the filter it
@@ -5966,6 +5967,8 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         echo_cancel: app.get_echo_cancel(),
         // The classic window has no switch for it; kept as stored.
         low_data_calls: previous.low_data_calls,
+        share_screen_audio: previous.share_screen_audio,
+        local_api: previous.local_api,
         duck_db: app.get_duck_db().max(0) as u32,
         presence: app.get_my_presence(),
         crash_reporting: app.get_crash_reporting(),
@@ -6228,6 +6231,9 @@ fn read_chain_config(app: &MainWindow) -> ChainConfig {
             damping: app.get_reverb_damping(),
             wet_dry: app.get_reverb_wet(),
         },
+        // The classic window has no plugin list; the plugins chosen in the
+        // main app are kept in its config, not edited here.
+        plugins: Vec::new(),
     }
 }
 
@@ -6436,6 +6442,7 @@ fn apply_spaces_to_ui(app: &MainWindow) {
     app.set_space_can_manage(joined && m.can(&me, perm::MANAGE_COMMUNITY, None));
     app.set_space_can_manage_channels(joined && m.can(&me, perm::MANAGE_CHANNELS, None));
     app.set_space_server_hosted(m.server_hosted_files);
+    app.set_space_full_scale(m.nodes.board.is_some());
     app.set_space_ring_rule(store.ring_rule(&space.id()).map_or(0, |r| r.to_i32() + 1));
     let first = |v: &[antiphon_crypto::community::NodeRef]| v.first().cloned().unwrap_or_default();
     let (mailbox, files) = (first(&m.nodes.mailbox), first(&m.nodes.files));
@@ -6756,7 +6763,21 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
             let files = node(app.get_space_files_node(), app.get_space_files_code());
             let dht = app.get_space_dht_node().trim().to_string();
             let hosted = app.get_space_server_hosted();
+            let full_scale = app.get_space_full_scale();
             space_update(&app, |m| {
+                // The board stays where it is while its node does; a new
+                // node gets a new board.
+                m.nodes.board = match (&mailbox, full_scale) {
+                    (Some(node), true) => match m.nodes.board.take() {
+                        Some(b) if b.addr == node.addr => Some(b),
+                        _ => {
+                            let mut id = [0u8; 32];
+                            getrandom::fill(&mut id).expect("OS randomness is unavailable");
+                            Some(antiphon_crypto::community::BoardRef { addr: node.addr.clone(), id: antiphon_crypto::community::Key(id) })
+                        }
+                    },
+                    _ => None,
+                };
                 m.nodes.mailbox = mailbox.into_iter().collect();
                 m.nodes.files = files.into_iter().collect();
                 m.nodes.dht = if dht.is_empty() { Vec::new() } else { vec![dht] };
