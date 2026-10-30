@@ -74,7 +74,7 @@ impl Drop for Api {
 fn new_token() -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("OS randomness is unavailable");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(&bytes)
 }
 
 /// Writes `api.json` so only this user can read it.

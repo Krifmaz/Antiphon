@@ -87,7 +87,6 @@ pub enum FileSource {
         /// The file's length when it was hashed.
         len: u64,
         /// Reads `len` bytes from `offset`.
-        #[expect(clippy::type_complexity)]
         read: Box<dyn Fn(u64, usize) -> std::io::Result<Vec<u8>> + Send + Sync>,
     },
 }

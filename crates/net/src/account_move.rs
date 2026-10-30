@@ -77,8 +77,7 @@ impl std::fmt::Debug for MoveLink {
 impl MoveLink {
     /// The link as text, for a QR code or the clipboard.
     pub fn to_link(&self) -> String {
-        let key: String = self.key.iter().map(|b| format!("{b:02x}")).collect();
-        format!("{SCHEME}{LINK_VERSION}/{}/{key}", self.addr)
+        format!("{SCHEME}{LINK_VERSION}/{}/{}", self.addr, antiphon_crypto::hex::encode(&self.key))
     }
 
     /// Reads a link, forgiving the spaces and line breaks a paste picks up.
@@ -90,13 +89,9 @@ impl MoveLink {
             return None;
         }
         let addr: SocketAddr = parts.next()?.parse().ok()?;
-        let hex = parts.next()?;
-        if parts.next().is_some() || hex.len() != 64 {
+        let key = antiphon_crypto::hex::decode_array(parts.next()?)?;
+        if parts.next().is_some() {
             return None;
-        }
-        let mut key = [0u8; 32];
-        for (i, byte) in key.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
         }
         Some(MoveLink { addr, key })
     }

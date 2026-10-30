@@ -22,6 +22,8 @@ log = "0.4"
 base64 = "0.22.1"
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 antiphon-mobile = { version = "0.1.0", path = "../mobile" }
+# The shared hex encoder, for the push token.
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 objc2 = "0.6.4"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"

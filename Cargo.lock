@@ -467,6 +467,7 @@ dependencies = [
 name = "antiphon-captions"
 version = "0.1.0"
 dependencies = [
+ "antiphon-crypto",
  "candle-core",
  "candle-nn",
  "candle-transformers",
@@ -552,7 +553,6 @@ dependencies = [
  "curve25519-dalek 5.0.0",
  "ed25519-dalek 3.0.0",
  "getrandom 0.4.3",
- "hex",
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "keyring",
@@ -574,6 +574,7 @@ dependencies = [
 name = "antiphon-ios"
 version = "0.1.0"
 dependencies = [
+ "antiphon-crypto",
  "antiphon-mobile",
  "base64 0.22.1",
  "block2 0.6.2",
@@ -707,6 +708,7 @@ dependencies = [
 name = "antiphon-update"
 version = "0.1.0"
 dependencies = [
+ "antiphon-crypto",
  "serde",
  "serde_json",
  "sha2 0.11.0",

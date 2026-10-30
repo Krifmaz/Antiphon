@@ -195,7 +195,7 @@ impl SignedRouteRecord {
     /// of someone's routes a node is holding without logging the routes.
     pub fn digest_hex(&self) -> String {
         let digest = Sha256::digest(self.encode());
-        digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+        crate::hex::encode(&digest[..8])
     }
 }
 

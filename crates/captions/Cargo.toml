@@ -4,6 +4,8 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+# Only for its hex encoder, shared by every crate that prints a digest.
+antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 candle-core = { version = "0.9.2", default-features = false }
 candle-nn = { version = "0.9.2", default-features = false }
 candle-transformers = { version = "0.9.2", default-features = false }

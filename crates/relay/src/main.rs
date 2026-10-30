@@ -321,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
             let ids: Vec<_> = store.list().into_iter().map(|(id, _)| id).collect();
             let mut removed = 0;
             for id in ids {
-                let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+                let hex: String = antiphon_crypto::hex::encode(&id);
                 if target == "all" || *target == hex {
                     removed += store.purge(&id) as usize;
                 }
@@ -330,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
             for (id, m) in store.list() {
-                let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+                let hex: String = antiphon_crypto::hex::encode(&id);
                 println!(
                     "{hex}  {:>12} bytes  {:>4} days old  {:>6} reads{}",
                     m.stored_bytes(),
@@ -360,7 +360,7 @@ async fn main() -> anyhow::Result<()> {
         let identity = load_push_identity(&args.mailbox_push_key)?;
         let sender = push_sender(&args)?;
         m.lock().unwrap().enable_push(identity.public().identity_key, sender.has_apns());
-        let key: String = identity.public().identity_key.iter().map(|b| format!("{b:02x}")).collect();
+        let key: String = antiphon_crypto::hex::encode(&identity.public().identity_key);
         let apple = if sender.has_apns() { "UnifiedPush and APNs" } else { "UnifiedPush" };
         println!("\nPush wake-ups on ({apple}). Node push key {key}");
         spawn_push_loop(m.clone(), identity, sender);
@@ -461,11 +461,11 @@ async fn main() -> anyhow::Result<()> {
         println!("\nFederating with other relays. Peer key {key}\nOther relays can pin it with --peer <this address>#{key}");
     }
     if let Some(h) = &hops {
-        let key: String = h.lock().unwrap().public_key().iter().map(|b| format!("{b:02x}")).collect();
+        let key: String = antiphon_crypto::hex::encode(&h.lock().unwrap().public_key());
         println!("\nHops on: carrying anonymity circuits. Hop key {key}");
     }
     if let Some(d) = &dht_node {
-        let id: String = d.lock().unwrap().id().iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let id = antiphon_crypto::hex::encode(&d.lock().unwrap().id()[..8]);
         println!("\nDHT node on (id {id}...).");
     }
     if args.directory.is_some() {
@@ -605,7 +605,7 @@ fn load_submitted(path: &std::path::Path) -> Vec<([u8; 32], ListingEntry)> {
         .filter_map(|line| {
             let parts: Vec<&str> = line.splitn(4, '|').map(str::trim).collect();
             let [key, name, description, invite] = parts[..] else { return None };
-            let key: [u8; 32] = (0..32).map(|i| u8::from_str_radix(key.get(i * 2..i * 2 + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?.try_into().ok()?;
+            let key: [u8; 32] = antiphon_crypto::hex::decode_array(key)?;
             Some((key, ListingEntry { name: name.into(), description: description.into(), invite: invite.into() }))
         })
         .collect()

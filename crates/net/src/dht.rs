@@ -1526,7 +1526,7 @@ mod tests {
         for body in [
             Reply::Pong { observed: addr(1, 1, 5) },
             Reply::Nodes(nodes.clone()),
-            Reply::Value { record: Some(record), nodes: nodes },
+            Reply::Value { record: Some(record), nodes },
             Reply::Value { record: None, nodes: vec![] },
             Reply::Stored(StoreResult::Stale),
             Reply::Listing {

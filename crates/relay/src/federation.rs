@@ -742,19 +742,12 @@ pub fn parse_peer(text: &str) -> Option<(String, Option<[u8; 32]>)> {
 
 /// 64 hex characters to 32 bytes.
 fn decode_hex(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
-    }
-    Some(out)
+    antiphon_crypto::hex::decode_array(hex)
 }
 
 /// 32 bytes as 64 lowercase hex characters, for printing a relay's key.
 pub fn encode_hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 /// The answer a relay that does not federate gives to a request that

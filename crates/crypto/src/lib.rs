@@ -63,6 +63,7 @@ pub mod dht_record;
 mod error;
 pub mod community;
 pub mod group;
+pub mod hex;
 mod handshake;
 mod identity;
 mod invite;

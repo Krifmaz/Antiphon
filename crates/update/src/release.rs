@@ -98,9 +98,7 @@ pub fn sum_for(sums: &str, name: &str) -> Option<String> {
 }
 
 /// Bytes as lowercase hex, for comparing a digest with a checksum list.
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use antiphon_crypto::hex::encode as hex;
 
 #[cfg(test)]
 mod tests {

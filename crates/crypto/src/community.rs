@@ -99,24 +99,14 @@ pub struct Key(pub [u8; 32]);
 
 impl Serialize for Key {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        s.serialize_str(&crate::hex::encode(&self.0))
     }
 }
 
 impl<'de> Deserialize<'de> for Key {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let text = String::deserialize(d)?;
-        let mut out = [0u8; 32];
-        if text.len() != 64 {
-            return Err(serde::de::Error::custom("a key is 64 hex digits"));
-        }
-        for (i, o) in out.iter_mut().enumerate() {
-            *o = text
-                .get(i * 2..i * 2 + 2)
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-                .ok_or_else(|| serde::de::Error::custom("not hex"))?;
-        }
-        Ok(Key(out))
+        crate::hex::decode_array(&text).map(Key).ok_or_else(|| serde::de::Error::custom("a key is 64 hex digits"))
     }
 }
 
@@ -430,7 +420,7 @@ impl ManifestDelta {
         }
         let mut m = self.rest.clone();
         m.members = members;
-        let signature: [u8; 64] = (0..128).step_by(2).map(|i| u8::from_str_radix(self.signature.get(i..i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?.try_into().ok()?;
+        let signature: [u8; 64] = crate::hex::decode_array(&self.signature)?;
         let signed = SignedManifest { body: serde_json::to_vec(&m).ok()?, signer: self.signer.0, signature };
         signed.open().ok()?;
         Some(signed)
@@ -451,7 +441,7 @@ impl SignedManifest {
         let delta = ManifestDelta {
             base: base.hash(),
             signer: Key(self.signer),
-            signature: self.signature.iter().map(|b| format!("{b:02x}")).collect(),
+            signature: crate::hex::encode(&self.signature),
             rest,
             removed,
             upserted,

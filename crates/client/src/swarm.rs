@@ -255,7 +255,7 @@ mod tests {
     fn temp(tag: &str) -> std::path::PathBuf {
         let mut r = [0u8; 6];
         getrandom::fill(&mut r).unwrap();
-        std::env::temp_dir().join(format!("antiphon-swarm-{tag}-{}", r.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+        std::env::temp_dir().join(format!("antiphon-swarm-{tag}-{}", antiphon_crypto::hex::encode(&r)))
     }
 
     async fn holder(plain: &[u8], key: &FileKey, scope: Scope, contacts: antiphon_relay::files::ContactCheck) -> SocketAddr {

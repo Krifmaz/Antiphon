@@ -391,7 +391,7 @@ mod tests {
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
-        hex::decode(s).unwrap()
+        crate::hex::decode(s).unwrap()
     }
 
     /// RFC 9605 Appendix C.1, a spread of the header vectors.

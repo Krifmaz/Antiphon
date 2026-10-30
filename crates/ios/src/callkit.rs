@@ -376,7 +376,7 @@ define_class!(
         fn did_update(&self, _registry: &PKPushRegistry, credentials: &PKPushCredentials, _kind: &PKPushType) {
             // SAFETY: a property read.
             let token = unsafe { credentials.token() }.to_vec();
-            let hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+            let hex = antiphon_crypto::hex::encode(&token);
             log::info!("PushKit token updated");
             post(PlatformEvent::PushRegistered(hex));
         }
@@ -460,7 +460,7 @@ fn start_push(mtm: MainThreadMarker) {
             registry.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             registry.setDesiredPushTypes(Some(&NSSet::from_slice(&[PKPushTypeVoIP])));
             if let Some(token) = registry.pushTokenForType(PKPushTypeVoIP) {
-                let hex: String = token.to_vec().iter().map(|b| format!("{b:02x}")).collect();
+                let hex = antiphon_crypto::hex::encode(&token.to_vec());
                 post(PlatformEvent::PushRegistered(hex));
             }
             *slot = Some(Push { _registry: registry, _delegate: delegate });

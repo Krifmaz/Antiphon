@@ -556,19 +556,12 @@ fn safe_path(rel: &str) -> Option<PathBuf> {
 
 /// Lower-case hex.
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 /// Exactly 64 hex digits as 32 bytes.
 fn unhex32(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    antiphon_crypto::hex::decode_array(text)
 }
 
 /// The time now, unix seconds.

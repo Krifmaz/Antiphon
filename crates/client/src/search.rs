@@ -14,7 +14,6 @@
 /// nothing constructs them -- they exist so the discriminants line up with
 /// `settings-category` in the UI, and so a future indexed section in
 /// either one has an obvious home.
-#[expect(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Category {
     General = 0,

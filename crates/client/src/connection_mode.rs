@@ -134,19 +134,11 @@ pub fn listening_tokens(
 }
 
 pub fn decode_hex32(hex: &str) -> Option<[u8; 32]> {
-    let hex = hex.trim();
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    antiphon_crypto::hex::decode_array(hex.trim())
 }
 
 pub fn encode_hex32(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 #[cfg(test)]

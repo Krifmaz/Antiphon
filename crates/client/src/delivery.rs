@@ -403,7 +403,7 @@ pub async fn resolve(kind: TrafficKind, node: &str) -> Option<SocketAddr> {
 }
 
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 pub fn unhex32(s: &str) -> Option<[u8; 32]> {
@@ -417,11 +417,7 @@ pub fn encode_record(record: &SignedRouteRecord) -> String {
 /// A contact's record from what they sent, checked: it must be signed by
 /// the key we know them by, and newer than the one already held.
 pub fn accept_record(encoded: &str, their_identity: &[u8; 32], known_sequence: Option<u64>) -> Option<SignedRouteRecord> {
-    if !encoded.len().is_multiple_of(2) {
-        return None;
-    }
-    let bytes: Vec<u8> =
-        (0..encoded.len()).step_by(2).map(|i| u8::from_str_radix(encoded.get(i..i + 2)?, 16).ok()).collect::<Option<_>>()?;
+    let bytes = antiphon_crypto::hex::decode(encoded)?;
     let record = SignedRouteRecord::decode(&bytes).ok()?;
     if record.record.identity_key != *their_identity {
         return None;
@@ -465,9 +461,16 @@ pub fn identity() -> Option<Arc<IdentityKeyPair>> {
 
 /// Your current route list, signed and hex-encoded for a `Hello`.
 pub fn my_record_hex() -> String {
-    let Some(identity) = IDENTITY.get() else { return String::new() };
+    hex(&my_record_bytes())
+}
+
+/// Your current route list, signed, as bytes: what [`my_record_hex`]
+/// encodes, for a caller (discovery) that publishes the bytes themselves.
+/// Empty before an identity is loaded.
+pub fn my_record_bytes() -> Vec<u8> {
+    let Some(identity) = IDENTITY.get() else { return Vec::new() };
     let config = crate::config::load();
-    encode_record(&my_record(identity, &config.routes, config.strict_mode, config.route_sequence))
+    my_record(identity, &config.routes, config.strict_mode, config.route_sequence).encode()
 }
 
 /// Run the courier now rather than at its next tick -- after a call

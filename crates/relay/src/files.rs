@@ -120,18 +120,11 @@ pub struct FileStore {
 }
 
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    antiphon_crypto::hex::encode(b)
 }
 
 fn unhex32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, o) in out.iter_mut().enumerate() {
-        *o = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    antiphon_crypto::hex::decode_array(s)
 }
 
 pub fn sealed_len(size: u64, index: u32) -> usize {

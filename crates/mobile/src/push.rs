@@ -111,7 +111,7 @@ fn saved_path(dir: &Path) -> PathBuf {
 
 /// Lowercase hex of any bytes.
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 impl Push {
@@ -230,8 +230,5 @@ impl Push {
 
 /// Bytes from hex, or `None` for anything that is not.
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
+    antiphon_crypto::hex::decode(s)
 }

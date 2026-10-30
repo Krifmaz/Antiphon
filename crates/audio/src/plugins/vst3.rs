@@ -259,18 +259,27 @@ fn w_text(field: &[TChar]) -> String {
     String::from_utf16_lossy(&field[..len])
 }
 
-/// A class id as text, for saving which plugin a bundle's entry is.
+/// A class id as text, for saving which plugin a bundle's entry is:
+/// upper-case hex, two digits per byte, the form saved configs hold.
 fn cid_text(cid: &TUID) -> String {
-    cid.iter().map(|b| format!("{:02X}", *b as u8)).collect()
+    use std::fmt::Write;
+    cid.iter().fold(String::with_capacity(32), |mut text, b| {
+        // Writing to a String cannot fail.
+        let _ = write!(text, "{:02X}", *b as u8);
+        text
+    })
 }
 
+/// The inverse of [`cid_text`]; `None` for anything but 32 hex digits.
 fn cid_from_text(text: &str) -> Option<TUID> {
     if text.len() != 32 {
         return None;
     }
     let mut cid: TUID = [0; 16];
     for (i, out) in cid.iter_mut().enumerate() {
-        *out = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()? as c_char;
+        // `get`, not indexing: a non-ASCII character in a hand-edited
+        // config would otherwise split mid-character and panic.
+        *out = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()? as c_char;
     }
     Some(cid)
 }

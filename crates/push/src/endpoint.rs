@@ -158,19 +158,12 @@ pub fn pick(targets: &[Target], kind: WakeKind) -> Option<&Target> {
 
 /// Lowercase hex.
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 /// Exactly 32 bytes from 64 hex digits, or `None`.
 pub fn unhex32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    antiphon_crypto::hex::decode_array(s)
 }
 
 /// Parsing, the route round trip, and which transport carries what.

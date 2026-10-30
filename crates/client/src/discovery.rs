@@ -285,13 +285,7 @@ async fn round(published: &mut Option<(Whereabouts, tokio::time::Instant)>, look
         }
         Err(_) => None,
     };
-    let route_record = {
-        let hex = crate::delivery::my_record_hex();
-        (0..hex.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
-            .collect::<Vec<u8>>()
-    };
+    let route_record = crate::delivery::my_record_bytes();
     let whereabouts = Whereabouts { addresses: addresses(&local, observed), relay: local.relay.clone(), route_record };
     let now = tokio::time::Instant::now();
     let due = match published {

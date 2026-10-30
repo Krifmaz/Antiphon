@@ -55,7 +55,7 @@ pub fn chunk_count(file_len: u64) -> u32 {
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(&hasher.finalize())
 }
 
 /// Splits `data` into [`CHUNK_SIZE`] pieces, each prefixed with the
@@ -136,7 +136,7 @@ pub fn sha256_hex_reader(mut reader: impl std::io::Read) -> std::io::Result<Stri
         };
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(antiphon_crypto::hex::encode(&hasher.finalize()))
 }
 
 /// The other half of `build_chunks`/`build_chunk`: pulls `(transfer_id,

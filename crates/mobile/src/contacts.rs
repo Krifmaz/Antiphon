@@ -65,20 +65,13 @@ impl Contact {
 /// Lower-case hex of a 32-byte key, the form keys are stored and
 /// compared in throughout the phone's files.
 pub fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 /// The inverse of [`hex`]: `None` for anything that is not exactly 64
 /// hex digits, which is how an unpinned contact's empty key reads.
 pub fn decode_key(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    antiphon_crypto::hex::decode_array(hex)
 }
 
 /// The address book, kept sorted by name (case-insensitively) after

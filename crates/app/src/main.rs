@@ -91,7 +91,7 @@ fn restore_identity(seed: [u8; 32], force: bool) -> Result<()> {
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    antiphon_crypto::hex::encode(bytes)
 }
 
 /// The active profile for this process, or `None` for the default. Set

@@ -102,12 +102,17 @@ pub fn evaluate(pinned: Option<&PinnedContact>, presented: &PublicIdentity) -> T
 /// *both* parties, which is what defeats a machine-in-the-middle. This is
 /// only an at-a-glance label for one key.
 pub fn fingerprint(identity_key: &[u8; 32]) -> String {
-    identity_key
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(":")
+    let hex = crate::hex::encode(&identity_key[..8]);
+    // Pairs of digits joined by colons: "ab:cd:...".
+    let mut out = String::with_capacity(8 * 3);
+    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        if i > 0 {
+            out.push(':');
+        }
+        out.push(char::from(pair[0]));
+        out.push(char::from(pair[1]));
+    }
+    out
 }
 
 #[cfg(test)]

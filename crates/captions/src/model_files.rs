@@ -100,7 +100,7 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(antiphon_crypto::hex::encode(&hasher.finalize()))
 }
 
 /// Checks a file against its pin. Unpinned files pass: that case only

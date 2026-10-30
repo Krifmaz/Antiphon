@@ -74,15 +74,16 @@ impl Invite {
     /// identity-only link, which is valid and forward-looking -- it just
     /// can't be dialled until discovery exists.
     pub fn to_link(&self) -> String {
-        let hex: String = self.identity_key.iter().map(|b| format!("{b:02x}")).collect();
-        let mut link = if self.address.is_empty() {
-            format!("{SCHEME}{hex}")
-        } else {
-            format!("{SCHEME}{hex}@{}", self.address)
-        };
+        let mut link = format!("{SCHEME}{}", crate::hex::encode(&self.identity_key));
+        if !self.address.is_empty() {
+            link.push('@');
+            link.push_str(&self.address);
+        }
         if let (false, Some(secret)) = (self.relay.is_empty(), self.relay_secret) {
-            let k: String = secret.iter().map(|b| format!("{b:02x}")).collect();
-            link.push_str(&format!("?relay={}&k={k}", self.relay));
+            link.push_str("?relay=");
+            link.push_str(&self.relay);
+            link.push_str("&k=");
+            link.push_str(&crate::hex::encode(&secret));
             if self.lends_relay {
                 link.push_str("&lend=1");
             }
@@ -141,16 +142,9 @@ impl Invite {
     }
 }
 
+/// A 32-byte key from the 64 hex digits of a link.
 fn parse_hex32(hex: &str) -> Result<[u8; 32], CryptoError> {
-    if hex.len() != 64 {
-        return Err(CryptoError::MalformedInvite);
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        let pair = hex.get(i * 2..i * 2 + 2).ok_or(CryptoError::MalformedInvite)?;
-        *byte = u8::from_str_radix(pair, 16).map_err(|_| CryptoError::MalformedInvite)?;
-    }
-    Ok(out)
+    crate::hex::decode_array(hex).ok_or(CryptoError::MalformedInvite)
 }
 
 /// A deliberately loose check: enough to catch a truncated paste or a
