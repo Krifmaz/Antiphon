@@ -494,7 +494,10 @@ impl Engine {
                 return;
             }
             if changes.mail_key {
+                // A device was removed elsewhere: shut it out of our
+                // groups too, as `RevokeDevice` does here.
                 self.publish_routes();
+                std::thread::spawn(community::rekey_all);
             } else if changes.changed {
                 // The device list may have changed: spaces' members get the
                 // new one on our cards (`publish_routes` does this too).
@@ -2359,8 +2362,11 @@ impl Engine {
             }
             A::RevokeDevice(id) => match self.devices.as_mut().map(|d| d.revoke(&id)) {
                 Some(Ok(name)) => {
-                    // Contacts learn the new mail key from the next record.
+                    // Contacts learn the new mail key from the next record,
+                    // and every group and community moves to keys the
+                    // removed device never had.
                     self.publish_routes();
+                    std::thread::spawn(community::rekey_all);
                     self.toast(format!("{name} was removed from your account. Your mail moved to a new key it doesn't have, and it signs out when it next hears from your devices."), ToastKind::Ok);
                 }
                 Some(Err(e)) => self.toast(e, ToastKind::Err),

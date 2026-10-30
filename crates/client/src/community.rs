@@ -378,6 +378,8 @@ pub struct Handled {
 enum Redo {
     Add { key_package: String, card: Card },
     Remove { keys: Vec<Key> },
+    /// Fresh keys for our own leaf, after a device left the account.
+    Rekey,
 }
 
 /// The state just before the last commit we applied, kept until the next
@@ -942,6 +944,21 @@ impl Space {
         });
         let wire = Wire::Commit { community: self.id(), commit: b64(&c.commit), manifest: self.manifest_text(), cards: Vec::new() };
         Ok(before.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
+    }
+
+    /// A commit giving our own leaf fresh keys, sent to everyone else in
+    /// the group. A device just removed from the account holds a copy of
+    /// our old leaf secrets; from the new epoch on it can read nothing.
+    fn commit_rekey(&mut self) -> Result<Vec<Out>, String> {
+        let others = self.others_in_group();
+        self.note_epoch();
+        let state = b64(&self.mls.save());
+        let epoch = self.mls.epoch().map_err(|e| e.to_string())?;
+        let c = self.mls.rekey().map_err(|e| e.to_string())?;
+        self.note_epoch();
+        self.previous = Some(Previous { epoch, mls: state, commit: sha(&c.commit), redo: Some(Redo::Rekey) });
+        let wire = Wire::Commit { community: self.id(), commit: b64(&c.commit), manifest: self.manifest_text(), cards: Vec::new() };
+        Ok(others.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
     }
 
     fn commit_add(&mut self, key_package: &[u8], card: &Card) -> Result<Vec<Out>, String> {
@@ -1617,6 +1634,8 @@ impl Space {
                 }
             }
             Some(Redo::Remove { .. }) => h.outs.extend(self.converge(true)),
+            // The removed device must still be shut out of the epoch that won.
+            Some(Redo::Rekey) => h.outs.extend(self.commit_rekey()?),
             None => {}
         }
         Ok(())
@@ -3501,6 +3520,23 @@ pub fn refresh_cards() {
     }
 }
 
+/// Gives our leaf fresh keys in every group chat and community we're in,
+/// so a device just removed from the account loses access to all of them
+/// at once rather than at each group's next membership change. Spaces
+/// under a separate identity are re-keyed too: that identity is derived
+/// from the account's seed, which the removed device also holds.
+pub fn rekey_all() {
+    let Some(store) = Store::app() else { return };
+    for id in store.ids() {
+        let _ = store.with_space(&id, |space, _| {
+            if space.removed || space.joining.is_some() {
+                return Ok(((), Vec::new(), Vec::new()));
+            }
+            Ok(((), space.commit_rekey()?, Vec::new()))
+        });
+    }
+}
+
 // ---- live calls ------------------------------------------------------------
 
 static LIVE: Mutex<Vec<([u8; 32], Arc<antiphon_net::PeerConnection>)>> = Mutex::new(Vec::new());
@@ -4020,6 +4056,35 @@ mod tests {
         assert!(texts(&h.events).is_empty());
         // And she can't rejoin by asking: the manifest lists her as banned.
         assert!(alice.space().invite(&alice_id, carol.key(), "Carol").is_err());
+    }
+
+    #[test]
+    fn a_rekey_shuts_out_a_removed_device_and_survives_crossing() {
+        let (mut alice, mut bob, mut carol) = three();
+        // Bob's removed device kept a copy of the space from before.
+        let saved = bob.space().save();
+        let mut stale = Space::restore(&bob.id, &saved).unwrap();
+        let bob_id = IdentityKeyPair::from_master_seed(bob.id.master_seed());
+
+        // Bob and Alice re-key at the same moment: the commits cross, the
+        // lower hash wins and the loser re-keys again on top of it.
+        let mut outs: Vec<(usize, Out)> = bob.space().commit_rekey().unwrap().into_iter().map(|o| (1, o)).collect();
+        outs.extend(alice.space().commit_rekey().unwrap().into_iter().map(|o| (0, o)));
+        run(&mut [&mut alice, &mut bob, &mut carol], outs);
+        let epoch = alice.space().epoch();
+        assert!(epoch.is_some());
+        assert_eq!(bob.space().epoch(), epoch);
+        assert_eq!(carol.space().epoch(), epoch);
+
+        // Everyone still talks...
+        let (outs, _) = carol.space().post(0, "after the rekey", None).unwrap();
+        let wire = outs[0].wire.clone();
+        let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
+        assert_eq!(texts(&ev[0]), ["after the rekey"]);
+        assert_eq!(texts(&ev[1]), ["after the rekey"]);
+        // ...and the old copy reads none of it.
+        let h = stale.handle(&bob_id, carol.key(), wire);
+        assert!(texts(&h.events).is_empty());
     }
 
     #[test]

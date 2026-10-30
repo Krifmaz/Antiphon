@@ -396,6 +396,23 @@ impl GroupMember {
         })
     }
 
+    /// Gives our own leaf fresh keys, in one commit. A copy of our old
+    /// state (held by a device since removed from the account) can't
+    /// follow the group past it: the new epoch's secrets are sealed to the
+    /// new leaf key, which that copy never saw.
+    pub fn rekey(&mut self) -> Result<Commit, GroupError> {
+        let (provider, signer) = (&self.provider, &self.signer);
+        let group = self.group.as_mut().filter(|g| g.is_active()).ok_or(GroupError::NoGroup)?;
+        let (commit, welcome, _) =
+            group.self_update(provider, signer, LeafNodeParameters::default()).map_err(mls)?.into_contents();
+        group.merge_pending_commit(provider).map_err(mls)?;
+        Ok(Commit {
+            commit: commit.tls_serialize_detached().map_err(mls)?,
+            welcome: welcome.map(|w| w.tls_serialize_detached()).transpose().map_err(mls)?,
+            epoch: group.epoch().as_u64(),
+        })
+    }
+
     /// Joins from a Welcome addressed to one of our KeyPackages.
     pub fn join(&mut self, welcome: &[u8]) -> Result<(), GroupError> {
         let message = MlsMessageIn::tls_deserialize_exact(welcome).map_err(|_| GroupError::Malformed)?;
@@ -668,6 +685,31 @@ mod tests {
         let frame = a_sf.seal(b"audio in epoch 3");
         assert_eq!(b_sf.open(alice_index, &frame).unwrap(), b"audio in epoch 3");
         assert!(c_sf.open(alice_index, &frame).is_err());
+    }
+
+    #[test]
+    fn after_a_rekey_an_old_copy_of_our_state_is_locked_out() {
+        let alice_id = IdentityKeyPair::generate();
+        let mut alice = GroupMember::new(&alice_id);
+        let mut bob = person();
+        alice.create().unwrap();
+        let kp = bob.mls.key_package().unwrap();
+        bob.mls.join(alice.add(&[&kp]).unwrap().welcome.as_ref().unwrap()).unwrap();
+
+        // A removed device kept a copy of Alice's state from before.
+        let mut stale = GroupMember::restore(&alice_id, &alice.save()).unwrap();
+        let c = alice.rekey().unwrap();
+        deliver(&c, &mut [&mut bob]);
+        assert_eq!(bob.mls.epoch().unwrap(), alice.epoch().unwrap());
+        assert_eq!(bob.mls.members().unwrap().len(), 2);
+
+        // Bob still reads Alice, and Alice reads Bob, in the new epoch...
+        let m = bob.mls.encrypt(b"after the rekey").unwrap();
+        assert_eq!(alice.process(&m).unwrap(), Processed::Application { sender: bob.key, data: b"after the rekey".to_vec() });
+        // ...but the old copy can't, nor take the commit that made it.
+        assert!(stale.process(&m).is_err());
+        assert!(stale.process(&c.commit).is_err());
+        assert_ne!(stale.sframe_base_key().unwrap(), alice.sframe_base_key().unwrap());
     }
 
     #[test]
