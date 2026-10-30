@@ -87,12 +87,33 @@ pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
     if let Some(w) = c.warning.as_deref() {
         col = col.push(warn_box(row![icon(Icon::Shield, 16.0, p.warn), t(w).size(13)].spacing(10).align_y(Alignment::Center)));
     }
+    if let Some(cc) = captions(m) {
+        col = col.push(cc);
+    }
     if let Some(pad) = talk_pad(m) {
         col = col.push(pad);
     }
     col = col.push(controls(m, compact));
 
     container(col).padding(if compact { [16, 14] } else { [22, 28] }).width(Length::Fill).style(theme::call_stage).into()
+}
+
+/// Live captions (spec §7): the last few things said, with who said
+/// them, while the recogniser runs; or what it is doing, when it has
+/// something to say.
+fn captions<'a>(m: &'a Model) -> Option<El<'a, Msg>> {
+    let c = m.captions.as_ref().filter(|c| c.live)?;
+    let mut lines = column![].spacing(4).width(Length::Fill);
+    for line in &c.lines {
+        lines = lines.push(row![t(line.who.as_str()).size(14).font(theme::semibold()), t(line.text.as_str()).size(14)].spacing(8));
+    }
+    if !c.status.is_empty() {
+        lines = lines.push(faint(c.status.as_str()).size(12));
+    }
+    if c.lines.is_empty() && c.status.is_empty() {
+        lines = lines.push(faint("Captions will appear here.").size(12));
+    }
+    Some(container(lines).padding([10, 14]).max_width(720).style(theme::inset).into())
 }
 
 /// The words both sides read out to rule out someone in the middle.

@@ -55,6 +55,8 @@ pub struct Model {
     /// A newer version of Stoop, and getting it (Settings > Updates, and a
     /// line across the top while one is waiting).
     pub update: Update,
+    /// Live captions, where this device can run them (desktop only).
+    pub captions: Option<Captions>,
 }
 
 impl Model {
@@ -781,6 +783,63 @@ pub struct BandRow {
     pub enabled: bool,
     /// Its settings.
     pub params: Vec<ParamRow>,
+}
+
+/// On-device live captions (spec §7), as Settings and the call view show
+/// them.
+#[derive(Clone, Debug, Default)]
+pub struct Captions {
+    /// Captions are switched on (they run only during a call).
+    pub enabled: bool,
+    /// Your own voice is captioned too.
+    pub own_voice: bool,
+    /// The speech model is on this computer.
+    pub installed: bool,
+    /// This build can fetch the model itself (it carries the model's
+    /// checksums).
+    pub can_download: bool,
+    /// How big the download is and where from, as words.
+    pub size: String,
+    /// How far the download is, 0 to 1, while it runs.
+    pub downloading: Option<f32>,
+    /// The outcome of the last download, import or removal.
+    pub message: String,
+    /// What the recogniser is doing, when there is something to say.
+    pub status: String,
+    /// The recogniser is running.
+    pub live: bool,
+    /// The last few captions, oldest first, for the call view.
+    pub lines: Vec<CaptionLine>,
+    /// This call has captions to save.
+    pub have_transcript: bool,
+}
+
+/// One caption in the call view.
+#[derive(Clone, Debug, Default)]
+pub struct CaptionLine {
+    /// Who said it.
+    pub who: String,
+    /// What they said.
+    pub text: String,
+}
+
+/// What the person asks of live captions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptionsDo {
+    /// Switch captions on or off.
+    On(bool),
+    /// Caption your own voice too, or not.
+    OwnVoice(bool),
+    /// Fetch the speech model.
+    Download,
+    /// Stop fetching it.
+    CancelDownload,
+    /// Install the model from files already on this computer.
+    Import,
+    /// Delete the model from this computer.
+    RemoveModel,
+    /// Save this call's captions to a text file.
+    SaveTranscript,
 }
 
 /// A keyboard shortcut that works while Stoop is in the background

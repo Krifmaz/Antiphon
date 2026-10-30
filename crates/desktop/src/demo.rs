@@ -108,6 +108,7 @@ impl Demo {
             directory: ui::Directory::default(),
             // No updater in the demo: nothing about updates is shown.
             update: ui::Update::default(),
+            captions: Some(ui::Captions { size: "about 150 MB".into(), can_download: true, ..ui::Captions::default() }),
         };
         // Chosen colours, as the engine registers saved ones.
         ui::avatars::set(&model.me.id, "", &model.me.color, |_| None);

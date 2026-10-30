@@ -410,6 +410,7 @@ dependencies = [
  "accesskit_unix",
  "accesskit_windows",
  "antiphon-audio",
+ "antiphon-captions",
  "antiphon-client",
  "antiphon-crypto",
  "antiphon-net",

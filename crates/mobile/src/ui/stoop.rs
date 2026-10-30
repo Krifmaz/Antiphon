@@ -230,6 +230,9 @@ impl App {
             channel: None,
             directory: Default::default(),
             update: self.update_model(),
+            // The speech model is too big for a phone to run alongside a
+            // call; captions are a desktop feature.
+            captions: None,
         }
     }
 
@@ -770,6 +773,8 @@ impl App {
             Action::ExportPreset | Action::ImportPreset => {}
             // Nor a folder to export everything into; the tab never offers it.
             Action::ExportData => {}
+            // Never offered on a phone (see `captions: None`).
+            Action::Captions(_) => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

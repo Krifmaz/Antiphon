@@ -314,6 +314,7 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
             titled_card("Reading font", Some("OpenDyslexic's heavier letter bottoms help some people with dyslexia keep letters in place."), fonts),
             card(motion),
         ]
+        .push(m.captions.as_ref().map(|c| titled_card("Live captions", Some("Words appear in the call as people speak. They are worked out on this computer; no sound or text leaves it, and they are gone when the call ends unless you save them."), captions(c))))
         .spacing(14)
         .into();
     }
@@ -344,6 +345,44 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
     ]
     .spacing(14)
     .into()
+}
+
+/// Live captions' switches, the speech model they need, and saving the
+/// call's transcript.
+fn captions(c: &crate::Captions) -> El<'_, Msg> {
+    use crate::CaptionsDo as C;
+    let mut body = column![
+        setting("Show captions", None, switch("Show captions", c.enabled, |on| Msg::Do(Action::Captions(C::On(on))))),
+        divider(),
+        setting("Caption my voice too", Some("So you can see what the others are reading."), switch("Caption my voice too", c.own_voice, |on| Msg::Do(Action::Captions(C::OwnVoice(on))))),
+        divider(),
+    ]
+    .spacing(12);
+    let model: El<'_, Msg> = if c.installed {
+        row![faint("The speech model is on this computer.").size(13).width(Length::Fill), btn_sm("Remove", Btn::Ghost, Some(Msg::Do(Action::Captions(C::RemoveModel))))].spacing(8).align_y(Alignment::Center).into()
+    } else if let Some(done) = c.downloading {
+        row![progress_bar(0.0..=1.0, done).girth(8).style(theme::meter), btn_sm("Cancel", Btn::Ghost, Some(Msg::Do(Action::Captions(C::CancelDownload))))].spacing(12).align_y(Alignment::Center).into()
+    } else {
+        column![
+            faint(format!("Captions need a speech model, {}. It is fetched only when you ask.", c.size)).size(13),
+            row![
+                btn_icon(Icon::Download, "Get the model", Btn::Default, c.can_download.then_some(Msg::Do(Action::Captions(C::Download)))),
+                btn_sm("Use files I already have…", Btn::Ghost, Some(Msg::Do(Action::Captions(C::Import)))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8)
+        .into()
+    };
+    body = body.push(field("Speech model", model));
+    if !c.message.is_empty() {
+        body = body.push(faint(c.message.as_str()).size(12.5));
+    }
+    if c.have_transcript {
+        body = body.push(btn_icon(Icon::File, "Save this call's captions…", Btn::Default, Some(Msg::Do(Action::Captions(C::SaveTranscript)))));
+    }
+    body.into()
 }
 
 /// A plain filled box of colour `c` with corner radius `r`, for swatches.

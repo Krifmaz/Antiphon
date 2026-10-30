@@ -15,6 +15,7 @@ antiphon-client = { version = "0.1.0", path = "../client" }
 # Which video a picture is (camera or screen), for the call's tiles.
 antiphon-video = { version = "0.1.0", path = "../video" }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
+antiphon-captions = { version = "0.1.0", path = "../captions" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
 antiphon-update = { version = "0.1.0", path = "../update" }

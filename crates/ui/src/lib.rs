@@ -569,6 +569,8 @@ pub enum Action {
     /// Export everything, readable without Stoop, into a folder the
     /// person picks (spec §13 "take everything with you").
     ExportData,
+    /// Live captions: the switches, the model, the transcript.
+    Captions(CaptionsDo),
     /// Use a voice preset by name.
     Preset(String),
     /// Turn a chain stage (by id) on or off.

@@ -271,6 +271,8 @@ pub struct Engine {
     outputs: Vec<String>,
     /// The shortcut waiting for a key press to bind it.
     binding: Option<ui::Hotkey>,
+    /// Live captions: the recogniser, its model and the transcript.
+    captions: crate::captions::Captions,
     /// The last delivery round handled; a new number means messages moved.
     delivery_seen: u64,
     /// The last LAN discovery count handled; a new number means new peers.
@@ -377,6 +379,7 @@ impl Engine {
             inputs: antiphon_audio::list_input_devices(),
             outputs: antiphon_audio::list_output_devices(),
             binding: None,
+            captions: crate::captions::Captions::default(),
             plugins_found: None,
             plugins_scanning: false,
             api: None,
@@ -484,6 +487,8 @@ impl Engine {
             self.on_event(e);
         }
         self.serve_api(open);
+
+        self.captions.tick(&self.state, self.dir.as_deref(), self.cfg.captions_enabled, self.cfg.captions_own_voice);
 
         // The far end hung up, or the connection died under us.
         let ended = self.state.call.lock().unwrap().as_ref().is_some_and(|a| !a.is_live());
@@ -2112,6 +2117,15 @@ impl Engine {
                 }
             }
             A::ExportData => self.export_data(),
+            A::Captions(ui::CaptionsDo::On(on)) => {
+                self.cfg.captions_enabled = on;
+                self.save();
+            }
+            A::Captions(ui::CaptionsDo::OwnVoice(on)) => {
+                self.cfg.captions_own_voice = on;
+                self.save();
+            }
+            A::Captions(what) => self.captions.act(what, self.dir.as_deref()),
             A::ExportPreset => self.export_preset(),
             A::ImportPreset => self.import_preset(),
             A::MicTest(on) => self.mic_test(on),
@@ -2920,6 +2934,7 @@ impl Engine {
             directory: ui::Directory { directories: self.cfg.directories.clone(), ..self.directory.clone() },
             // The app's updater fills this in (`App::stamp_update`).
             update: ui::Update::default(),
+            captions: Some(self.captions.model(self.dir.as_deref(), self.cfg.captions_enabled, self.cfg.captions_own_voice)),
         }
     }
 
