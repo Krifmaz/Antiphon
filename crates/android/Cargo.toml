@@ -29,3 +29,6 @@ ndk-sys = "0.6.0"
 # antiphon-mobile's.
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "android-native-activity"] }
 antiphon-mobile = { version = "0.1.0", path = "../mobile" }
+
+[lints]
+workspace = true

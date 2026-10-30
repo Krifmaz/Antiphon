@@ -10,3 +10,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 vst3 = "0.3.0"
+
+[lints]
+workspace = true

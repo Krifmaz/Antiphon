@@ -189,7 +189,7 @@ impl PhoneAccount {
         };
         let dir = dir.to_path_buf();
         // The old device approves this phone's own key on the way.
-        let device = self.device.as_ref().map(|d| d.public());
+        let device = self.device.as_ref().map(IdentityKeyPair::public);
         self.run("Receiving your account…", move || Done::Restored(account_move::receive_as(&link, device.as_ref()).and_then(|plain| apply(&dir, &plain))));
         Vec::new()
     }

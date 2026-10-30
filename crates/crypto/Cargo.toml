@@ -57,3 +57,5 @@ keyring-core = "1.0.1"
 # DPAPI, for spec §6's "private keys in the OS keystore".
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
+[lints]
+workspace = true

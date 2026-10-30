@@ -6,3 +6,6 @@ version.workspace = true
 [dependencies]
 thiserror = "2.0.20"
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
+
+[lints]
+workspace = true

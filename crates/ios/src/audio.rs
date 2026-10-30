@@ -57,7 +57,7 @@ fn set_category(in_call: bool) -> Result<(), String> {
 ///
 /// Deprecated in iOS 17 for AVAudioApplication, which does not exist on
 /// the iOS 15 and 16 this app also supports.
-#[allow(deprecated)]
+#[expect(deprecated, reason = "the replacement, AVAudioApplication, is not on iOS 15 and 16")]
 pub fn has_mic_permission() -> bool {
     // SAFETY: a property read.
     let permission = unsafe { AVAudioSession::sharedInstance().recordPermission() };
@@ -71,7 +71,7 @@ pub fn has_mic_permission() -> bool {
 pub fn request_mic_permission() {
     let block = RcBlock::new(|granted: Bool| log::info!("microphone permission: {}", granted.as_bool()));
     // SAFETY: as above; the block is copied by AVFAudio.
-    #[allow(deprecated)]
+    #[expect(deprecated, reason = "the replacement, AVAudioApplication, is not on iOS 15 and 16")]
     unsafe {
         AVAudioSession::sharedInstance().requestRecordPermission(&block)
     };

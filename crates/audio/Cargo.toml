@@ -43,3 +43,6 @@ vst3 = "0.3.0"
 serde_json = "1"
 antiphon-test-plugins = { path = "../test-plugins" }
 approx = "0.5.1"
+
+[lints]
+workspace = true

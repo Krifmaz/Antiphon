@@ -39,3 +39,6 @@ serde_json = { version = "1.0.151", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time", "macros"] }
+
+[lints]
+workspace = true

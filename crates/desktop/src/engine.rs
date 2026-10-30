@@ -452,7 +452,7 @@ impl Engine {
         self.account_outcomes(outcomes);
         // Another of your devices changed the notes or the device list, or
         // removed this one.
-        if let Some(changes) = self.devices.as_mut().map(|d| d.poll()) {
+        if let Some(changes) = self.devices.as_mut().map(super::my_devices::MyDevices::poll) {
             if changes.removed {
                 self.devices = None;
                 self.toast("This computer was removed from your account on another device. Signing out…", ToastKind::Warn);
@@ -1052,7 +1052,7 @@ impl Engine {
     /// Reads the last saved message of every contact, for the list previews.
     fn load_previews(&mut self) {
         let (Some(dir), Some(key)) = (&self.dir, &self.key) else { return };
-        let notes = self.devices.as_ref().map(|d| d.notes_id());
+        let notes = self.devices.as_ref().map(super::my_devices::MyDevices::notes_id);
         for id in self.cfg.contacts.iter().map(|c| &c.identity_key).filter(|k| !k.is_empty()).chain(&notes) {
             let log = history::load(dir, id, key);
             if let Some(m) = log.iter().rev().find(|m| !m.deleted) {
@@ -2109,7 +2109,7 @@ impl Engine {
             | A::MoveStop
             | A::MoveReceive(_)) => {
                 let in_call = self.busy();
-                let device = self.devices.as_ref().map(|d| d.device());
+                let device = self.devices.as_ref().map(super::my_devices::MyDevices::device);
                 let ctx = crate::account::Ctx { dir: self.dir.as_deref(), identity: &self.state.identity, key: self.key.as_ref(), device, in_call };
                 let outcomes = self.account.act(a, ctx);
                 self.account_outcomes(outcomes);

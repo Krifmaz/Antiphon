@@ -11,3 +11,6 @@ candle-nn = { version = "0.9.2", default-features = false }
 candle-transformers = { version = "0.9.2", default-features = false }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+
+[lints]
+workspace = true

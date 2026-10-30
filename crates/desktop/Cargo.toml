@@ -45,3 +45,6 @@ accesskit_macos = "0.26.3"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # AT-SPI over D-Bus (Orca).
 accesskit_unix = "0.22.1"
+
+[lints]
+workspace = true

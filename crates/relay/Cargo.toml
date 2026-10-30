@@ -30,3 +30,6 @@ antiphon-push = { version = "0.1.0", path = "../push" }
 # key (`--apns-key` and friends). Off by default: it adds an HTTP/2 stack
 # that nobody without that key can use. See docs/mobile-push.md.
 apns = ["antiphon-push/apns", "clap/env"]
+
+[lints]
+workspace = true

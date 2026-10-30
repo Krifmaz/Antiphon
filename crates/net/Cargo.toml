@@ -26,3 +26,6 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-protocol = { version = "0.1.0", path = "../protocol" }
+
+[lints]
+workspace = true

@@ -409,10 +409,10 @@ pub async fn round(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, devic
     // Leave what waits. A message for a device no longer listed is dropped,
     // unless it is the list that removed it (that one it must hear).
     let list = devices::load_list(dir, &account_key);
-    let mut pending = load_pending(dir);
+    let pending = load_pending(dir);
     let now = now_secs();
     let mut kept = Vec::with_capacity(pending.len());
-    for p in pending.drain(..) {
+    for p in pending {
         if now.saturating_sub(p.queued_secs) > PENDING_LIFETIME.as_secs() {
             continue;
         }

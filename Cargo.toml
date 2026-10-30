@@ -24,6 +24,65 @@ members = [
 edition = "2021"
 version = "0.1.0"
 
+# Lints every crate opts into with `[lints] workspace = true` (CI already
+# turns every warning into an error with `-D warnings`).
+#
+# On top of clippy's default set, these are the pedantic and nursery lints
+# that catch code rot and wasted work rather than matters of taste: clones
+# nobody needed, arguments taken by value and never consumed, strings built
+# through throwaway `format!`s, `Result`s that can never be `Err`, leftover
+# `todo!`/`dbg!`. Taste lints (`map_unwrap_or`, `option_if_let_else`, cast
+# lints and the like) are left out on purpose; turning them on would be
+# churn, not cleanup.
+#
+# `allow_attributes` bans `#[allow(...)]`: a warning is fixed, not
+# silenced. Where a lint genuinely does not apply (a C plugin ABI's symbol
+# names, say), `#[expect(..., reason = "...")]` says why, and turns into an
+# error itself the day it stops being needed.
+[workspace.lints.rust]
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_import_braces = "warn"
+
+[workspace.lints.clippy]
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+assigning_clones = "warn"
+cloned_instead_of_copied = "warn"
+collection_is_never_read = "warn"
+dbg_macro = "warn"
+equatable_if_let = "warn"
+explicit_iter_loop = "warn"
+format_collect = "warn"
+format_push_string = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+iter_on_single_items = "warn"
+iter_with_drain = "warn"
+large_stack_arrays = "warn"
+large_types_passed_by_value = "warn"
+manual_let_else = "warn"
+needless_collect = "warn"
+needless_for_each = "warn"
+needless_pass_by_ref_mut = "warn"
+needless_pass_by_value = "warn"
+or_fun_call = "warn"
+redundant_clone = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+set_contains_or_insert = "warn"
+stable_sort_primitive = "warn"
+string_add_assign = "warn"
+todo = "warn"
+trivially_copy_pass_by_ref = "warn"
+unimplemented = "warn"
+unnecessary_join = "warn"
+unnecessary_wraps = "warn"
+unnested_or_patterns = "warn"
+unused_async = "warn"
+useless_let_if_seq = "warn"
+
 # Audio DSP is optimised even in a debug build, because "debug" changes
 # whether it works rather than only how fast it is. An unoptimised echo
 # canceller takes ~123% of real time to process a second of audio, so it

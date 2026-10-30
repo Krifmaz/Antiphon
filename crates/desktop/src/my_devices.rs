@@ -129,7 +129,7 @@ impl MyDevices {
         let mut rows: Vec<ui::DeviceRow> = self
             .list
             .iter()
-            .flat_map(|l| l.devices())
+            .flat_map(SignedDeviceList::devices)
             .map(|d| ui::DeviceRow {
                 id: antiphon_crypto::hex::encode(&d.device.identity_key),
                 name: d.name.clone(),

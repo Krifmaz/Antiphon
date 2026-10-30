@@ -396,7 +396,7 @@ impl App {
         }
         if let Ok(key) = &backup_key {
             // The notes conversation's preview comes from the same place.
-            let notes = devices.as_ref().map(|d| d.notes_id());
+            let notes = devices.as_ref().map(crate::my_devices::PhoneDevices::notes_id);
             for id in contacts.list.iter().map(|c| &c.identity_key).chain(notes.as_ref()) {
                 if let Some(preview) = preview_of(&dir, id, key) {
                     previews.insert(id.clone(), preview);
@@ -747,7 +747,7 @@ impl App {
         // What the account's other devices changed: a removal of this
         // phone reloads the app on a fresh account; a note or the device
         // list redraws.
-        match self.devices.as_mut().map(|d| d.poll()) {
+        match self.devices.as_mut().map(crate::my_devices::PhoneDevices::poll) {
             Some(c) if c.removed => {
                 self.reload_account("This phone was removed from your account on another device.".into());
                 return true;

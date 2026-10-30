@@ -207,7 +207,7 @@ fn open(request: CameraRequest) -> Result<Running, String> {
             // `videoOrientation` is deprecated from iOS 17 for
             // `videoRotationAngle`, which iOS 15 and 16 (still supported)
             // do not have; the old property still works everywhere.
-            #[allow(deprecated)]
+            #[expect(deprecated, reason = "videoRotationAngle, the replacement, is not on iOS 15 and 16")]
             if connection.isVideoOrientationSupported() {
                 connection.setVideoOrientation(objc2_av_foundation::AVCaptureVideoOrientation::Portrait);
             }

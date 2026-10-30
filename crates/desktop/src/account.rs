@@ -58,7 +58,6 @@ struct Offer {
 }
 
 /// What the engine needs to lend an account action.
-#[derive(Clone, Copy)]
 pub struct Ctx<'a> {
     /// The config folder; `None` when the app has nowhere to save.
     pub dir: Option<&'a Path>,

@@ -59,3 +59,5 @@ anyhow = "1.0.104"
 # and nothing that pulls in threads.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
+[lints]
+workspace = true

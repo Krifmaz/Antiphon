@@ -24,3 +24,6 @@ xcap = { version = "0.9.8", optional = true }
 default = []
 # The camera (nokhwa) and the screen (xcap).
 capture = ["dep:nokhwa", "dep:xcap"]
+
+[lints]
+workspace = true

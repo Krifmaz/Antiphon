@@ -858,7 +858,7 @@ mod tests {
         // Someone else's certificate pasted into the record is ignored.
         let mallory = IdentityKeyPair::generate();
         let forged = mail_key::MailKeyCert::issue(&mallory, 99, &mallory);
-        let mut tampered = plain.record.clone();
+        let mut tampered = plain.record;
         tampered.routes.push(Route { kind: mail_key::ROUTE_KIND.into(), address: forged.to_address() });
         let tampered = tampered.sign(&me).unwrap();
         assert_eq!(mail_key_in(&tampered), None);
