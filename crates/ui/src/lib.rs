@@ -220,6 +220,7 @@ impl Section {
             Section::Account => &["Identity", "Backup file", "Recovery phrase"],
             Section::Voice if desktop => &["Input & output", "Processing", "Fine-tune", "Sounds", "Plugins"],
             Section::Voice => &["Input & output", "Processing", "Fine-tune"],
+            Section::Appearance if desktop => &["Theme", "Text & motion", "Call layout"],
             Section::Appearance => &["Theme", "Text & motion"],
             Section::Relays => &["Relay", "Mailboxes"],
             _ => &[],
@@ -606,6 +607,8 @@ pub enum Action {
     /// The background picture: pick, clear, or change how it shows
     /// (desktop only).
     Backdrop(BackdropDo),
+    /// Change the call's layout (desktop only).
+    CallLayout(LayoutDo),
     /// Turn animations off (or back on).
     ReducedMotion(bool),
     /// Notify about messages while the window is in the background.

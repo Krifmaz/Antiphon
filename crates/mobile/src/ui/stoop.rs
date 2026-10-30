@@ -783,8 +783,9 @@ impl App {
             Action::TextScale(_) => {}
             // Nor a font file to pick; never offered.
             Action::ImportFont => {}
-            // Nor a background picture or a settings file; never offered.
-            Action::Backdrop(_) | Action::ExportSettings | Action::ImportSettings => {}
+            // Nor a background picture, a settings file or a call layout;
+            // never offered.
+            Action::Backdrop(_) | Action::ExportSettings | Action::ImportSettings | Action::CallLayout(_) => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

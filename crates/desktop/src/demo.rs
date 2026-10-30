@@ -372,6 +372,7 @@ impl Demo {
             Action::Theme(t) => self.model.settings.theme = t,
             Action::TextScale(scale) => self.model.settings.text_scale = scale,
             Action::Backdrop(what) => self.backdrop_do(what),
+            Action::CallLayout(what) => self.model.settings.call_layout.apply(what),
             Action::Accent(a) => self.model.settings.accent = a,
             Action::Look(i) => {
                 if let Some(look) = ui::theme::LOOKS.get(i) {

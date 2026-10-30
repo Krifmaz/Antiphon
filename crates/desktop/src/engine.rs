@@ -1130,6 +1130,11 @@ impl Engine {
         });
     }
 
+    /// The call's layout as saved.
+    fn call_layout(&self) -> ui::CallLayout {
+        ui::CallLayout::new(&self.cfg.call_panel_order, &self.cfg.call_panels_hidden, self.cfg.call_beside_chat, self.cfg.call_column_width)
+    }
+
     /// Decodes the saved background picture off the window's thread; it
     /// arrives as [`Event::Backdrop`]. A picture that has gone missing is
     /// simply not shown.
@@ -2371,6 +2376,14 @@ impl Engine {
             }
             A::ImportFont => self.import_font(),
             A::Backdrop(what) => self.backdrop_do(what),
+            A::CallLayout(what) => {
+                let mut layout = self.call_layout();
+                layout.apply(what);
+                (self.cfg.call_panel_order, self.cfg.call_panels_hidden) = layout.ids();
+                self.cfg.call_beside_chat = layout.beside;
+                self.cfg.call_column_width = layout.width;
+                self.save();
+            }
             A::TextScale(scale) => {
                 // The classic app's range: small enough to fit more, large
                 // enough for low vision, never so far the layout breaks.
@@ -3601,6 +3614,7 @@ impl Engine {
                 panels: self.cfg.theme_opacity,
             }),
             backdrops: true,
+            call_layout: self.call_layout(),
             notify_messages: self.cfg.stoop.notify_messages,
             open_on_start: self.cfg.stoop.door_on_start,
             version: env!("CARGO_PKG_VERSION").to_string(),

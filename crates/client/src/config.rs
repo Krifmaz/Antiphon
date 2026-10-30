@@ -408,6 +408,20 @@ pub struct AppConfig {
     /// between.
     #[serde(default)]
     pub saved_layouts: Vec<NamedLayout>,
+    /// The call's parts by id (`people`, `code`, `captions`, `replay`,
+    /// `soundboard`, `talk-pad`), in the order the call shows them; empty
+    /// for the standard order. A part missing here is shown after these.
+    #[serde(default)]
+    pub call_panel_order: Vec<String>,
+    /// The ids of the call's parts the person hid.
+    #[serde(default)]
+    pub call_panels_hidden: Vec<String>,
+    /// The call sits in a column beside the chat instead of above it.
+    #[serde(default)]
+    pub call_beside_chat: bool,
+    /// That column's width in logical pixels; 0 for the narrowest.
+    #[serde(default)]
+    pub call_column_width: f32,
     /// Soundboard clips (spec §13).
     #[serde(default)]
     pub sound_clips: Vec<crate::soundboard::SoundClip>,
@@ -887,6 +901,10 @@ impl Default for AppConfig {
             profile_section_order: default_profile_order(),
             call_section_order: default_call_order(),
             saved_layouts: Vec::new(),
+            call_panel_order: Vec::new(),
+            call_panels_hidden: Vec::new(),
+            call_beside_chat: false,
+            call_column_width: 0.0,
             sound_clips: Vec::new(),
             first_run: crate::first_run::FirstRunState::default(),
             calls_completed: 0,

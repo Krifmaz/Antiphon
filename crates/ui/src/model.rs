@@ -715,6 +715,9 @@ pub struct Settings {
     pub backdrop: Option<Backdrop>,
     /// A background picture can be chosen here (desktop only).
     pub backdrops: bool,
+    /// How the call is laid out: which parts show, in what order, and
+    /// where (desktop only; the phone keeps the standard layout).
+    pub call_layout: CallLayout,
     /// Show a notification for messages while the window is not focused.
     pub notify_messages: bool,
     /// Open the door (listen for calls) when the app starts.
@@ -931,6 +934,143 @@ impl Backdrop {
         let bottom = cut(self.crop[3], h).min(h.saturating_sub(top + 1));
         iced_core::Rectangle { x: left, y: top, width: (w - left - right).max(1), height: (h - top - bottom).max(1) }
     }
+}
+
+/// A part of the call that can be moved, hidden or shown again. The
+/// clock, the badges and the controls are always there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallPanel {
+    /// Both of you (or the pictures, with video on).
+    People,
+    /// The words to compare, and any safety warning.
+    Code,
+    /// Live captions.
+    Captions,
+    /// Moments to hear again.
+    Replay,
+    /// The soundboard's clips.
+    Soundboard,
+    /// The push-to-talk pad.
+    TalkPad,
+}
+
+impl CallPanel {
+    /// Every part, in the standard order.
+    pub const ALL: [Self; 6] = [Self::People, Self::Code, Self::Captions, Self::Replay, Self::Soundboard, Self::TalkPad];
+
+    /// Its id in the settings file.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::People => "people",
+            Self::Code => "code",
+            Self::Captions => "captions",
+            Self::Replay => "replay",
+            Self::Soundboard => "soundboard",
+            Self::TalkPad => "talk-pad",
+        }
+    }
+
+    /// The part with id `id`, if there is one.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.id() == id)
+    }
+
+    /// Its name in Settings.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::People => "People and pictures",
+            Self::Code => "Safety words",
+            Self::Captions => "Live captions",
+            Self::Replay => "Hear it again",
+            Self::Soundboard => "Soundboard",
+            Self::TalkPad => "Talk button",
+        }
+    }
+}
+
+/// How the call is laid out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallLayout {
+    /// Every part, in the order shown, with whether it is shown. Always
+    /// holds each [`CallPanel`] exactly once (see [`CallLayout::new`]).
+    pub panels: Vec<(CallPanel, bool)>,
+    /// The call sits in a column beside the chat instead of above it.
+    pub beside: bool,
+    /// That column's width, in logical pixels.
+    pub width: f32,
+}
+
+impl Default for CallLayout {
+    /// Everything shown, in the standard order, above the chat.
+    fn default() -> Self {
+        Self { panels: CallPanel::ALL.iter().map(|&p| (p, true)).collect(), beside: false, width: Self::WIDTHS.0 }
+    }
+}
+
+impl CallLayout {
+    /// The narrowest and widest the column beside the chat can be.
+    pub const WIDTHS: (f32, f32) = (360.0, 720.0);
+
+    /// A layout from saved ids: `order` first (unknown or repeated ids are
+    /// dropped), then any part it missed in the standard order, so no part
+    /// can get lost; `hidden` names the ones not shown.
+    pub fn new(order: &[String], hidden: &[String], beside: bool, width: f32) -> Self {
+        let mut panels: Vec<(CallPanel, bool)> = Vec::new();
+        for p in order.iter().filter_map(|id| CallPanel::from_id(id)).chain(CallPanel::ALL) {
+            if !panels.iter().any(|(q, _)| *q == p) {
+                panels.push((p, !hidden.iter().any(|h| h == p.id())));
+            }
+        }
+        Self { panels, beside, width: width.clamp(Self::WIDTHS.0, Self::WIDTHS.1) }
+    }
+
+    /// Whether `panel` is shown.
+    pub fn shows(&self, panel: CallPanel) -> bool {
+        self.panels.iter().any(|&(p, on)| p == panel && on)
+    }
+
+    /// Carries out `what`.
+    pub fn apply(&mut self, what: LayoutDo) {
+        match what {
+            LayoutDo::Show(panel, on) => {
+                if let Some(entry) = self.panels.iter_mut().find(|(p, _)| *p == panel) {
+                    entry.1 = on;
+                }
+            }
+            LayoutDo::Move(panel, later) => {
+                let Some(i) = self.panels.iter().position(|(p, _)| *p == panel) else { return };
+                let j = if later { i + 1 } else { i.wrapping_sub(1) };
+                if j < self.panels.len() {
+                    self.panels.swap(i, j);
+                }
+            }
+            LayoutDo::Beside(on) => self.beside = on,
+            LayoutDo::Width(w) => self.width = w.clamp(Self::WIDTHS.0, Self::WIDTHS.1),
+            LayoutDo::Reset => *self = Self::default(),
+        }
+    }
+
+    /// The ids of the parts in order, and of the hidden ones, to save.
+    pub fn ids(&self) -> (Vec<String>, Vec<String>) {
+        let order = self.panels.iter().map(|(p, _)| p.id().to_string()).collect();
+        let hidden = self.panels.iter().filter(|(_, on)| !on).map(|(p, _)| p.id().to_string()).collect();
+        (order, hidden)
+    }
+}
+
+/// What the person changes about the call's layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LayoutDo {
+    /// Show or hide a part.
+    Show(CallPanel, bool),
+    /// Move a part one place later (`true`) or earlier.
+    Move(CallPanel, bool),
+    /// Put the call beside the chat, or above it.
+    Beside(bool),
+    /// Make the column beside the chat this wide.
+    Width(f32),
+    /// Back to the standard layout.
+    Reset,
 }
 
 /// How a background picture is fitted to the window.
@@ -1381,6 +1521,35 @@ mod tests {
         assert_eq!(b.frame(b.started + Duration::from_millis(150), true).id(), b.frames[0].0.id());
         assert_eq!(b.frame_delay(), Some(Duration::from_millis(100)));
         assert_eq!(backdrop(&[0], 1, 1).frame_delay(), None);
+    }
+
+    #[test]
+    fn a_saved_layout_never_loses_a_part() {
+        let ids = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let l = CallLayout::new(&ids(&["soundboard", "bogus", "people", "people"]), &ids(&["code"]), true, 9999.0);
+        assert_eq!(l.panels.len(), CallPanel::ALL.len());
+        assert_eq!(l.panels[0], (CallPanel::Soundboard, true));
+        assert_eq!(l.panels[1], (CallPanel::People, true));
+        assert!(!l.shows(CallPanel::Code));
+        assert_eq!(l.width, CallLayout::WIDTHS.1);
+        // What is saved reads back the same.
+        let (order, hidden) = l.ids();
+        assert_eq!(CallLayout::new(&order, &hidden, l.beside, l.width), l);
+    }
+
+    #[test]
+    fn moving_a_part_stops_at_the_ends() {
+        let mut l = CallLayout::default();
+        l.apply(LayoutDo::Move(CallPanel::People, false));
+        assert_eq!(l, CallLayout::default());
+        l.apply(LayoutDo::Move(CallPanel::People, true));
+        assert_eq!(l.panels[1].0, CallPanel::People);
+        l.apply(LayoutDo::Move(CallPanel::TalkPad, true));
+        assert_eq!(l.panels.last().unwrap().0, CallPanel::TalkPad);
+        l.apply(LayoutDo::Show(CallPanel::Replay, false));
+        assert!(!l.shows(CallPanel::Replay));
+        l.apply(LayoutDo::Reset);
+        assert_eq!(l, CallLayout::default());
     }
 
     #[test]

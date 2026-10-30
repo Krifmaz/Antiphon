@@ -174,6 +174,26 @@ const TOUR: &[Step] = &[
         },
     },
     Step {
+        name: "call-beside-chat",
+        size: (1440.0, 900.0),
+        setup: |app| {
+            // The picture from the step before would be in every shot after.
+            app.demo().act(Action::Backdrop(ui::BackdropDo::Clear));
+            app.demo().act(Action::CallLayout(ui::LayoutDo::Beside(true)));
+            app.demo().act(Action::CallLayout(ui::LayoutDo::Width(440.0)));
+            app.go(Route::Person(Demo::robin()));
+        },
+    },
+    Step {
+        name: "call-layout",
+        size: (1280.0, 900.0),
+        setup: |app| {
+            app.demo().act(Action::CallLayout(ui::LayoutDo::Reset));
+            app.go(Route::Settings(Section::Appearance));
+            let _ = app.send(Msg::SettingsTab(2));
+        },
+    },
+    Step {
         name: "fine-tune",
         size: (1280.0, 900.0),
         setup: |app| {

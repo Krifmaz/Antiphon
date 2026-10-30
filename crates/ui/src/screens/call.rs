@@ -13,7 +13,7 @@ use super::{clock, fill};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::*;
-use crate::{Action, El, Model, Msg, Phase, Transmit, Ui, VideoTile};
+use crate::{Action, CallPanel, El, Model, Msg, Phase, Transmit, Ui, VideoTile};
 
 /// The stage. `compact` is the phone's: smaller avatars, controls in one row.
 pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
@@ -65,43 +65,54 @@ pub fn stage<'a>(ui: &'a Ui, m: &'a Model, compact: bool) -> El<'a, Msg> {
         middle = middle.push(faint("Ringing their door").size(12));
     }
 
+    let layout = &m.settings.call_layout;
     let mut col = column![].spacing(16).align_x(Alignment::Center);
-    if let Some(video) = video_area(ui, m, compact) {
-        // The pictures take the avatars' place; the clock and badges stay
-        // above them.
-        col = col.push(middle).push(video);
-    } else {
-        col = col.push(
-            row![
-                person(&m.me.name, &m.me.id, me_strength, p.ok, me_caption),
-                container(middle).width(Length::Fill).center_x(Length::Fill),
-                person(&c.peer_name, &peer_seed, them_strength, them_color, them_caption),
-            ]
-            .align_y(Alignment::Center),
-        );
+    // The clock and badges always show: with the people they sit between
+    // the two of you (or above the pictures), without them on top.
+    let mut people = Some((middle, me_caption, them_caption));
+    if !layout.shows(CallPanel::People) {
+        col = col.push(people.take().map(|(middle, _, _)| middle));
     }
-
-    if c.phase == Phase::Connected && !c.code.is_empty() {
-        col = col.push(code_strip(m));
-    }
-    if let Some(w) = c.warning.as_deref() {
-        col = col.push(warn_box(row![icon(Icon::Shield, 16.0, p.warn), t(w).size(13)].spacing(10).align_y(Alignment::Center)));
-    }
-    if let Some(cc) = captions(m) {
-        col = col.push(cc);
-    }
-    if let Some(r) = replay(c) {
-        col = col.push(r);
-    }
-    if c.phase == Phase::Connected && !c.sounds.is_empty() {
-        let mut board = row![faint("Soundboard").size(12)].spacing(6).align_y(Alignment::Center);
-        for (i, name) in c.sounds.iter().enumerate() {
-            board = board.push(btn_sm(name.as_str(), Btn::Ghost, Some(Msg::Do(Action::Sound(crate::SoundDo::Send(i))))));
+    for &(panel, on) in &layout.panels {
+        match panel {
+            CallPanel::People if on => {
+                let Some((middle, me_caption, them_caption)) = people.take() else { continue };
+                if let Some(video) = video_area(ui, m, compact) {
+                    // The pictures take the avatars' place.
+                    col = col.push(middle).push(video);
+                } else {
+                    col = col.push(
+                        row![
+                            person(&m.me.name, &m.me.id, me_strength, p.ok, me_caption),
+                            container(middle).width(Length::Fill).center_x(Length::Fill),
+                            person(&c.peer_name, &peer_seed, them_strength, them_color, them_caption),
+                        ]
+                        .align_y(Alignment::Center),
+                    );
+                }
+            }
+            CallPanel::Code => {
+                if on && c.phase == Phase::Connected && !c.code.is_empty() {
+                    col = col.push(code_strip(m));
+                }
+                // A safety warning shows in this place even with the words
+                // hidden: it is not something to lay out of sight.
+                if let Some(w) = c.warning.as_deref() {
+                    col = col.push(warn_box(row![icon(Icon::Shield, 16.0, p.warn), t(w).size(13)].spacing(10).align_y(Alignment::Center)));
+                }
+            }
+            CallPanel::Captions if on => col = col.push(captions(m)),
+            CallPanel::Replay if on => col = col.push(replay(c)),
+            CallPanel::Soundboard if on && c.phase == Phase::Connected && !c.sounds.is_empty() => {
+                let mut board = row![faint("Soundboard").size(12)].spacing(6).align_y(Alignment::Center);
+                for (i, name) in c.sounds.iter().enumerate() {
+                    board = board.push(btn_sm(name.as_str(), Btn::Ghost, Some(Msg::Do(Action::Sound(crate::SoundDo::Send(i))))));
+                }
+                col = col.push(board.wrap());
+            }
+            CallPanel::TalkPad if on => col = col.push(talk_pad(m)),
+            _ => {}
         }
-        col = col.push(board.wrap());
-    }
-    if let Some(pad) = talk_pad(m) {
-        col = col.push(pad);
     }
     col = col.push(controls(m, compact));
 

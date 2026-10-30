@@ -17,12 +17,20 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
         return container(empty(Icon::Users, "They are not in your contacts", "They may have been removed.")).center(Length::Fill).into();
     };
     let mut col = column![header(ui, m, person, false), divider()];
-    if m.call.with(id) || matches!(m.call.phase, Phase::Ended(_)) && m.call.peer.as_deref() == Some(id) {
-        col = col.push(call::stage(ui, m, false));
+    let stage = m.call.with(id) || matches!(m.call.phase, Phase::Ended(_)) && m.call.peer.as_deref() == Some(id);
+    let layout = &m.settings.call_layout;
+    let chat = column![container(messages(ui, m, person, false)).height(Length::Fill), transfers(ui, m), container(composer(ui, m, person)).padding(pad(4.0, 20.0, 18.0, 20.0))];
+    if stage && layout.beside {
+        // The call in a column of its own beside the chat, scrolling on
+        // its own when it is taller than the window.
+        let side = container(scrollable(call::stage(ui, m, false)).height(Length::Fill).style(theme::scroll)).width(Length::Fixed(layout.width)).height(Length::Fill).style(theme::call_stage);
+        col = col.push(row![chat.width(Length::Fill), vdivider(), side].height(Length::Fill));
+    } else {
+        if stage {
+            col = col.push(call::stage(ui, m, false));
+        }
+        col = col.push(chat.height(Length::Fill));
     }
-    col = col.push(container(messages(ui, m, person, false)).height(Length::Fill));
-    col = col.push(transfers(ui, m));
-    col = col.push(container(composer(ui, m, person)).padding(pad(4.0, 20.0, 18.0, 20.0)));
     col.height(Length::Fill).into()
 }
 

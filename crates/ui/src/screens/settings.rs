@@ -336,6 +336,9 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
         btn_icon(Icon::Palette, "Import theme…", Btn::Ghost, Some(Msg::Do(Action::ImportTheme))),
     ]
     .spacing(8);
+    if tab == 2 {
+        return call_layout(&m.settings.call_layout);
+    }
     if tab == 1 {
         return column![
             titled_card(
@@ -376,6 +379,45 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
         ),
     ]
     .push(m.settings.backdrops.then(|| titled_card("Background picture", Some("A picture or animated GIF behind everything. It stays on this computer."), backdrop(m.settings.backdrop.as_ref()))))
+    .spacing(14)
+    .into()
+}
+
+/// Appearance's Call layout tab: where the call sits, how wide, and which
+/// of its parts show in what order.
+fn call_layout(l: &crate::CallLayout) -> El<'_, Msg> {
+    use crate::LayoutDo as L;
+    let go = |what| Msg::Do(Action::CallLayout(what));
+    let place = setting(
+        "Beside the chat",
+        Some("Puts the call in a column of its own next to the messages, instead of above them."),
+        switch("Call beside the chat", l.beside, move |on| go(L::Beside(on))),
+    );
+    let mut place = column![place].spacing(12);
+    if l.beside {
+        place = place.push(field("Column width", value_slider("Column width", l.width, crate::CallLayout::WIDTHS.0, crate::CallLayout::WIDTHS.1, 10.0, "px", move |w| go(L::Width(w)))));
+    }
+    let mut parts = column![].spacing(10);
+    let last = l.panels.len().saturating_sub(1);
+    for (i, &(panel, on)) in l.panels.iter().enumerate() {
+        let name = panel.name();
+        let moves = row![
+            btn_sm("Up", Btn::Ghost, (i > 0).then(|| go(L::Move(panel, false)))),
+            btn_sm("Down", Btn::Ghost, (i < last).then(|| go(L::Move(panel, true)))),
+            switch(name, on, move |on| go(L::Show(panel, on))),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        parts = parts.push(row![t(name).size(14).width(Length::Fill), moves].spacing(8).align_y(Alignment::Center));
+        if i < last {
+            parts = parts.push(divider());
+        }
+    }
+    column![
+        titled_card("Where the call goes", None, place),
+        titled_card("What the call shows", Some("Top to bottom. The clock, the badges and the buttons are always there, and so is a safety warning."), parts),
+        btn_sm("Back to the standard layout", Btn::Ghost, Some(go(L::Reset))),
+    ]
     .spacing(14)
     .into()
 }

@@ -5954,6 +5954,11 @@ fn current_config(app: &MainWindow) -> config::AppConfig {
         // reconstructed -- rebuilding them from the window would flatten
         // every saved layout into whatever is on screen right now.
         saved_layouts: previous.saved_layouts.clone(),
+        // The iced app's call layout; this app has its own.
+        call_panel_order: previous.call_panel_order.clone(),
+        call_panels_hidden: previous.call_panels_hidden.clone(),
+        call_beside_chat: previous.call_beside_chat,
+        call_column_width: previous.call_column_width,
         // Same reasoning as saved layouts: the UI shows clip names, not
         // their paths and gains, so these come from the stored config.
         sound_clips: previous.sound_clips.clone(),
