@@ -179,7 +179,8 @@ jobs:
         run: bash packaging/set-version.sh "$SV"
       - name: Tests
         shell: bash
-        run: cargo test --workspace --locked
+        # --no-fail-fast: every failing crate in one run, not just the first
+        run: cargo test --workspace --locked --no-fail-fast
       - name: Reproducible environment
         shell: bash
         # CARGO_ENCODED_RUSTFLAGS rather than RUSTFLAGS, and Windows-form

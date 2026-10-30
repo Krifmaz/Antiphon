@@ -643,7 +643,15 @@ mod tests {
     fn class_ids_round_trip_as_text() {
         let cid: TUID = vst3::uid(0x6E332252, 0x54224A00, 0xAA69301A, 0xF318797D);
         let text = cid_text(&cid);
-        assert_eq!(text, "6E33225254224A00AA69301AF318797D");
+        // The text is the id's bytes as stored, and the SDK stores a class id
+        // COM-style on Windows (first two groups little-endian), as plugins
+        // built there report theirs.
+        let want = if cfg!(target_os = "windows") {
+            "5222336E2254004AAA69301AF318797D"
+        } else {
+            "6E33225254224A00AA69301AF318797D"
+        };
+        assert_eq!(text, want);
         assert_eq!(cid_from_text(&text), Some(cid));
         assert_eq!(cid_from_text("nope"), None);
     }
