@@ -777,6 +777,8 @@ impl App {
             Action::Captions(_) => {}
             // Replay history and the soundboard are a desktop's for now.
             Action::Replay(_) | Action::Sound(_) => {}
+            // A phone follows the system's text size; never offered.
+            Action::TextScale(_) => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

@@ -702,6 +702,10 @@ pub struct Settings {
     pub output_db: f32,
     /// Animations are off.
     pub reduced_motion: bool,
+    /// How large the whole interface is drawn, 1 being normal (desktop
+    /// only; a phone follows the system's text size). `0` before it is
+    /// known, which draws at normal size.
+    pub text_scale: f32,
     /// Show a notification for messages while the window is not focused.
     pub notify_messages: bool,
     /// Open the door (listen for calls) when the app starts.

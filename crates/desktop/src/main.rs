@@ -123,6 +123,7 @@ fn main() -> anyhow::Result<()> {
     let mut app = iced::application(move || app::App::boot(mode.clone()), app::App::update, app::App::view)
         .title(move |a: &app::App| format!("{}{title_suffix}", a.title()))
         .theme(app::App::theme)
+        .scale_factor(app::App::scale_factor)
         .subscription(app::App::subscription)
         .window(iced::window::Settings {
             size: iced::Size::new(1280.0, 820.0),

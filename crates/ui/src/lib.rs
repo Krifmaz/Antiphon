@@ -592,6 +592,8 @@ pub enum Action {
     MicTest(bool),
     /// Master output volume, dB.
     OutputVolume(f32),
+    /// Draw the whole interface this much larger or smaller (1 is normal).
+    TextScale(f32),
     /// Turn animations off (or back on).
     ReducedMotion(bool),
     /// Notify about messages while the window is in the background.

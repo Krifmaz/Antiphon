@@ -348,6 +348,7 @@ impl Demo {
                 }
             }
             Action::Theme(t) => self.model.settings.theme = t,
+            Action::TextScale(scale) => self.model.settings.text_scale = scale,
             Action::Accent(a) => self.model.settings.accent = a,
             Action::Look(i) => {
                 if let Some(look) = ui::theme::LOOKS.get(i) {

@@ -638,6 +638,13 @@ impl App {
         view
     }
 
+    /// How large the interface is drawn: the Interface size setting,
+    /// normal size until it is known.
+    pub fn scale_factor(&self) -> f32 {
+        let scale = self.model().settings.text_scale;
+        if scale > 0.0 { scale } else { 1.0 }
+    }
+
     /// The iced theme built from the current palette (see `theme`).
     pub fn theme(&self) -> Theme {
         self.theme.clone()

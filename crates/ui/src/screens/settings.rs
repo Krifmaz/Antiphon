@@ -303,6 +303,15 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
         );
     }
 
+    // A computer's interface size; a phone follows the system's.
+    let size = (!m.device.phone).then(|| {
+        let scale = if m.settings.text_scale > 0.0 { m.settings.text_scale } else { 1.0 };
+        titled_card(
+            "Interface size",
+            Some("Makes text and everything around it larger or smaller."),
+            value_slider("Interface size", scale * 100.0, 85.0, 140.0, 5.0, "%", |pct| Msg::Do(Action::TextScale(pct / 100.0))),
+        )
+    });
     let motion = setting("Reduce motion", Some("Dialogs and panels appear at once instead of sliding."), switch("Reduce motion", m.settings.reduced_motion, |on| Msg::Do(Action::ReducedMotion(on))));
     let files = row![
         btn_icon(Icon::Download, "Export theme…", Btn::Default, Some(Msg::Do(Action::ExportTheme))),
@@ -314,6 +323,7 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
             titled_card("Reading font", Some("OpenDyslexic's heavier letter bottoms help some people with dyslexia keep letters in place."), fonts),
             card(motion),
         ]
+        .push(size)
         .push(m.captions.as_ref().map(|c| titled_card("Live captions", Some("Words appear in the call as people speak. They are worked out on this computer; no sound or text leaves it, and they are gone when the call ends unless you save them."), captions(c))))
         .spacing(14)
         .into();

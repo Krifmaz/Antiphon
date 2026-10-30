@@ -2156,6 +2156,12 @@ impl Engine {
                 *self.state.output_gain_db.lock().unwrap() = db;
                 self.save();
             }
+            A::TextScale(scale) => {
+                // The classic app's range: small enough to fit more, large
+                // enough for low vision, never so far the layout breaks.
+                self.cfg.text_scale = scale.clamp(0.85, 1.4);
+                self.save();
+            }
             A::ReducedMotion(on) => {
                 self.cfg.reduced_motion = on;
                 self.save();
@@ -3364,6 +3370,7 @@ impl Engine {
             mic_test: self.state.loopback.lock().unwrap().as_ref().map(|l| l.level().min(1.0)),
             output_db: self.cfg.output_gain_db,
             reduced_motion: self.cfg.reduced_motion,
+            text_scale: self.cfg.text_scale,
             notify_messages: self.cfg.stoop.notify_messages,
             open_on_start: self.cfg.stoop.door_on_start,
             version: env!("CARGO_PKG_VERSION").to_string(),
