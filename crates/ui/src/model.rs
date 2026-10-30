@@ -588,6 +588,9 @@ pub struct Network {
     /// Whether calling a bare `host:port` is allowed; `None` where it
     /// always is (the phone).
     pub ip_direct: Option<bool>,
+    /// The settings for relays, mail, lookup, file sharing and the VPN
+    /// that only a computer offers; `None` on the phone.
+    pub more: Option<NetworkMore>,
     /// The one-line reachability status ("Direct", "Relayed — …"), its
     /// explanation, and whether people can reach you; `None` where it
     /// isn't worked out (the phone).
@@ -964,6 +967,109 @@ impl Backdrop {
         let bottom = cut(self.crop[3], h).min(h.saturating_sub(top + 1));
         iced_core::Rectangle { x: left, y: top, width: (w - left - right).max(1), height: (h - top - bottom).max(1) }
     }
+}
+
+/// Relay, mail, lookup, file sharing and VPN settings (spec §5, §6, §8),
+/// as Settings shows them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetworkMore {
+    /// Relays to try when yours doesn't answer, comma-separated.
+    pub fallback_relays: String,
+    /// The project's relays are tried last of all.
+    pub project_relays: bool,
+    /// Sealed mail is dropped at every mailbox on the route, not only
+    /// the first that takes it.
+    pub fan_out: bool,
+    /// Hours an undelivered message keeps trying; 0 is never giving up.
+    pub give_up_hours: u32,
+    /// This computer holds sealed mail for your other devices.
+    pub hold_mail: bool,
+    /// The port it holds mail on, as text.
+    pub hold_mail_port: String,
+    /// Contacts are looked up in the shared address book (DHT) when their
+    /// address changed.
+    pub dht: bool,
+    /// The nodes the lookup starts from, comma-separated; empty uses the
+    /// built-in ones.
+    pub dht_bootstrap: String,
+    /// Files you share stay available from this computer after the call.
+    pub seeding: bool,
+    /// Who you help share files with: 0 the conversation (or community)
+    /// it was shared in, 1 your contacts, 2 anyone.
+    pub seed_scope: u8,
+    /// Seeding goes through your pin nodes, so downloaders never see your
+    /// address.
+    pub anonymous_seeding: bool,
+    /// The port files are shared from, as text.
+    pub seed_port: String,
+    /// Nodes that keep a copy of what you share, comma-separated.
+    pub pin_nodes: String,
+    /// A code for those nodes is saved.
+    pub pin_code_set: bool,
+    /// The VPN (spec §6 "Bring your own VPN").
+    pub vpn: Vpn,
+}
+
+/// Bring-your-own VPN, as Settings shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Vpn {
+    /// The app's traffic goes through it.
+    pub on: bool,
+    /// The imported configs: id and a one-line description.
+    pub configs: Vec<(String, String)>,
+    /// The id of the one in use.
+    pub active: String,
+    /// What goes through it: calls, shared files, offline messages.
+    pub routes: (bool, bool, bool),
+    /// If the tunnel drops, that traffic stops rather than going out over
+    /// your own connection.
+    pub kill_switch: bool,
+    /// One line on what it is doing.
+    pub status: String,
+}
+
+/// A network switch Settings flips (see [`NetworkMore`] and [`Vpn`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetSwitch {
+    /// The project's relays as a last resort.
+    ProjectRelays,
+    /// Fan mail out to every mailbox.
+    FanOut,
+    /// Hold mail for your other devices.
+    HoldMail,
+    /// Look contacts up in the shared address book.
+    Dht,
+    /// Keep sharing files after the call.
+    Seeding,
+    /// Seed through pin nodes only.
+    AnonymousSeeding,
+    /// Use the VPN.
+    Vpn,
+    /// Stop traffic when the tunnel drops.
+    KillSwitch,
+    /// Calls go through the VPN.
+    VpnCalls,
+    /// Shared files go through the VPN.
+    VpnFiles,
+    /// Offline messages go through the VPN.
+    VpnMessages,
+}
+
+/// A network text setting, saved from its box (see [`NetworkMore`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NetText {
+    /// Fallback relays, comma-separated.
+    FallbackRelays,
+    /// The port mail is held on.
+    HoldMailPort,
+    /// Lookup start nodes, comma-separated.
+    DhtBootstrap,
+    /// The port files are shared from.
+    SeedPort,
+    /// Pin nodes, comma-separated.
+    PinNodes,
+    /// The pin nodes' code.
+    PinCode,
 }
 
 /// How much attention an incoming call may ask for (spec §9 "Receiver

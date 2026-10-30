@@ -114,6 +114,8 @@ enum Event {
     NodesFound(Vec<String>),
     /// A node read from a QR code picture, or why none was.
     NodePicked(Result<node_picker::NodeLink, String>),
+    /// A VPN config was imported: its id, to use it.
+    VpnImported(String),
 }
 
 /// What the app should do in the interface after the engine acted.
@@ -325,6 +327,10 @@ pub struct Engine {
     delivery_seen: u64,
     /// The last LAN discovery count handled; a new number means new peers.
     discovery_seen: u64,
+    /// The imported VPN configs as Settings lists them (id, description),
+    /// and the store revision they were read at, so the sealed list is
+    /// only opened again when it changed.
+    vpn_configs: (u64, Vec<(String, String)>),
     /// The relay the peer last told us about, saved to their contact.
     peer_relay_saved: String,
     /// The VPN routes the peer last told us about, saved to their contact.
@@ -446,6 +452,7 @@ impl Engine {
             api_phase: String::new(),
             delivery_seen: 0,
             discovery_seen: 0,
+            vpn_configs: (u64::MAX, Vec::new()),
             peer_relay_saved: String::new(),
             peer_routes_saved: String::new(),
             call_check: Default::default(),
@@ -597,6 +604,10 @@ impl Engine {
         if found != self.discovery_seen {
             self.discovery_seen = found;
             self.cfg = config::load();
+        }
+        let vpn_rev = vpn::revision();
+        if vpn_rev != self.vpn_configs.0 {
+            self.vpn_configs = (vpn_rev, vpn::load().iter().map(|e| (e.id.clone(), format!("{} · {}", e.name, vpn::describe(e)))).collect());
         }
 
         // Keyboard shortcuts raised by the key poller thread.
@@ -1235,6 +1246,91 @@ impl Engine {
         });
     }
 
+    /// Flips one of the relay, mail, lookup, file-sharing or VPN switches,
+    /// saves, and restarts whatever the switch drives.
+    fn net_switch(&mut self, which: ui::NetSwitch, on: bool) {
+        use ui::NetSwitch as S;
+        let c = &mut self.cfg;
+        match which {
+            S::ProjectRelays => c.use_project_relays = on,
+            S::FanOut => c.route_fan_out = on,
+            S::HoldMail => c.hold_mail_for_devices = on,
+            S::Dht => c.dht_enabled = on,
+            S::Seeding => c.seeding = on,
+            S::AnonymousSeeding => c.anonymous_seeding = on,
+            S::Vpn => c.vpn_enabled = on,
+            S::KillSwitch => c.vpn_kill_switch = on,
+            S::VpnCalls => c.vpn_route_voice = on,
+            S::VpnFiles => c.vpn_route_files = on,
+            S::VpnMessages => c.vpn_route_messages = on,
+        }
+        self.save();
+        match which {
+            S::HoldMail => delivery::set_hosting(&self.state.runtime, self.cfg.hold_mail_for_devices, self.cfg.hold_mail_port),
+            S::Seeding => sharing::set_seeding(&self.state.runtime, self.cfg.seeding, self.cfg.seed_port),
+            S::Vpn | S::KillSwitch | S::VpnCalls | S::VpnFiles | S::VpnMessages => self.apply_vpn(),
+            S::ProjectRelays | S::FanOut | S::Dht | S::AnonymousSeeding => {}
+        }
+    }
+
+    /// Saves one of the network text boxes. Ports that don't parse, and
+    /// port 0, are refused with a toast; lists are split on commas.
+    fn net_text(&mut self, which: ui::NetText, text: &str) {
+        use ui::NetText as T;
+        let list = || text.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect::<Vec<_>>();
+        let port = match which {
+            T::HoldMailPort | T::SeedPort => match text.trim().parse::<u16>() {
+                Ok(p) if p != 0 => p,
+                _ => {
+                    self.toast("A port is a number from 1 to 65535.", ToastKind::Err);
+                    return;
+                }
+            },
+            _ => 0,
+        };
+        match which {
+            T::FallbackRelays => self.cfg.fallback_relays = list(),
+            T::DhtBootstrap => self.cfg.dht_bootstrap = list(),
+            T::PinNodes => self.cfg.pin_nodes = list(),
+            T::PinCode => self.cfg.pin_code = text.trim().to_string(),
+            T::HoldMailPort => self.cfg.hold_mail_port = port,
+            T::SeedPort => self.cfg.seed_port = port,
+        }
+        self.save();
+        match which {
+            // The relay is chosen again so a new fallback is tried.
+            T::FallbackRelays => self.relay_choice = None,
+            T::HoldMailPort => delivery::set_hosting(&self.state.runtime, self.cfg.hold_mail_for_devices, self.cfg.hold_mail_port),
+            T::SeedPort => sharing::set_seeding(&self.state.runtime, self.cfg.seeding, self.cfg.seed_port),
+            T::DhtBootstrap | T::PinNodes | T::PinCode => {}
+        }
+    }
+
+    /// Starts, switches or stops the VPN tunnel to match the settings.
+    fn apply_vpn(&self) {
+        let c = &self.cfg;
+        vpn::apply(
+            &self.state.runtime,
+            c.vpn_enabled,
+            &c.vpn_active,
+            antiphon_net::vpn::Routes { voice: c.vpn_route_voice, files: c.vpn_route_files, messages: c.vpn_route_messages },
+            c.vpn_kill_switch,
+        );
+    }
+
+    /// Asks for a WireGuard config file and imports it, off the window's
+    /// thread; the imported one becomes the one in use.
+    fn import_vpn(&self) {
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Import a WireGuard config").add_filter("WireGuard config", &["conf"]).pick_file() else { return };
+            match vpn::import(&path) {
+                Ok(stored) => Self::push(&events, Event::VpnImported(stored.id.clone())),
+                Err(e) => Self::push(&events, Event::Toast(format!("Couldn't import that config: {e}"), ToastKind::Err)),
+            }
+        });
+    }
+
     /// Exports everything into a folder the person picks, off the window's
     /// thread (spec §13 "take everything with you, in an open format"):
     /// settings, contacts, decrypted history, sound clips and received
@@ -1551,6 +1647,11 @@ impl Engine {
                 self.out.push(Out::LoadFont(bytes, family));
             }
             Event::Mapping(symmetric, vpn) => self.mapping = Some((symmetric, vpn)),
+            Event::VpnImported(id) => {
+                self.cfg.vpn_active = id;
+                self.save();
+                self.apply_vpn();
+            }
             Event::Preview(result) => {
                 self.previewing = false;
                 match result {
@@ -2547,6 +2648,31 @@ impl Engine {
             A::IpDirect(on) => {
                 self.cfg.ip_direct_calling = on;
                 self.save();
+            }
+            A::NetSwitch(which, on) => self.net_switch(which, on),
+            A::NetText(which, text) => self.net_text(which, &text),
+            A::SeedScope(scope) => {
+                self.cfg.seed_scope = i32::from(scope.min(2));
+                self.save();
+            }
+            A::GiveUpHours(hours) => {
+                self.cfg.outbox_give_up_hours = hours;
+                self.save();
+            }
+            A::VpnImport => self.import_vpn(),
+            A::VpnUse(id) => {
+                self.cfg.vpn_active = id;
+                self.save();
+                self.apply_vpn();
+            }
+            A::VpnDelete(id) => {
+                if let Err(e) = vpn::delete(&id) {
+                    self.toast(format!("Couldn't remove that VPN config: {e}"), ToastKind::Err);
+                } else if self.cfg.vpn_active == id {
+                    self.cfg.vpn_active.clear();
+                    self.save();
+                    self.apply_vpn();
+                }
             }
             A::LendRelay(on) => {
                 self.cfg.lend_relay = on;
@@ -3716,6 +3842,7 @@ impl Engine {
             lend_relay: self.cfg.lend_relay,
             ip_direct: Some(self.cfg.ip_direct_calling),
             status: Some(self.reach_status()),
+            more: Some(self.network_more()),
             anonymity: self.cfg.anonymity_mode,
             hops: self.cfg.anonymity_hops.join(", "),
             mailboxes: self.mailboxes(),
@@ -3723,6 +3850,35 @@ impl Engine {
             finding_nodes: self.finding_nodes,
             local_api: self.api.is_some(),
             api_file: self.dir.as_ref().map(|d| d.join("api.json").display().to_string()).unwrap_or_default(),
+        }
+    }
+
+    /// The relay, mail, lookup, file-sharing and VPN settings.
+    fn network_more(&self) -> ui::NetworkMore {
+        let c = &self.cfg;
+        ui::NetworkMore {
+            fallback_relays: c.fallback_relays.join(", "),
+            project_relays: c.use_project_relays,
+            fan_out: c.route_fan_out,
+            give_up_hours: c.outbox_give_up_hours,
+            hold_mail: c.hold_mail_for_devices,
+            hold_mail_port: c.hold_mail_port.to_string(),
+            dht: c.dht_enabled,
+            dht_bootstrap: c.dht_bootstrap.join(", "),
+            seeding: c.seeding,
+            seed_scope: u8::try_from(c.seed_scope.clamp(0, 2)).unwrap_or(0),
+            anonymous_seeding: c.anonymous_seeding,
+            seed_port: c.seed_port.to_string(),
+            pin_nodes: c.pin_nodes.join(", "),
+            pin_code_set: !c.pin_code.is_empty(),
+            vpn: ui::Vpn {
+                on: c.vpn_enabled,
+                configs: self.vpn_configs.1.clone(),
+                active: c.vpn_active.clone(),
+                routes: (c.vpn_route_voice, c.vpn_route_files, c.vpn_route_messages),
+                kill_switch: c.vpn_kill_switch,
+                status: vpn::status_line(),
+            },
         }
     }
 

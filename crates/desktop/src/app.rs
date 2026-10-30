@@ -193,6 +193,8 @@ const TOUR: &[Step] = &[
             let _ = app.send(Msg::SettingsTab(2));
         },
     },
+    Step { name: "network", size: (1280.0, 1400.0), setup: |app| app.go(Route::Settings(Section::Network)) },
+    Step { name: "file-sharing", size: (1280.0, 1200.0), setup: |app| app.go(Route::Settings(Section::Data)) },
     Step {
         name: "fine-tune",
         size: (1280.0, 900.0),

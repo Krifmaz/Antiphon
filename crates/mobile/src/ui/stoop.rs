@@ -668,7 +668,7 @@ impl App {
             }
             // Lending a relay needs a relay of one's own, which the phone
             // does not run; the setting is the desktop's.
-            Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::IpDirect(_) | Action::Input(_) | Action::Output(_) => {}
+            Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::IpDirect(_) | Action::NetSwitch(..) | Action::NetText(..) | Action::SeedScope(_) | Action::GiveUpHours(_) | Action::VpnImport | Action::VpnUse(_) | Action::VpnDelete(_) | Action::Input(_) | Action::Output(_) => {}
             // A phone has no keyboard shortcuts.
             Action::BindKey(_) | Action::ClearKey(_) | Action::KeyHold(..) => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}

@@ -19,7 +19,7 @@ use crate::icons::{icon, logo, Icon};
 use crate::a11y::Role;
 use crate::theme::{self, Btn, ACCENTS, FONTS, THEMES};
 use crate::widgets::*;
-use crate::{Action, CheckState, El, Group, Hotkey, Model, Msg, Route, Section, Transmit, Ui};
+use crate::{Action, CheckState, El, Group, Hotkey, Model, Msg, NetSwitch, NetText, NetworkMore, Route, Section, Transmit, Ui};
 
 /// Settings on a wide window: the grouped section list beside the chosen
 /// section.
@@ -929,7 +929,7 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         )),
         None => listen,
     };
-    column![card(check_card), titled_card("Your door", None, listen)].spacing(14).into()
+    column![card(check_card), titled_card("Your door", None, listen)].push(m.network.more.as_ref().map(|more| lookup_and_vpn(ui, more))).spacing(14).into()
 }
 
 /// Relays & mailboxes' tab `tab`: 0 the relay to fall back on and
@@ -946,6 +946,17 @@ fn relays<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
             Some("Friends with no relay of their own can be reached through yours. They use your bandwidth, never your keys. Off unless you turn it on."),
             switch("Let contacts use my relay", m.network.lend_relay, |on| Msg::Do(Action::LendRelay(on))),
         ));
+        if let Some(more) = &m.network.more {
+            relay = relay
+                .push(divider())
+                .push(field("Fallback relays", net_box(ui, NetText::FallbackRelays, "Fallback relays", "relay2.example.org:7100, …", &more.fallback_relays)))
+                .push(faint("Tried in order when your relay doesn't answer.").size(12))
+                .push(setting(
+                    "Use the project's relays last",
+                    Some("When nothing else answers. They pass sealed packets like any relay, and hold nothing."),
+                    net_switch("Use the project's relays last", more.project_relays, NetSwitch::ProjectRelays),
+                ));
+        }
         return titled_card("Relay", Some("For people who cannot reach you directly. The relay passes sealed packets; it cannot hear the call."), relay);
     }
     let mut nodes = column![].spacing(8);
@@ -989,7 +1000,145 @@ fn relays<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
         );
     }
     nodes = nodes.push(faint("A node prints its link and QR code when it starts. Pick a picture of the code (a screenshot or a photo) to add it.").size(12));
-    titled_card("Mailboxes", Some("Nodes that hold sealed mail for you while you're away. They can't read it."), nodes)
+    let mailboxes = titled_card("Mailboxes", Some("Nodes that hold sealed mail for you while you're away. They can't read it."), nodes);
+    let Some(more) = &m.network.more else { return mailboxes };
+    // Spec §8: the sender controls only their outbox, so these are about
+    // what you send and what this computer holds.
+    let mut delivery = column![
+        setting(
+            "Drop mail at every mailbox",
+            Some("The same sealed message goes to each mailbox on their route, so it arrives even if some are down. Uses a little more data."),
+            net_switch("Drop mail at every mailbox", more.fan_out, NetSwitch::FanOut),
+        ),
+        divider(),
+        field(
+            "Give up on a message after",
+            value_slider("Give up after", more.give_up_hours as f32, 0.0, 720.0, 12.0, "h", |h| Msg::Do(Action::GiveUpHours(h as u32))),
+        ),
+        faint(if more.give_up_hours == 0 { "0: a message keeps trying until it arrives." } else { "After that it stops trying and says so." }).size(12),
+        divider(),
+        setting(
+            "Hold mail for my other devices",
+            Some("This computer keeps sealed mail for your phone and other devices while they're away."),
+            net_switch("Hold mail for my other devices", more.hold_mail, NetSwitch::HoldMail),
+        ),
+    ]
+    .spacing(12);
+    if more.hold_mail {
+        delivery = delivery.push(field("Port", net_box(ui, NetText::HoldMailPort, "Mail holding port", "Any free port", &more.hold_mail_port)));
+    }
+    column![mailboxes, titled_card("Sending and holding mail", None, delivery)].spacing(14).into()
+}
+
+/// A text box for a network setting, with Save while it differs from
+/// `saved`.
+fn net_box<'a>(ui: &'a Ui, which: NetText, name: &'static str, placeholder: &'a str, saved: &'a str) -> El<'a, Msg> {
+    let id = match which {
+        NetText::FallbackRelays => "stoop-fallback-relays",
+        NetText::HoldMailPort => "stoop-hold-mail-port",
+        NetText::DhtBootstrap => "stoop-dht-bootstrap",
+        NetText::SeedPort => "stoop-seed-port",
+        NetText::PinNodes => "stoop-pin-nodes",
+        NetText::PinCode => "stoop-pin-code",
+    };
+    let edited = ui.net_edits.get(&which);
+    let value = edited.map_or(saved, String::as_str);
+    let mut r = row![input(name, id, placeholder, value).on_input(move |s| Msg::NetEdit(which, s)).on_submit(Msg::NetSave(which)).padding([9, 12]).size(14)].spacing(8).align_y(Alignment::Center);
+    if edited.is_some_and(|e| e != saved) {
+        r = r.push(btn("Save", Btn::Primary, Some(Msg::NetSave(which))));
+    }
+    r.into()
+}
+
+/// A switch for a network setting.
+fn net_switch<'a>(name: &'a str, on: bool, which: NetSwitch) -> El<'a, Msg> {
+    switch(name, on, move |on| Msg::Do(Action::NetSwitch(which, on)))
+}
+
+/// Finding people whose address changed (spec §2 DHT), and the VPN
+/// (spec §6), for Network.
+fn lookup_and_vpn<'a>(ui: &'a Ui, more: &'a NetworkMore) -> El<'a, Msg> {
+    let mut lookup = column![setting(
+        "Find contacts whose address changed",
+        Some("Looks them up in an address book shared across everyone's devices. Lookups are blinded: nodes can't tell who you're looking for."),
+        net_switch("Find contacts whose address changed", more.dht, NetSwitch::Dht),
+    )]
+    .spacing(12);
+    if more.dht {
+        lookup = lookup.push(field("Start from", net_box(ui, NetText::DhtBootstrap, "Lookup start nodes", "The built-in nodes", &more.dht_bootstrap)));
+    }
+    let v = &more.vpn;
+    let mut vpn = column![setting(
+        "Use my VPN",
+        Some("Sends Stoop's traffic through a WireGuard VPN you already have. Only Stoop is affected, and it won't fight a VPN that's already running."),
+        net_switch("Use my VPN", v.on, NetSwitch::Vpn),
+    )]
+    .spacing(12);
+    for (id, about) in &v.configs {
+        let on = *id == v.active;
+        vpn = vpn.push(
+            row![
+                pressable(faint(about.as_str()).size(12.5), Role::Tab, about, on, if on { Btn::RowOn } else { Btn::Row }, Msg::Do(Action::VpnUse(id.clone()))).width(Length::Fill).padding([8, 10]),
+                icon_btn(Icon::Trash, "Delete this config", Some(Msg::Do(Action::VpnDelete(id.clone())))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    vpn = vpn.push(btn_icon(Icon::File, "Import a WireGuard file…", Btn::Ghost, Some(Msg::Do(Action::VpnImport))));
+    if v.on {
+        let (calls, files, messages) = v.routes;
+        vpn = vpn
+            .push(divider())
+            .push(setting("Calls through the VPN", None, net_switch("Calls through the VPN", calls, NetSwitch::VpnCalls)))
+            .push(setting("Shared files through the VPN", None, net_switch("Shared files through the VPN", files, NetSwitch::VpnFiles)))
+            .push(setting("Offline messages through the VPN", None, net_switch("Offline messages through the VPN", messages, NetSwitch::VpnMessages)))
+            .push(divider())
+            .push(setting(
+                "Kill switch",
+                Some("If the tunnel drops, that traffic stops instead of going out over your own connection."),
+                net_switch("Kill switch", v.kill_switch, NetSwitch::KillSwitch),
+            ));
+    }
+    vpn = vpn.push(faint(v.status.as_str()).size(12.5));
+    column![
+        titled_card("Finding people", None, lookup),
+        titled_card("Bring your own VPN", Some("Its keys are sealed on this computer and never go into theme files, settings files or backups."), vpn),
+    ]
+    .spacing(14)
+    .into()
+}
+
+/// Sharing files after the call (spec §5 seeding), for Data & battery.
+fn sharing<'a>(ui: &'a Ui, more: &'a NetworkMore) -> El<'a, Msg> {
+    let mut col = column![setting(
+        "Keep sharing files after the call",
+        Some("Files you send stay downloadable from this computer while Stoop is open, so people can fetch them later."),
+        net_switch("Keep sharing files after the call", more.seeding, NetSwitch::Seeding),
+    )]
+    .spacing(12);
+    if more.seeding {
+        let scopes = vec![
+            ("Where it was shared", Msg::Do(Action::SeedScope(0))),
+            ("My contacts", Msg::Do(Action::SeedScope(1))),
+            ("Anyone", Msg::Do(Action::SeedScope(2))),
+        ];
+        col = col
+            .push(field("Help share files with", tabs(scopes, usize::from(more.seed_scope.min(2)))))
+            .push(faint("Checked by the protocol, not just hidden: a file can only be fetched by the people you choose.").size(12))
+            .push(setting(
+                "Share anonymously",
+                Some("Files are shared through your pin nodes, so people downloading never see your address. Slower; needs a pin node."),
+                net_switch("Share anonymously", more.anonymous_seeding, NetSwitch::AnonymousSeeding),
+            ))
+            .push(field("Port", net_box(ui, NetText::SeedPort, "File sharing port", "Any free port", &more.seed_port)));
+    }
+    col = col
+        .push(divider())
+        .push(field("Pin nodes", net_box(ui, NetText::PinNodes, "Pin nodes", "files.example.org:7300, …", &more.pin_nodes)))
+        .push(faint("Machines you or a friend run that keep a sealed copy of what you share, so it's there while you're offline.").size(12))
+        .push(field("Their code", net_box(ui, NetText::PinCode, "Pin node code", if more.pin_code_set { "Saved; type to change" } else { "None" }, "")));
+    titled_card("Sharing files", None, col)
 }
 
 /// Anonymity routing, and whether programs on this computer may act as
@@ -1063,7 +1212,7 @@ fn data<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Some("Voice only, at the least data that stays clear. Calls already lower their quality by themselves when the connection is poor."),
         switch("Low data calls", m.settings.low_data, |on| Msg::Do(Action::LowData(on))),
     );
-    let cards = column![titled_card("Calls", None, low_data)].spacing(14);
+    let cards = column![titled_card("Calls", None, low_data)].spacing(14).push(m.network.more.as_ref().map(|more| sharing(ui, more)));
     let Some(ph) = m.phone.as_ref() else { return cards.into() };
     let background = column![
         setting(

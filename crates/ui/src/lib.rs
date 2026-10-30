@@ -651,6 +651,20 @@ pub enum Action {
     LendRelay(bool),
     /// Allow calling a bare `host:port` (desktop only).
     IpDirect(bool),
+    /// Flip a relay, mail, lookup, sharing or VPN switch (desktop only).
+    NetSwitch(NetSwitch, bool),
+    /// Save a relay, mail, lookup or sharing text setting (desktop only).
+    NetText(NetText, String),
+    /// Who you help share files with (see [`NetworkMore::seed_scope`]).
+    SeedScope(u8),
+    /// Hours an undelivered message keeps trying; 0 never gives up.
+    GiveUpHours(u32),
+    /// Import a WireGuard config file for the VPN.
+    VpnImport,
+    /// Use this imported VPN config (by id).
+    VpnUse(String),
+    /// Delete this imported VPN config (by id).
+    VpnDelete(String),
     /// Route calls through anonymity-mode hops, or stop.
     Anonymity(bool),
     /// The hops for anonymity mode, comma-separated `host:port[#key]`.
@@ -1120,6 +1134,10 @@ pub enum Msg {
     Cursor(Point),
     /// Shift is held (true) or let go, so Shift+click on Call can knock.
     Shift(bool),
+    /// Typing in a network text setting's box.
+    NetEdit(NetText, String),
+    /// Save that box.
+    NetSave(NetText),
     /// Open the right-click menu for a person, or close it.
     Menu(Option<String>),
     /// Copy text and say so.
@@ -1262,6 +1280,8 @@ pub struct Ui {
     reduced_motion: bool,
     /// Shift is held down.
     shift: bool,
+    /// Unsaved edits to network text settings.
+    net_edits: HashMap<NetText, String>,
     /// The strips the phone's system draws over, in logical pixels, as
     /// (top, bottom): the status bar and camera cutout, and the gesture
     /// bar (or the keyboard while it is up). The layout keeps every
@@ -1351,6 +1371,7 @@ impl Ui {
             epoch: now,
             reduced_motion: false,
             shift: false,
+            net_edits: HashMap::new(),
             video_focus: None,
             insets: (0.0, 0.0),
             accent_edit: None,
@@ -1499,6 +1520,14 @@ impl Ui {
                 self.shift = down;
                 Vec::new()
             }
+            Msg::NetEdit(which, text) => {
+                self.net_edits.insert(which, text);
+                Vec::new()
+            }
+            Msg::NetSave(which) => match self.net_edits.remove(&which) {
+                Some(text) => vec![Action::NetText(which, text.trim().to_string())],
+                None => Vec::new(),
+            },
             Msg::Frame(now) => {
                 self.now = now;
                 self.toasts.retain(|t| now.saturating_duration_since(t.at) < t.life());

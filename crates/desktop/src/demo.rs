@@ -76,6 +76,14 @@ impl Demo {
                 ],
                 port: 6002,
                 relay: String::new(),
+                more: Some(ui::NetworkMore {
+                    project_relays: true,
+                    hold_mail_port: "6004".into(),
+                    seeding: true,
+                    seed_port: "6005".into(),
+                    vpn: ui::Vpn { routes: (false, true, true), status: "Off".into(), ..ui::Vpn::default() },
+                    ..ui::NetworkMore::default()
+                }),
                 ..Default::default()
             },
             settings: ui::Settings {
