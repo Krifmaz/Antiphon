@@ -547,17 +547,37 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     .spacing(16);
 
     let test: El<'a, Msg> = match s.mic_test {
-        Some(level) => row![
-            btn_icon(Icon::X, "Stop test", Btn::Default, Some(Msg::Do(Action::MicTest(false)))),
-            progress_bar(0.0..=1.0, level).girth(8).style(theme::meter),
+        Some(level) => column![
+            row![btn_icon(Icon::X, "Stop test", Btn::Default, Some(Msg::Do(Action::MicTest(false)))), progress_bar(0.0..=1.0, level).girth(8).style(theme::meter)]
+                .spacing(14)
+                .align_y(Alignment::Center),
         ]
-        .spacing(14)
-        .align_y(Alignment::Center)
+        // Spec §1 "Live Monitoring": how much delay hearing yourself adds,
+        // as "about", since the sound card's share can only be estimated.
+        .push((s.monitor_ms > 0).then(|| faint(format!("Hearing yourself adds about {} ms.", s.monitor_ms)).size(12)))
+        .spacing(8)
         .into(),
         None => row![btn_icon(Icon::Mic, "Test my microphone", Btn::Default, Some(Msg::Do(Action::MicTest(true)))), faint("You will hear yourself.").size(12.5)]
             .spacing(14)
             .align_y(Alignment::Center)
             .into(),
+    };
+    // Spec §1 "Record Preview": five seconds through the whole chain,
+    // played back, so you hear what everyone else hears.
+    let test: El<'a, Msg> = match s.record_preview {
+        Some(recording) => column![
+            test,
+            divider(),
+            row![
+                btn_icon(Icon::Mic, if recording { "Recording…" } else { "Record 5 seconds" }, Btn::Ghost, (!recording && s.mic_test.is_none()).then_some(Msg::Do(Action::RecordPreview))),
+                faint("Then it plays back as others will hear you. Nothing is kept.").size(12.5),
+            ]
+            .spacing(14)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(12)
+        .into(),
+        None => test,
     };
 
     let mut seg = row![].spacing(4);
@@ -570,6 +590,12 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     let mut talk = column![container(seg).padding(4).style(theme::tabs_frame)].spacing(14);
     if s.transmit == Transmit::PushToTalk && m.device.ptt_keys {
         talk = talk.push(setting(Hotkey::Talk.label(), Some(Hotkey::Talk.help()), key_button(s, Hotkey::Talk)));
+        talk = talk.push(setting("Press once to talk", Some("The talk key stays on until you press it again, instead of only while held."), switch("Press once to talk", s.ptt_latch, |on| Msg::Do(Action::PttLatch(on)))));
+        talk = talk.push(setting(
+            "Release delay",
+            Some("Keeps the microphone open a moment after you let go, so the end of your last word isn't cut off."),
+            value_slider("Release delay", s.ptt_release_ms, 0.0, 1000.0, 50.0, "ms", |ms| Msg::Do(Action::PttRelease(ms))),
+        ));
     }
     if let (Transmit::Voice, Some(threshold)) = (s.transmit, s.va_threshold) {
         // While the mic test runs (or a call is up) your voice moves the

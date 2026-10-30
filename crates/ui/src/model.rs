@@ -706,6 +706,17 @@ pub struct Settings {
     pub preset_files: bool,
     /// The microphone test is running, and its level.
     pub mic_test: Option<f32>,
+    /// Roughly how many milliseconds hearing yourself adds, to show
+    /// beside the test; `0` where it isn't known (the phone).
+    pub monitor_ms: u32,
+    /// Recording five seconds to play back can be offered, and whether it
+    /// is recording now; `None` where it isn't offered (the phone).
+    pub record_preview: Option<bool>,
+    /// The talk key latches: press once to talk, again to stop.
+    pub ptt_latch: bool,
+    /// How long the microphone stays open after the talk key is let go,
+    /// in milliseconds, so the end of a word isn't cut off.
+    pub ptt_release_ms: f32,
     /// Master output volume, dB.
     pub output_db: f32,
     /// Animations are off.

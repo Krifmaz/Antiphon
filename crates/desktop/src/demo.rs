@@ -84,6 +84,8 @@ impl Demo {
                 output: String::new(),
                 transmit: ui::Transmit::Voice,
                 va_threshold: Some(0.05),
+                monitor_ms: 30,
+                record_preview: Some(false),
                 ptt_key: "Caps Lock".into(),
                 noise_suppression: true,
                 echo_cancel: true,

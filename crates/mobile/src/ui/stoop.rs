@@ -789,6 +789,8 @@ impl App {
             // The phone's microphone is open or push-to-talk; there is no
             // voice activation to set a threshold for.
             Action::VaThreshold(_) => {}
+            // Nor talk keys to latch or delay, nor a record preview.
+            Action::PttLatch(_) | Action::PttRelease(_) | Action::RecordPreview => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

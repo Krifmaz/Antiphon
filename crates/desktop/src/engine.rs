@@ -96,6 +96,9 @@ enum Event {
     /// A background picture was decoded; with a path, it was just picked
     /// (and copied there) and becomes the saved one.
     Backdrop(Option<PathBuf>, crate::backdrop::Loaded),
+    /// The record preview finished: its sample rate and sound, processed
+    /// as a call would send it, or why it failed.
+    Preview(Result<(u32, Vec<f32>), String>),
     /// A settings file was read: lay its preferences over ours.
     Settings(Box<config::AppConfig>),
     /// A voice preset file was chosen and read: use its chain.
@@ -308,6 +311,8 @@ pub struct Engine {
     custom_font: String,
     /// The background picture, once decoded; `None` when there is none.
     backdrop: Option<crate::backdrop::Loaded>,
+    /// Five seconds of microphone are being recorded to play back.
+    previewing: bool,
     /// The last delivery round handled; a new number means messages moved.
     delivery_seen: u64,
     /// The last LAN discovery count handled; a new number means new peers.
@@ -420,6 +425,7 @@ impl Engine {
             // Registered at start, before the window opened (see `main`).
             custom_font: ui::theme::custom_font_name().unwrap_or_default().to_string(),
             backdrop: None,
+            previewing: false,
             plugins_found: None,
             plugins_scanning: false,
             api: None,
@@ -1531,6 +1537,13 @@ impl Engine {
                 self.custom_font.clone_from(&family);
                 self.out.push(Out::LoadFont(bytes, family));
             }
+            Event::Preview(result) => {
+                self.previewing = false;
+                match result {
+                    Ok((rate, samples)) => self.play_here(rate, &samples),
+                    Err(e) => self.toast(format!("Couldn't record: {e}"), ToastKind::Err),
+                }
+            }
             Event::Backdrop(picked, loaded) => {
                 if let Some(path) = picked {
                     self.cfg.theme_image_path = path.to_string_lossy().into_owned();
@@ -2380,6 +2393,17 @@ impl Engine {
             A::ExportPreset => self.export_preset(),
             A::ImportPreset => self.import_preset(),
             A::MicTest(on) => self.mic_test(on),
+            A::RecordPreview => self.record_preview(),
+            A::PttLatch(on) => {
+                self.cfg.ptt_toggle = on;
+                self.sync_transmit();
+                self.save();
+            }
+            A::PttRelease(ms) => {
+                self.cfg.ptt_release_ms = ms.clamp(0.0, 1000.0);
+                self.sync_transmit();
+                self.save();
+            }
             A::OutputVolume(db) => {
                 self.cfg.output_gain_db = db;
                 *self.state.output_gain_db.lock().unwrap() = db;
@@ -2843,6 +2867,8 @@ impl Engine {
         *t.hangup_key.lock().unwrap() = Keycode::from_str(&self.cfg.hangup_key).ok();
         *t.replay_key.lock().unwrap() = Keycode::from_str(&self.cfg.replay_key).ok();
         t.mute_hold.store(self.cfg.mute_hold, Ordering::Relaxed);
+        t.ptt_toggle.store(self.cfg.ptt_toggle, Ordering::Relaxed);
+        t.ptt_release_ms.store(self.cfg.ptt_release_ms as u32, Ordering::Relaxed);
         t.deafen_hold.store(self.cfg.deafen_hold, Ordering::Relaxed);
         caps_lock::set_bound(*t.ptt_key.lock().unwrap() == Keycode::CapsLock && mode == MODE_PTT);
     }
@@ -2903,6 +2929,25 @@ impl Engine {
                 self.toast(format!("Couldn't start the test: {e}"), ToastKind::Err);
             }
         }
+    }
+
+    /// Records five seconds through the voice chain off the window's
+    /// thread; it comes back as [`Event::Preview`] to be played.
+    fn record_preview(&mut self) {
+        if self.previewing || self.state.loopback.lock().unwrap().is_some() {
+            return;
+        }
+        if self.state.call.lock().unwrap().is_some() {
+            self.toast("Not while a call is using your microphone", ToastKind::Warn);
+            return;
+        }
+        self.previewing = true;
+        let (input, chain) = (self.cfg.input_device.clone(), self.cfg.chain.clone());
+        let events = self.events.clone();
+        self.state.runtime.spawn_blocking(move || {
+            let result = state::record_mic_test(input.as_deref(), &chain, state::MIC_TEST_SECONDS).map_err(|e| e.to_string());
+            Self::push(&events, Event::Preview(result));
+        });
     }
 
     // ---------------------------------------------------------------- voice messages
@@ -3616,6 +3661,10 @@ impl Engine {
             bands: crate::chain_rows::bands(&self.cfg.chain),
             preset_files: true,
             mic_test: self.state.loopback.lock().unwrap().as_ref().map(|l| l.level().min(1.0)),
+            monitor_ms: state::monitor_added_latency_ms(),
+            record_preview: Some(self.previewing),
+            ptt_latch: self.cfg.ptt_toggle,
+            ptt_release_ms: self.cfg.ptt_release_ms,
             output_db: self.cfg.output_gain_db,
             reduced_motion: self.cfg.reduced_motion,
             text_scale: self.cfg.text_scale,

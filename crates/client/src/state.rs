@@ -1125,26 +1125,6 @@ pub fn record_until(
     Ok((sample_rate, samples))
 }
 
-/// Watches for `key` being pressed, up to `timeout`.
-///
-/// Used right after binding a push-to-talk key to confirm the app can
-/// actually see it (spec §1). Some keys bind fine and are then swallowed
-/// by another program or the window manager, and the resulting silence is
-/// blamed on the microphone rather than the binding.
-///
-/// Blocks, so call it from `spawn_blocking`.
-pub fn watch_for_key(key: Keycode, timeout: Duration) -> bool {
-    let device_state = DeviceState::new();
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if keys_down(&device_state).contains(&key) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
-}
-
 /// Plays a buffer once through `output_device`.
 ///
 /// The returned handle must be kept alive until playback finishes --

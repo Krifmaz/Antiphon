@@ -601,6 +601,15 @@ pub enum Action {
     ImportPreset,
     /// Start or stop hearing my own microphone.
     MicTest(bool),
+    /// Record five seconds through the voice chain and play it back
+    /// (desktop only).
+    RecordPreview,
+    /// Make the talk key latch (press to start, press to stop) or work
+    /// only while held.
+    PttLatch(bool),
+    /// Keep the microphone open this many milliseconds after the talk key
+    /// is let go.
+    PttRelease(f32),
     /// Master output volume, dB.
     OutputVolume(f32),
     /// Pick a font file and use it as the reading font (desktop only).

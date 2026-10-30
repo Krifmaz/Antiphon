@@ -182,7 +182,7 @@ impl Engine {
 
     /// Plays `samples` on this computer's speakers or headphones, on a
     /// stream of its own.
-    fn play_here(&mut self, rate: u32, samples: &[f32]) {
+    pub(super) fn play_here(&mut self, rate: u32, samples: &[f32]) {
         match state::play_clip(self.cfg.output_device.as_deref(), rate, samples) {
             Ok(handle) => {
                 // Held until the sound finishes: dropping it cuts it off.
