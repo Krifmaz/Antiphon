@@ -93,6 +93,10 @@ enum Event {
     FontImported(PathBuf, String, Vec<u8>),
     /// A soundboard clip was chosen, checked and copied in: list it.
     SoundAdded(antiphon_client::soundboard::SoundClip),
+    /// The NAT check finished: whether the mapping is symmetric (`None`
+    /// when fewer than two STUN servers answered) and whether the default
+    /// route is a VPN.
+    Mapping(Option<bool>, bool),
     /// A background picture was decoded; with a path, it was just picked
     /// (and copied there) and becomes the saved one.
     Backdrop(Option<PathBuf>, crate::backdrop::Loaded),
@@ -336,6 +340,10 @@ pub struct Engine {
     their_level: f32,
     /// True while a STUN check is running.
     checking: bool,
+    /// From the last check: whether this network's NAT is symmetric
+    /// (`None` until two STUN servers answered), and whether the default
+    /// route runs through a VPN. `None` as a whole while it runs.
+    mapping: Option<(Option<bool>, bool)>,
     /// The call's pictures as last drawn, by tile key, with the version
     /// each was built from: a tile is rebuilt (and its picture uploaded
     /// again) only when a newer frame has come.
@@ -445,6 +453,7 @@ impl Engine {
             finding_nodes: false,
             their_level: 0.0,
             checking: false,
+            mapping: None,
             tiles: HashMap::new(),
             spaces: Default::default(),
             viewing: None,
@@ -1541,6 +1550,7 @@ impl Engine {
                 self.custom_font.clone_from(&family);
                 self.out.push(Out::LoadFont(bytes, family));
             }
+            Event::Mapping(symmetric, vpn) => self.mapping = Some((symmetric, vpn)),
             Event::Preview(result) => {
                 self.previewing = false;
                 match result {
@@ -1825,6 +1835,19 @@ impl Engine {
             // address the world sees is what matters here.
             let r = state::discover_public_address(0).await.map(|(addr, _)| addr.ip().to_string()).map_err(|e| e.to_string());
             Self::push(&events, Event::Public(r));
+        });
+        // How the NAT maps a socket (two STUN servers from one socket), and
+        // whether a VPN carries everything: what the status line says why
+        // from.
+        self.mapping = None;
+        let events = self.events.clone();
+        self.state.runtime.spawn(async move {
+            let symmetric = match vpn::bind(antiphon_net::vpn::TrafficKind::Voice, 0).await {
+                Ok(socket) => antiphon_net::stun::discover_mapping(&socket).await.ok().map(|(_, m)| m == antiphon_net::stun::NatMapping::EndpointDependent),
+                Err(_) => None,
+            };
+            let vpn = tokio::task::spawn_blocking(|| reachability::default_route_via_vpn().unwrap_or(false)).await.unwrap_or(false);
+            Self::push(&events, Event::Mapping(symmetric, vpn));
         });
         self.choose_relay();
         if self.door && self.state.port_map.lock().unwrap().is_none() {
@@ -3644,6 +3667,20 @@ impl Engine {
             .collect()
     }
 
+    /// The status line: how people reach you, why, and whether they can.
+    fn reach_status(&self) -> (String, String, bool) {
+        let (symmetric, vpn) = self.mapping.unwrap_or((None, false));
+        let status = reachability::Status::from_inputs(&reachability::StatusInputs {
+            reach: self.reach,
+            symmetric_nat: symmetric,
+            vpn_active: vpn,
+            relay_available: !self.my_relay().is_empty(),
+        });
+        // Once both checks are back, "still checking" would be a lie.
+        let status = if self.mapping.is_some() && !self.checking { status.settled() } else { status };
+        (status.label().to_string(), status.explain().to_string(), status.is_ok())
+    }
+
     /// The reachability checks and network settings.
     fn network(&self) -> ui::Network {
         let checks = self
@@ -3678,6 +3715,7 @@ impl Engine {
             relay_note,
             lend_relay: self.cfg.lend_relay,
             ip_direct: Some(self.cfg.ip_direct_calling),
+            status: Some(self.reach_status()),
             anonymity: self.cfg.anonymity_mode,
             hops: self.cfg.anonymity_hops.join(", "),
             mailboxes: self.mailboxes(),

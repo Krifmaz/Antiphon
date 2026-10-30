@@ -54,6 +54,17 @@ pub fn door_card<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
         words = words.push(addr);
     }
     let r = row![badge_box, words, switch("Door open", open, |on| Msg::Do(Action::Door(on)))].spacing(16).align_y(Alignment::Center);
+    // Spec: how people reach you is always on show, never found out by a
+    // call failing. Pressing it checks again.
+    let r = match &m.network.status {
+        Some((line, why, ok)) => {
+            let colour = if *ok { p.ok } else { p.warn };
+            let face = column![t(line.as_str()).size(13).font(theme::semibold()).color(colour), faint(why.as_str()).size(12)].spacing(2);
+            let status = pressable(face, crate::a11y::Role::Button, &format!("{line}. Check again"), false, Btn::Ghost, Msg::Do(Action::CheckNetwork)).padding([6, 8]);
+            column![r, status].spacing(10).into()
+        }
+        None => El::from(r),
+    };
     container(r)
         .padding(if compact { 14 } else { 20 })
         .width(Length::Fill)

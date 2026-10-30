@@ -64,6 +64,11 @@ impl Demo {
             },
             network: ui::Network {
                 ip_direct: Some(false),
+                status: Some((
+                    antiphon_client::reachability::Status::Direct.label().into(),
+                    antiphon_client::reachability::Status::Direct.explain().into(),
+                    true,
+                )),
                 checks: vec![
                     check("Calling out", CheckState::Good, "Connections you start are what every home router already allows."),
                     check("Your public address", CheckState::Good, "This is the address to give someone so they can reach you."),

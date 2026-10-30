@@ -588,6 +588,10 @@ pub struct Network {
     /// Whether calling a bare `host:port` is allowed; `None` where it
     /// always is (the phone).
     pub ip_direct: Option<bool>,
+    /// The one-line reachability status ("Direct", "Relayed — …"), its
+    /// explanation, and whether people can reach you; `None` where it
+    /// isn't worked out (the phone).
+    pub status: Option<(String, String, bool)>,
     /// Whether anonymity mode is on.
     pub anonymity: bool,
     /// Its hops, comma-separated `host:port[#key]`.

@@ -241,7 +241,7 @@ impl Status {
             }
             Status::Blocked => {
                 "Direct connections can't be set up from this network. Add a relay in \
-                 Settings > Call so people can reach you."
+                 Settings > Relays & mailboxes so people can reach you."
             }
         }
     }
