@@ -416,8 +416,12 @@ pub struct Line {
     pub pinned: bool,
     /// Taken down by its author or a moderator; drawn as a faint note.
     pub deleted: bool,
-    /// (emoji, how many).
+    /// (emoji, how many), in the order the row shows them. An emoji is a
+    /// Unicode emoji, or a community's custom one written `:name:`.
     pub reactions: Vec<(String, u32)>,
+    /// The emoji among [`reactions`](Self::reactions) that I used, so
+    /// their chips show as mine and a tap takes mine off.
+    pub reacted: Vec<String>,
     /// A file instead of text: (name, size).
     pub file: Option<(String, String)>,
     /// A voice message instead of text.

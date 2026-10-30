@@ -318,6 +318,10 @@ pub enum Post {
     /// Withdrawn by its author, or removed by a moderator (who must hold
     /// Manage messages and outrank `author`).
     Delete { id: u64, author: Key },
+    /// A reaction put on (`on`) or taken off a message: `id` by `author`,
+    /// in `channel`. On and off rather than a toggle, so a reaction
+    /// delivered twice still leaves everyone agreeing.
+    React { id: u64, author: Key, channel: u32, emoji: String, on: bool },
     /// A file shared in a channel (spec §5), fetchable from its holders.
     File { id: u64, channel: u32, name: String, size: u64, file_id: String, key: String, holders: Vec<String>, at_secs: u64 },
     Card(Card),
@@ -344,6 +348,10 @@ pub enum Event {
     Edited { id: u64, sender: [u8; 32], text: String },
     /// Already checked: by the author, or by a moderator allowed to.
     Deleted { id: u64, author: [u8; 32] },
+    /// `sender` put a reaction on (`on`) or took it off message `id`,
+    /// which `author` wrote. Already checked: the emoji is a Unicode emoji
+    /// or one of this community's, and the sender may read the channel.
+    Reacted { id: u64, author: [u8; 32], sender: [u8; 32], emoji: String, on: bool },
     File { channel: u32, id: u64, sender: [u8; 32], name: String, size: u64, file_id: String, key: String, holders: Vec<String>, at_secs: u64 },
     Joined,
     /// A member reported messages to us as a moderator.
@@ -509,6 +517,10 @@ pub const VOICE_TTL_SECS: u64 = 2 * VOICE_HEARTBEAT_SECS + 30;
 pub const MAX_EXCERPTS: usize = 10;
 /// Most reports a moderator keeps waiting.
 const MAX_REPORTS: usize = 200;
+/// The most different reactions one member keeps on one message. Ten
+/// times what anyone uses, and a ceiling on how much one member can grow
+/// a message's stored record by reacting.
+pub const MAX_REACTIONS_EACH: usize = 20;
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -1062,6 +1074,25 @@ impl Space {
             return Err("you can't remove their messages".into());
         }
         self.send_in(channel, &Post::Delete { id, author: Key(author) })
+    }
+
+    /// Puts our reaction `emoji` on message `id` (written by `author`, in
+    /// `channel`), or takes it off. The emoji must be a Unicode emoji or
+    /// one of this community's custom ones, as `:name:`.
+    pub fn react(&mut self, id: u64, author: [u8; 32], channel: u32, emoji: &str, on: bool) -> Result<(Vec<Out>, Event), String> {
+        let m = self.manifest();
+        if !crate::reactions::is_allowed_in(emoji, m.emoji.iter().map(|e| e.name.as_str())) {
+            return Err("that isn't an emoji this community has".into());
+        }
+        if !m.can(&self.me, perm::POST, None) {
+            return Err("you can't react here".into());
+        }
+        if !m.can_read(channel, &self.me) {
+            return Err("that channel is private and you're not one of its readers".into());
+        }
+        let post = Post::React { id, author: Key(author), channel, emoji: emoji.to_string(), on };
+        let outs = self.send_in(Some(channel), &post)?;
+        Ok((outs, Event::Reacted { id, author, sender: self.me, emoji: emoji.to_string(), on }))
     }
 
     pub fn share_file(&mut self, post: Post) -> Result<Vec<Out>, String> {
@@ -1723,6 +1754,19 @@ impl Space {
                     h.events.push(Event::Deleted { id, author: author.0 });
                 }
             }
+            Post::React { id, author, channel, emoji, on } => {
+                // As for a message: from someone who may post, about a
+                // channel both of us can read, with an emoji this
+                // community knows -- a reaction is never a place for text.
+                let private = m.channel(channel).is_some_and(|c| c.readers.is_some());
+                let readable = !private || (m.can_read(channel, &sender) && m.can_read(channel, &self.me));
+                if readable
+                    && m.can(&sender, perm::POST, None)
+                    && crate::reactions::is_allowed_in(&emoji, m.emoji.iter().map(|e| e.name.as_str()))
+                {
+                    h.events.push(Event::Reacted { id, author: author.0, sender, emoji, on });
+                }
+            }
             Post::File { id, channel, name, size, file_id, key, holders, at_secs } => {
                 let private = m.channel(channel).is_some_and(|c| c.readers.is_some());
                 if private && !(m.can_read(channel, &sender) && m.can_read(channel, &self.me)) {
@@ -1779,6 +1823,23 @@ impl Space {
             }
         }
         Ok(())
+    }
+}
+
+/// Puts `by`'s reaction `emoji` on a stored message's list (`on`), or
+/// takes it off. Putting on one already there, or taking off one that
+/// isn't, changes nothing, so a repeated delivery is harmless. A member
+/// already at [`MAX_REACTIONS_EACH`] on this message adds no more.
+pub fn set_reaction(list: &mut Vec<crate::history::StoredReaction>, emoji: &str, by: &str, on: bool) {
+    let at = list.iter().position(|r| r.emoji == emoji && r.by == by);
+    match (on, at) {
+        (true, None) if list.iter().filter(|r| r.by == by).count() < MAX_REACTIONS_EACH => {
+            list.push(crate::history::StoredReaction { emoji: emoji.to_string(), by: by.to_string() });
+        }
+        (false, Some(at)) => {
+            list.remove(at);
+        }
+        _ => {}
     }
 }
 
@@ -2436,7 +2497,13 @@ impl Store {
                 Event::Deleted { id: mid, author } => self.rewrite(space, *mid, author, |m| {
                     m.text = String::new();
                     m.deleted = true;
+                    // Reactions to a message that is gone are about nothing.
+                    m.reactions.clear();
                 }),
+                Event::Reacted { id: mid, author, sender, emoji, on } => {
+                    let by = hex(sender);
+                    self.rewrite(space, *mid, author, |m| set_reaction(&mut m.reactions, emoji, &by, *on));
+                }
                 Event::Removed => crate::delivery::notice(format!("You're no longer in {}.", space.manifest().name)),
                 Event::Notice(n) => crate::delivery::notice(format!("{}: {n}", space.manifest().name)),
                 Event::Joined => crate::delivery::notice(format!("You joined {}.", space.manifest().name)),
@@ -3531,6 +3598,45 @@ mod tests {
         let (outs, _) = carol.space().post(0, "a reply", Some(root)).unwrap();
         let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
         assert!(ev[1].iter().any(|e| matches!(e, Event::Message { reply_to: Some(r), .. } if *r == root)));
+    }
+
+    #[test]
+    fn reactions_take_any_emoji_and_this_communitys_own() {
+        let (mut alice, mut bob, mut carol) = three();
+        let alice_id = IdentityKeyPair::from_master_seed(alice.id.master_seed());
+        let outs = alice
+            .space()
+            .update(&alice_id, |m| m.emoji.push(antiphon_crypto::community::Emoji { name: "party".into(), image: "x".into() }))
+            .unwrap();
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (0, o)).collect());
+        let (outs, mine) = bob.space().post(0, "react to me", None).unwrap();
+        let Event::Message { id, sender: author, .. } = mine else { panic!() };
+        run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (1, o)).collect());
+
+        // A duck, and the community's own :party:, both arrive.
+        for emoji in ["🦆", ":party:"] {
+            let (outs, _) = carol.space().react(id, author, 0, emoji, true).unwrap();
+            let ev = run(&mut [&mut alice, &mut bob, &mut carol], outs.into_iter().map(|o| (2, o)).collect());
+            assert!(ev[1].iter().any(|e| matches!(e, Event::Reacted { emoji: got, on: true, .. } if got == emoji)), "{emoji} didn't reach Bob");
+        }
+        // Text, or an emoji this community doesn't have, is refused.
+        assert!(carol.space().react(id, author, 0, "hello", true).is_err());
+        assert!(carol.space().react(id, author, 0, ":nope:", true).is_err());
+    }
+
+    #[test]
+    fn a_stored_reaction_is_set_once_and_capped_per_member() {
+        let mut list = Vec::new();
+        set_reaction(&mut list, "🦆", "c", true);
+        set_reaction(&mut list, "🦆", "c", true);
+        assert_eq!(list.len(), 1, "delivered twice, stored once");
+        set_reaction(&mut list, "🦆", "b", true);
+        set_reaction(&mut list, "🦆", "c", false);
+        assert_eq!(list, [crate::history::StoredReaction { emoji: "🦆".into(), by: "b".into() }]);
+        for n in 0..MAX_REACTIONS_EACH + 5 {
+            set_reaction(&mut list, &format!(":e{n}:"), "c", true);
+        }
+        assert_eq!(list.iter().filter(|r| r.by == "c").count(), MAX_REACTIONS_EACH);
     }
 
     #[test]

@@ -70,6 +70,21 @@ pub struct StoredMessage {
     /// thread (spec §9 "Threads and replies").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// Reactions to it in a group chat or community channel, in the order
+    /// they were first made. Empty in a conversation with one person,
+    /// whose reactions are kept beside the history instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<StoredReaction>,
+}
+
+/// One member's reaction to a message in a group chat or community
+/// channel.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct StoredReaction {
+    /// The emoji: a Unicode emoji, or one of the community's as `:name:`.
+    pub emoji: String,
+    /// Who reacted, hex identity key in that community.
+    pub by: String,
 }
 
 impl StoredMessage {

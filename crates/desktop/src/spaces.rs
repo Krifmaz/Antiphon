@@ -9,7 +9,7 @@
 //! different channel comes on screen.
 
 use antiphon_client::community::{self, Event, Store};
-use antiphon_client::{config, connection_mode, delivery, history};
+use antiphon_client::{config, connection_mode, delivery, history, reactions};
 use antiphon_crypto::community::{perm, Key, Kind};
 use antiphon_ui as ui;
 
@@ -205,6 +205,19 @@ impl Spaces {
                     let me = identity.public().identity_key;
                     let outs = space.edit(message, &text, channel)?;
                     Ok(((), outs, vec![Event::Edited { id: message, sender: me, text: text.trim().to_string() }]))
+                })?;
+            }
+            A::ReactPost { community, channel, id: message, author, emoji } => {
+                let id = key(&community)?;
+                let author = connection_mode::decode_hex32(&author).ok_or("whose message that is isn't known")?;
+                store.with_space(&id, |space, _| {
+                    // A second tap on my own reaction takes it off, as in a
+                    // conversation; whether it is mine is in the history.
+                    let mine = delivery::hex(&space.me());
+                    let log = history::load(&store.dir, &community::channel_log(&id, channel), &store.key);
+                    let on = !log.iter().any(|m| m.id == message && m.reactions.iter().any(|r| r.emoji == emoji && r.by == mine));
+                    let (outs, event) = space.react(message, author, channel, &emoji, on)?;
+                    Ok(((), outs, vec![event]))
                 })?;
             }
             A::DeletePost { community, id: message, author } => {
@@ -617,6 +630,7 @@ fn community_model(store: &Store, s: &community::Space, unread: u32, voice_room:
 /// with the rest; threads are not shown apart yet.
 fn channel_model(store: &Store, space: &community::Space, channel: u32) -> ui::ChannelView {
     let me = space.me();
+    let me_hex = delivery::hex(&me);
     let log = history::load(&store.dir, &community::channel_log(&space.id(), channel), &store.key);
     let mut last_day = None;
     let lines = log
@@ -634,6 +648,8 @@ fn channel_model(store: &Store, space: &community::Space, channel: u32) -> ui::C
                 time: clock_time(msg.at_secs),
                 day: (last_day.as_ref() != Some(&day)).then(|| day.clone()),
                 edited: msg.edited,
+                reactions: reactions::tally(msg.reactions.iter().map(|r| r.emoji.as_str())),
+                reacted: msg.reactions.iter().filter(|r| r.by == me_hex).map(|r| r.emoji.clone()).collect(),
                 ..ui::Line::default()
             };
             last_day = Some(day);
@@ -646,6 +662,17 @@ fn channel_model(store: &Store, space: &community::Space, channel: u32) -> ui::C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_emoji_the_picker_offers_is_taken_as_a_reaction() {
+        // The picker lives in the interface, the check in the client; an
+        // emoji offered but refused on arrival would vanish in transit.
+        for (group, list) in ui::emoji::GROUPS {
+            for e in *list {
+                assert!(reactions::is_unicode_emoji(e), "{e:?} in {group} would be refused");
+            }
+        }
+    }
 
     #[test]
     fn emoji_names_come_from_file_names() {

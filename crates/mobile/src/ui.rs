@@ -152,7 +152,7 @@ pub enum Message {
     /// Delete one of our messages.
     DeleteChat(u64),
     /// Toggle our reaction on a message.
-    React(u64, &'static str),
+    React(u64, String),
     /// Set the open conversation's disappearing-message timer.
     #[allow(dead_code)] // see the note on `Message`
     Expiry(Expiry),
@@ -1201,7 +1201,7 @@ impl App {
             Message::React(id, emoji) => {
                 if let Some(chat) = self.chat.as_mut() {
                     if let Some(live) = live_here(chat) {
-                        chat.react(id, emoji, &live);
+                        chat.react(id, &emoji, &live);
                     }
                 }
                     }

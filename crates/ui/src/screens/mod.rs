@@ -12,6 +12,7 @@ mod menu;
 mod panel;
 mod phone;
 mod profile;
+mod reactions;
 mod settings;
 mod sidebar;
 mod update;

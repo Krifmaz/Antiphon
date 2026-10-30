@@ -23,7 +23,7 @@ use crate::data_rules::{CellularMeter, Hold};
 use crate::file_integrity::FileSource;
 use crate::file_transfer;
 use crate::platform::{self, PickedFile};
-use crate::queue::{Entry, TransferQueue};
+use crate::queue::{self, Entry, TransferQueue};
 use crate::stream::Windowed;
 
 /// The largest file sent when the platform cannot read it in ranges and
@@ -85,17 +85,6 @@ enum Stage {
     /// task returns, which is the only reliable sign it is over: its state
     /// is briefly empty before the task first runs, too.
     Sending(Arc<AtomicBool>),
-}
-
-/// One queued file as saved: the file and whether the user held it.
-#[derive(Serialize, Deserialize)]
-struct Saved {
-    /// The file and who it is for.
-    #[serde(flatten)]
-    file: Outgoing,
-    /// Held by the user, so it keeps waiting after a restart too.
-    #[serde(default)]
-    held: bool,
 }
 
 /// The one file being sent now.
@@ -217,15 +206,7 @@ impl FileManager {
         if now == self.saved {
             return;
         }
-        let saved: Vec<Saved> = now.iter().map(|(file, held)| Saved { file: file.clone(), held: *held }).collect();
-        let result = serde_json::to_vec_pretty(&saved).map_err(std::io::Error::other).and_then(|json| {
-            // Written aside and renamed over, so a crash mid-write leaves
-            // the old queue rather than half of a new one.
-            let tmp = self.dir.join(format!("{QUEUE_FILE}.tmp"));
-            std::fs::write(&tmp, json)?;
-            std::fs::rename(&tmp, self.dir.join(QUEUE_FILE))
-        });
-        match result {
+        match queue::save(&self.dir.join(QUEUE_FILE), &now) {
             Ok(()) => self.saved = now,
             Err(e) => log::warn!("could not save the send queue: {e}"),
         }
@@ -564,9 +545,8 @@ fn prepare_in_memory(handle: &str, name: &str, thumbnails: bool) -> Result<Prepa
 /// The send queue saved in `dir`, front first, with each file's held
 /// state, or nothing when there is none or it cannot be read.
 fn load_queue(dir: &Path) -> Vec<(Outgoing, bool)> {
-    let Ok(bytes) = std::fs::read(dir.join(QUEUE_FILE)) else { return Vec::new() };
-    match serde_json::from_slice::<Vec<Saved>>(&bytes) {
-        Ok(saved) => saved.into_iter().map(|s| (s.file, s.held)).collect(),
+    match queue::load(&dir.join(QUEUE_FILE)) {
+        Ok(saved) => saved,
         Err(e) => {
             log::warn!("the saved send queue could not be read, so it starts empty: {e}");
             Vec::new()

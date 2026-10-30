@@ -16,7 +16,7 @@ use crate::a11y::{Role, Spec};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
-use crate::{Action, Channel, Community, Dialog, El, Line, Member, Model, Msg, Notify, Route, SpaceChange, Ui};
+use crate::{Action, Channel, Community, Dialog, El, Line, Member, Model, Msg, Notify, ReactTarget, Route, SpaceChange, Ui};
 
 /// How wide the channel column beside a channel is.
 const CHANNELS_W: f32 = 232.0;
@@ -433,6 +433,12 @@ fn message_body<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, 
         body = body.push(row![t(who).size(13.5).font(theme::semibold()), faint(line.time.as_str()).size(11)].spacing(8).align_y(Alignment::Center));
     }
     body = body.push(content);
+    let target = ReactTarget::Post { community: c.id.clone(), channel, id: line.id, author: line.author_id.clone() };
+    if !line.deleted {
+        if let Some(chips) = super::reactions::chips(line, &target, Some(c), 13.0) {
+            body = body.push(chips);
+        }
+    }
     let lead: El<'a, Msg> = if first { avatar(&line.author, &line.author_id, 34.0) } else { space().width(34).into() };
     let row_el = container(row![lead, body].spacing(12).align_y(Alignment::Start)).padding([3, 0]).width(Length::Fill);
     if editing.is_some() || phone || line.deleted {
@@ -442,6 +448,9 @@ fn message_body<'a>(ui: &'a Ui, c: &'a Community, channel: u32, line: &'a Line, 
     // message with focus, as in a conversation.
     crate::a11y::pause(!active);
     let mut tools = row![].spacing(2).align_y(Alignment::Center);
+    if c.can_post && c.waiting.is_none() {
+        tools = tools.push(super::reactions::quick(&target, 14.0));
+    }
     tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
     if !line.mine && c.waiting.is_none() && !c.group {
         tools = tools.push(icon_btn(Icon::Info, "Report to the moderators", Some(Msg::Dialog(Some(Dialog::Report(c.id.clone(), channel, line.id))))));

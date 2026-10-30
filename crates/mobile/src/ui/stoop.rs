@@ -10,7 +10,6 @@
 //!
 //! A child of `ui` so it can read and change the app's state directly.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use antiphon_crypto::Invite;
@@ -385,14 +384,6 @@ impl App {
     fn conversation_model(&self, id: &str, live: bool) -> Option<stoop::Conversation> {
         let chat = self.chat.as_ref().filter(|c| c.peer_hex == id)?;
         let now = now_secs();
-        let mut reactions: HashMap<u64, Vec<(String, u32)>> = HashMap::new();
-        for r in &chat.reactions {
-            let list = reactions.entry(r.message_id).or_default();
-            match list.iter_mut().find(|(e, _)| *e == r.emoji) {
-                Some((_, n)) => *n += 1,
-                None => list.push((r.emoji.clone(), 1)),
-            }
-        }
         let lines = chat
             .messages
             .iter()
@@ -414,7 +405,8 @@ impl App {
                 pinned: m.pinned,
                 deleted: m.deleted,
                 reply_to: m.reply_to,
-                reactions: reactions.remove(&m.id).unwrap_or_default(),
+                reactions: crate::reactions::counts(&chat.reactions, m.id),
+                reacted: chat.reactions.iter().filter(|r| r.message_id == m.id && r.from_me).map(|r| r.emoji.clone()).collect(),
                 file: None,
                 ..Line::default()
             })
@@ -545,11 +537,7 @@ impl App {
             }
             Action::React { to, id, emoji } => {
                 self.open_chat(&to);
-                // Only the reactions the wire allows; anything else is
-                // dropped by the receiver anyway.
-                if let Some(e) = crate::reactions::AVAILABLE.iter().find(|e| **e == emoji) {
-                    self.update(Message::React(id, e));
-                }
+                self.update(Message::React(id, emoji));
             }
             Action::Pin { .. } => self.stoop.toast("Pinning is on the desktop for now", ToastKind::Info),
             Action::SendFile => self.update(Message::PickFile),
@@ -651,6 +639,7 @@ impl App {
             | Action::Post { .. }
             | Action::EditPost { .. }
             | Action::DeletePost { .. }
+            | Action::ReactPost { .. }
             | Action::InviteToSpace { .. }
             | Action::AddChannel { .. }
             | Action::SpaceNotify { .. }

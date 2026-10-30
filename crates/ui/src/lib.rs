@@ -17,6 +17,7 @@
 
 pub mod a11y;
 pub mod avatars;
+pub mod emoji;
 pub mod icons;
 pub mod markup;
 pub mod model;
@@ -273,6 +274,52 @@ pub enum Dialog {
     EmojiPicker(String),
     /// This community's custom emoji: see, add and remove them (by id).
     SpaceEmoji(String),
+    /// Every emoji to react to a message with, and the community's own
+    /// when the message is in one.
+    ReactPicker(ReactTarget),
+}
+
+/// The message a reaction picked in the picker goes on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReactTarget {
+    /// A message in a conversation with one person.
+    Chat {
+        /// The contact the conversation is with.
+        to: String,
+        /// Which message.
+        id: u64,
+    },
+    /// A message in a group chat or community channel.
+    Post {
+        /// The group chat or community's id.
+        community: String,
+        /// The channel the message is in.
+        channel: u32,
+        /// Which message.
+        id: u64,
+        /// Who wrote it (their key there, hex).
+        author: String,
+    },
+}
+
+impl ReactTarget {
+    /// The action that puts `emoji` on this message, or takes mine off.
+    pub fn action(&self, emoji: String) -> Action {
+        match self {
+            ReactTarget::Chat { to, id } => Action::React { to: to.clone(), id: *id, emoji },
+            ReactTarget::Post { community, channel, id, author } => {
+                Action::ReactPost { community: community.clone(), channel: *channel, id: *id, author: author.clone(), emoji }
+            }
+        }
+    }
+
+    /// The community whose custom emoji the picker offers, if any.
+    pub fn community(&self) -> Option<&str> {
+        match self {
+            ReactTarget::Chat { .. } => None,
+            ReactTarget::Post { community, .. } => Some(community),
+        }
+    }
 }
 
 /// How a toast is coloured.
@@ -638,6 +685,19 @@ pub enum Action {
         id: u64,
         /// The new words.
         text: String,
+    },
+    /// Put a reaction on a channel's message, or take mine off.
+    ReactPost {
+        /// The group chat or community's id.
+        community: String,
+        /// The channel the message is in.
+        channel: u32,
+        /// Which message.
+        id: u64,
+        /// Who wrote it (their key there, hex).
+        author: String,
+        /// The emoji: a Unicode emoji, or one of the community's as `:name:`.
+        emoji: String,
     },
     /// Take a message down: my own, or someone's I'm allowed to remove.
     DeletePost {
@@ -1867,6 +1927,9 @@ impl Ui {
             }
             Msg::Do(action) => {
                 match &action {
+                    // A reaction picked in the picker closes it; one tapped
+                    // on a message had nothing open to close.
+                    Action::React { .. } | Action::ReactPost { .. } if matches!(self.dialog, Some(Dialog::ReactPicker(_))) => self.set_dialog(None),
                     Action::Call(_) | Action::AddToCall(_) => self.menu = None,
                     Action::Remove(_) | Action::Block(_) => {
                         self.set_dialog(None);

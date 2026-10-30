@@ -7,6 +7,12 @@ version.workspace = true
 # Everything is phone-only, so `cargo build --workspace` on a desktop
 # compiles only the two plain-std rule modules (for their tests) rather
 # than a second GUI toolkit.
+[dependencies]
+# Plain data, so on every target: the send queue (shared with the desktop
+# by path) is saved as JSON, and the phone saves everything else so too.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 log = "0.4"
 # `image` draws pictures: a call's video, and the thumbnail a sender
@@ -21,8 +27,6 @@ iced_widget = { version = "0.14.0", features = ["wgpu", "image"] }
 iced_graphics = { version = "0.14.0", features = ["fira-sans"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 futures = { version = "0.3", features = ["executor"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
 # Wipes the identity seed in an account backup when it is dropped
 # (`account_backup.rs`, shared with the desktop).
 zeroize = "1.9.0"

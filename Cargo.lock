@@ -423,6 +423,7 @@ dependencies = [
  "iced",
  "image",
  "rfd",
+ "serde",
  "serde_json",
  "tokio",
 ]

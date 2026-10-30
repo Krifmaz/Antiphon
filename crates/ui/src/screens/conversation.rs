@@ -9,10 +9,7 @@ use super::{call, fill};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::*;
-use crate::{Action, Delivery, El, Line, Model, Msg, Person, Phase, Ui};
-
-/// Reactions offered on a message.
-const QUICK: [&str; 4] = ["👍", "❤️", "😂", "😮"];
+use crate::{Action, Delivery, El, Line, Model, Msg, Person, Phase, ReactTarget, Ui};
 
 /// The conversation with `person`: header, call stage, messages and composer.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
@@ -252,22 +249,9 @@ fn message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line
         stack_col = stack_col.push(bubble_quote(m, person, quoted));
     }
     stack_col = stack_col.push(content);
-    if !line.reactions.is_empty() {
-        let mut rr = row![].spacing(4);
-        for (emoji, n) in &line.reactions {
-            rr = rr.push(
-                pressable(
-                    row![t(emoji.as_str()).size(13), t(n.to_string()).size(11.5).color(p.muted)].spacing(4).align_y(Alignment::Center),
-                    crate::a11y::Role::Button,
-                    &format!("{emoji} {n}"),
-                    false,
-                    Btn::Default,
-                    Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: emoji.clone() }),
-                )
-                .padding([2, 8]),
-            );
-        }
-        stack_col = stack_col.push(rr);
+    let target = ReactTarget::Chat { to: person.id.clone(), id: line.id };
+    if let Some(chips) = super::reactions::chips(line, &target, None, 13.0) {
+        stack_col = stack_col.push(chips);
     }
     if first || !line.reactions.is_empty() || line.delivery == Delivery::Failed || line.delivery == Delivery::Queued {
         stack_col = stack_col.push(meta);
@@ -295,13 +279,7 @@ fn message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line
     // list only for the message with focus: Tab would otherwise stop seven
     // times per message.
     crate::a11y::pause(!active);
-    let mut tools = row![].spacing(2).align_y(Alignment::Center);
-    for e in QUICK {
-        tools = tools.push(
-            pressable(t(e).size(14), crate::a11y::Role::Button, &format!("React {e}"), false, Btn::Ghost, Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: e.to_string() }))
-                .padding([3, 6]),
-        );
-    }
+    let mut tools = row![super::reactions::quick(&target, 14.0)].spacing(2).align_y(Alignment::Center);
     tools = tools.push(icon_btn(Icon::Back, "Reply", Some(Msg::Reply(Some(line.id)))));
     tools = tools.push(icon_btn(Icon::Sparkle, if line.pinned { "Unpin" } else { "Pin" }, Some(Msg::Do(Action::Pin { to: person.id.clone(), id: line.id, pinned: !line.pinned }))));
     if line.mine {
@@ -429,22 +407,9 @@ fn flat_message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a
         body = body.push(head);
     }
     body = body.push(content);
-    if !line.reactions.is_empty() {
-        let mut rr = row![].spacing(4);
-        for (emoji, n) in &line.reactions {
-            rr = rr.push(
-                pressable(
-                    row![t(emoji.as_str()).size(14), t(n.to_string()).size(12).color(p.muted)].spacing(4).align_y(Alignment::Center),
-                    crate::a11y::Role::Button,
-                    &format!("{emoji} {n}"),
-                    false,
-                    Btn::Default,
-                    Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: emoji.clone() }),
-                )
-                .padding([3, 9]),
-            );
-        }
-        body = body.push(rr);
+    let target = ReactTarget::Chat { to: person.id.clone(), id: line.id };
+    if let Some(chips) = super::reactions::chips(line, &target, None, 14.0) {
+        body = body.push(chips);
     }
     if line.mine {
         let (label, color) = match line.delivery {
@@ -470,13 +435,7 @@ fn flat_message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a
     // The tools, over the message's top right while it is tapped (or has
     // the keyboard's focus); only then do they join the keyboard's list.
     crate::a11y::pause(!active);
-    let mut tools = row![].spacing(2).align_y(Alignment::Center);
-    for e in QUICK {
-        tools = tools.push(
-            pressable(t(e).size(15), crate::a11y::Role::Button, &format!("React {e}"), false, Btn::Ghost, Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: e.to_string() }))
-                .padding([4, 7]),
-        );
-    }
+    let mut tools = row![super::reactions::quick(&target, 15.0)].spacing(2).align_y(Alignment::Center);
     if line.file.is_none() && line.voice.is_none() {
         tools = tools.push(icon_btn(Icon::Back, "Reply", Some(Msg::Reply(Some(line.id)))));
         tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));

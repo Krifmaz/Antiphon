@@ -4,7 +4,13 @@
 //! and two transfers would only make both slower while the voice suffers
 //! -- so everything else waits here, in an order the user can change.
 //! Generic over what is queued so the ordering rules are testable without
-//! a phone, a peer or a file. The desktop and the phone both use it.
+//! a phone, a peer or a file. The desktop and the phone both use it, and
+//! both keep it across a restart with [`load`] and [`save`].
+
+use std::path::Path;
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 /// A queued item and the id the interface names it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +143,44 @@ impl<T> TransferQueue<T> {
     }
 }
 
+/// One queued item as saved: the item's own fields, and whether the user
+/// held it.
+#[derive(Serialize, Deserialize)]
+struct Saved<T> {
+    /// What was waiting, its fields written inline.
+    #[serde(flatten)]
+    item: T,
+    /// Held by the user, so it keeps waiting after a restart too.
+    #[serde(default)]
+    held: bool,
+}
+
+/// The queue saved at `path` by [`save`], front first, each with whether
+/// it was held, ready for [`TransferQueue::restore`]. No file is an empty
+/// queue; a file that can't be read is an error, which callers log and
+/// start empty from -- losing the list of what was waiting is better than
+/// not starting.
+pub fn load<T: DeserializeOwned>(path: &Path) -> Result<Vec<(T, bool)>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let saved: Vec<Saved<T>> = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    Ok(saved.into_iter().map(|s| (s.item, s.held)).collect())
+}
+
+/// Writes `items` (front first, each with whether it is held) to `path`.
+/// Written aside and renamed over, so a crash mid-write leaves the old
+/// queue rather than half of a new one.
+pub fn save<T: Serialize>(path: &Path, items: &[(T, bool)]) -> std::io::Result<()> {
+    let saved: Vec<Saved<&T>> = items.iter().map(|(item, held)| Saved { item, held: *held }).collect();
+    let json = serde_json::to_vec_pretty(&saved).map_err(std::io::Error::other)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +247,24 @@ mod tests {
         assert_eq!(queue.take_next(|_| true).map(|e| e.item), Some("c"), "the held one is skipped");
         let fresh = queue.push("d");
         assert!(queue.iter().filter(|e| e.id == fresh).count() == 1, "new ids do not collide");
+    }
+
+    #[test]
+    fn a_saved_queue_reads_back_in_order_with_its_holds() {
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+        struct File {
+            name: String,
+        }
+        let dir = std::env::temp_dir().join(format!("antiphon-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("send-queue.json");
+        assert!(load::<File>(&path).unwrap().is_empty(), "no file is an empty queue");
+        let items = vec![(File { name: "a".into() }, false), (File { name: "b".into() }, true)];
+        save(&path, &items).unwrap();
+        assert_eq!(load::<File>(&path).unwrap(), items);
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load::<File>(&path).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

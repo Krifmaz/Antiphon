@@ -8,7 +8,7 @@
 //! [`ui::Action`]s the interface hands it.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use antiphon_audio::{ChainConfig, GainConfig};
 use antiphon_client::control::{ControlMessage, Hello, ProfileCard};
-use antiphon_client::transfer_queue::TransferQueue;
+use antiphon_client::transfer_queue::{self, Entry, TransferQueue};
 use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
@@ -170,7 +170,12 @@ fn load_clip(link: &VoiceLink, mine: bool) -> Option<Vec<f32>> {
     }
 }
 
-/// A file waiting in the send queue.
+/// Where the send queue is kept between runs, in the config directory.
+const QUEUE_FILE: &str = "send-queue.json";
+
+/// A file waiting in the send queue. Saved with the queue, so a restart
+/// still sends it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct QueuedSend {
     /// Where it is.
     path: PathBuf,
@@ -180,6 +185,16 @@ struct QueuedSend {
     size: u64,
     /// The contact it is for (id): it goes on a call with them.
     peer: String,
+}
+
+/// The send queue saved in `dir` by a previous run. One that can't be
+/// read starts empty, with a line in the log: losing the list of what was
+/// waiting is better than not starting.
+fn load_queue(dir: &Path) -> Vec<(QueuedSend, bool)> {
+    transfer_queue::load(&dir.join(QUEUE_FILE)).unwrap_or_else(|e| {
+        eprintln!("[queue] the saved send queue could not be read, so it starts empty: {e}");
+        Vec::new()
+    })
 }
 
 /// The open conversation, built once per change rather than per frame.
@@ -280,8 +295,13 @@ pub struct Engine {
     /// Files waiting to be sent, one at a time, each to its contact.
     send_queue: TransferQueue<QueuedSend>,
     /// The queued file being read or sent now, and a flag raised once
-    /// that is over (sent, failed, declined or cancelled).
-    sending: Option<Arc<AtomicBool>>,
+    /// that is over (sent, failed, declined or cancelled). Saved at the
+    /// front of the queue until then, so one cut short by the app closing
+    /// goes first next time.
+    sending: Option<(Entry<QueuedSend>, Arc<AtomicBool>)>,
+    /// The queue as last written to [`QUEUE_FILE`], so it is written only
+    /// when something changed.
+    queue_saved: Vec<(QueuedSend, bool)>,
     /// A voice message being recorded.
     recording: Option<Recording>,
     /// Voice messages seen in conversations, by (contact, message id):
@@ -324,6 +344,7 @@ impl Engine {
         let cfg = config::load();
         let dir = config::config_dir();
         let key = dir.as_ref().and_then(|d| history::load_or_create_backup_key(d).ok());
+        let saved_queue = dir.as_ref().map(|d| load_queue(d)).unwrap_or_default();
         let mut engine = Engine {
             state,
             events: Arc::new(Mutex::new(Vec::new())),
@@ -363,8 +384,9 @@ impl Engine {
             tiles: HashMap::new(),
             spaces: Default::default(),
             viewing: None,
-            send_queue: TransferQueue::default(),
+            send_queue: TransferQueue::restore(saved_queue.iter().cloned()),
             sending: None,
+            queue_saved: saved_queue,
             recording: None,
             voice_links: HashMap::new(),
             voice_fetched: HashSet::new(),
@@ -1662,6 +1684,7 @@ impl Engine {
                 } else {
                     self.send_queue.move_down(id);
                 }
+                self.save_queue();
             }
             A::QueueHold { id, held } => {
                 self.send_queue.set_held(id, held);
@@ -1669,6 +1692,7 @@ impl Engine {
             }
             A::QueueRemove(id) => {
                 self.send_queue.remove(id);
+                self.save_queue();
             }
             A::AddPerson { name, invite } => self.add_person(name, invite),
             A::Remove(id) => {
@@ -2005,6 +2029,7 @@ impl Engine {
             | A::Post { .. }
             | A::EditPost { .. }
             | A::DeletePost { .. }
+            | A::ReactPost { .. }
             | A::InviteToSpace { .. }
             | A::AddChannel { .. }
             | A::SpaceNotify { .. }
@@ -2463,10 +2488,34 @@ impl Engine {
     }
 
     /// Starts the next queued file for the person on the call, once
-    /// nothing else is going out. Called whenever the queue or the call
-    /// may have moved on.
+    /// nothing else is going out, then saves the queue if that or anything
+    /// else changed it. Called whenever the queue or the call may have
+    /// moved on, which includes every tick.
     fn pump_queue(&mut self) {
-        if let Some(flag) = &self.sending {
+        self.start_next_queued();
+        self.save_queue();
+    }
+
+    /// Writes the queue, with the file being sent at its front, to
+    /// [`QUEUE_FILE`] if it changed since the last write. A failure is
+    /// logged and tried again at the next change or tick.
+    fn save_queue(&mut self) {
+        let Some(dir) = &self.dir else { return };
+        let now: Vec<(QueuedSend, bool)> =
+            self.sending.iter().map(|(e, _)| e).chain(self.send_queue.iter()).map(|e| (e.item.clone(), e.held)).collect();
+        if now == self.queue_saved {
+            return;
+        }
+        match transfer_queue::save(&dir.join(QUEUE_FILE), &now) {
+            Ok(()) => self.queue_saved = now,
+            Err(e) => eprintln!("[queue] could not save the send queue: {e}"),
+        }
+    }
+
+    /// [`pump_queue`](Self::pump_queue)'s first half: retires a finished
+    /// send and starts the next one that fits the call.
+    fn start_next_queued(&mut self) {
+        if let Some((_, flag)) = &self.sending {
             if !flag.load(Ordering::SeqCst) {
                 return;
             }
@@ -2486,7 +2535,7 @@ impl Engine {
         }
         let Some(entry) = self.send_queue.take_next(|q| q.peer == peer) else { return };
         let flag = Arc::new(AtomicBool::new(false));
-        self.sending = Some(flag.clone());
+        self.sending = Some((entry.clone(), flag.clone()));
         let (state, events) = (self.state.clone(), self.events.clone());
         // Reading and hashing a large file takes a while: off the window's
         // thread, and off the call's runtime.
@@ -3068,13 +3117,6 @@ impl Engine {
         for e in &log {
             let at = times.get(&(e.id, e.from_me)).copied().unwrap_or_else(now_secs);
             let day = day_label(at);
-            let mut counts: Vec<(String, u32)> = Vec::new();
-            for emoji in reactions::AVAILABLE {
-                let n = all_reactions.iter().filter(|r| r.message_id == e.id && r.emoji == *emoji).count() as u32;
-                if n > 0 {
-                    counts.push((emoji.to_string(), n));
-                }
-            }
             lines.push(ui::Line {
                 id: e.id,
                 mine: e.from_me,
@@ -3093,7 +3135,8 @@ impl Engine {
                 },
                 edited: e.edited,
                 pinned: e.pinned,
-                reactions: counts,
+                reactions: reactions::counts(&all_reactions, e.id),
+                reacted: all_reactions.iter().filter(|r| r.message_id == e.id && r.from_me).map(|r| r.emoji.clone()).collect(),
                 file: None,
                 reply_to: e.reply_to,
                 ..ui::Line::default()

@@ -72,6 +72,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
             modal(if ui.space_group { "Start a group chat" } else { "Start a community" }, super::community::new_space(ui), Some(footer.into()), 480.0, close, rise)
         }
         Dialog::EmojiPicker(id) => modal("Emoji", super::community::emoji_picker(m, id), None, 420.0, close, rise),
+        Dialog::ReactPicker(target) => modal("React", super::reactions::picker(m, target), None, 440.0, close, rise),
         Dialog::SpaceEmoji(id) => modal("Custom emoji", super::community::emoji_manager(m, id), None, 460.0, close, rise),
         Dialog::SpaceNotify(id) => modal("Notifications", super::community::notify(m, id), None, 520.0, close, rise),
         Dialog::InviteToSpace(id) => modal("Invite someone", super::community::invite(m, id), None, 460.0, close, rise),
