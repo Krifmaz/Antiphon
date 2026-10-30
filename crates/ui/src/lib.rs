@@ -436,6 +436,17 @@ pub enum Action {
     Welcome(String),
     /// Open the folder where received files go.
     OpenDownloads,
+    /// Look for a newer version of Stoop now.
+    UpdateCheck,
+    /// Download and install the newer version (or, where the app can't
+    /// install it itself, open its release page).
+    UpdateInstall,
+    /// Not now: hide the newer version's banner until a newer one still.
+    UpdateLater,
+    /// Open the newer version's release page, to read about it.
+    UpdatePage,
+    /// Look for updates by itself (true), or only when asked.
+    UpdateAuto(bool),
     /// Play the call through the loudspeaker (true) or the earpiece.
     Speaker(bool),
     /// Turn my camera on (true) or off.

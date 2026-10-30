@@ -4,7 +4,9 @@ import android.Manifest;
 import android.app.NativeActivity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
+import android.app.PendingIntent;
 import android.database.Cursor;
 import android.net.ConnectivityManager;
 import android.net.Network;
@@ -17,6 +19,12 @@ import android.os.Process;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.util.Log;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 /**
  * The platform's NativeActivity, plus the few callbacks only an Activity
@@ -269,6 +277,88 @@ public class AntiphonActivity extends NativeActivity {
                     startActivity(intent);
                 } catch (RuntimeException e) {
                     Log.w(TAG, "could not ask for a battery exemption", e);
+                }
+            }
+        });
+    }
+
+    /**
+     * Installs a downloaded update, the APK at {@code path} in the app's
+     * private storage, which Rust's updater has already checked against the
+     * release's checksums. The file is streamed into a PackageInstaller
+     * session, which needs no FileProvider or shared storage, and the
+     * session is committed; Android then answers InstallReceiver, which
+     * shows the system's confirmation. Called through JNI from Rust's
+     * thread, which it blocks only while the file is copied.
+     *
+     * @return whether the session was committed; false when the file could
+     *         not be read or the installer refused the session.
+     */
+    public boolean installPackage(String path) {
+        PackageInstaller installer = getPackageManager().getPackageInstaller();
+        File apk = new File(path);
+        int id = -1;
+        try {
+            PackageInstaller.SessionParams params =
+                    new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+            params.setAppPackageName(getPackageName());
+            params.setSize(apk.length());
+            id = installer.createSession(params);
+            PackageInstaller.Session session = installer.openSession(id);
+            try {
+                InputStream in = new FileInputStream(apk);
+                try {
+                    OutputStream out = session.openWrite("stoop.apk", 0, apk.length());
+                    try {
+                        byte[] buffer = new byte[64 * 1024];
+                        int n;
+                        while ((n = in.read(buffer)) > 0) {
+                            out.write(buffer, 0, n);
+                        }
+                        session.fsync(out);
+                    } finally {
+                        out.close();
+                    }
+                } finally {
+                    in.close();
+                }
+                // The installer fills in the result, so the intent must be
+                // mutable from Android 12 on.
+                int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                if (Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
+                Intent result = new Intent(this, InstallReceiver.class);
+                PendingIntent pending = PendingIntent.getBroadcast(this, id, result, flags);
+                session.commit(pending.getIntentSender());
+            } finally {
+                session.close();
+            }
+            return true;
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "could not install the update", e);
+            if (id != -1) {
+                try {
+                    installer.abandonSession(id);
+                } catch (RuntimeException ignored) {
+                    // Already gone.
+                }
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Opens a web page in the browser: an update's release page. Called
+     * through JNI from Rust's thread, so it is started from the UI thread.
+     */
+    public void openUrl(final String url) {
+        runOnUiThread(new Runnable() {
+            /** Starts the browser; a phone without one says so in logcat only. */
+            @Override
+            public void run() {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "could not open " + url, e);
                 }
             }
         });

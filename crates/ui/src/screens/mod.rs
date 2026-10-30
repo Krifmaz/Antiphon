@@ -13,6 +13,7 @@ mod panel;
 mod phone;
 mod settings;
 mod sidebar;
+mod update;
 
 use iced_core::{Alignment, Background, Border, Color, Length};
 use iced_widget::{button, column, container, row, space, stack};
@@ -71,9 +72,12 @@ fn wide<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Route::Profile(None) | Route::ProfileEdit => settings::view(ui, m, crate::Section::Profile),
         Route::Profile(Some(id)) => conversation::view(ui, m, id),
     };
-    let main = match m.notice.as_deref() {
-        Some(n) => column![notice(n), main].into(),
-        None => main,
+    // The notice first, then a newer version, then the screen.
+    let main = match (m.notice.as_deref(), update::banner(m, false)) {
+        (Some(n), Some(b)) => column![notice(n), b, main].into(),
+        (Some(n), None) => column![notice(n), main].into(),
+        (None, Some(b)) => column![b, main].into(),
+        (None, None) => main,
     };
     let mut r = row![side, container(main).width(Length::Fill).height(Length::Fill).style(theme::stage)];
     if let Route::Person(id) = &ui.route {

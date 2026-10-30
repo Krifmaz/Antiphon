@@ -414,6 +414,7 @@ dependencies = [
  "antiphon-crypto",
  "antiphon-net",
  "antiphon-ui",
+ "antiphon-update",
  "antiphon-video",
  "anyhow",
  "chrono",
@@ -611,6 +612,7 @@ dependencies = [
  "antiphon-net",
  "antiphon-push",
  "antiphon-ui",
+ "antiphon-update",
  "antiphon-video",
  "anyhow",
  "futures",
@@ -709,6 +711,16 @@ dependencies = [
  "iced_widget",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "antiphon-update"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "ureq",
 ]
 
 [[package]]

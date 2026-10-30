@@ -48,6 +48,11 @@
     <!-- Lets the app ask, with the system's own dialog, to be left out of
          battery optimisation so it can keep listening. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- The in-app updater hands a downloaded update's APK to the system's
+         installer (AntiphonActivity.installPackage); Android still asks the
+         person to confirm every install, and the first time to allow Stoop
+         to install apps at all. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Android 11 hides other apps unless asked for by what they do; this
          finds UnifiedPush distributors. -->
@@ -105,6 +110,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Waiting for incoming peer-to-peer voice calls, which arrive directly from the caller with no server to send a push" />
         </service>
+
+        <!-- The installer's answer to an update (InstallReceiver). Only the
+             system sends to it, through the app's own PendingIntent. -->
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false" />
 
         <!-- Exported: the UnifiedPush distributor is another app. Messages
              are checked against the registration's secret token. -->

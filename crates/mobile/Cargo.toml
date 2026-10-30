@@ -36,6 +36,7 @@ antiphon-net = { version = "0.1.0", path = "../net" }
 antiphon-push = { version = "0.1.0", path = "../push", default-features = false }
 # Stoop's interface, the same screens the desktop draws.
 antiphon-ui = { version = "0.1.0", path = "../ui" }
+antiphon-update = { version = "0.1.0", path = "../update" }
 # The other side's camera and screen on a call. Without the `capture`
 # feature: a phone's camera comes through the OS, not nokhwa.
 antiphon-video = { version = "0.1.0", path = "../video" }

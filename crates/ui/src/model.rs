@@ -48,6 +48,50 @@ pub struct Model {
     pub channel: Option<ChannelView>,
     /// The community directories you browse, and what they last listed.
     pub directory: Directory,
+    /// A newer version of Stoop, and getting it (Settings > About, and a
+    /// line across the top while one is waiting).
+    pub update: Update,
+}
+
+/// The in-app updater, as the screens show it. The app fills this in from
+/// `antiphon-update`; the buttons come back as [`crate::Action::UpdateCheck`],
+/// [`crate::Action::UpdateInstall`], [`crate::Action::UpdateLater`],
+/// [`crate::Action::UpdatePage`] and [`crate::Action::UpdateAuto`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Update {
+    /// This copy can look for updates at all. False (iOS, whose updates come
+    /// from the App Store, and the demo) hides everything about updates.
+    pub available: bool,
+    /// Look for updates by itself, at start and every few hours.
+    pub auto: bool,
+    /// Where it stands.
+    pub state: UpdateState,
+    /// Show the newer version across the top of the window. False after
+    /// "Later", until a newer one still comes out.
+    pub banner: bool,
+    /// The app can download and install it itself. When false, "Update"
+    /// opens the release page instead (a Flatpak, or the plain tarball).
+    pub can_install: bool,
+}
+
+/// Where an update stands, for [`Update`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum UpdateState {
+    /// Nothing looked for yet.
+    #[default]
+    Idle,
+    /// Looking.
+    Checking,
+    /// This is the newest version.
+    UpToDate,
+    /// This version is out ("0.3.1").
+    Available(String),
+    /// This version is downloading; how far, from 0 to 1, when known.
+    Downloading(String, Option<f32>),
+    /// Downloaded and being installed.
+    Installing(String),
+    /// What went wrong, in a sentence.
+    Failed(String),
 }
 
 /// Community directories (spec §4 "Opt-in directories for public

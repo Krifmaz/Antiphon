@@ -17,6 +17,7 @@ antiphon-video = { version = "0.1.0", path = "../video" }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }
 antiphon-net = { version = "0.1.0", path = "../net" }
+antiphon-update = { version = "0.1.0", path = "../update" }
 anyhow = "1.0.104"
 # Local time for message timestamps and the greeting.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }

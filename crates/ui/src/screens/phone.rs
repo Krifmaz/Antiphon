@@ -22,7 +22,7 @@ use iced_core::text::Wrapping;
 use iced_core::{Alignment, Background, Border, Color, Length};
 use iced_widget::{button, column, container, row, scrollable, space, stack};
 
-use super::{call, clip, community, conversation, fill, presence_color, settings, sidebar};
+use super::{call, clip, community, conversation, fill, presence_color, settings, sidebar, update};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
@@ -47,8 +47,9 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let on_call_screen = matches!((&ui.route, &m.call.peer), (Route::Person(id), Some(peer)) if id == peer);
     let call_strip = m.call.active() && !on_call_screen;
     // A profile's banner runs on up under the clock, as a photo would,
-    // unless a notice or the call's strip has to sit up there first.
-    let banner_on_top = matches!(ui.route, Route::Profile(_)) && !call_strip && m.notice.is_none();
+    // unless a notice, a newer version or the call's strip has to sit up
+    // there first.
+    let banner_on_top = matches!(ui.route, Route::Profile(_)) && !call_strip && m.notice.is_none() && !update::shown(m);
     let banner_top = if banner_on_top { top } else { 0.0 };
     let screen: El<'a, Msg> = match &ui.route {
         Route::Person(id) => match m.people.iter().find(|p| &p.id == id) {
@@ -72,6 +73,9 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     }
     if let Some(n) = m.notice.as_deref() {
         col = col.push(warn_box(t(n).size(13)));
+    }
+    if let Some(b) = update::banner(m, true) {
+        col = col.push(b);
     }
     if call_strip {
         col = col.push(container(sidebar::call_strip(m)).padding([8, 10]));

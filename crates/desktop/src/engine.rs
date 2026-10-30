@@ -1935,6 +1935,9 @@ impl Engine {
                 self.cfg.first_run.welcomed = true;
                 self.save();
             }
+            // The app handles updates itself (`App::update_action`), so these
+            // never reach the engine.
+            A::UpdateCheck | A::UpdateInstall | A::UpdateLater | A::UpdatePage | A::UpdateAuto(_) => {}
             A::OpenDownloads => {
                 if let Some(dir) = dirs_downloads() {
                     open_folder(&dir);
@@ -2599,6 +2602,8 @@ impl Engine {
             space_invites,
             channel,
             directory: ui::Directory { directories: self.cfg.directories.clone(), ..self.directory.clone() },
+            // The app's updater fills this in (`App::stamp_update`).
+            update: ui::Update::default(),
         }
     }
 

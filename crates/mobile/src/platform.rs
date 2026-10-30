@@ -153,6 +153,19 @@ pub trait Platform: Send + Sync + 'static {
     /// Closes the camera, and with it the camera light. Does nothing when
     /// none is open.
     fn stop_camera(&self) {}
+
+    // The in-app updater (`antiphon-update`).
+
+    /// Hands a downloaded, checked update package (an APK on Android) to
+    /// the system's installer, which asks the person to confirm and then
+    /// replaces the app. Returns once it is handed over; the error is a
+    /// sentence for the person. The default refuses: a platform whose apps
+    /// come from a store has nothing to install.
+    fn install_package(&self, _path: &std::path::Path) -> Result<(), String> {
+        Err("This phone updates Stoop through its app store.".into())
+    }
+    /// Opens a web page in the system's browser: an update's release page.
+    fn open_url(&self, _url: &str) {}
 }
 
 /// The network the phone is on.
@@ -372,6 +385,18 @@ pub fn downloads_dir() -> Option<std::path::PathBuf> {
 pub fn notify(title: &str, body: &str) {
     if let Some(p) = get() {
         p.notify(title, body);
+    }
+}
+
+/// [`Platform::install_package`]; without a platform installed, an error.
+pub fn install_package(path: &std::path::Path) -> Result<(), String> {
+    get().ok_or_else(|| "The phone isn't ready to install yet.".to_string()).and_then(|p| p.install_package(path))
+}
+
+/// [`Platform::open_url`].
+pub fn open_url(url: &str) {
+    if let Some(p) = get() {
+        p.open_url(url);
     }
 }
 

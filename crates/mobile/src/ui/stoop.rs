@@ -158,7 +158,8 @@ impl App {
             presets,
             mic_test: self.engine.mic_test_running().then(|| self.engine.level()),
             reduced_motion: self.settings.reduced_motion,
-            version: env!("CARGO_PKG_VERSION").into(),
+            // The full version, a hotfix's run number included.
+            version: self.updater.current().to_string(),
             data_dir: self.dir.display().to_string(),
             ..stoop::Settings::default()
         };
@@ -218,7 +219,72 @@ impl App {
             space_invites: Vec::new(),
             channel: None,
             directory: Default::default(),
+            update: self.update_model(),
         }
+    }
+
+    /// The updater as the screens show it.
+    fn update_model(&self) -> stoop::Update {
+        use antiphon_update::Status;
+        let u = &self.updater;
+        let state = match (u.status(), &self.installing) {
+            (_, Some(v)) => stoop::UpdateState::Installing(v.clone()),
+            (Status::Idle, _) => stoop::UpdateState::Idle,
+            (Status::Checking, _) => stoop::UpdateState::Checking,
+            (Status::UpToDate, _) => stoop::UpdateState::UpToDate,
+            (Status::Available(r), _) => stoop::UpdateState::Available(r.version.to_string()),
+            (Status::Downloading { release, done, total }, _) => {
+                stoop::UpdateState::Downloading(release.version.to_string(), total.filter(|t| *t > 0).map(|t| (done as f32 / t as f32).min(1.0)))
+            }
+            // Ready is handed to the installer at once, in `poll_update`.
+            (Status::Ready { release, .. }, _) => stoop::UpdateState::Installing(release.version.to_string()),
+            (Status::Failed(why), _) => stoop::UpdateState::Failed(why),
+        };
+        stoop::Update { available: u.target().can_check(), auto: u.auto(), state, banner: u.banner(), can_install: u.can_install() }
+    }
+
+    /// Moves the updater on, from [`App::poll`]: an automatic look when one
+    /// is due, and a finished download to Android's installer. Returns
+    /// whether what it shows changed, and refreshes the model if so.
+    pub(super) fn poll_update(&mut self) -> bool {
+        if let Some(file) = self.updater.tick() {
+            let version = self.updater.status().release().map(|r| r.version.to_string()).unwrap_or_default();
+            match crate::platform::install_package(&file) {
+                Ok(()) => {
+                    self.installing = Some(version);
+                    self.stoop.toast("Android will ask you to confirm the update.", ToastKind::Info);
+                }
+                Err(why) => {
+                    self.updater.failed(why.clone());
+                    self.stoop.toast(why, ToastKind::Err);
+                }
+            }
+        }
+        let now = self.update_model();
+        if now == self.update_seen {
+            return false;
+        }
+        self.update_seen = now;
+        self.refresh();
+        true
+    }
+
+    /// Carries out one of the update buttons.
+    fn update_action(&mut self, action: Action) {
+        match action {
+            Action::UpdateCheck => {
+                // Looking again after the installer was dismissed starts
+                // over.
+                self.installing = None;
+                self.updater.check();
+            }
+            Action::UpdateInstall if self.updater.can_install() => self.updater.start(),
+            Action::UpdateInstall | Action::UpdatePage => crate::platform::open_url(&self.updater.page()),
+            Action::UpdateLater => self.updater.later(),
+            Action::UpdateAuto(on) => self.updater.set_auto(on),
+            _ => {}
+        }
+        self.refresh();
     }
 
     /// One row in the people list.
@@ -555,6 +621,7 @@ impl App {
             // does not run; the setting is the desktop's.
             Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
+            Action::UpdateCheck | Action::UpdateInstall | Action::UpdateLater | Action::UpdatePage | Action::UpdateAuto(_) => self.update_action(action),
             // Voice messages aren't recorded on the phone yet (the
             // button is hidden by `Device::voice_messages`).
             Action::RecordVoice(_) | Action::FinishVoice { .. } | Action::PlayVoice { .. } => {}

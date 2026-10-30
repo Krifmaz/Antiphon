@@ -1,0 +1,16 @@
+[package]
+name = "antiphon-update"
+description = "Stoop's in-app updater: looks for a newer GitHub release, downloads and checks it, and installs it where the platform allows"
+edition.workspace = true
+version.workspace = true
+
+# Everything here is plain Rust with no interface of its own: the desktop and
+# phone apps show what it finds through antiphon-ui. The network goes through
+# ureq and rustls with the Mozilla roots, as the push sender's does, so the
+# phone and the desktop trust the same certificates and need no system TLS.
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }

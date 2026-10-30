@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use antiphon_client::state::AppState;
-use antiphon_ui::{self as ui, theme, Action, Msg, Route, Section, Ui};
+use antiphon_ui::{self as ui, theme, Action, Msg, Route, Section, ToastKind, Ui};
+use antiphon_update::{self as update, Updater};
 use iced::keyboard::{self, key};
 use iced::widget::operation;
 use iced::{event, window, Element, Event, Subscription, Task, Theme};
@@ -53,6 +54,12 @@ pub struct App {
     look: (String, String, String, String, bool),
     /// When the app started, to animate the demo's meters.
     epoch: Instant,
+    /// Looks for, downloads and installs newer versions. Only on the real
+    /// engine: the demo and the tour never touch the network.
+    updater: Option<Updater>,
+    /// The version being installed, from the moment the download is handed
+    /// over until the app closes for it (or the install fails).
+    installing: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,16 +221,20 @@ const TOUR: &[Step] = &[
 impl App {
     /// Starts the app in `mode`; a tour queues its first step.
     pub fn boot(mode: Mode) -> (Self, Task<Message>) {
-        let (source, tour) = match mode {
+        let (source, tour, updater) = match mode {
             Mode::Live(state) => {
                 let mut engine = Box::new(Engine::new(state));
                 let model = engine.model(None);
-                (Source::Live { engine, model: Box::new(model) }, None)
+                // The setting lives beside the app's own; downloads go to a
+                // folder of the updater's own under the system's temporary one.
+                let updater = antiphon_client::config::config_dir().map(|dir| Updater::new(&dir, std::env::temp_dir().join("stoop-update")));
+                (Source::Live { engine, model: Box::new(model) }, None, updater)
             }
-            Mode::Demo => (Source::Demo(Box::new(Demo::new())), None),
-            Mode::Tour(dir) => (Source::Demo(Box::new(Demo::new())), Some(dir)),
+            Mode::Demo => (Source::Demo(Box::new(Demo::new())), None, None),
+            Mode::Tour(dir) => (Source::Demo(Box::new(Demo::new())), Some(dir), None),
         };
-        let mut app = App { ui: Ui::new(), source, tour, system_dark: true, look: Default::default(), epoch: Instant::now() };
+        let mut app = App { ui: Ui::new(), source, tour, system_dark: true, look: Default::default(), epoch: Instant::now(), updater, installing: None };
+        app.stamp_update();
         app.apply_look();
         let mut tasks = vec![iced::system::theme().map(Message::SystemMode)];
         if app.tour.is_some() {
@@ -288,6 +299,14 @@ impl App {
         let mut tasks = Vec::new();
         let opened = actions.iter().any(|a| matches!(a, Action::Open(_)));
         for action in actions {
+            // Updates are the app's, not the engine's.
+            let action = match self.update_action(action) {
+                Ok(task) => {
+                    tasks.push(task);
+                    continue;
+                }
+                Err(action) => action,
+            };
             match &mut self.source {
                 Source::Live { engine, .. } => {
                     let open = self.ui.open_person().map(str::to_string);
@@ -352,6 +371,7 @@ impl App {
         if !engine.out.is_empty() {
             tasks.push(Task::done(Message::Tick(Instant::now())));
         }
+        self.stamp_update();
         Task::batch(tasks)
     }
 
@@ -362,7 +382,92 @@ impl App {
             engine.set_viewing(self.ui.open_channel());
             **model = engine.model(open.as_deref());
         }
+        self.stamp_update();
         self.apply_look();
+    }
+
+    /// Copies where the updater stands into the model, which the engine
+    /// rebuilds without it.
+    fn stamp_update(&mut self) {
+        let Source::Live { model, .. } = &mut self.source else { return };
+        let Some(u) = &self.updater else { return };
+        let state = match (u.status(), &self.installing) {
+            (_, Some(v)) => ui::UpdateState::Installing(v.clone()),
+            (update::Status::Idle, _) => ui::UpdateState::Idle,
+            (update::Status::Checking, _) => ui::UpdateState::Checking,
+            (update::Status::UpToDate, _) => ui::UpdateState::UpToDate,
+            (update::Status::Available(r), _) => ui::UpdateState::Available(r.version.to_string()),
+            (update::Status::Downloading { release, done, total }, _) => {
+                ui::UpdateState::Downloading(release.version.to_string(), total.filter(|t| *t > 0).map(|t| (done as f32 / t as f32).min(1.0)))
+            }
+            // Ready is handed over at once, so it shows as installing.
+            (update::Status::Ready { release, .. }, _) => ui::UpdateState::Installing(release.version.to_string()),
+            (update::Status::Failed(why), _) => ui::UpdateState::Failed(why),
+        };
+        model.update = ui::Update { available: u.target().can_check(), auto: u.auto(), state, banner: u.banner(), can_install: u.can_install() };
+        // The About screen shows the full version, a hotfix's run number
+        // included, which the crate version has no room for.
+        model.settings.version = u.current().to_string();
+    }
+
+    /// Carries out an update action, or gives back any other action for the
+    /// engine.
+    fn update_action(&mut self, action: Action) -> Result<Task<Message>, Action> {
+        let Some(u) = &mut self.updater else {
+            // The demo has no updater; its buttons do nothing.
+            return match action {
+                Action::UpdateCheck | Action::UpdateInstall | Action::UpdateLater | Action::UpdatePage | Action::UpdateAuto(_) => Ok(Task::none()),
+                other => Err(other),
+            };
+        };
+        match action {
+            Action::UpdateCheck => u.check(),
+            Action::UpdateInstall if u.can_install() => u.start(),
+            // Nothing this copy can install: the page has the files.
+            Action::UpdateInstall | Action::UpdatePage => {
+                if let Err(why) = update::install::open(u.page()) {
+                    self.ui.toast(why, ToastKind::Err);
+                }
+            }
+            Action::UpdateLater => u.later(),
+            Action::UpdateAuto(on) => u.set_auto(on),
+            other => return Err(other),
+        }
+        self.stamp_update();
+        Ok(Task::none())
+    }
+
+    /// Installs a downloaded update, once the updater hands one over: closes
+    /// down for an installer or a restart, or says what the system will do.
+    fn install_update(&mut self, file: PathBuf) -> Task<Message> {
+        let Some(u) = &mut self.updater else { return Task::none() };
+        let version = u.status().release().map(|r| r.version.to_string()).unwrap_or_default();
+        self.installing = Some(version.clone());
+        let result = update::install::install(u.target(), &file);
+        let task = match result {
+            Ok(update::After::Quit) => Task::done(Message::Close),
+            Ok(update::After::Restart(path)) => match update::install::relaunch(&path) {
+                Ok(()) => Task::done(Message::Close),
+                Err(why) => {
+                    // In place but not started: it starts next time.
+                    self.ui.toast(format!("Stoop {version} is installed. {why}."), ToastKind::Warn);
+                    Task::none()
+                }
+            },
+            Ok(update::After::Handed(next)) => {
+                self.installing = None;
+                self.ui.toast(next, ToastKind::Info);
+                Task::none()
+            }
+            Err(why) => {
+                self.installing = None;
+                u.failed(why.clone());
+                self.ui.toast(why, ToastKind::Err);
+                Task::none()
+            }
+        };
+        self.stamp_update();
+        task
     }
 
     /// Repaints the palette and switches the reading font when the theme,
@@ -391,10 +496,17 @@ impl App {
                 let _ = self.ui.update(Msg::Frame(now), model);
                 let open = self.ui.open_person().map(str::to_string);
                 let t = self.epoch.elapsed().as_secs_f32();
+                // A look that is due starts here; a finished download comes
+                // back to be installed.
+                let ready = self.updater.as_mut().and_then(Updater::tick);
                 let task = match &mut self.source {
                     Source::Live { engine, .. } => {
                         engine.tick(open.as_deref());
-                        self.drain()
+                        let drained = self.drain();
+                        match ready {
+                            Some(file) => Task::batch([drained, self.install_update(file)]),
+                            None => drained,
+                        }
                     }
                     Source::Demo(d) => {
                         d.tick(t);

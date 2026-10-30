@@ -34,6 +34,7 @@ A Cargo workspace, one crate per concern:
 | [`crates/ui`](crates/ui) | -- | `antiphon-ui`: the Stoop interface in iced, one set of screens for the desktop and the phone. Draws a plain `Model` and hands back `Action`s, so it never touches an engine |
 | [`crates/client`](crates/client) | §4, §5, §7, §8, §9, §13 | `antiphon-client`: the call engine and everything around it (contacts, history, outbox, delivery, discovery, file transfer, moderation), shared by both desktop apps |
 | [`crates/desktop`](crates/desktop) | -- | `antiphon`: Stoop for the desktop, the shared interface on the client engine |
+| [`crates/update`](crates/update) | -- | `antiphon-update`: the in-app updater. Looks at the newest GitHub release, downloads the file for this install, checks it against `SHA256SUMS`, and installs it: the Windows installer or MSI run silently, an AppImage replaced in place, a `.deb` handed to the software installer, `Stoop.app` swapped from the `.dmg`, and the APK handed to Android's installer |
 | [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon-classic`: the previous Slint desktop app, kept while the new one catches up -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
 Every crate's `lib.rs` doc comment states its scope against the spec.

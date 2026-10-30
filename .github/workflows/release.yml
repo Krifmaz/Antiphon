@@ -30,7 +30,8 @@ name: release
 #   the .dmg, its checksums and its Install line when build-macos finishes, or says it is not in this release.
 #   Every desktop binary is built twice from clean and compared byte for byte before it is packaged
 #   (spec §10); one that differs fails its platform. The version is written into the workspace first
-#   (packaging/set-version.sh), so `--version` and the About screen show it.
+#   (packaging/set-version.sh), so `--version` and the About screen show it; STOOP_VERSION carries the full
+#   number, a hotfix's run number included, which the in-app updater (crates/update) compares releases by.
 #   Re-running a version replaces its release. cleanup-releases.yml deletes old ones.
 on:
   push:
@@ -164,6 +165,10 @@ jobs:
     env: &build-env
       V: ${{ needs.version.outputs.version }}
       SV: ${{ needs.version.outputs.semver }}
+      # The full version, a hotfix's run number included, built into the app (crates/update/src/version.rs):
+      # the crate version holds only MAJOR.MINOR.PATCH, and the in-app updater needs the rest to tell a hotfix
+      # from the release it extends.
+      STOOP_VERSION: ${{ needs.version.outputs.version }}
     steps: &build-steps
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -302,6 +307,8 @@ jobs:
     env:
       V: ${{ needs.version.outputs.version }}
       SV: ${{ needs.version.outputs.semver }}
+      # As for the desktop builds: the full version, for the in-app updater.
+      STOOP_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

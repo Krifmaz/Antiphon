@@ -538,19 +538,24 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     cards.into()
 }
 
-/// Version, where your data lives, and the crash-report switch.
+/// Version, updates, and where your data lives.
 fn about<'a>(m: &'a Model) -> El<'a, Msg> {
     let s = &m.settings;
-    column![
-        card(
-            row![
-                logo(56.0),
-                column![t("Stoop").size(20).font(theme::bold()), faint(format!("Version {}", s.version)).size(12.5), muted("Calls and messages that go straight to the people you talk to.").size(13)].spacing(4),
-            ]
-            .spacing(18)
-            .align_y(Alignment::Center)
-        ),
-        titled_card(
+    let mut cards = column![card(
+        row![
+            logo(56.0),
+            column![t("Stoop").size(20).font(theme::bold()), faint(format!("Version {}", s.version)).size(12.5), muted("Calls and messages that go straight to the people you talk to.").size(13)].spacing(4),
+        ]
+        .spacing(18)
+        .align_y(Alignment::Center)
+    )]
+    .spacing(14);
+    // Updates sit next to the version they would replace.
+    if let Some(updates) = super::update::card(m) {
+        cards = cards.push(updates);
+    }
+    cards
+        .push(titled_card(
             "Your data",
             Some("Settings, contacts and history stay on this device."),
             column![container(t(s.data_dir.as_str()).size(12).font(theme::mono())).padding([8, 10]).width(Length::Fill).style(theme::inset), row![btn_icon(
@@ -559,11 +564,9 @@ fn about<'a>(m: &'a Model) -> El<'a, Msg> {
                 Btn::Default,
                 Some(Msg::Do(Action::OpenDownloads))
             )]]
-            .spacing(10)
-        ),
-    ]
-    .spacing(14)
-    .into()
+            .spacing(10),
+        ))
+        .into()
 }
 
 /// The phone's own settings: the microphone permission, listening in the

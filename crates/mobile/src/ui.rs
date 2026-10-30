@@ -409,6 +409,15 @@ pub struct App {
     wake: Waker,
     /// Settings > Account & backup: backup files and moving devices.
     account: crate::account::PhoneAccount,
+    /// Looks for, downloads and checks newer versions; the APK it fetches
+    /// goes to the system's installer through [`platform::install_package`].
+    updater: antiphon_update::Updater,
+    /// The version handed to the system's installer, until the app is
+    /// replaced (or the person cancels and looks again).
+    installing: Option<String>,
+    /// The updater as the model last showed it, so [`App::poll`] redraws
+    /// only when it moves.
+    update_seen: antiphon_ui::Update,
 }
 
 /// The profile card the saved settings describe, as sent to contacts.
@@ -459,6 +468,7 @@ impl App {
         // PushKit (iOS) for one, and a phone with neither just goes on
         // without wake-ups.
         platform::register_push();
+        let dir_for_updates = dir.clone();
         let mut app = Self {
             push,
             port_text: settings.listen_port.to_string(),
@@ -513,6 +523,12 @@ impl App {
             size: Size::new(0.0, 0.0),
             wake,
             account: Default::default(),
+            // Its setting beside the app's own; downloads in a folder of
+            // its own in private storage, which Android's installer is
+            // handed a stream of (see `AntiphonActivity.installPackage`).
+            updater: antiphon_update::Updater::new(&dir_for_updates, dir_for_updates.join("update-downloads")),
+            installing: None,
+            update_seen: Default::default(),
         };
         app.refresh();
         Ok(app)
@@ -528,6 +544,9 @@ impl App {
             // A backup being sealed or a move offer open: its result is
             // collected in `poll`, which runs on each frame.
             || self.account.active()
+            // So is an update being looked for or downloaded, whose thread
+            // has no way to wake the runner itself.
+            || matches!(self.updater.status(), antiphon_update::Status::Checking | antiphon_update::Status::Downloading { .. })
     }
 
     /// Rebuilds the whole app from what is on disk, after a restore wrote
@@ -756,7 +775,7 @@ impl App {
     /// Called by the runner every time it wakes, so it stays cheap when
     /// nothing happened.
     pub fn poll(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.poll_update();
 
         for outcome in self.account.poll() {
             match outcome {

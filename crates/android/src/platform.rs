@@ -132,6 +132,33 @@ impl Platform for Android {
     fn stop_camera(&self) {
         camera::stop();
     }
+
+    fn install_package(&self, path: &Path) -> Result<(), String> {
+        install_package(path)
+    }
+
+    fn open_url(&self, url: &str) {
+        with_activity("opening a web page", |env, activity| {
+            let url = env.new_string(url)?;
+            env.call_method(activity, "openUrl", "(Ljava/lang/String;)V", &[JValue::Object(&url)])?;
+            Ok(())
+        });
+    }
+}
+
+/// Hands a downloaded update's APK to Android's package installer through
+/// `AntiphonActivity.installPackage`, which streams it into an install
+/// session and commits it; Android then asks the person to confirm (and,
+/// the first time, to let Stoop install apps), and replaces the app.
+fn install_package(path: &Path) -> Result<(), String> {
+    let handed = with_activity("installing an update", |env, activity| {
+        let path = env.new_string(path.to_string_lossy())?;
+        env.call_method(activity, "installPackage", "(Ljava/lang/String;)Z", &[JValue::Object(&path)])?.z()
+    });
+    match handed {
+        Some(true) => Ok(()),
+        _ => Err("Android's installer couldn't take the update. Try again, or install it from the release page.".into()),
+    }
 }
 
 /// `Manifest.permission.RECORD_AUDIO`, the run-time microphone permission.
