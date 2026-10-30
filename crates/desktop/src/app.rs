@@ -52,6 +52,10 @@ pub struct App {
     /// What the look was last built from: theme, accent, custom accent,
     /// reading font, and whether the system is dark.
     look: (String, String, String, String, bool),
+    /// The iced theme built from that look. Kept rather than built in
+    /// [`App::theme`], which iced calls on every redraw: building one
+    /// derives a whole extended palette.
+    theme: Theme,
     /// When the app started, to animate the demo's meters.
     epoch: Instant,
     /// Looks for, downloads and installs newer versions. Only on the real
@@ -254,7 +258,7 @@ impl App {
             Mode::Demo => (Source::Demo(Box::new(Demo::new())), None, None),
             Mode::Tour(dir) => (Source::Demo(Box::new(Demo::new())), Some(dir), None),
         };
-        let mut app = App { ui: Ui::new(), source, tour, system_dark: true, look: Default::default(), epoch: Instant::now(), updater, installing: None };
+        let mut app = App { ui: Ui::new(), source, tour, system_dark: true, look: Default::default(), theme: theme::iced_theme(&theme::look()), epoch: Instant::now(), updater, installing: None };
         app.stamp_update();
         app.apply_look();
         let mut tasks = vec![iced::system::theme().map(Message::SystemMode)];
@@ -495,10 +499,14 @@ impl App {
     /// accent, font or system tone changed.
     fn apply_look(&mut self) {
         let s = &self.model().settings;
-        let look = (s.theme.clone(), s.accent.clone(), s.custom_accent.clone(), s.font.clone(), self.system_dark);
-        if look != self.look {
+        // Compared by reference first: this runs on every tick, and the
+        // look only rarely changes.
+        let (t, a, c, f) = (&self.look.0, &self.look.1, &self.look.2, &self.look.3);
+        if (&s.theme, &s.accent, &s.custom_accent, &s.font, self.system_dark) != (t, a, c, f, self.look.4) {
+            let look = (s.theme.clone(), s.accent.clone(), s.custom_accent.clone(), s.font.clone(), self.system_dark);
             theme::set(theme::palette(&look.0, &look.1, &look.2, look.4));
             theme::set_font(&look.3);
+            self.theme = theme::iced_theme(&theme::look());
             self.look = look;
         }
         let reduced = self.model().settings.reduced_motion;
@@ -606,9 +614,9 @@ impl App {
         view
     }
 
-    /// The iced theme built from the current palette.
+    /// The iced theme built from the current palette (see `theme`).
     pub fn theme(&self) -> Theme {
-        theme::iced_theme(&theme::look())
+        self.theme.clone()
     }
 
     /// The window title: who you are on a call with, if anyone.
