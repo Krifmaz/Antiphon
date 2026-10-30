@@ -19,7 +19,7 @@ use crate::icons::{icon, logo, Icon};
 use crate::a11y::Role;
 use crate::theme::{self, Btn, ACCENTS, FONTS, THEMES};
 use crate::widgets::*;
-use crate::{Action, CheckState, El, Group, Model, Msg, Route, Section, Transmit, Ui};
+use crate::{Action, CheckState, El, Group, Hotkey, Model, Msg, Route, Section, Transmit, Ui};
 
 /// Settings on a wide window: the grouped section list beside the chosen
 /// section.
@@ -396,12 +396,22 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     }
     let mut talk = column![container(seg).padding(4).style(theme::tabs_frame)].spacing(14);
     if s.transmit == Transmit::PushToTalk && m.device.ptt_keys {
-        let key: El<'a, Msg> = if s.ptt_capturing {
-            btn("Press a key…", Btn::Primary, None).into()
-        } else {
-            btn_icon(Icon::Keyboard, if s.ptt_key.is_empty() { "Choose a key" } else { s.ptt_key.as_str() }, Btn::Default, Some(Msg::Do(Action::BindPtt))).into()
-        };
-        talk = talk.push(setting("Talk key", Some("Hold it to talk. It works while Stoop is in the background."), key));
+        talk = talk.push(setting(Hotkey::Talk.label(), Some(Hotkey::Talk.help()), key_button(s, Hotkey::Talk)));
+    }
+    // Spec §1 "mute and deafen, each independently bindable".
+    let mut shortcuts = column![].spacing(12);
+    for (i, hotkey) in Hotkey::OTHERS.into_iter().enumerate() {
+        if i > 0 {
+            shortcuts = shortcuts.push(divider());
+        }
+        let mut control = row![key_button(s, hotkey)].spacing(8).align_y(Alignment::Center);
+        if !s.key(hotkey).is_empty() {
+            control = control.push(icon_btn(Icon::X, "Unbind", Some(Msg::Do(Action::ClearKey(hotkey)))));
+        }
+        shortcuts = shortcuts.push(setting(hotkey.label(), Some(hotkey.help()), control));
+        if let Some(hold) = s.hold(hotkey) {
+            shortcuts = shortcuts.push(setting("Only while held", None, switch(&format!("{} only while held", hotkey.label()), hold, move |on| Msg::Do(Action::KeyHold(hotkey, on)))));
+        }
     }
 
     let mut processing = column![
@@ -448,10 +458,24 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
             if m.phone.is_none() {
                 cards = cards.push(titled_card("Devices", None, devices));
             }
-            cards.push(titled_card("Microphone test", None, test)).push(titled_card("When to send your voice", None, talk))
+            cards = cards.push(titled_card("Microphone test", None, test)).push(titled_card("When to send your voice", None, talk));
+            if m.device.ptt_keys {
+                cards = cards.push(titled_card("Shortcuts", Some("Keys that work in a call while Stoop is in the background."), shortcuts));
+            }
+            cards
         }
     };
     cards.into()
+}
+
+/// The button that shows the key bound to `hotkey` and, pressed, waits
+/// for a new one.
+fn key_button<'a>(s: &'a crate::Settings, hotkey: Hotkey) -> El<'a, Msg> {
+    if s.binding == Some(hotkey) {
+        return btn("Press a key…", Btn::Primary, None).into();
+    }
+    let key = s.key(hotkey);
+    btn_icon(Icon::Keyboard, if key.is_empty() { "Choose a key" } else { key }, Btn::Default, s.binding.is_none().then_some(Msg::Do(Action::BindKey(hotkey)))).into()
 }
 
 /// Voice's "Fine-tune" tab (spec §1 "every chain stage toggles

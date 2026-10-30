@@ -67,8 +67,9 @@ enum Event {
     RelayChosen(Option<fallback_relay::Choice>, Vec<String>),
     /// The router port mapping finished: the outside port, or why not.
     PortMap(Result<u16, String>),
-    /// A push-to-talk key capture finished: the key's name, or why not.
-    Key(Result<String, String>),
+    /// A shortcut's key capture finished: which shortcut, and the key's
+    /// name or why not.
+    Key(ui::Hotkey, Result<String, String>),
     /// A note to show the person.
     Toast(String, ToastKind),
     /// A picked profile picture, made small: the base64 to save, or why
@@ -268,8 +269,8 @@ pub struct Engine {
     inputs: Vec<String>,
     /// Speaker names, listed at start.
     outputs: Vec<String>,
-    /// True while waiting for a key press to set push-to-talk.
-    ptt_capturing: bool,
+    /// The shortcut waiting for a key press to bind it.
+    binding: Option<ui::Hotkey>,
     /// The last delivery round handled; a new number means messages moved.
     delivery_seen: u64,
     /// The last LAN discovery count handled; a new number means new peers.
@@ -375,7 +376,7 @@ impl Engine {
             seen_lines: 0,
             inputs: antiphon_audio::list_input_devices(),
             outputs: antiphon_audio::list_output_devices(),
-            ptt_capturing: false,
+            binding: None,
             plugins_found: None,
             plugins_scanning: false,
             api: None,
@@ -413,6 +414,9 @@ impl Engine {
                 Err(e) => eprintln!("[devices] {e}"),
             }
         }
+        // The shortcuts beyond push to talk, which the shared state
+        // starts without.
+        engine.sync_transmit();
         engine.load_previews();
         engine.api_seen = engine.previews.clone();
         engine.set_api(engine.cfg.local_api || crate::has_flag("--api"));
@@ -443,7 +447,7 @@ impl Engine {
     pub fn busy(&self) -> bool {
         self.call.phase != ui::Phase::Idle
             || self.state.loopback.lock().unwrap().is_some()
-            || self.ptt_capturing
+            || self.binding.is_some()
             || self.recording.is_some()
             || self.playing.is_some()
             || self.voice_waiting.is_some()
@@ -1273,15 +1277,20 @@ impl Engine {
                     self.reach.port_forward_refused = true;
                 }
             },
-            Event::Key(r) => {
-                self.ptt_capturing = false;
+            Event::Key(hotkey, r) => {
+                self.binding = None;
                 match r {
-                    Ok(name) => {
-                        self.cfg.ptt_key.clone_from(&name);
-                        self.sync_transmit();
-                        self.save();
-                        self.toast(format!("Push to talk is now {name}"), ToastKind::Ok);
-                    }
+                    // One key, one job: a key that already does something
+                    // else would do both at once.
+                    Ok(name) => match [ui::Hotkey::Talk, ui::Hotkey::Mute, ui::Hotkey::Deafen, ui::Hotkey::HangUp].into_iter().find(|&h| h != hotkey && *self.key_mut(h) == name) {
+                        Some(other) => self.toast(format!("{} is already the {} key", key_label(&name), other.label().to_lowercase()), ToastKind::Warn),
+                        None => {
+                            self.toast(format!("{} is now {}", hotkey.label(), key_label(&name)), ToastKind::Ok);
+                            *self.key_mut(hotkey) = name;
+                            self.sync_transmit();
+                            self.save();
+                        }
+                    },
                     Err(why) => self.toast(why, ToastKind::Warn),
                 }
             }
@@ -2026,7 +2035,23 @@ impl Engine {
                 self.sync_transmit();
                 self.save();
             }
-            A::BindPtt => self.bind_ptt(),
+            A::BindKey(hotkey) => self.bind_key(hotkey),
+            // Push to talk always needs a key, so it is only ever rebound.
+            A::ClearKey(ui::Hotkey::Talk) => {}
+            A::ClearKey(hotkey) => {
+                self.key_mut(hotkey).clear();
+                self.sync_transmit();
+                self.save();
+            }
+            A::KeyHold(hotkey, on) => {
+                match hotkey {
+                    ui::Hotkey::Mute => self.cfg.mute_hold = on,
+                    ui::Hotkey::Deafen => self.cfg.deafen_hold = on,
+                    ui::Hotkey::Talk | ui::Hotkey::HangUp => return,
+                }
+                self.sync_transmit();
+                self.save();
+            }
             A::EchoCancel(on) => {
                 self.cfg.echo_cancel = on;
                 if !on && self.state.echo_cancel.swap(false, Ordering::Relaxed) {
@@ -2515,7 +2540,8 @@ impl Engine {
         self.save();
     }
 
-    /// Copies the saved transmit mode and push-to-talk key into the live state.
+    /// Copies the saved transmit mode and shortcut keys into the live
+    /// state.
     fn sync_transmit(&self) {
         let t = &self.state.transmit;
         let mode = transmit_mode(self.cfg.transmit_mode);
@@ -2523,25 +2549,48 @@ impl Engine {
         if let Ok(key) = Keycode::from_str(&self.cfg.ptt_key) {
             *t.ptt_key.lock().unwrap() = key;
         }
+        // An unbound (empty) or unknown name leaves the shortcut off.
+        *t.mute_key.lock().unwrap() = Keycode::from_str(&self.cfg.mute_key).ok();
+        *t.deafen_key.lock().unwrap() = Keycode::from_str(&self.cfg.deafen_key).ok();
+        *t.hangup_key.lock().unwrap() = Keycode::from_str(&self.cfg.hangup_key).ok();
+        t.mute_hold.store(self.cfg.mute_hold, Ordering::Relaxed);
+        t.deafen_hold.store(self.cfg.deafen_hold, Ordering::Relaxed);
         caps_lock::set_bound(*t.ptt_key.lock().unwrap() == Keycode::CapsLock && mode == MODE_PTT);
     }
 
-    /// Waits, in the background, for the next key press and makes it the push-to-talk key.
-    fn bind_ptt(&mut self) {
-        if self.ptt_capturing {
+    /// The saved key name of `hotkey`, to read or change.
+    fn key_mut(&mut self, hotkey: ui::Hotkey) -> &mut String {
+        match hotkey {
+            ui::Hotkey::Talk => &mut self.cfg.ptt_key,
+            ui::Hotkey::Mute => &mut self.cfg.mute_key,
+            ui::Hotkey::Deafen => &mut self.cfg.deafen_key,
+            ui::Hotkey::HangUp => &mut self.cfg.hangup_key,
+        }
+    }
+
+    /// Waits, in the background, for the next key press and makes it
+    /// `hotkey`'s key.
+    fn bind_key(&mut self, hotkey: ui::Hotkey) {
+        if self.binding.is_some() {
             return;
         }
-        self.ptt_capturing = true;
+        self.binding = Some(hotkey);
         let events = self.events.clone();
         self.state.runtime.spawn_blocking(move || {
             let r = match state::capture_next_key(Duration::from_secs(6)) {
                 None => Err("No key came through. Another program may have it.".to_string()),
                 Some(key) => {
                     let name = key.to_string();
-                    key_capture::check(&name).map(|_| name.clone()).map_err(|why| why.explain(&name))
+                    // Spec §1: refuse a talk key that cannot work, with the
+                    // reason, rather than one that saves and never sends.
+                    if hotkey == ui::Hotkey::Talk {
+                        key_capture::check(&name).map(|_| name.clone()).map_err(|why| why.explain(&name))
+                    } else {
+                        Ok(name)
+                    }
                 }
             };
-            Self::push(&events, Event::Key(r));
+            Self::push(&events, Event::Key(hotkey, r));
         });
     }
 
@@ -3252,7 +3301,12 @@ impl Engine {
                 _ => ui::Transmit::Voice,
             },
             ptt_key: key_label(&self.cfg.ptt_key),
-            ptt_capturing: self.ptt_capturing,
+            mute_key: bound_label(&self.cfg.mute_key),
+            deafen_key: bound_label(&self.cfg.deafen_key),
+            hangup_key: bound_label(&self.cfg.hangup_key),
+            mute_hold: self.cfg.mute_hold,
+            deafen_hold: self.cfg.deafen_hold,
+            binding: self.binding,
             noise_suppression: self.cfg.chain.noise_suppress.enabled,
             echo_cancel: self.cfg.echo_cancel,
             low_data: self.cfg.low_data_calls,
@@ -3698,6 +3752,16 @@ fn transmit_mode(stored: i32) -> u32 {
         1 => MODE_VOICE_ACTIVATION,
         2 => MODE_OPEN_MIC,
         _ => MODE_PTT,
+    }
+}
+
+/// A shortcut's key as a person writes it, or empty when unbound (where
+/// [`key_label`] would name the push-to-talk default).
+fn bound_label(name: &str) -> String {
+    if name.is_empty() {
+        String::new()
+    } else {
+        key_label(name)
     }
 }
 

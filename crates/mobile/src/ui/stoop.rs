@@ -662,7 +662,9 @@ impl App {
             }
             // Lending a relay needs a relay of one's own, which the phone
             // does not run; the setting is the desktop's.
-            Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
+            Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::Input(_) | Action::Output(_) => {}
+            // A phone has no keyboard shortcuts.
+            Action::BindKey(_) | Action::ClearKey(_) | Action::KeyHold(..) => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
             Action::UpdateCheck | Action::UpdateInstall | Action::UpdateLater | Action::UpdatePage | Action::UpdateAuto(_) => self.update_action(&action),
             // Voice messages aren't recorded on the phone yet (the

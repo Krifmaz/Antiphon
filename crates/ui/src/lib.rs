@@ -535,8 +535,12 @@ pub enum Action {
     Output(String),
     /// How the microphone decides to send.
     Transmit(Transmit),
-    /// Wait for the next key press and bind it to push-to-talk.
-    BindPtt,
+    /// Wait for the next key press and bind it to this shortcut.
+    BindKey(Hotkey),
+    /// Unbind a shortcut (not push to talk, which always has a key).
+    ClearKey(Hotkey),
+    /// Make the mute or deafen shortcut act only while held (or toggle).
+    KeyHold(Hotkey, bool),
     /// Noise suppression on or off.
     NoiseSuppression(bool),
     /// Echo cancellation on or off.

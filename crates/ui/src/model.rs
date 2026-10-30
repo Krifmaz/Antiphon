@@ -643,8 +643,18 @@ pub struct Settings {
     pub transmit: Transmit,
     /// The push-to-talk key, as a name ("Caps Lock").
     pub ptt_key: String,
-    /// Waiting for a key press to bind push-to-talk.
-    pub ptt_capturing: bool,
+    /// The mute shortcut's key, as a name; empty when unbound.
+    pub mute_key: String,
+    /// The deafen shortcut's key, as a name; empty when unbound.
+    pub deafen_key: String,
+    /// The hang-up shortcut's key, as a name; empty when unbound.
+    pub hangup_key: String,
+    /// Mute only while its key is held, rather than toggling.
+    pub mute_hold: bool,
+    /// Deafen only while its key is held, rather than toggling.
+    pub deafen_hold: bool,
+    /// The shortcut waiting for a key press to bind it.
+    pub binding: Option<Hotkey>,
     /// Noise suppression is on.
     pub noise_suppression: bool,
     /// Echo cancellation is on.
@@ -771,6 +781,68 @@ pub struct BandRow {
     pub enabled: bool,
     /// Its settings.
     pub params: Vec<ParamRow>,
+}
+
+/// A keyboard shortcut that works while Stoop is in the background
+/// (desktop only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hotkey {
+    /// Held to talk, in push-to-talk.
+    Talk,
+    /// Mutes or unmutes your microphone in a call.
+    Mute,
+    /// Mutes or unmutes everyone else in a call.
+    Deafen,
+    /// Leaves the call.
+    HangUp,
+}
+
+impl Hotkey {
+    /// The shortcuts besides push to talk, in the order Settings lists
+    /// them.
+    pub const OTHERS: [Hotkey; 3] = [Hotkey::Mute, Hotkey::Deafen, Hotkey::HangUp];
+
+    /// The shortcut as Settings names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Hotkey::Talk => "Talk key",
+            Hotkey::Mute => "Mute",
+            Hotkey::Deafen => "Deafen",
+            Hotkey::HangUp => "Hang up",
+        }
+    }
+
+    /// What the shortcut does, in a sentence.
+    pub fn help(self) -> &'static str {
+        match self {
+            Hotkey::Talk => "Hold it to talk. It works while Stoop is in the background.",
+            Hotkey::Mute => "Turns your microphone off or back on during a call.",
+            Hotkey::Deafen => "Stops you hearing the call, and them hearing you, or brings both back.",
+            Hotkey::HangUp => "Leaves the call.",
+        }
+    }
+}
+
+impl Settings {
+    /// The key bound to `hotkey`, as a name; empty when unbound.
+    pub fn key(&self, hotkey: Hotkey) -> &str {
+        match hotkey {
+            Hotkey::Talk => &self.ptt_key,
+            Hotkey::Mute => &self.mute_key,
+            Hotkey::Deafen => &self.deafen_key,
+            Hotkey::HangUp => &self.hangup_key,
+        }
+    }
+
+    /// Whether `hotkey` acts only while held: `None` for shortcuts that
+    /// have no such choice.
+    pub fn hold(&self, hotkey: Hotkey) -> Option<bool> {
+        match hotkey {
+            Hotkey::Mute => Some(self.mute_hold),
+            Hotkey::Deafen => Some(self.deafen_hold),
+            Hotkey::Talk | Hotkey::HangUp => None,
+        }
+    }
 }
 
 /// How the microphone decides to send.
