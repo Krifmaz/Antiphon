@@ -174,6 +174,10 @@ pub struct ActiveCall {
     /// The rest of their profile (picture, About, colour), once their
     /// `Profile` message arrives; taken by the UI thread to save it.
     pub peer_card: Arc<Mutex<Option<crate::control::ProfileCard>>>,
+    /// Their account's device list, as their `Devices` message carried it
+    /// (hex), once it arrives; checked with their `Hello` by the UI thread
+    /// (see `crate::contact_devices::CallCheck`).
+    pub peer_devices: Arc<Mutex<Option<String>>>,
     /// Kept around so the UI thread can re-send an updated `Hello` (e.g.
     /// after the user edits their profile mid-call) via `AppState::runtime`
     /// -- see `main::sync_transmit_from_ui`'s sibling for profile pushes.
@@ -1449,11 +1453,20 @@ pub fn start_pipeline(
 
     // Best-effort: sent a few times a beat apart in case the first UDP
     // datagram is lost before the peer's socket is even listening yet.
+    // The account's device list goes first, so it is there when the
+    // `Hello` and its device proof are checked.
     {
         let hello_peer = peer.clone();
+        let mut local_hello = local_hello;
+        local_hello.device = crate::delivery::hello_proof(&peer.peer_identity().identity_key);
+        let devices = crate::delivery::my_devices_hex();
         tokio::spawn(async move {
             let bytes = ControlMessage::Hello(local_hello).encode();
+            let devices = (!devices.is_empty()).then(|| ControlMessage::Devices { list: devices }.encode());
             for _ in 0..3 {
+                if let Some(devices) = &devices {
+                    let _ = hello_peer.send_control(devices).await;
+                }
                 let _ = hello_peer.send_control(&bytes).await;
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
@@ -1763,6 +1776,8 @@ pub fn start_pipeline(
     *group.video.lock().unwrap() = Some(video.clone());
     let peer_card = Arc::new(Mutex::new(None));
     let recv_card = peer_card.clone();
+    let peer_devices = Arc::new(Mutex::new(None));
+    let recv_devices = peer_devices.clone();
     let recv_video = video.clone();
     // The primary connection's voice decoder; its losses go into our
     // reports back (spec §2 automatic bandwidth), as source 0.
@@ -1938,6 +1953,7 @@ pub fn start_pipeline(
                     }
                     Some(ControlMessage::FriendReject) => {}
                     Some(ControlMessage::Profile(card)) => *recv_card.lock().unwrap() = Some(card),
+                    Some(ControlMessage::Devices { list }) => *recv_devices.lock().unwrap() = Some(list),
                     Some(other) => file_transfer::handle_control_message(other, &recv_ft_state, &recv_ft_peer),
                     None => {}
                 },
@@ -2257,6 +2273,7 @@ pub fn start_pipeline(
         mic_level,
         peer_profile,
         peer_card,
+        peer_devices,
         peer,
         monitor_enabled,
         soundboard_queue,

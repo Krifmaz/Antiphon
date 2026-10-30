@@ -460,6 +460,7 @@ pub fn handle_control_message(msg: ControlMessage, state: &Arc<Mutex<FileTransfe
         | ControlMessage::GroupSfu { .. }
         | ControlMessage::Community { .. }
         | ControlMessage::Profile(_)
+        | ControlMessage::Devices { .. }
         | ControlMessage::MlsKeyPackage(_)
         | ControlMessage::MlsWelcome(_)
         | ControlMessage::MlsCommit(_)

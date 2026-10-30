@@ -12,6 +12,8 @@ pub enum CryptoError {
     MalformedDeviceList,
     #[error("device list sequence {offered} does not supersede the known sequence {known}")]
     StaleDeviceList { offered: u64, known: u64 },
+    #[error("signed by a device that is not on the account's device list")]
+    DeviceNotAuthorized,
     #[error("recovery phrase is not a valid 24-word phrase")]
     InvalidRecoveryPhrase,
     #[error("that is not a valid recovery share")]

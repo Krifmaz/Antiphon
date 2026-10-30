@@ -157,8 +157,9 @@ fn unspecified_for(nodes: &[SocketAddr]) -> SocketAddr {
 
 /// Applies a found record to a saved contact. Returns whether anything
 /// changed. The record is already proven to be theirs; the route list
-/// inside is checked again against its own signature and sequence.
-pub fn apply(contact: &mut Contact, sequence: u64, found: &Whereabouts) -> bool {
+/// inside is checked again against its own signature and sequence, and
+/// against the contact's devices in `known`.
+pub fn apply(contact: &mut Contact, sequence: u64, found: &Whereabouts, known: &mut crate::contact_devices::ContactDevices) -> bool {
     let mut changed = false;
     if contact.dht_sequence.is_some_and(|s| sequence <= s) {
         return false;
@@ -174,15 +175,9 @@ pub fn apply(contact: &mut Contact, sequence: u64, found: &Whereabouts) -> bool 
         contact.relay.clone_from(&found.relay);
         changed = true;
     }
-    if !found.route_record.is_empty() {
-        let encoded = crate::delivery::hex(&found.route_record);
-        if let Some(key) = crate::connection_mode::decode_hex32(&contact.identity_key) {
-            if let Some(record) = crate::delivery::accept_record(&encoded, &key, contact.route_sequence) {
-                contact.route_record = encoded;
-                contact.route_sequence = Some(record.record.sequence);
-                changed = true;
-            }
-        }
+    // Proved by one of their devices once their devices are known.
+    if !found.route_record.is_empty() && crate::delivery::take_record(contact, &crate::delivery::hex(&found.route_record), known) {
+        changed = true;
     }
     changed
 }
@@ -322,13 +317,15 @@ async fn round(published: &mut Option<(Whereabouts, tokio::time::Instant)>, look
     // the lookups ran.
     let mut config = crate::config::load();
     let mut names = Vec::new();
-    for (key, sequence, found) in moved {
-        if let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == key) {
-            if apply(contact, sequence, &found) {
-                names.push(contact.name.clone());
+    crate::delivery::with_contact_devices(|known| {
+        for (key, sequence, found) in moved {
+            if let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == key) {
+                if apply(contact, sequence, &found, known) {
+                    names.push(contact.name.clone());
+                }
             }
         }
-    }
+    });
     crate::config::save(&config);
     if !names.is_empty() {
         set_status(format!("Updated where to reach {}.", names.join(", ")));
@@ -357,7 +354,7 @@ pub async fn find_contact_now(identity_key_hex: &str, tried: &str) -> Option<Str
     let (sequence, found) = lookup(&key, &bootstrap, None, now_secs(), opts).await?;
     let mut config = crate::config::load();
     if let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == identity_key_hex) {
-        if known.is_none_or(|k| sequence > k) && apply(contact, sequence, &found) {
+        if known.is_none_or(|k| sequence > k) && crate::delivery::with_contact_devices(|devices| apply(contact, sequence, &found, devices)).unwrap_or(false) {
             crate::config::save(&config);
             REVISION.fetch_add(1, Ordering::Relaxed);
         }
@@ -455,11 +452,11 @@ mod tests {
     fn a_found_record_updates_a_contact_once() {
         let mut c = Contact { name: "Ana".into(), address: "198.51.100.1:4000".into(), ..Default::default() };
         let w = Whereabouts { addresses: vec!["198.51.100.9:4000".into()], relay: "r.example:3479".into(), route_record: vec![] };
-        assert!(apply(&mut c, 5, &w));
+        assert!(apply(&mut c, 5, &w, &mut Default::default()));
         assert_eq!(c.address, "198.51.100.9:4000");
         assert_eq!(c.relay, "r.example:3479");
         let old = Whereabouts { addresses: vec!["192.0.2.1:1".into()], ..w.clone() };
-        assert!(!apply(&mut c, 4, &old), "an older record changes nothing");
+        assert!(!apply(&mut c, 4, &old, &mut Default::default()), "an older record changes nothing");
         assert_eq!(c.address, "198.51.100.9:4000");
     }
 
@@ -504,7 +501,7 @@ mod tests {
             identity_key: crate::delivery::hex(&key),
             ..Default::default()
         };
-        assert!(apply(&mut contact, sequence, &found));
+        assert!(apply(&mut contact, sequence, &found, &mut Default::default()));
         assert_eq!(contact.address, "198.51.100.7:4000");
         assert_eq!(contact.route_sequence, Some(3), "the route list inside came along");
         // Someone else can't find her under their own key.

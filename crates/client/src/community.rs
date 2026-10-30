@@ -2342,9 +2342,10 @@ impl Store {
     pub fn card_for(&self, id: &Key, identity: &IdentityKeyPair) -> Card {
         let config = crate::config::load();
         // The main identity's cards carry its mail key; a separate persona
-        // has none of its own.
+        // has none of its own. No device proof: members aren't contacts, and
+        // needn't learn which device wrote the card.
         let keys = if identity.public().identity_key == self.identity.public().identity_key { crate::delivery::my_mail_keys() } else { Default::default() };
-        let record = crate::delivery::my_record_with(identity, &keys, &config.routes, config.strict_mode, config.route_sequence);
+        let record = crate::delivery::my_record_with(identity, &keys, None, &config.routes, config.strict_mode, config.route_sequence);
         card_as(identity, crate::delivery::encode_record(&record), &config.profile, &self.appearance(id))
     }
 
@@ -3059,7 +3060,7 @@ impl Store {
                 unreachable.push(q.to);
                 continue;
             };
-            let body = crate::delivery::MailBody { id: q.id, text: String::new(), at_secs: now_secs(), group: Some(q.fragment.clone()), reply_to: None };
+            let body = crate::delivery::MailBody { id: q.id, text: String::new(), at_secs: now_secs(), group: Some(q.fragment.clone()), ..Default::default() };
             let sender: &IdentityKeyPair = match q.persona {
                 Some(id) => personas.entry(id).or_insert_with(|| identity_for(&self.identity, &id, true)),
                 None => &self.identity,
@@ -4124,7 +4125,7 @@ mod tests {
         assert!(frags.len() > 1);
         // Each, sealed in a mail body, fits a mailbox blob.
         for f in &frags {
-            let body = crate::delivery::MailBody { id: u64::MAX, text: String::new(), at_secs: u64::MAX, group: Some(f.clone()), reply_to: None };
+            let body = crate::delivery::MailBody { id: u64::MAX, text: String::new(), at_secs: u64::MAX, group: Some(f.clone()), ..Default::default() };
             let sealed = antiphon_crypto::mail::seal(&alice, &bob.public().identity_key, &bob.public().prekey, &serde_json::to_vec(&body).unwrap()).unwrap();
             assert!(sealed.len() <= antiphon_net::mailbox::MAX_BLOB, "{}", sealed.len());
         }
@@ -4179,7 +4180,7 @@ mod tests {
                 for (from, out) in std::mem::take(&mut outs) {
                     let card = own.iter().chain(cards).find(|c| c.key.0 == out.to).expect("a card for everyone");
                     for f in fragments(&out.wire) {
-                        let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f), reply_to: None };
+                        let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f), ..Default::default() };
                         let sent = crate::delivery::send(&people[from].id, &out.to, &card.prekey().unwrap(), &card.record().unwrap(), &body, false).await;
                         assert_eq!(sent, crate::delivery::Sent::Deposited(1));
                     }
@@ -4282,7 +4283,7 @@ mod tests {
             for (from, out) in std::mem::take(&mut outs) {
                 let card = cards.iter().find(|c| c.key.0 == out.to).expect("a card for everyone");
                 for f in fragments(&out.wire) {
-                    let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f), reply_to: None };
+                    let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f), ..Default::default() };
                     let sent = crate::delivery::send(from, &out.to, &card.prekey().unwrap(), &card.record().unwrap(), &body, false).await;
                     assert_eq!(sent, crate::delivery::Sent::Deposited(1));
                 }

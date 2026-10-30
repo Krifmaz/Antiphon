@@ -22,18 +22,28 @@
 //!   hears from its siblings it sees itself gone and signs out
 //!   ([`accept`], [`Accepted::RemovedHere`]).
 //!
+//! **Endorsements.** Every device endorses each list it makes or accepts
+//! with its own key, and the endorsements are kept beside the list in
+//! `devices.endorsements` and shared with the siblings. Contacts are sent
+//! the list with them ([`carried`]) and only take a new list a device they
+//! already know endorses -- so a removed device, which still holds the
+//! master seed, can't sign itself back in (see
+//! [`antiphon_crypto::device`]).
+//!
 //! Pure file handling: nothing here touches the network, so the phone app
 //! can share this module by path as it does `history`.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use antiphon_crypto::{DeviceCredential, DeviceKeyPair, DeviceList, IdentityKeyPair, PublicIdentity, SignedDeviceList};
+use antiphon_crypto::{CarriedList, DeviceCredential, DeviceKeyPair, DeviceList, DeviceProof, IdentityKeyPair, PublicIdentity, SignedDeviceList};
 
 /// The file holding this device's own keypair.
 pub const DEVICE_KEY_FILE: &str = "device.key";
 /// The file holding the account's signed device list.
 pub const LIST_FILE: &str = "devices.list";
+/// The file holding the devices' endorsements of the current list.
+pub const ENDORSEMENTS_FILE: &str = "devices.endorsements";
 /// The longest device name the list accepts (the crypto layer's cap).
 pub const MAX_NAME_CHARS: usize = 64;
 
@@ -78,6 +88,60 @@ pub fn save_list(dir: &Path, list: &SignedDeviceList) -> std::io::Result<()> {
     std::fs::rename(&tmp, &path)
 }
 
+/// The endorsements of `list` held here: valid ones by devices on it,
+/// one per device.
+pub fn endorsements(dir: &Path, list: &SignedDeviceList) -> Vec<DeviceProof> {
+    let bytes = std::fs::read(dir.join(ENDORSEMENTS_FILE)).unwrap_or_default();
+    let mut out: Vec<DeviceProof> = Vec::new();
+    for proof in bytes.chunks_exact(DeviceProof::ENCODED_LEN).filter_map(|c| DeviceProof::decode(c).ok()) {
+        if !out.iter().any(|p| p.device == proof.device) && list.is_endorsed_by(&proof) {
+            out.push(proof);
+        }
+    }
+    out
+}
+
+/// Adds `proofs` to the endorsements of `list` held here, dropping any
+/// that don't endorse it (and every endorsement of an older list). Returns
+/// whether anything was added.
+pub fn add_endorsements(dir: &Path, list: &SignedDeviceList, proofs: impl IntoIterator<Item = DeviceProof>) -> bool {
+    let mut held = endorsements(dir, list);
+    let before = held.len();
+    for proof in proofs {
+        if !held.iter().any(|p| p.device == proof.device) && list.is_endorsed_by(&proof) {
+            held.push(proof);
+        }
+    }
+    let bytes: Vec<u8> = held.iter().flat_map(DeviceProof::encode).collect();
+    // Written even when nothing was added, so endorsements of an older
+    // list don't linger.
+    let path = dir.join(ENDORSEMENTS_FILE);
+    let tmp = path.with_extension("endorsements.tmp");
+    let written = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path));
+    written.is_ok() && held.len() > before
+}
+
+/// Endorses the list here with this device's key (once). Returns the
+/// endorsement, for the siblings.
+pub fn endorse(dir: &Path, list: &SignedDeviceList, device: &DeviceKeyPair) -> DeviceProof {
+    let proof = list.endorse(device);
+    add_endorsements(dir, list, [proof]);
+    proof
+}
+
+/// The account's list with its endorsements, as contacts are sent it.
+pub fn carried(dir: &Path, account: &[u8; 32]) -> Option<CarriedList> {
+    let list = load_list(dir, account)?;
+    Some(CarriedList { endorsements: endorsements(dir, &list), list })
+}
+
+/// Saves a list this device made and endorses it.
+fn save_endorsed(dir: &Path, list: &SignedDeviceList, device: &DeviceKeyPair) -> Result<(), String> {
+    save_list(dir, list).map_err(|e| e.to_string())?;
+    endorse(dir, list, device);
+    Ok(())
+}
+
 /// A name for the list, cut to what it holds. Blank becomes `fallback`.
 pub fn clean_name(name: &str, fallback: &str) -> String {
     let name = name.trim();
@@ -104,21 +168,26 @@ pub fn clean_name(name: &str, fallback: &str) -> String {
 pub fn ensure(dir: &Path, account: &IdentityKeyPair, device: &DeviceKeyPair, name: &str) -> Result<SignedDeviceList, String> {
     let key = account.public().identity_key;
     let me = device.public();
-    match load_list(dir, &key) {
-        Some(list) if list.authorizes(&me.identity_key) => Ok(list),
+    let list = match load_list(dir, &key) {
+        Some(list) if list.authorizes(&me.identity_key) => {
+            // Listed already; endorsed too, unless the list came from a
+            // sibling before this device could.
+            if !endorsements(dir, &list).iter().any(|p| p.device == me.identity_key) {
+                endorse(dir, &list, device);
+            }
+            return Ok(list);
+        }
         Some(list) => {
             let credential = DeviceCredential::approve(account, me, &clean_name(name, "This device"), now_secs()).map_err(|e| e.to_string())?;
-            let next = list.with_device(account, credential).map_err(|e| e.to_string())?;
-            save_list(dir, &next).map_err(|e| e.to_string())?;
-            Ok(next)
+            list.with_device(account, credential).map_err(|e| e.to_string())?
         }
         None => {
             let credential = DeviceCredential::approve(account, me, &clean_name(name, "This device"), now_secs()).map_err(|e| e.to_string())?;
-            let list = DeviceList { identity_key: key, sequence: 1, devices: vec![credential] }.sign(account).map_err(|e| e.to_string())?;
-            save_list(dir, &list).map_err(|e| e.to_string())?;
-            Ok(list)
+            DeviceList { identity_key: key, sequence: 1, devices: vec![credential] }.sign(account).map_err(|e| e.to_string())?
         }
-    }
+    };
+    save_endorsed(dir, &list, device)?;
+    Ok(list)
 }
 
 /// Approves another device into the account: the step an existing device
@@ -134,7 +203,7 @@ pub fn approve(dir: &Path, account: &IdentityKeyPair, this_device: &DeviceKeyPai
     }
     let credential = DeviceCredential::approve(account, *new, &clean_name(name, "New device"), now_secs()).map_err(|e| e.to_string())?;
     let next = list.with_device(account, credential).map_err(|e| e.to_string())?;
-    save_list(dir, &next).map_err(|e| e.to_string())?;
+    save_endorsed(dir, &next, this_device)?;
     Ok(next)
 }
 
@@ -153,7 +222,7 @@ pub fn revoke(dir: &Path, account: &IdentityKeyPair, this_device: &DeviceKeyPair
         return Err("That device isn't on your account any more.".into());
     }
     let next = list.without_device(account, gone).map_err(|e| e.to_string())?;
-    save_list(dir, &next).map_err(|e| e.to_string())?;
+    save_endorsed(dir, &next, this_device)?;
     Ok(next)
 }
 
@@ -171,12 +240,14 @@ pub enum Accepted {
 }
 
 /// Takes a list another of the account's devices sent, if it is newer and
-/// genuinely signed by the account.
+/// genuinely signed by the account, and endorses it when it still names
+/// this device.
 ///
 /// Only a list that *used* to name this device and no longer does counts
 /// as removal. A device that never made it into the list (an old-style
 /// move that hasn't started yet) is not signed out by an unrelated change.
-pub fn accept(dir: &Path, account: &[u8; 32], this_device: &[u8; 32], incoming: &SignedDeviceList) -> Accepted {
+pub fn accept(dir: &Path, account: &[u8; 32], device: &DeviceKeyPair, incoming: &SignedDeviceList) -> Accepted {
+    let this_device = &device.public().identity_key;
     if incoming.list.identity_key != *account {
         return Accepted::Ignored;
     }
@@ -188,11 +259,11 @@ pub fn accept(dir: &Path, account: &[u8; 32], this_device: &[u8; 32], incoming: 
         return Accepted::Ignored;
     }
     let was_listed = held.is_some_and(|l| l.authorizes(this_device));
-    if was_listed && !incoming.authorizes(this_device) {
-        Accepted::RemovedHere
-    } else {
-        Accepted::Updated
+    if !incoming.authorizes(this_device) {
+        return if was_listed { Accepted::RemovedHere } else { Accepted::Updated };
     }
+    endorse(dir, incoming, device);
+    Accepted::Updated
 }
 
 /// Now, in unix seconds.
@@ -289,12 +360,33 @@ mod tests {
         save_list(&third, &both).unwrap();
 
         let without_phone = revoke(&here, &account, &desktop, &phone.public().identity_key).unwrap();
-        assert_eq!(accept(&there, &key, &phone.public().identity_key, &without_phone), Accepted::RemovedHere);
-        assert_eq!(accept(&third, &key, &laptop.public().identity_key, &without_phone), Accepted::Updated);
+        assert_eq!(accept(&there, &key, &phone, &without_phone), Accepted::RemovedHere);
+        assert_eq!(accept(&third, &key, &laptop, &without_phone), Accepted::Updated);
         // Hearing it twice changes nothing more.
-        assert_eq!(accept(&third, &key, &laptop.public().identity_key, &without_phone), Accepted::Ignored);
+        assert_eq!(accept(&third, &key, &laptop, &without_phone), Accepted::Ignored);
         // And the older list can't be replayed to bring the phone back.
-        assert_eq!(accept(&third, &key, &laptop.public().identity_key, &both), Accepted::Ignored);
+        assert_eq!(accept(&third, &key, &laptop, &both), Accepted::Ignored);
+    }
+
+    #[test]
+    fn each_device_endorses_the_list_and_contacts_get_both() {
+        let (here, there) = (folder("endorse-a"), folder("endorse-b"));
+        let account = IdentityKeyPair::generate();
+        let key = account.public().identity_key;
+        let (desktop, phone) = (DeviceKeyPair::generate(), DeviceKeyPair::generate());
+        let list = approve(&here, &account, &desktop, &phone.public(), "Phone").unwrap();
+        assert_eq!(endorsements(&here, &list).len(), 1, "the approving device endorses");
+        // The phone receives it, endorses it, and the desktop hears back.
+        save_list(&there, &list).unwrap();
+        let theirs = ensure(&there, &account, &phone, "Phone").unwrap();
+        assert_eq!(theirs, list);
+        let from_phone = endorsements(&there, &list);
+        assert!(add_endorsements(&here, &list, from_phone));
+        let carried = carried(&here, &key).unwrap();
+        assert_eq!(carried.endorsements.len(), 2);
+        // A newer list leaves the older endorsements behind.
+        let next = revoke(&here, &account, &desktop, &phone.public().identity_key).unwrap();
+        assert_eq!(endorsements(&here, &next).len(), 1);
     }
 
     #[test]

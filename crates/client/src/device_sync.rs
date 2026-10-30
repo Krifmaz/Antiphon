@@ -31,6 +31,10 @@
 //! removed one. So the removed device keeps nothing that opens the
 //! account's future mail.
 //!
+//! **Endorsements.** Each device endorses every list it accepts and tells
+//! the others ([`DeviceMail::Endorse`]), so whichever device talks to a
+//! contact can show them every endorsement (see `crate::devices`).
+//!
 //! **Network.** What sockets and names mean differs between the apps (the
 //! desktop routes messages through the VPN when asked, the phone simply
 //! binds), so a round is given a [`Network`] that answers for it.
@@ -46,7 +50,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use antiphon_crypto::{hex, mail, BackupKey, DeviceKeyPair, IdentityKeyPair, PublicIdentity, SignedDeviceList};
+use antiphon_crypto::{hex, mail, BackupKey, DeviceKeyPair, DeviceProof, IdentityKeyPair, PublicIdentity, SignedDeviceList};
 use antiphon_net::{mailbox, Datagram};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
@@ -55,6 +59,7 @@ use sha2::Sha256;
 use crate::devices::{self, Accepted};
 use crate::history::{self, StoredMessage};
 use crate::mail_keys::MailKeys;
+use crate::parts;
 
 /// How the app reaches the account's mailbox nodes.
 pub trait Network: Send + Sync + 'static {
@@ -73,12 +78,8 @@ pub trait Network: Send + Sync + 'static {
 const NODE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Where pieces of a message wait for the rest.
 const PARTS_FILE: &str = "devices.parts";
-/// Bytes of frame header: message id, index, count.
-const FRAME_HEADER: usize = 8 + 1 + 1;
 /// Bytes of message in one frame, so the sealed frame fits a mailbox.
-const FRAME_DATA: usize = mailbox::MAX_BLOB - mail::OVERHEAD - FRAME_HEADER;
-/// The most frames one message may take (about 200 KB).
-const MAX_FRAMES: usize = 255;
+const FRAME_DATA: usize = mailbox::MAX_BLOB - mail::OVERHEAD - parts::HEADER;
 
 /// The file pending sibling mail waits in.
 pub const OUTBOX_FILE: &str = "devices.outbox";
@@ -103,6 +104,16 @@ pub enum DeviceMail {
     List {
         /// The encoded list, hex.
         list: String,
+        /// The sending device's endorsements of it
+        /// ([`antiphon_crypto::DeviceProof`] each, hex). Defaulted for
+        /// devices on builds without them.
+        #[serde(default)]
+        endorsements: Vec<String>,
+    },
+    /// A device's endorsement of the current list, once it has it.
+    Endorse {
+        /// The endorsement, hex.
+        proof: String,
     },
     /// A change to the notes-to-self conversation.
     Note(NoteOp),
@@ -216,7 +227,9 @@ pub fn send(dir: &Path, device: &DeviceKeyPair, list: &SignedDeviceList, also: O
     if to.is_empty() {
         return Ok(());
     }
-    let frames = frames(&serde_json::to_vec(message).expect("device mail always serializes"))?;
+    // A device list or a long note is bigger than one mailbox blob, so
+    // every message travels in pieces.
+    let frames = parts::split(&serde_json::to_vec(message).expect("device mail always serializes"), FRAME_DATA)?;
     let mut pending = load_pending(dir);
     for recipient in to {
         for frame in &frames {
@@ -232,81 +245,11 @@ pub fn send(dir: &Path, device: &DeviceKeyPair, list: &SignedDeviceList, also: O
     Ok(())
 }
 
-/// Cuts a message into frames that each fit a mailbox once sealed:
-/// `message id[8] index u8 count u8 data`.
-///
-/// A device list or a long note is bigger than one mailbox blob, so every
-/// message travels this way; the receiver puts the pieces back together
-/// ([`reassemble`]).
-fn frames(plain: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
-    let chunks: Vec<&[u8]> = if plain.is_empty() { vec![plain] } else { plain.chunks(FRAME_DATA).collect() };
-    if chunks.len() > MAX_FRAMES {
-        return Err(std::io::Error::other("too long to send to your other devices"));
-    }
-    let mut id = [0u8; 8];
-    getrandom::fill(&mut id).expect("OS randomness is unavailable");
-    Ok(chunks
-        .iter()
-        .enumerate()
-        .map(|(i, data)| {
-            let mut frame = Vec::with_capacity(FRAME_HEADER + data.len());
-            frame.extend_from_slice(&id);
-            frame.push(i as u8);
-            frame.push(chunks.len() as u8);
-            frame.extend_from_slice(data);
-            frame
-        })
-        .collect())
-}
-
-/// Pieces of messages still waiting for the rest, by sender and message
-/// id: how many pieces there are, the ones here (index → data, hex), and
-/// when the first came.
-type Parts = std::collections::BTreeMap<String, (u8, std::collections::BTreeMap<u8, String>, u64)>;
-
-/// Takes one frame from `sender` and returns the whole message once every
-/// piece is here. Pieces wait in `devices.parts`, sealed under the history
-/// key (they are readable once opened), for up to [`PENDING_LIFETIME`].
-fn reassemble(dir: &Path, key: &BackupKey, sender: &[u8; 32], frame: &[u8]) -> Option<Vec<u8>> {
-    if frame.len() < FRAME_HEADER {
-        return None;
-    }
-    let (id, index, count, data) = (&frame[..8], frame[8], frame[9], &frame[FRAME_HEADER..]);
-    if count == 0 || index >= count {
-        return None;
-    }
-    if count == 1 {
-        return Some(data.to_vec());
-    }
-    let path = dir.join(PARTS_FILE);
-    let mut parts: Parts = std::fs::read(&path)
-        .ok()
-        .and_then(|b| key.open_content(&b).ok())
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    let now = now_secs();
-    parts.retain(|_, (_, _, first)| now.saturating_sub(*first) <= PENDING_LIFETIME.as_secs());
-    let slot = format!("{}:{}", hex::encode(sender), hex::encode(id));
-    let entry = parts.entry(slot.clone()).or_insert_with(|| (count, Default::default(), now));
-    if entry.0 != count {
-        return None;
-    }
-    entry.1.insert(index, hex::encode(data));
-    let whole = (entry.1.len() == count as usize).then(|| entry.1.values().filter_map(|h| hex::decode(h)).flatten().collect::<Vec<u8>>());
-    if whole.is_some() {
-        parts.remove(&slot);
-    }
-    let plain = serde_json::to_vec(&parts).expect("parts always serialize");
-    if let Ok(sealed) = key.seal_content(&plain) {
-        let _ = std::fs::write(&path, sealed);
-    }
-    whole
-}
-
 /// Tells the account's other devices about a list change. `removed` is a
 /// device just taken off, which is told too.
 pub fn send_list(dir: &Path, device: &DeviceKeyPair, list: &SignedDeviceList, removed: Option<&PublicIdentity>) -> std::io::Result<()> {
-    send(dir, device, list, removed, &DeviceMail::List { list: hex::encode(&list.encode()) })
+    let endorsements = devices::endorsements(dir, list).iter().map(|p| hex::encode(&p.encode())).collect();
+    send(dir, device, list, removed, &DeviceMail::List { list: hex::encode(&list.encode()), endorsements })
 }
 
 /// Removes a device from the account, from this one: the shorter list goes
@@ -442,20 +385,36 @@ fn receive(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, device: &Devi
     // Sealed to the device's key, never the account's.
     let Ok((sender, frame)) = mail::open(device, blob) else { return };
     let me = &device.public().identity_key;
-    let Some(plain) = reassemble(dir, key, &sender.identity_key, &frame) else { return };
+    let Some(plain) = parts::join(&dir.join(PARTS_FILE), key, &sender.identity_key, &frame, PENDING_LIFETIME) else { return };
     let Ok(message) = serde_json::from_slice::<DeviceMail>(&plain) else { return };
     let account_key = account.public().identity_key;
     match message {
-        DeviceMail::List { list } => {
+        DeviceMail::List { list, endorsements } => {
             // Believed for its own signature, whoever carried it.
             let Some(list) = hex::decode(&list).and_then(|b| SignedDeviceList::decode(&b).ok()) else { return };
-            match devices::accept(dir, &account_key, me, &list) {
+            let accepted = devices::accept(dir, &account_key, device, &list);
+            devices::add_endorsements(dir, &list, endorsements.iter().filter_map(|e| hex::decode(e)).filter_map(|b| DeviceProof::decode(&b).ok()));
+            match accepted {
                 Accepted::Ignored => {}
-                Accepted::Updated => out.list_changed = true,
+                Accepted::Updated => {
+                    out.list_changed = true;
+                    // Tell the siblings this device endorses it too, so any
+                    // of them can show contacts every endorsement.
+                    if list.authorizes(me) {
+                        let proof = hex::encode(&list.endorse(device).encode());
+                        let _ = send(dir, device, &list, None, &DeviceMail::Endorse { proof });
+                    }
+                }
                 Accepted::RemovedHere => {
                     out.list_changed = true;
                     out.removed_here = true;
                 }
+            }
+        }
+        DeviceMail::Endorse { proof } => {
+            let (Some(list), Some(proof)) = (devices::load_list(dir, &account_key), hex::decode(&proof).and_then(|b| DeviceProof::decode(&b).ok())) else { return };
+            if devices::add_endorsements(dir, &list, [proof]) {
+                out.list_changed = true;
             }
         }
         DeviceMail::Note(op) => {
@@ -627,24 +586,6 @@ mod tests {
         dir: PathBuf,
         /// Its own keypair.
         keys: DeviceKeyPair,
-    }
-
-    #[test]
-    fn a_long_message_comes_back_whole_from_its_pieces_in_any_order() {
-        let dir = folder("frames");
-        let key = BackupKey::generate();
-        let message: Vec<u8> = (0..3_000u32).map(|i| (i % 251) as u8).collect();
-        let mut pieces = frames(&message).unwrap();
-        assert!(pieces.len() > 1);
-        assert!(pieces.iter().all(|f| f.len() + mail::OVERHEAD <= mailbox::MAX_BLOB));
-        pieces.reverse();
-        let last = pieces.pop().unwrap();
-        for p in &pieces {
-            assert!(reassemble(&dir, &key, &[1; 32], p).is_none());
-        }
-        assert_eq!(reassemble(&dir, &key, &[1; 32], &last), Some(message));
-        // Pieces from someone else never complete another sender's message.
-        assert!(reassemble(&dir, &key, &[2; 32], &pieces[0]).is_none());
     }
 
     #[test]

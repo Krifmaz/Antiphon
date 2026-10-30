@@ -75,6 +75,8 @@ impl MyDevices {
     pub fn start(runtime: &tokio::runtime::Handle, dir: &Path, account: Arc<IdentityKeyPair>, key: BackupKey) -> Result<Self, String> {
         let device = devices::load_or_create_device(dir).map_err(|e| format!("Couldn't load this device's key: {e}"))?;
         let list = devices::ensure(dir, &account, &device, &computer_name())?;
+        // Mail and the route record the courier sends carry this device's proof.
+        delivery::set_device(Arc::new(DeviceKeyPair::from_master_seed(device.master_seed())));
         let copy = DeviceKeyPair::from_master_seed(device.master_seed());
         // Runs for the life of the app: a different account means a restart.
         drop(device_sync::start(runtime, dir.to_path_buf(), account.clone(), key.clone(), copy, DesktopNet));

@@ -28,6 +28,18 @@
 //! Revocation is by omission rather than by tombstone because the list is
 //! the authority: a peer holding sequence 7 does not care what was in
 //! sequence 6, only who is authorized now.
+//!
+//! **Signing as a device.** Every device of an account holds the master
+//! seed, so a device that has been removed can still sign as the account
+//! -- including a new device list. Two things keep it out:
+//!
+//! - What a device sends contacts carries a [`DeviceProof`]: the device's
+//!   own signature, which a contact checks against the list it holds
+//!   ([`SignedDeviceList::check`]). A removed device's key is not on it.
+//! - A new list is only taken in place of a known one when a device on
+//!   the *known* list endorses it ([`CarriedList`], [`judge`]). The master
+//!   signature alone -- which a removed device can still make -- is not
+//!   enough to change who speaks for the account.
 
 use crate::error::CryptoError;
 use crate::identity::{verify_signature, IdentityKeyPair, PublicIdentity};
@@ -35,6 +47,10 @@ use crate::identity::{verify_signature, IdentityKeyPair, PublicIdentity};
 // Frozen under the project's old name -- see "Frozen labels" in `lib.rs`.
 const CREDENTIAL_CONTEXT: &[u8] = b"voip-app/device/credential/v1";
 const LIST_CONTEXT: &[u8] = b"voip-app/device/list/v1";
+/// Domain separation for a device's own signatures ([`DeviceProof`]).
+const PROOF_CONTEXT: &[u8] = b"stoop/device/proof/v1";
+/// What a [`DeviceProof`] endorsing a device list is made for.
+const ENDORSE_PURPOSE: &[u8] = b"list";
 
 /// Upper bound on devices in one list, so a hostile list can't make a peer
 /// allocate without limit.
@@ -309,6 +325,160 @@ impl SignedDeviceList {
     }
 }
 
+/// A device's own signature over something it sends for the account:
+/// which device, and its signature. A contact believes it only from a
+/// device on the account's list ([`SignedDeviceList::check`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DeviceProof {
+    /// The signing device's key.
+    pub device: [u8; 32],
+    /// The device's signature over the purpose and message.
+    pub signature: [u8; 64],
+}
+
+impl DeviceProof {
+    /// Encoded length: device key, signature.
+    pub const ENCODED_LEN: usize = 32 + 64;
+
+    /// `device` signs `message`, made for `purpose` -- a short label
+    /// ("mail", "hello", "route") so a proof for one thing can't be passed
+    /// off as another.
+    pub fn sign(device: &DeviceKeyPair, purpose: &[u8], message: &[u8]) -> Self {
+        Self { device: device.public().identity_key, signature: device.sign(&Self::signed_bytes(purpose, message)) }
+    }
+
+    /// Checks the signature alone -- not whether the device is listed.
+    pub fn verify(&self, purpose: &[u8], message: &[u8]) -> Result<(), CryptoError> {
+        verify_signature(&self.device, &Self::signed_bytes(purpose, message), &self.signature)
+    }
+
+    /// What the signature covers.
+    fn signed_bytes(purpose: &[u8], message: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(PROOF_CONTEXT.len() + 1 + purpose.len() + message.len());
+        out.extend_from_slice(PROOF_CONTEXT);
+        // Purposes are short labels; the length keeps them from running
+        // into the message.
+        out.push(purpose.len() as u8);
+        out.extend_from_slice(purpose);
+        out.extend_from_slice(message);
+        out
+    }
+
+    /// `device[32] signature[64]`.
+    pub fn encode(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0u8; Self::ENCODED_LEN];
+        out[..32].copy_from_slice(&self.device);
+        out[32..].copy_from_slice(&self.signature);
+        out
+    }
+
+    /// Reads [`DeviceProof::encode`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let bytes: &[u8; Self::ENCODED_LEN] = bytes.try_into().map_err(|_| CryptoError::MalformedDeviceList)?;
+        Ok(Self { device: bytes[..32].try_into().expect("32 bytes"), signature: bytes[32..].try_into().expect("64 bytes") })
+    }
+}
+
+impl SignedDeviceList {
+    /// Checks `proof` was made for `purpose` over `message` by a device
+    /// this list authorizes, and returns that device's credential.
+    pub fn check(&self, proof: &DeviceProof, purpose: &[u8], message: &[u8]) -> Result<&DeviceCredential, CryptoError> {
+        let credential = self.credential(&proof.device).ok_or(CryptoError::DeviceNotAuthorized)?;
+        proof.verify(purpose, message)?;
+        Ok(credential)
+    }
+
+    /// This list's endorsement by `device`: the device vouching that this
+    /// is the account's list now (see [`judge`]).
+    pub fn endorse(&self, device: &DeviceKeyPair) -> DeviceProof {
+        DeviceProof::sign(device, ENDORSE_PURPOSE, &self.encode())
+    }
+
+    /// Whether `proof` is a valid endorsement of this list by one of the
+    /// devices on it.
+    pub fn is_endorsed_by(&self, proof: &DeviceProof) -> bool {
+        self.check(proof, ENDORSE_PURPOSE, &self.encode()).is_ok()
+    }
+}
+
+/// A device list as it travels to contacts: the list, and the endorsements
+/// of the devices on it that have seen it.
+///
+/// A contact holding an older list takes this one only when a device on
+/// the older list endorses it ([`judge`]). Each device endorses every list
+/// it accepts, so as long as one device the contact knows is still on the
+/// account, the change goes through.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CarriedList {
+    /// The account's list.
+    pub list: SignedDeviceList,
+    /// Endorsements of `list` by devices on it.
+    pub endorsements: Vec<DeviceProof>,
+}
+
+impl CarriedList {
+    /// `list_len u32 BE, list, count u8, count × DeviceProof`.
+    pub fn encode(&self) -> Vec<u8> {
+        let list = self.list.encode();
+        let mut out = Vec::with_capacity(4 + list.len() + 1 + self.endorsements.len() * DeviceProof::ENCODED_LEN);
+        out.extend_from_slice(&(list.len() as u32).to_be_bytes());
+        out.extend_from_slice(&list);
+        // A list holds at most MAX_DEVICES (64), so at most that many endorse it.
+        out.push(self.endorsements.len().min(MAX_DEVICES) as u8);
+        for proof in self.endorsements.iter().take(MAX_DEVICES) {
+            out.extend_from_slice(&proof.encode());
+        }
+        out
+    }
+
+    /// Reads [`CarriedList::encode`]. Only the shape is checked; [`judge`]
+    /// checks the signatures.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let mut r = Reader { bytes, at: 0 };
+        let len = u32::from_be_bytes(r.array::<4>()?) as usize;
+        let list = SignedDeviceList::decode(r.take(len)?)?;
+        let count = r.array::<1>()?[0] as usize;
+        if count > MAX_DEVICES {
+            return Err(CryptoError::MalformedDeviceList);
+        }
+        let endorsements = (0..count).map(|_| DeviceProof::decode(r.take(DeviceProof::ENCODED_LEN)?)).collect::<Result<Vec<_>, _>>()?;
+        if r.at != bytes.len() {
+            return Err(CryptoError::MalformedDeviceList);
+        }
+        Ok(Self { list, endorsements })
+    }
+}
+
+/// What a contact should do with a device list it was offered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Judged {
+    /// The list already held, or an older one: nothing to do.
+    Unchanged,
+    /// Newer, and endorsed by a device on the list held (or no list was
+    /// held): take it.
+    Accepted,
+    /// Newer, but no device on the list held endorses it -- what a removed
+    /// device holding the master seed could make, and also what restoring
+    /// from the recovery phrase with no old device left makes. Only taken
+    /// when the user says so, after checking with the person.
+    Unendorsed,
+}
+
+/// Decides whether a contact should take `offered` in place of `known`.
+/// An error is a list that isn't the account's at all (or is damaged).
+pub fn judge(known: Option<&SignedDeviceList>, offered: &CarriedList) -> Result<Judged, CryptoError> {
+    offered.list.verify()?;
+    let Some(known) = known else { return Ok(Judged::Accepted) };
+    if offered.list.list.identity_key != known.list.identity_key {
+        return Err(CryptoError::MalformedIdentity);
+    }
+    if offered.list.list.sequence <= known.list.sequence {
+        return Ok(Judged::Unchanged);
+    }
+    let endorsed = offered.endorsements.iter().any(|p| known.authorizes(&p.device) && offered.list.is_endorsed_by(p));
+    Ok(if endorsed { Judged::Accepted } else { Judged::Unendorsed })
+}
+
 /// A cursor over encoded bytes for [`SignedDeviceList::decode`]; every
 /// short read is a malformed list rather than a panic.
 struct Reader<'a> {
@@ -559,5 +729,50 @@ mod tests {
 
         assert!(signed.verify().is_ok());
         assert!(!signed.authorizes(&device.public().identity_key));
+    }
+
+    #[test]
+    fn a_device_proof_holds_only_for_a_listed_device_and_its_purpose() {
+        let master = IdentityKeyPair::generate();
+        let desktop = DeviceKeyPair::generate();
+        let removed = DeviceKeyPair::generate();
+        let list = list_of(&master, 2, vec![approve(&master, &desktop, "Desktop")]);
+
+        let proof = DeviceProof::sign(&desktop, b"mail", b"hello");
+        assert_eq!(list.check(&proof, b"mail", b"hello").unwrap().name, "Desktop");
+        assert!(list.check(&proof, b"hello", b"hello").is_err(), "made for something else");
+        assert!(list.check(&proof, b"mail", b"changed").is_err());
+        assert!(matches!(list.check(&DeviceProof::sign(&removed, b"mail", b"hello"), b"mail", b"hello"), Err(CryptoError::DeviceNotAuthorized)));
+        // Nor can the account's master key stand in for a device.
+        assert!(list.check(&DeviceProof::sign(&master, b"mail", b"hello"), b"mail", b"hello").is_err());
+        assert_eq!(DeviceProof::decode(&proof.encode()).unwrap(), proof);
+    }
+
+    #[test]
+    fn a_removed_device_cannot_get_a_list_of_its_own_accepted() {
+        let master = IdentityKeyPair::generate();
+        let (desktop, phone, stolen) = (DeviceKeyPair::generate(), DeviceKeyPair::generate(), DeviceKeyPair::generate());
+        let one = list_of(&master, 1, vec![approve(&master, &desktop, "Desktop"), approve(&master, &stolen, "Laptop")]);
+        // The desktop removes the laptop and adds a phone; each device
+        // endorses the list once it has it.
+        let two = one.without_device(&master, &stolen.public().identity_key).unwrap();
+        let three = two.with_device(&master, approve(&master, &phone, "Phone")).unwrap();
+        let carried = CarriedList { endorsements: vec![three.endorse(&desktop), three.endorse(&phone)], list: three.clone() };
+        let carried = CarriedList::decode(&carried.encode()).unwrap();
+        // A contact that only ever saw list one still takes it: the
+        // desktop, which it knows, vouches for it.
+        assert_eq!(judge(Some(&one), &carried).unwrap(), Judged::Accepted);
+        assert_eq!(judge(None, &carried).unwrap(), Judged::Accepted);
+        assert_eq!(judge(Some(&three), &carried).unwrap(), Judged::Unchanged);
+
+        // The laptop still holds the master seed, so it can sign a list
+        // putting itself back -- endorsed by itself, which counts for
+        // nothing once a contact holds a list without it.
+        let forged = three.with_device(&master, approve(&master, &stolen, "Laptop")).unwrap();
+        let by_itself = CarriedList { endorsements: vec![forged.endorse(&stolen)], list: forged };
+        assert_eq!(judge(Some(&three), &by_itself).unwrap(), Judged::Unendorsed);
+        // And an endorsement copied from another list doesn't carry over.
+        let copied = CarriedList { endorsements: vec![three.endorse(&desktop)], list: by_itself.list };
+        assert_eq!(judge(Some(&three), &copied).unwrap(), Judged::Unendorsed);
     }
 }

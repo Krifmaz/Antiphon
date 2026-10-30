@@ -710,6 +710,8 @@ fn local_hello(app: &MainWindow) -> Hello {
         relay: network_ui::effective_relay(app),
         lends_relay: false,
         routes: delivery::my_record_hex(),
+        // Proved per call, once the peer is known (`state`).
+        device: String::new(),
     }
 }
 

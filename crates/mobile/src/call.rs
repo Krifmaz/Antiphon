@@ -101,6 +101,9 @@ struct Shared {
     /// The rest of the profile (picture, About, colour), sent when a call
     /// connects.
     card: Mutex<ProfileCard>,
+    /// Proves calls come from this phone, one of the account's devices;
+    /// `None` until the device sync is running.
+    prover: Mutex<Option<Arc<crate::my_devices::Prover>>>,
 }
 
 impl Shared {
@@ -274,6 +277,16 @@ impl CallEngine {
     /// Surrounding whitespace is dropped.
     pub fn set_display_name(&self, name: &str) {
         *self.shared.display_name.lock().unwrap() = name.trim().to_string();
+    }
+
+    /// Sets what proves the next calls come from this phone.
+    pub fn set_prover(&self, prover: Option<Arc<crate::my_devices::Prover>>) {
+        *self.shared.prover.lock().unwrap() = prover;
+    }
+
+    /// This phone's proof for a Hello to `to`, hex; empty without one.
+    pub fn hello_proof(&self, to: &[u8; 32]) -> String {
+        self.shared.prover.lock().unwrap().as_ref().map(|p| p.hello_proof(to)).unwrap_or_default()
     }
 
     /// Sets the status line and profile card sent when the next call
@@ -650,8 +663,10 @@ async fn talk(
 
     // Who we are, for the other side's screen. Sent a few times a beat
     // apart, as the desktop does, in case the first datagram is lost
-    // before their receive loop is up.
+    // before their receive loop is up. The account's device list goes
+    // first, so it is there when the Hello's device proof is checked.
     {
+        let prover = shared.prover.lock().unwrap().clone();
         let hello = Hello {
             display_name: shared.display_name.lock().unwrap().clone(),
             status_message: shared.status_message.lock().unwrap().clone(),
@@ -660,14 +675,19 @@ async fn talk(
             relay: String::new(),
             lends_relay: false,
             routes: crate::push::published_routes(),
+            device: prover.as_ref().map(|p| p.hello_proof(&live.peer_key)).unwrap_or_default(),
         };
         let bytes = ControlMessage::Hello(hello).encode();
+        let devices = prover.map(|p| p.devices_hex()).filter(|l| !l.is_empty()).map(|list| ControlMessage::Devices { list }.encode());
         // The picture and About line follow in their own message, which
         // an older peer that does not know it simply ignores.
         let card = ControlMessage::Profile(shared.card.lock().unwrap().clone()).encode();
         let peer = peer.clone();
         tokio::spawn(async move {
             for _ in 0..3 {
+                if let Some(devices) = &devices {
+                    let _ = peer.send_control(devices).await;
+                }
                 let _ = peer.send_control(&bytes).await;
                 let _ = peer.send_control(&card).await;
                 tokio::time::sleep(Duration::from_millis(400)).await;
@@ -730,6 +750,7 @@ async fn talk(
                     // interface, so these wait for it there.
                     Some(
                         message @ (ControlMessage::Hello(_)
+                        | ControlMessage::Devices { .. }
                         | ControlMessage::Profile(_)
                         | ControlMessage::Chat { .. }
                         | ControlMessage::ChatEdit { .. }

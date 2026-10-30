@@ -25,13 +25,21 @@
 //! deposits at one node, the least metadata; **fan out** drops the same
 //! sealed message at every node, and the recipient keeps whichever copy
 //! arrives first.
+//!
+//! **Which device.** Mail and the route record carry a proof by the
+//! device that sent them, and a contact refuses either from a device the
+//! account has removed (see [`crate::contact_devices`]). When the route
+//! record or the device list changes -- a device added or removed, a new
+//! mail key -- the courier pushes both to every contact by mailbox at
+//! once ([`Update`]), rather than waiting for the next call.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use antiphon_crypto::{Route, RouteRecord, SignedRouteRecord};
-use antiphon_crypto::{mail, mail_key, IdentityKeyPair};
+use antiphon_crypto::{mail, mail_key, CarriedList, DeviceKeyPair, DeviceProof, IdentityKeyPair};
 
+use crate::contact_devices::{self, ContactDevices, Offer, Trust};
 use crate::mail_keys::MailKeys;
 use antiphon_net::mailbox::{self, InboxStatus, Label};
 use hkdf::Hkdf;
@@ -162,13 +170,14 @@ pub fn inbox_nodes(routes: &[RouteConfig], strict: bool) -> Vec<(RouteKind, Stri
 /// Your route list, signed, ready to hand to a contact: [`my_record_with`]
 /// for an identity that keeps no separate mail key (a persona, a test).
 pub fn my_record(identity: &IdentityKeyPair, routes: &[RouteConfig], strict: bool, sequence: u64) -> SignedRouteRecord {
-    my_record_with(identity, &MailKeys::default(), routes, strict, sequence)
+    my_record_with(identity, &MailKeys::default(), None, routes, strict, sequence)
 }
 
 /// Your route list, signed, with inboxes under the account's current mail
 /// key and, once that is not the identity itself, the certificate contacts
-/// seal to (see [`crate::mail_keys`]).
-pub fn my_record_with(identity: &IdentityKeyPair, keys: &MailKeys, routes: &[RouteConfig], strict: bool, sequence: u64) -> SignedRouteRecord {
+/// seal to (see [`crate::mail_keys`]). Proved by `device` when given (the
+/// account's own record; never a persona's, which mustn't be linked to it).
+pub fn my_record_with(identity: &IdentityKeyPair, keys: &MailKeys, device: Option<&DeviceKeyPair>, routes: &[RouteConfig], strict: bool, sequence: u64) -> SignedRouteRecord {
     let holder = keys.current(identity);
     let mut out = Vec::new();
     if strict || routes.iter().any(|r| r.kind == RouteKind::Direct && r.enabled) {
@@ -178,13 +187,14 @@ pub fn my_record_with(identity: &IdentityKeyPair, keys: &MailKeys, routes: &[Rou
         let label = mail::inbox_label(&holder, &node);
         out.push(Route { kind: kind.wire().to_string(), address: format!("{node}#{}", hex(&label)) });
     }
-    // The certificate always fits: it takes the last place if need be.
+    // The certificate and the device's proof always fit: they take the
+    // last places if need be.
     let cert = keys.cert(identity);
-    out.truncate(if cert.is_some() { 31 } else { 32 });
+    out.truncate(32 - usize::from(cert.is_some()) - usize::from(device.is_some()));
     if let Some(cert) = cert {
         out.push(Route { kind: mail_key::ROUTE_KIND.to_string(), address: cert.to_address() });
     }
-    RouteRecord {
+    let mut record = RouteRecord {
         identity_key: identity.public().identity_key,
         sequence,
         timestamp_secs: std::time::SystemTime::now()
@@ -192,24 +202,18 @@ pub fn my_record_with(identity: &IdentityKeyPair, keys: &MailKeys, routes: &[Rou
             .map(|d| d.as_secs())
             .unwrap_or(0),
         routes: out,
+    };
+    if let Some(device) = device {
+        contact_devices::prove_record(device, &mut record);
     }
-    .sign(identity)
-    .expect("signing our own record cannot fail")
+    record.sign(identity).expect("signing our own record cannot fail")
 }
 
 /// The prekey a recipient's record says to seal mail to: their current
 /// mail key, when they publish one their identity signed, else `None`
 /// (seal to the identity's own prekey).
 pub fn mail_key_in(record: &SignedRouteRecord) -> Option<[u8; 32]> {
-    record
-        .record
-        .routes
-        .iter()
-        .filter(|r| r.kind == mail_key::ROUTE_KIND)
-        .filter_map(|r| mail_key::MailKeyCert::from_address(&r.address))
-        .filter(|c| c.verify(&record.record.identity_key).is_ok())
-        .max_by_key(|c| c.epoch)
-        .map(|c| c.prekey)
+    contact_devices::mail_cert(record).map(|c| c.prekey)
 }
 
 /// Where in a recipient's record mail can be left: `(node, label)`, in
@@ -219,7 +223,7 @@ pub fn mailboxes_in(record: &SignedRouteRecord) -> Vec<(String, Label)> {
         .record
         .routes
         .iter()
-        .filter(|r| r.kind != RouteKind::Direct.wire() && r.kind != mail_key::ROUTE_KIND)
+        .filter(|r| r.kind != RouteKind::Direct.wire() && r.kind != mail_key::ROUTE_KIND && r.kind != contact_devices::PROOF_ROUTE_KIND)
         // A phone's push targets live in the same record; they are where
         // to wake it, never where to leave mail.
         .filter(|r| !antiphon_push::Target::is_push_route(r))
@@ -231,7 +235,7 @@ pub fn mailboxes_in(record: &SignedRouteRecord) -> Vec<(String, Label)> {
 }
 
 /// What travels inside the seal.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct MailBody {
     pub id: u64,
     pub text: String,
@@ -245,7 +249,62 @@ pub struct MailBody {
     /// as before (and show it without its quote).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// A piece of an [`Update`] (see [`crate::parts`]), hex, instead of a
+    /// message. Left out otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<String>,
+    /// The sending device's proof over the rest of the body
+    /// ([`MailBody::signed`]), hex. Added by [`send`]; left out by older
+    /// builds, whose mail is refused once their device list is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
+
+impl MailBody {
+    /// The bytes the device proof covers: the body without the proof.
+    pub fn signed(&self) -> Vec<u8> {
+        serde_json::to_vec(&MailBody { device: None, ..self.clone() }).expect("a mail body always serializes")
+    }
+
+    /// The device proof it carries, if any.
+    fn proof(&self) -> Option<DeviceProof> {
+        DeviceProof::decode(&antiphon_crypto::hex::decode(self.device.as_deref()?)?).ok()
+    }
+}
+
+/// What the courier pushes to contacts when the account's route record or
+/// device list changes: both, so the device list that proves the record
+/// arrives with it. Sent in pieces ([`crate::parts`]) by mailbox.
+pub struct Update {
+    /// This account's route record.
+    pub record: SignedRouteRecord,
+    /// This account's devices, endorsed.
+    pub devices: CarriedList,
+}
+
+impl Update {
+    /// `record_len u32 BE, record, carried list`.
+    pub fn encode(&self) -> Vec<u8> {
+        let record = self.record.encode();
+        [(record.len() as u32).to_be_bytes().as_slice(), &record, &self.devices.encode()].concat()
+    }
+
+    /// Reads [`Update::encode`]; the parts are checked where they are used.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let len = u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+        let record = SignedRouteRecord::decode(bytes.get(4..4usize.checked_add(len)?)?).ok()?;
+        let devices = CarriedList::decode(&bytes[4 + len..]).ok()?;
+        Some(Self { record, devices })
+    }
+}
+
+/// Bytes of an [`Update`] in one piece: what fits a mailbox once the piece
+/// is hex in a body's JSON (with room for the rest of the body) and sealed.
+const UPDATE_DATA: usize = (mailbox::MAX_BLOB - mail::OVERHEAD - 100) / 2 - crate::parts::HEADER;
+/// Where pieces of contacts' updates wait for the rest.
+const PARTS_FILE: &str = "contacts.parts";
+/// How long a piece waits for the rest.
+const PARTS_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How a message went out.
 #[derive(Clone, Debug, PartialEq)]
@@ -272,7 +331,16 @@ pub async fn send(
     if boxes.is_empty() {
         return Sent::NoRoute;
     }
-    let plain = serde_json::to_vec(body).expect("a mail body always serializes");
+    // Your own mail is proved by this device; a persona's, or a piece of a
+    // group message, is not -- that would tie it to this device's key. Nor
+    // is a piece of an update, which proves itself once whole.
+    let mut body = body.clone();
+    let is_main = IDENTITY.get().is_some_and(|me| me.public().identity_key == identity.public().identity_key);
+    if let (true, None, None, Some(device)) = (is_main, &body.group, &body.update, DEVICE.get()) {
+        let proof = contact_devices::prove_mail(device, their_identity, &body.signed());
+        body.device = Some(antiphon_crypto::hex::encode(&proof.encode()));
+    }
+    let plain = serde_json::to_vec(&body).expect("a mail body always serializes");
     // Their current mail key when they publish one, so a device they have
     // since removed can't open it.
     let prekey = mail_key_in(their_record).unwrap_or(*their_prekey);
@@ -500,6 +568,8 @@ pub fn accept_record(encoded: &str, their_identity: &[u8; 32], known_sequence: O
 use std::sync::{Arc, Mutex, OnceLock};
 
 static IDENTITY: OnceLock<Arc<IdentityKeyPair>> = OnceLock::new();
+/// This device's own keypair, which proves the account's mail and record.
+static DEVICE: OnceLock<Arc<DeviceKeyPair>> = OnceLock::new();
 static KICK: OnceLock<tokio::sync::Notify> = OnceLock::new();
 static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static NODE_REPORT: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -528,6 +598,58 @@ pub fn identity() -> Option<Arc<IdentityKeyPair>> {
     IDENTITY.get().cloned()
 }
 
+/// Sets this device's keypair, once: from then on the account's mail and
+/// route record carry its proof.
+pub fn set_device(device: Arc<DeviceKeyPair>) {
+    let _ = DEVICE.set(device);
+}
+
+/// This device's proof for a call's Hello to `to` (hex), or empty before
+/// the identity and device are set.
+pub fn hello_proof(to: &[u8; 32]) -> String {
+    match (IDENTITY.get(), DEVICE.get()) {
+        (Some(me), Some(device)) => antiphon_crypto::hex::encode(&contact_devices::prove_hello(device, &me.public().identity_key, to).encode()),
+        _ => String::new(),
+    }
+}
+
+/// The account's device list with its endorsements (hex), for a call's
+/// `Devices` message; empty when there is none.
+pub fn my_devices_hex() -> String {
+    let (Some(dir), Some(me)) = (crate::config::config_dir(), IDENTITY.get()) else { return String::new() };
+    crate::devices::carried(&dir, &me.public().identity_key).map(|c| antiphon_crypto::hex::encode(&c.encode())).unwrap_or_default()
+}
+
+/// Opens the device lists contacts showed this device, lets `f` read or
+/// change them, and saves them. `None` without a data folder or history key.
+pub fn with_contact_devices<R>(f: impl FnOnce(&mut ContactDevices) -> R) -> Option<R> {
+    let dir = crate::config::config_dir()?;
+    let key = crate::history::load_or_create_backup_key(&dir).ok()?;
+    let mut known = ContactDevices::load(&dir, &key);
+    let out = f(&mut known);
+    if let Err(e) = known.save(&dir, &key) {
+        eprintln!("[delivery] couldn't save contacts' devices: {e}");
+    }
+    Some(out)
+}
+
+/// Takes `encoded` as `contact`'s route record if it is theirs, newer than
+/// the one held, and proved by one of their devices (see
+/// [`ContactDevices::check_record`]). Returns whether it was taken.
+pub fn take_record(contact: &mut crate::config::Contact, encoded: &str, known: &mut ContactDevices) -> bool {
+    let Some(their_key) = crate::connection_mode::decode_hex32(&contact.identity_key) else { return false };
+    if contact.route_record == encoded {
+        return false;
+    }
+    let Some(record) = accept_record(encoded, &their_key, contact.route_sequence) else { return false };
+    if !known.check_record(&record) {
+        return false;
+    }
+    contact.route_record = encoded.to_string();
+    contact.route_sequence = Some(record.record.sequence);
+    true
+}
+
 /// Your current route list, signed and hex-encoded for a `Hello`.
 pub fn my_record_hex() -> String {
     hex(&my_record_bytes())
@@ -539,7 +661,7 @@ pub fn my_record_hex() -> String {
 pub fn my_record_bytes() -> Vec<u8> {
     let Some(identity) = IDENTITY.get() else { return Vec::new() };
     let config = crate::config::load();
-    my_record_with(identity, &my_mail_keys(), &config.routes, config.strict_mode, config.route_sequence).encode()
+    my_record_with(identity, &my_mail_keys(), DEVICE.get().map(|d| &**d), &config.routes, config.strict_mode, config.route_sequence).encode()
 }
 
 /// The account's mail keys as saved in the config folder; epoch 0 (the
@@ -637,6 +759,10 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
     let mut strangers = 0;
     let community = crate::community::Store::app();
     let keys = MailKeys::load(&dir, &key);
+    let me = identity.public().identity_key;
+    let mut known = ContactDevices::load(&dir, &key);
+    let mut refused: Vec<String> = Vec::new();
+    let mut updates: Vec<([u8; 32], Vec<u8>)> = Vec::new();
     let report = collect_with(&identity, &keys, &config.routes, config.strict_mode, config.hold_mail_for_devices, |r| {
         // A piece of a group chat or community message (spec §9): from
         // members who need not be your contacts. Whether they really are
@@ -651,6 +777,21 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
             strangers += 1;
             return true;
         };
+        // A piece of their route record and device list: whole, it proves
+        // itself (see `take_update`), so the pieces need no proof.
+        if let Some(piece) = &r.body.update {
+            let path = dir.join(PARTS_FILE);
+            if let Some(whole) = antiphon_crypto::hex::decode(piece).and_then(|f| crate::parts::join(&path, &key, &r.from, &f, PARTS_LIFETIME)) {
+                updates.push((r.from, whole));
+            }
+            return true;
+        }
+        // From a device they removed, or unsigned once their devices are
+        // known: dropped, and the user told.
+        if known.check_mail(&r.from, &me, r.body.proof().as_ref(), &r.body.signed()) == Trust::Refused {
+            refused.push(contact.name.clone());
+            return true;
+        }
         // On a call with them right now: that call owns their history
         // file, so the mail waits at the node until it ends.
         if busy.as_deref() == Some(hex_key.as_str()) {
@@ -704,6 +845,12 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
     if strangers > 0 {
         notice(format!("{strangers} message(s) from people not in your contacts were discarded."));
     }
+    for name in dedupe(&refused) {
+        notice(format!("A message claiming to be from {name} came from a device they removed, or one they never added. It was discarded."));
+    }
+    for (from, bytes) in updates {
+        take_update(&mut known, &from, &bytes);
+    }
 
     // Communities you're in under a separate identity (spec §7): that
     // identity has inboxes of its own at the same nodes, under labels
@@ -731,8 +878,11 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
 
     // Then the outbox, for everyone not on a live call.
     if config.strict_mode {
+        save_known(&dir, &key, &known);
         return;
     }
+    push_updates(&identity, &dir, &config, busy.as_deref(), &mut known).await;
+    save_known(&dir, &key, &known);
     for contact in &config.contacts {
         if contact.message_route != 0 || busy.as_deref() == Some(contact.identity_key.as_str()) {
             continue;
@@ -751,7 +901,7 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
         let mut left = 0;
         let mut failure = None;
         for message in queue.clone() {
-            let body = MailBody { id: message.id, text: message.text.clone(), at_secs: message.queued_at_secs, group: None, reply_to: message.reply_to };
+            let body = MailBody { id: message.id, text: message.text.clone(), at_secs: message.queued_at_secs, reply_to: message.reply_to, ..Default::default() };
             match send(&identity, &their_key, &their_prekey, &record, &body, config.route_fan_out).await {
                 Sent::Deposited(_) => {
                     crate::outbox::mark_delivered(&mut queue, message.id);
@@ -773,6 +923,90 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
         }
         if let Some(why) = failure {
             notice(format!("Couldn't leave a message for {}: {why}", contact.name));
+        }
+    }
+}
+
+/// Saves the contacts' device lists after a round.
+fn save_known(dir: &std::path::Path, key: &antiphon_crypto::BackupKey, known: &ContactDevices) {
+    if let Err(e) = known.save(dir, key) {
+        eprintln!("[delivery] couldn't save contacts' devices: {e}");
+    }
+}
+
+/// Each name once, in the order first seen.
+fn dedupe(names: &[String]) -> Vec<&String> {
+    let mut out: Vec<&String> = Vec::new();
+    for n in names {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Takes a contact's [`Update`], whole: their device list first (it says
+/// which of their devices may prove the record), then their route record.
+fn take_update(known: &mut ContactDevices, from: &[u8; 32], bytes: &[u8]) {
+    let Some(update) = Update::decode(bytes) else { return };
+    let mut config = crate::config::load();
+    let from_hex = hex(from);
+    let Some(contact) = config.contacts.iter_mut().find(|c| c.identity_key == from_hex) else { return };
+    let mut changed = false;
+    if known.offer(from, &update.devices) == Offer::Unendorsed {
+        // No device of theirs vouched for the change: verified no longer
+        // holds until the user checks with them.
+        contact.verified = false;
+        changed = true;
+        notice(unendorsed_notice(&contact.name));
+    }
+    if take_record(contact, &encode_record(&update.record), known) || changed {
+        crate::config::save(&config);
+    }
+}
+
+/// What the user is told when a contact's new device list isn't endorsed
+/// by any device of theirs this one knew.
+pub fn unendorsed_notice(name: &str) -> String {
+    format!(
+        "{name}'s devices changed without one of their devices approving it. That happens after restoring from the recovery phrase -- or if someone else has their phrase. Check with {name}, then verify them again to accept their new devices."
+    )
+}
+
+/// Pushes this account's route record and device list to every contact
+/// that hasn't had the current ones, by mailbox: so a new mail key reaches
+/// them now, not at the next call, and a removed device is refused by them
+/// as soon as possible.
+async fn push_updates(identity: &IdentityKeyPair, dir: &std::path::Path, config: &crate::config::AppConfig, busy: Option<&str>, known: &mut ContactDevices) {
+    let Some(devices) = crate::devices::carried(dir, &identity.public().identity_key) else { return };
+    let Ok(record) = SignedRouteRecord::decode(&my_record_bytes()) else { return };
+    let (record_seq, list_seq) = (record.record.sequence, devices.list.list.sequence);
+    let Ok(frames) = crate::parts::split(&Update { record, devices }.encode(), UPDATE_DATA) else { return };
+    for contact in &config.contacts {
+        if contact.message_route != 0 || busy == Some(contact.identity_key.as_str()) {
+            continue;
+        }
+        let (Some(their_key), Some(their_prekey)) =
+            (crate::connection_mode::decode_hex32(&contact.identity_key), crate::connection_mode::decode_hex32(&contact.prekey))
+        else {
+            continue;
+        };
+        if !known.needs_update(&their_key, record_seq, list_seq) {
+            continue;
+        }
+        let Some(their_record) = accept_record(&contact.route_record, &their_key, None) else { continue };
+        let mut all = true;
+        for frame in &frames {
+            let mut id = [0u8; 8];
+            getrandom::fill(&mut id).expect("OS randomness is unavailable");
+            let body = MailBody { id: u64::from_be_bytes(id), at_secs: now_secs(), update: Some(hex(frame)), ..Default::default() };
+            if !matches!(send(identity, &their_key, &their_prekey, &their_record, &body, config.route_fan_out).await, Sent::Deposited(_)) {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            known.mark_sent(&their_key, record_seq, list_seq);
         }
     }
 }
@@ -840,6 +1074,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_update_carries_a_proved_record_and_its_devices_whole() {
+        let me = IdentityKeyPair::generate();
+        let device = DeviceKeyPair::generate();
+        let list = antiphon_crypto::DeviceList {
+            identity_key: me.public().identity_key,
+            sequence: 1,
+            devices: vec![antiphon_crypto::DeviceCredential::approve(&me, device.public(), "Desktop", 1).unwrap()],
+        }
+        .sign(&me)
+        .unwrap();
+        let mut keys = MailKeys::default();
+        keys.rotate(1);
+        let record = my_record_with(&me, &keys, Some(&device), &with_nodes(), false, 4);
+        assert!(record.record.routes.iter().any(|r| r.kind == contact_devices::PROOF_ROUTE_KIND));
+        assert_eq!(mailboxes_in(&record).len(), 2, "the proof is not a mailbox");
+        let update = Update { record, devices: CarriedList { endorsements: vec![list.endorse(&device)], list } };
+        let back = Update::decode(&update.encode()).unwrap();
+        assert!(Update::decode(&update.encode()[..20]).is_none());
+
+        // A contact takes the list, then the record it proves.
+        let mut known = ContactDevices::default();
+        assert_eq!(known.offer(&me.public().identity_key, &back.devices), Offer::Updated);
+        assert!(known.check_record(&back.record));
+        // Pieces of it fit a mailbox once in a body and sealed.
+        let pieces = crate::parts::split(&update.encode(), UPDATE_DATA).unwrap();
+        let body = MailBody { id: u64::MAX, at_secs: u64::MAX, update: Some(hex(&pieces[0])), ..Default::default() };
+        assert!(serde_json::to_vec(&body).unwrap().len() + mail::OVERHEAD <= mailbox::MAX_BLOB);
+    }
+
+    #[test]
+    fn mail_is_proved_over_the_body_without_its_proof() {
+        let device = DeviceKeyPair::generate();
+        let to = [7; 32];
+        let mut body = MailBody { id: 1, text: "hi".into(), at_secs: 2, ..Default::default() };
+        let proof = contact_devices::prove_mail(&device, &to, &body.signed());
+        body.device = Some(hex(&proof.encode()));
+        assert_eq!(body.proof(), Some(proof));
+        assert!(proof.verify(b"mail", &contact_devices::mail_message(&to, &body.signed())).is_ok());
+        body.text = "changed".into();
+        assert!(proof.verify(b"mail", &contact_devices::mail_message(&to, &body.signed())).is_err());
+    }
+
+    #[test]
     fn a_rotated_mail_key_is_published_and_moves_the_inboxes() {
         let me = IdentityKeyPair::generate();
         let plain = my_record(&me, &with_nodes(), false, 1);
@@ -847,7 +1124,7 @@ mod tests {
 
         let mut keys = MailKeys::default();
         keys.rotate(10);
-        let record = my_record_with(&me, &keys, &with_nodes(), false, 2);
+        let record = my_record_with(&me, &keys, None, &with_nodes(), false, 2);
         assert_eq!(mail_key_in(&record), Some(keys.current(&me).public().prekey));
         // The certificate is not a mailbox, and the inboxes moved.
         let boxes = mailboxes_in(&record);
@@ -939,7 +1216,7 @@ mod tests {
 
     #[test]
     fn a_reply_keeps_its_quote_in_the_mail_and_older_mail_still_reads() {
-        let reply = MailBody { id: 3, text: "same".into(), at_secs: 1, group: None, reply_to: Some(2) };
+        let reply = MailBody { id: 3, text: "same".into(), at_secs: 1, reply_to: Some(2), ..Default::default() };
         let back: MailBody = serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
         assert_eq!(back.reply_to, Some(2));
         // Mail from a build before replies has no such field.
@@ -972,7 +1249,7 @@ mod tests {
         assert!(report[0].1.is_ok(), "{:?}", report[0].1);
 
         let record = my_record(&bob, &routes, false, 1);
-        let body = MailBody { id: 7, text: "back at six".into(), at_secs: 1, group: None, reply_to: None };
+        let body = MailBody { id: 7, text: "back at six".into(), at_secs: 1, ..Default::default() };
         let sent = send(&alice, &bob.public().identity_key, &bob.public().prekey, &record, &body, false).await;
         assert_eq!(sent, Sent::Deposited(1));
 

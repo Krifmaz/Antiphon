@@ -71,6 +71,31 @@ impl Drop for PhoneDevices {
     }
 }
 
+/// What a call needs to show it comes from this phone, one of the
+/// account's devices: its proof for the Hello, and the account's device
+/// list for the `Devices` message. Shared with the call engine.
+pub struct Prover {
+    /// The app's private storage, where the list is kept.
+    dir: PathBuf,
+    /// The account's identity key.
+    account: [u8; 32],
+    /// This phone's own keypair.
+    device: DeviceKeyPair,
+}
+
+impl Prover {
+    /// This phone's proof for its Hello to `to`, hex.
+    pub fn hello_proof(&self, to: &[u8; 32]) -> String {
+        antiphon_crypto::hex::encode(&crate::contact_devices::prove_hello(&self.device, &self.account, to).encode())
+    }
+
+    /// The account's device list with its endorsements, hex; empty when
+    /// there is none.
+    pub fn devices_hex(&self) -> String {
+        crate::devices::carried(&self.dir, &self.account).map(|c| antiphon_crypto::hex::encode(&c.encode())).unwrap_or_default()
+    }
+}
+
 /// What changed since the app last asked.
 #[derive(Default)]
 pub struct Changes {
@@ -96,6 +121,11 @@ impl PhoneDevices {
             PhoneNet { nodes: nodes.clone() },
         );
         Ok(Self { dir: dir.to_path_buf(), account, key, device, nodes, task, seen: device_sync::changes() })
+    }
+
+    /// What a call needs to prove it comes from this phone.
+    pub fn prover(&self) -> Arc<Prover> {
+        Arc::new(Prover { dir: self.dir.clone(), account: self.account.public().identity_key, device: DeviceKeyPair::from_master_seed(self.device.master_seed()) })
     }
 
     /// Replaces the mailboxes the sync uses, and syncs now.

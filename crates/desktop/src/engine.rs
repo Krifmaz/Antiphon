@@ -21,7 +21,7 @@ use antiphon_client::transfer_queue::{self, Entry, TransferQueue};
 use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
 use antiphon_client::{
-    caps_lock, community, config, connection_mode, data_export, delivery, discovery, node_picker, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
+    caps_lock, community, config, connection_mode, contact_devices, data_export, delivery, discovery, node_picker, fallback_relay, file_integrity, file_preview, file_transfer, history, key_capture,
     group, moderation, notify, outbox, presence, profile, push_wake, reachability, reactions, sharing, video_capture, vpn,
 };
 use antiphon_crypto::BackupKey;
@@ -278,6 +278,9 @@ pub struct Engine {
     peer_relay_saved: String,
     /// The VPN routes the peer last told us about, saved to their contact.
     peer_routes_saved: String,
+    /// Whether the person on the call is calling from one of their
+    /// account's devices; started afresh with every call.
+    call_check: contact_devices::CallCheck,
     /// Mailbox nodes found on this network at the last look.
     found_nodes: Vec<String>,
     /// A look for mailbox nodes on this network is under way.
@@ -383,6 +386,7 @@ impl Engine {
             discovery_seen: 0,
             peer_relay_saved: String::new(),
             peer_routes_saved: String::new(),
+            call_check: Default::default(),
             found_nodes: Vec::new(),
             finding_nodes: false,
             their_level: 0.0,
@@ -867,6 +871,7 @@ impl Engine {
     fn watch_call(&mut self, open: Option<&str>) {
         let mut save_relay = None;
         let mut save_routes = None;
+        let device_inputs;
         let mut new_lines = 0usize;
         let ready;
         let card;
@@ -880,6 +885,9 @@ impl Engine {
             // A meter that falls gently reads as speech; one that snaps to
             // zero between frames flickers.
             self.their_level = level.max(self.their_level * 0.82);
+            let devices = active.peer_devices.lock().unwrap().clone();
+            let proof = active.peer_profile.lock().unwrap().as_ref().map(|h| h.device.clone());
+            device_inputs = Some((active.peer.peer_identity().identity_key, proof, devices));
             if let Some(peer) = active.peer_profile.lock().unwrap().as_ref() {
                 if self.call.peer.is_none() && !peer.display_name.is_empty() {
                     self.call.name = peer.display_name.clone();
@@ -899,6 +907,11 @@ impl Engine {
             }
             ready = active.file_transfer.lock().unwrap().ready_to_save.take();
             card = active.peer_card.lock().unwrap().take();
+        }
+        if let Some((who, proof, devices)) = device_inputs {
+            if self.check_caller_device(&who, proof.as_deref(), devices.as_deref()) {
+                return;
+            }
         }
         let key = self.call.peer.clone();
         if let Some(card) = card {
@@ -931,6 +944,35 @@ impl Engine {
         if let Some((name, stored)) = ready {
             self.save_received(name, stored);
         }
+    }
+
+    /// Checks the person on the call is calling from one of their devices
+    /// (see `contact_devices::CallCheck`). Returns true when the call was
+    /// hung up for coming from a device they removed.
+    fn check_caller_device(&mut self, who: &[u8; 32], proof: Option<&str>, devices: Option<&str>) -> bool {
+        let (Some(dir), Some(key)) = (self.dir.clone(), self.key.clone()) else { return false };
+        let me = self.state.identity.public().identity_key;
+        let name = contact_mut(&mut self.cfg, &delivery::hex(who)).map_or_else(|| self.call.name.clone(), |c| c.name.clone());
+        let mut refused = false;
+        for event in self.call_check.step(&dir, &key, who, &me, contact_devices::Heard { proof, list: devices }, Instant::now()) {
+            match event {
+                contact_devices::CallEvent::Unendorsed => {
+                    // Their devices changed in a way no device of theirs
+                    // vouched for: verified no longer holds.
+                    if let Some(c) = contact_mut(&mut self.cfg, &delivery::hex(who)) {
+                        c.verified = false;
+                        self.save();
+                    }
+                    self.toast(delivery::unendorsed_notice(&name), ToastKind::Warn);
+                }
+                contact_devices::CallEvent::Refuse => refused = true,
+            }
+        }
+        if refused {
+            self.teardown("Hung up".into());
+            self.toast(format!("That call claimed to be {name}, but came from a device they removed, or one they never added. Hung up."), ToastKind::Err);
+        }
+        refused
     }
 
     /// Keeps the card the person on the call sent: saved to their contact
@@ -1146,6 +1188,7 @@ impl Engine {
                 self.seen_lines = self.state.call.lock().unwrap().as_ref().map(|a| a.chat_log.lock().unwrap().len()).unwrap_or(0);
                 self.peer_relay_saved.clear();
                 self.peer_routes_saved.clear();
+                self.call_check = Default::default();
                 self.conv = None;
                 self.call = CallInfo {
                     phase: ui::Phase::Connected,
@@ -1343,8 +1386,11 @@ impl Engine {
     fn profile_changed(&self) {
         self.save();
         self.send_card();
-        let hello = self.hello();
-        self.with_call(|a| a.send_control(&self.state.runtime, ControlMessage::Hello(hello)));
+        let mut hello = self.hello();
+        self.with_call(|a| {
+            hello.device = delivery::hello_proof(&a.peer.peer_identity().identity_key);
+            a.send_control(&self.state.runtime, ControlMessage::Hello(hello));
+        });
     }
 
     /// Asks for a picture file off the window's thread, and makes it small
@@ -1377,6 +1423,8 @@ impl Engine {
             relay: self.my_relay(),
             lends_relay: self.lends_relay(),
             routes: delivery::my_record_hex(),
+            // Proved per call, once the peer is known (`state`).
+            device: String::new(),
         }
     }
 
@@ -1847,6 +1895,11 @@ impl Engine {
             A::Verify(id, on) => {
                 if let Some(c) = contact_mut(&mut self.cfg, &id) {
                     c.verified = on;
+                    // Verifying them is also accepting a change to their
+                    // devices that none of their devices vouched for.
+                    if let (true, Some(who)) = (on, delivery::unhex32(&id)) {
+                        delivery::with_contact_devices(|known| known.trust_pending(&who));
+                    }
                     if c.first_seen_secs == 0 {
                         c.first_seen_secs = now_secs();
                     }
@@ -3561,17 +3614,14 @@ fn history_sink_for(cfg: &config::AppConfig, hex: &str) -> Option<Arc<history::H
 }
 
 /// Stores a contact's route list if it is theirs and newer than ours.
+/// Proved by one of their devices once their devices are known.
 fn save_peer_routes(identity_key: &[u8; 32], encoded: &str) {
     let mut cfg = config::load();
     let key = connection_mode::encode_hex32(identity_key);
     let Some(contact) = cfg.contacts.iter_mut().find(|c| c.identity_key == key) else { return };
-    if contact.route_record == encoded {
-        return;
+    if delivery::with_contact_devices(|known| delivery::take_record(contact, encoded, known)).unwrap_or(false) {
+        config::save(&cfg);
     }
-    let Some(record) = delivery::accept_record(encoded, identity_key, contact.route_sequence) else { return };
-    contact.route_record = encoded.to_string();
-    contact.route_sequence = Some(record.record.sequence);
-    config::save(&cfg);
 }
 
 /// The secret behind the relay part of the invite link (spec §3).

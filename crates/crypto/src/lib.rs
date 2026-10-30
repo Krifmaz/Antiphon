@@ -88,7 +88,7 @@ mod verification;
 
 pub use backup::{open_backup_key, seal_backup_key, BackupKey, SealedBackupKey};
 pub use contact::{evaluate, fingerprint, PinnedContact, TrustDecision, TrustLevel};
-pub use device::{DeviceCredential, DeviceKeyPair, DeviceList, SignedDeviceList};
+pub use device::{judge, CarriedList, DeviceCredential, DeviceKeyPair, DeviceList, DeviceProof, Judged, SignedDeviceList};
 pub use error::CryptoError;
 pub use invite::Invite;
 pub use handshake::{Handshake, HandshakeInit, HandshakeMessage};

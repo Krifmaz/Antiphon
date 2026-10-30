@@ -714,6 +714,7 @@ mod tests {
             relay: String::new(),
             lends_relay: false,
             routes: String::new(),
+            device: String::new(),
         }
     }
 

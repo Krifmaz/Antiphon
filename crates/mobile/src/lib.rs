@@ -104,6 +104,13 @@ mod devices;
 #[path = "../../client/src/mail_keys.rs"]
 mod mail_keys;
 #[cfg(any(target_os = "android", target_os = "ios"))]
+#[path = "../../client/src/parts.rs"]
+mod parts;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone has no courier, so only calls use it")]
+#[path = "../../client/src/contact_devices.rs"]
+mod contact_devices;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/file_integrity.rs"]
 mod file_integrity;

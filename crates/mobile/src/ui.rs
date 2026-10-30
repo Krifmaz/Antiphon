@@ -224,6 +224,13 @@ pub struct App {
     /// Syncing with the account's other devices: removals and notes to
     /// self. `None` without an identity or history key.
     devices: Option<crate::my_devices::PhoneDevices>,
+    /// The device proof in the Hello of the person on the call, hex.
+    peer_proof: Option<String>,
+    /// Their account's device list from the call, hex.
+    peer_devices: Option<String>,
+    /// Whether the person on the call is calling from one of their
+    /// devices; started afresh with every call.
+    call_check: crate::contact_devices::CallCheck,
     /// The address book.
     contacts: Contacts,
     /// The push key and endpoint, and the wake-ups received lately.
@@ -384,7 +391,10 @@ impl App {
         let mut devices = None;
         if let (Ok(identity), Ok(key)) = (&identity, &backup_key) {
             match crate::my_devices::PhoneDevices::start(&engine.handle(), &dir, identity, key.clone(), settings.device_mailboxes.clone()) {
-                Ok(d) => devices = Some(d),
+                Ok(d) => {
+                    engine.set_prover(Some(d.prover()));
+                    devices = Some(d);
+                }
                 Err(e) => log::warn!("{e}"),
             }
         }
@@ -424,6 +434,9 @@ impl App {
             local_ip: call::local_ip(),
             backup_key,
             devices,
+            peer_proof: None,
+            peer_devices: None,
+            call_check: Default::default(),
             calls,
             dialled: None,
             chat: None,
@@ -509,6 +522,36 @@ impl App {
             self.chat = None;
             self.open_chat(&id);
         }
+    }
+
+    /// Checks the person on the call is calling from one of their devices
+    /// (see `contact_devices::CallCheck`). Returns true when the call was
+    /// hung up for coming from a device they removed.
+    fn check_caller_device(&mut self, who: [u8; 32]) -> bool {
+        let (Ok(identity), Ok(key)) = (&self.identity, &self.backup_key) else { return false };
+        let me = identity.public().identity_key;
+        let events = self.call_check.step(&self.dir, key, &who, &me, crate::contact_devices::Heard { proof: self.peer_proof.as_deref(), list: self.peer_devices.as_deref() }, Instant::now());
+        let name = self.display_name_for(&hex(&who));
+        let mut refused = false;
+        for event in events {
+            match event {
+                crate::contact_devices::CallEvent::Unendorsed => {
+                    // Their devices changed in a way no device of theirs
+                    // vouched for: verified no longer holds.
+                    if let Some(contact) = self.contacts.by_key_mut(&hex(&who)) {
+                        contact.verified = false;
+                        self.contacts.save(&self.dir);
+                    }
+                    self.stoop.toast(format!("{name}'s devices changed without one of their devices approving it. Check with them, then verify them again."), antiphon_ui::ToastKind::Warn);
+                }
+                crate::contact_devices::CallEvent::Refuse => refused = true,
+            }
+        }
+        if refused {
+            self.engine.stop();
+            self.stoop.toast(format!("That call claimed to be {name}, but came from a device they removed, or one they never added. Hung up."), antiphon_ui::ToastKind::Err);
+        }
+        refused
     }
 
     /// Rebuilds the whole app from what is on disk, after a restore wrote
@@ -780,6 +823,9 @@ impl App {
             self.live_peer.clone_from(&live_peer);
             self.peer_display_name = None;
             self.peer_card = None;
+            self.peer_proof = None;
+            self.peer_devices = None;
+            self.call_check = Default::default();
             self.unread = 0;
             self.connected_at = live_peer.as_ref().map(|_| Instant::now());
             self.muted = false;
@@ -812,6 +858,11 @@ impl App {
                     if !name.is_empty() {
                         self.peer_display_name = Some(name);
                     }
+                    self.peer_proof = Some(hello.device);
+                    continue;
+                }
+                if let ControlMessage::Devices { list } = message {
+                    self.peer_devices = Some(list);
                     continue;
                 }
                 if let ControlMessage::Profile(card) = message {
@@ -839,6 +890,9 @@ impl App {
                         platform::notify(&self.display_name_for(&peer), &text);
                     }
                 }
+            }
+            if self.check_caller_device(live.peer_key) {
+                return true;
             }
         }
 
@@ -932,6 +986,7 @@ impl App {
                 // The phone runs no relay of its own to lend.
                 lends_relay: false,
                 routes: String::new(),
+                device: self.engine.hello_proof(&live.peer_key),
             }));
             live.send(ControlMessage::Profile(card));
         }
@@ -1098,6 +1153,16 @@ impl App {
                 if let Some(contact) = self.contacts.by_key_mut(&key) {
                     contact.verified = verified;
                     self.contacts.save(&self.dir);
+                }
+                // Verifying them is also accepting a change to their
+                // devices that none of their devices vouched for.
+                if let (true, Some(who), Ok(backup)) = (verified, antiphon_crypto::hex::decode_array::<32>(&key), &self.backup_key) {
+                    let mut known = crate::contact_devices::ContactDevices::load(&self.dir, backup);
+                    if known.trust_pending(&who) {
+                        if let Err(e) = known.save(&self.dir, backup) {
+                            log::warn!("couldn't save a contact's devices: {e}");
+                        }
+                    }
                 }
             }
 

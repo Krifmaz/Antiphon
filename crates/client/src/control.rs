@@ -39,6 +39,12 @@ pub struct Hello {
     /// mail for them while they're offline. Defaulted for older builds.
     #[serde(default)]
     pub routes: String,
+    /// The calling device's proof that it is one of this account's devices
+    /// (`crate::contact_devices::prove_hello`), hex. A contact holding the
+    /// account's device list refuses a call without a good one. Defaulted
+    /// for older builds.
+    #[serde(default)]
+    pub device: String,
 }
 
 /// Note on trust: none of these messages are authenticated beyond the
@@ -240,6 +246,11 @@ pub enum ControlMessage {
     /// a peer from before profiles drops it as unknown. Sent after
     /// `Hello` when a call opens and again whenever it changes.
     Profile(ProfileCard),
+    /// The sender's account's device list with its devices' endorsements
+    /// (`antiphon_crypto::CarriedList`), hex. Sent with `Hello` when a call
+    /// opens, so the contact knows which devices may speak for them. Its
+    /// own message so a long list never pushes `Hello` past one datagram.
+    Devices { list: String },
 }
 
 /// What [`ControlMessage::Profile`] carries. Every field defaults, so a
@@ -299,6 +310,7 @@ mod tests {
             relay: "relay.example:3479".to_string(),
             lends_relay: true,
             routes: String::new(),
+            device: String::new(),
         });
         let decoded = ControlMessage::decode(&msg.encode()).unwrap();
         match decoded {

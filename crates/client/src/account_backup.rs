@@ -111,17 +111,18 @@ struct Layout {
 const HISTORY_DIRS: [&str; 2] = ["history", "outbox"];
 
 /// Files both apps keep the same way and that always come along: the
-/// account's signed device list (see `crate::devices`) and its mail keys,
-/// sealed under the history key (see `crate::mail_keys`). The device's own
-/// `device.key` is never one of them -- it belongs to the device, not the
-/// account.
-const SHARED_FILES: [&str; 2] = ["devices.list", "mail.keys"];
+/// account's signed device list and its devices' endorsements of it (see
+/// `crate::devices`), its mail keys, sealed under the history key (see
+/// `crate::mail_keys`), and the device lists contacts showed it (see
+/// `crate::contact_devices`). The device's own `device.key` is never one
+/// of them -- it belongs to the device, not the account.
+const SHARED_FILES: [&str; 4] = ["devices.list", "devices.endorsements", "mail.keys", "contacts.devices"];
 
 /// Files that belong to this device rather than the account: never put
 /// in a bundle, and gone when the device signs out. (A restore keeps the
 /// device key, so the device stays itself, and sets the pending mail
 /// aside with the old account it was meant for.)
-const DEVICE_FILES: [&str; 3] = ["device.key", "devices.outbox", "devices.parts"];
+const DEVICE_FILES: [&str; 4] = ["device.key", "devices.outbox", "devices.parts", "contacts.parts"];
 
 /// One account, ready to seal.
 pub struct Bundle {
@@ -350,7 +351,9 @@ pub fn apply(dir: &Path, platform: Platform, bundle: &Bundle) -> std::io::Result
     // Everything that makes up an account on this device, whichever way
     // the bundle was made: the old account must not leak into the new.
     let layout = platform.layout();
-    let mut ours: Vec<&str> = vec!["identity.key", "backup.key", "devices.outbox", "devices.parts"];
+    // The device key stays: the device is still itself.
+    let mut ours: Vec<&str> = vec!["identity.key", "backup.key"];
+    ours.extend(DEVICE_FILES.iter().filter(|f| **f != "device.key"));
     ours.extend(SHARED_FILES);
     ours.extend(layout.files);
     ours.extend(layout.dirs);
