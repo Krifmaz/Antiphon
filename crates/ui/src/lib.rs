@@ -613,6 +613,11 @@ pub enum Action {
     /// Set a setting (by id) of the EQ band at this index; `"enabled"`
     /// turns the band on (1) or off (0).
     BandParam(usize, &'static str, f32),
+    /// Save the whole voice chain as a named preset, replacing one by the
+    /// same name.
+    SavePreset(String),
+    /// Delete a saved voice preset by name.
+    DeletePreset(String),
     /// Save the whole voice chain to a preset file (desktop only).
     ExportPreset,
     /// Load the voice chain from a preset file (desktop only).
@@ -667,6 +672,13 @@ pub enum Action {
     VpnDelete(String),
     /// Ask the holders of every shared file whether it is still there.
     SharedCheck,
+    /// Pick a file and share it in a community channel.
+    ShareInSpace {
+        /// The community's id.
+        community: String,
+        /// The channel.
+        channel: u32,
+    },
     /// Download a shared file (its id) to a place the person picks.
     SharedDownload(String),
     /// Take a shared file (its id) off the list, and stop sharing it if
@@ -936,6 +948,12 @@ pub enum SpaceChange {
     },
     /// Ask a directory to take it off.
     WithdrawListing(String),
+    /// Pin members' files to this file node, given as `host:port#code`
+    /// (the code it was started with), or, with `None`, to none.
+    FileNode(Option<String>),
+    /// Turn server-hosted files on or off (spec §5 "per-community toggle,
+    /// off by default").
+    ServerHosted(bool),
     /// Start a space shared with another community, with this name; a
     /// link for the other community's admin comes back.
     StartShared(String),
@@ -1113,6 +1131,12 @@ pub enum Msg {
     ListingDirectory(String),
     /// The node box in a community's board settings changed.
     BoardNode(String),
+    /// The name box for saving a voice preset changed.
+    PresetName(String),
+    /// Save the voice chain under the name in the box.
+    PresetSave,
+    /// The file node box in a community's settings changed.
+    FileNode(String),
     /// The description box in a community's listing settings changed.
     ListingDescription(String),
     /// Send the listing typed in the boxes (community id).
@@ -1259,6 +1283,11 @@ pub struct Ui {
     listing_directory: String,
     /// The mailbox node a community's board is to be on.
     board_node: String,
+    /// The name a voice preset is to be saved under.
+    preset_name: String,
+    /// The file node (`host:port#code`) a community's files are to be
+    /// pinned to.
+    file_node: String,
     /// What the listing is to say.
     listing_description: String,
     /// The name for a new shared space.
@@ -1365,6 +1394,8 @@ impl Ui {
             directory_address: String::new(),
             listing_directory: String::new(),
             board_node: String::new(),
+            file_node: String::new(),
+            preset_name: String::new(),
             shared_name: String::new(),
             shared_link: String::new(),
             listing_description: String::new(),
@@ -1950,6 +1981,22 @@ impl Ui {
             }
             Msg::BoardNode(s) => {
                 self.board_node = s.trim().to_string();
+                Vec::new()
+            }
+            Msg::PresetName(s) => {
+                self.preset_name = s.chars().take(60).collect();
+                Vec::new()
+            }
+            Msg::PresetSave => {
+                let name = self.preset_name.trim().to_string();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                self.preset_name.clear();
+                vec![Action::SavePreset(name)]
+            }
+            Msg::FileNode(s) => {
+                self.file_node = s.trim().to_string();
                 Vec::new()
             }
             Msg::SharedName(s) => {

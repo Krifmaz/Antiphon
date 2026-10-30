@@ -244,6 +244,14 @@ const TOUR: &[Step] = &[
             let _ = app.send(Msg::Dialog(Some(ui::Dialog::SpaceNotify(Demo::club()))));
         },
     },
+    Step {
+        name: "community-files",
+        size: (1280.0, 1000.0),
+        setup: |app| {
+            app.go(Route::Community(Demo::club(), 0));
+            let _ = app.send(Msg::Dialog(Some(ui::Dialog::Moderation(Demo::club()))));
+        },
+    },
     Step { name: "spaces", size: (1280.0, 820.0), setup: |app| {
             let _ = app.send(Msg::Dialog(None));
             app.go(Route::Spaces);

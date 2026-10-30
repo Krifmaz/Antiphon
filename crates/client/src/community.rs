@@ -1119,18 +1119,23 @@ impl Space {
         Ok((outs, Event::Reacted { id, author, sender: self.me, emoji: emoji.to_string(), on }))
     }
 
-    /// Shares a file in a channel: `post` is a [`Post::File`] link, sent
-    /// only to those who may read its channel.
-    pub fn share_file(&mut self, post: &Post) -> Result<Vec<Out>, String> {
-        let channel = match post {
-            Post::File { channel, .. } => Some(*channel),
-            _ => None,
-        };
-        if channel.is_some_and(|c| !self.manifest().can_read(c, &self.me)) {
+    /// Shares a file in `channel`: its link (name, size, id, key and who
+    /// holds it, from `crate::sharing::share_in_community`) goes only to
+    /// those who may read the channel.
+    pub fn share_file(&mut self, channel: u32, name: &str, size: u64, file_id: &str, key: &str, holders: Vec<String>) -> Result<(Vec<Out>, Event), String> {
+        if !self.manifest().can(&self.me, perm::POST, None) {
+            return Err("you can't post here".into());
+        }
+        if !self.manifest().can_read(channel, &self.me) {
             return Err("that channel is private and you're not one of its readers".into());
         }
-        self.pace_mine(now_secs())?;
-        self.send_in(channel, post)
+        let at_secs = now_secs();
+        self.pace_mine(at_secs)?;
+        let id = random_id();
+        let (name, file_id, key) = (name.to_string(), file_id.to_string(), key.to_string());
+        let post = Post::File { id, channel, name: name.clone(), size, file_id: file_id.clone(), key: key.clone(), holders: holders.clone(), at_secs };
+        let outs = self.send_in(Some(channel), &post)?;
+        Ok((outs, Event::File { channel, id, sender: self.me, name, size, file_id, key, holders, at_secs }))
     }
 
     // ---- voice channels ----
@@ -2546,7 +2551,7 @@ impl Store {
                     all.push(crate::history::StoredMessage {
                         id: *mid,
                         from_me: *sender == me,
-                        text: format!("[file] {name} ({} KB) -- under Shared files", size.div_ceil(1024)),
+                        text: format!("[file] {name} ({} KB) -- under Settings > Data & battery > Shared files", size.div_ceil(1024)),
                         at_secs: *at_secs,
                         sender: Some(hex(sender)),
                         ..Default::default()

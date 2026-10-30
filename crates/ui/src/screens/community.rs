@@ -491,8 +491,10 @@ fn composer<'a>(ui: &'a Ui, c: &'a Community, ch: Option<&'a Channel>) -> El<'a,
         input = input.on_input(Msg::Draft).on_submit(Msg::Send);
     }
     let picker = (!c.emoji.is_empty() && can_send).then(|| Msg::Dialog(Some(Dialog::EmojiPicker(c.id.clone()))));
+    let share = (can_send && ch.is_none_or(|ch| !ch.voice)).then(|| Msg::Do(Action::ShareInSpace { community: c.id.clone(), channel: ch.map_or(0, |ch| ch.id) }));
     let bar = row![
         icon_btn(Icon::Smile, "Emoji", picker),
+        icon_btn(Icon::Paperclip, "Share a file", share),
         container(input).width(Length::Fill).padding([0, 6]),
         icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send)),
     ]
@@ -830,6 +832,41 @@ pub fn report<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a,
     col.into()
 }
 
+/// Server-hosted files (spec §5 "Server-hosted mode (opt-in)"): the
+/// file node members' files are pinned to, and the switch that turns it
+/// on. The node's own size limits, quotas and retention are set where it
+/// runs (`antiphon-relay --files-code`).
+fn file_hosting<'a>(ui: &'a Ui, c: &'a Community) -> El<'a, Msg> {
+    let change = |change: SpaceChange| Msg::Do(Action::ManageSpace { community: c.id.clone(), change });
+    let mut col = column![setting(
+        "Server-hosted files",
+        Some("Files shared here are also pinned, still sealed, to the community's file node, so they stay available while the person who shared them is offline. The node can't read them. Off by default."),
+        switch("Server-hosted files", c.server_hosted, move |on| change(SpaceChange::ServerHosted(on))),
+    )]
+    .spacing(8);
+    match &c.file_node {
+        Some(node) => {
+            col = col.push(
+                row![faint(format!("File node {node}.")).size(12).width(Length::Fill), btn_sm("Remove", Btn::Ghost, Some(change(SpaceChange::FileNode(None))))]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            );
+        }
+        None => {
+            let node = (!ui.file_node.is_empty()).then(|| ui.file_node.clone());
+            col = col.push(
+                row![
+                    input("File node address and code", "stoop-file-node", "files.example.org:7300#members-code", &ui.file_node).on_input(Msg::FileNode).padding([8, 10]).size(13).width(Length::Fill),
+                    btn_sm("Use it", Btn::Primary, node.map(|n| change(SpaceChange::FileNode(Some(n))))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+    }
+    col.into()
+}
+
 /// Slow mode, being listed, the reports waiting, and the invitations you
 /// sent.
 pub fn moderation<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
@@ -909,6 +946,7 @@ pub fn moderation<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
             }
         }
         col = col.push(board);
+        col = col.push(file_hosting(ui, c));
     }
     if c.moderator {
         let mut reports = column![label("Reports")].spacing(8);

@@ -668,7 +668,7 @@ impl App {
             }
             // Lending a relay needs a relay of one's own, which the phone
             // does not run; the setting is the desktop's.
-            Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::IpDirect(_) | Action::NetSwitch(..) | Action::NetText(..) | Action::SeedScope(_) | Action::GiveUpHours(_) | Action::VpnImport | Action::VpnUse(_) | Action::VpnDelete(_) | Action::SharedCheck | Action::SharedDownload(_) | Action::SharedForget(_) | Action::Input(_) | Action::Output(_) => {}
+            Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::IpDirect(_) | Action::NetSwitch(..) | Action::NetText(..) | Action::SeedScope(_) | Action::GiveUpHours(_) | Action::VpnImport | Action::VpnUse(_) | Action::VpnDelete(_) | Action::SharedCheck | Action::ShareInSpace { .. } | Action::SharedDownload(_) | Action::SharedForget(_) | Action::Input(_) | Action::Output(_) => {}
             // A phone has no keyboard shortcuts.
             Action::BindKey(_) | Action::ClearKey(_) | Action::KeyHold(..) => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
@@ -773,7 +773,7 @@ impl App {
             Action::StageOn(..) | Action::StageParam(..) | Action::BandParam(..) => self.update(Message::Chain(action)),
             // A phone has no file dialog to save a preset through or pick
             // one from, so the tab never offers it.
-            Action::ExportPreset | Action::ImportPreset => {}
+            Action::SavePreset(_) | Action::DeletePreset(_) | Action::ExportPreset | Action::ImportPreset => {}
             // Nor a folder to export everything into; the tab never offers it.
             Action::ExportData => {}
             // Never offered on a phone (see `captions: None`).

@@ -2564,6 +2564,25 @@ impl Engine {
             // Fine-tune tab's for those stages.
             A::NoiseSuppression(on) => self.act(A::StageOn("noise_suppress", on), open),
             A::AutoGain(on) => self.act(A::StageOn("gain", on), open),
+            A::Preset(name) if self.cfg.voice_presets.iter().any(|p| p.name == name) => {
+                let Some(saved) = self.cfg.voice_presets.iter().find(|p| p.name == name) else { return };
+                // As with a preset file, your plugins stay as they are.
+                let plugins = std::mem::take(&mut self.cfg.chain.plugins);
+                self.cfg.chain = ChainConfig { plugins, name, ..saved.chain.clone() };
+                self.chain_changed();
+            }
+            A::SavePreset(name) => {
+                let chain = ChainConfig { plugins: Vec::new(), name: name.clone(), ..self.cfg.chain.clone() };
+                self.cfg.voice_presets.retain(|p| p.name != name);
+                self.cfg.voice_presets.push(config::VoicePreset { name: name.clone(), chain });
+                self.cfg.chain.name = name;
+                self.save();
+                self.toast("Preset saved", ToastKind::Ok);
+            }
+            A::DeletePreset(name) => {
+                self.cfg.voice_presets.retain(|p| p.name != name);
+                self.save();
+            }
             A::Preset(name) => {
                 self.cfg.chain.eq_bands = if name == NATURAL { Vec::new() } else { antiphon_audio::eq_preset(&name).unwrap_or_default() };
                 self.cfg.chain.name = name;
@@ -2669,6 +2688,16 @@ impl Engine {
             }
             A::VpnImport => self.import_vpn(),
             A::SharedCheck => sharing::check_all(&self.state.runtime),
+            A::ShareInSpace { community, channel } => {
+                let (runtime, events) = (self.state.runtime.clone(), self.events.clone());
+                std::thread::spawn(move || {
+                    let Some(path) = rfd::FileDialog::new().set_title("Share a file").pick_file() else { return };
+                    match crate::spaces::share_file(&runtime, &community, channel, &path) {
+                        Ok(()) => Self::push(&events, Event::Toast("Shared. Members can download it under Data & battery.".into(), ToastKind::Ok)),
+                        Err(e) => Self::push(&events, Event::Toast(format!("Couldn't share that file: {e}"), ToastKind::Err)),
+                    }
+                });
+            }
             A::SharedForget(id) => sharing::forget(&id),
             A::SharedDownload(id) => {
                 let Some(name) = self.shared_rows.1.iter().find(|f| f.id == id).map(|f| f.name.clone()) else { return };
@@ -3925,7 +3954,15 @@ impl Engine {
     fn settings(&self) -> ui::Settings {
         let mut presets = vec![NATURAL.to_string()];
         presets.extend(antiphon_audio::eq_preset_names().iter().map(ToString::to_string));
-        let preset = if self.cfg.chain.eq_bands.is_empty() || !presets.contains(&self.cfg.chain.name) { NATURAL.to_string() } else { self.cfg.chain.name.clone() };
+        let saved: Vec<String> = self.cfg.voice_presets.iter().map(|p| p.name.clone()).collect();
+        let preset = if saved.contains(&self.cfg.chain.name) {
+            self.cfg.chain.name.clone()
+        } else if self.cfg.chain.eq_bands.is_empty() || !presets.contains(&self.cfg.chain.name) {
+            NATURAL.to_string()
+        } else {
+            self.cfg.chain.name.clone()
+        };
+        presets.extend(saved.iter().cloned());
         ui::Settings {
             theme: self.cfg.stoop.theme.clone(),
             accent: self.cfg.stoop.accent.clone(),
@@ -3962,6 +3999,7 @@ impl Engine {
             stages: crate::chain_rows::stages(&self.cfg.chain, |id| self.with_call(|a| a.chain.lock().ok().map(|c| c.gain_reduction_db(id))).flatten()),
             bands: crate::chain_rows::bands(&self.cfg.chain),
             preset_files: true,
+            saved_presets: saved,
             mic_test: self.state.loopback.lock().unwrap().as_ref().map(|l| l.level().min(1.0)),
             monitor_ms: state::monitor_added_latency_ms(),
             record_preview: Some(self.previewing),

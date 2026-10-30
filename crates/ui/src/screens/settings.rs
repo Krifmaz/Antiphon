@@ -146,7 +146,7 @@ fn section_view<'a>(ui: &'a Ui, m: &'a Model, section: Section, tab: usize) -> E
         Section::Devices => super::account::devices(ui, m),
         Section::Privacy => privacy(ui, m),
         Section::Notifications => notifications(m),
-        Section::Voice => voice(m, tab),
+        Section::Voice => voice(ui, m, tab),
         Section::Appearance => appearance(ui, m, tab),
         Section::Data => data(ui, m),
         Section::Network => network(ui, m),
@@ -563,7 +563,7 @@ fn flat(c: iced_core::Color, r: f32) -> container::Style {
 /// Voice & video's tab `tab`: 0 the microphone, speakers, volume, the
 /// microphone test and how you talk (voice or push to talk); 1 clean-up
 /// and presets; 2 (computers only) audio plugins.
-fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
+fn voice<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
     let s = &m.settings;
     let device = |label: &'a str, list: &'a [String], chosen: &'a str, f: fn(String) -> Action| -> El<'a, Msg> {
         let selected = if chosen.is_empty() { None } else { Some(chosen.to_string()) };
@@ -684,7 +684,7 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     }
     let cards = match tab {
         1 => cards.push(titled_card("Processing", None, processing)),
-        2 => fine_tune(cards, s),
+        2 => fine_tune(ui, cards, s),
         3 if !m.device.phone => cards
             .push(titled_card(
                 "Replay",
@@ -763,7 +763,7 @@ fn soundboard(s: &crate::Settings) -> El<'_, Msg> {
 /// independently"): a card per stage of the chain, in the order the sound
 /// runs through them, each with its switch and, while on, its settings;
 /// then the EQ's bands, and saving the chain to a file and loading one.
-fn fine_tune<'a>(mut cards: iced_widget::Column<'a, Msg>, s: &'a crate::Settings) -> iced_widget::Column<'a, Msg> {
+fn fine_tune<'a>(ui: &'a Ui, mut cards: iced_widget::Column<'a, Msg>, s: &'a crate::Settings) -> iced_widget::Column<'a, Msg> {
     for stage in &s.stages {
         let id = stage.id;
         let mut body = column![setting(stage.name, Some(stage.help), switch(stage.name, stage.enabled, move |on| Msg::Do(Action::StageOn(id, on))))].spacing(12);
@@ -802,6 +802,7 @@ fn fine_tune<'a>(mut cards: iced_widget::Column<'a, Msg>, s: &'a crate::Settings
     cards = cards.push(titled_card("EQ", Some("Shapes the tone of your voice, band by band."), eq));
 
     if s.preset_files {
+        cards = cards.push(saved_presets(ui, s));
         cards = cards.push(titled_card(
             "Preset files",
             Some("Save everything on this tab to a file to share it, or load someone else's. Plugins are never loaded from a file."),
@@ -809,6 +810,36 @@ fn fine_tune<'a>(mut cards: iced_widget::Column<'a, Msg>, s: &'a crate::Settings
         ));
     }
     cards
+}
+
+/// Your own named voice presets (spec §1 "Voice Presets": save, name,
+/// switch): save everything on the tab under a name, use one, or delete
+/// it. Saved ones are in the Voice preset list on the Processing tab too.
+fn saved_presets<'a>(ui: &'a Ui, s: &'a crate::Settings) -> El<'a, Msg> {
+    let name = ui.preset_name.trim();
+    let mut col = column![row![
+        input("Preset name", "stoop-preset-name", "Late-night radio", &ui.preset_name).on_input(Msg::PresetName).on_submit(Msg::PresetSave).padding([8, 10]).size(13).width(Length::Fill),
+        btn_sm("Save", Btn::Primary, (!name.is_empty()).then_some(Msg::PresetSave)),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)]
+    .spacing(8);
+    if s.saved_presets.is_empty() {
+        col = col.push(faint("None saved yet.").size(12.5));
+    }
+    for preset in &s.saved_presets {
+        let current = *preset == s.preset;
+        col = col.push(
+            row![
+                t(preset.as_str()).size(13.5).color(if current { theme::look().text } else { theme::look().muted }).width(Length::Fill),
+                btn_sm(if current { "In use" } else { "Use" }, Btn::Default, (!current).then(|| Msg::Do(Action::Preset(preset.clone())))),
+                btn_icon(Icon::Trash, "Delete", Btn::Ghost, Some(Msg::Do(Action::DeletePreset(preset.clone())))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    titled_card("Your presets", Some("Save how you sound now under a name, and switch back to it any time. Saving under a name you already used replaces it."), col)
 }
 
 /// One setting's label, slider and sentence; `on` turns a value into the

@@ -341,6 +341,24 @@ pub fn add_emoji(community: &str, file_name: &str, image: String) -> Result<Stri
     Ok(name)
 }
 
+/// Shares the file at `path` in a community channel: seals it, seeds and
+/// pins it as `sharing::share_in_community` does (to the community's
+/// file node too when it has server-hosted files on), then posts the
+/// link. Blocks while pinning, so it is called off the window's thread.
+pub fn share_file(runtime: &tokio::runtime::Handle, community: &str, channel: u32, path: &std::path::Path) -> Result<(), String> {
+    let store = Store::app().ok_or("Your identity isn't loaded yet")?;
+    let id = key(community)?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or("That file has no name")?;
+    // The manifest is copied out first: pinning can take a while, and the
+    // space must not stay locked meanwhile.
+    let manifest = store.with_space(&id, |space, _| Ok((space.manifest().clone(), Vec::new(), Vec::new())))?;
+    let (name, size, file_id, file_key, holders) = antiphon_client::sharing::share_in_community(runtime, path, &name, &manifest)?;
+    store.with_space(&id, |space, _| {
+        let (outs, event) = space.share_file(channel, &name, size, &file_id, &file_key, holders)?;
+        Ok(((), outs, vec![event]))
+    })
+}
+
 /// An emoji name from a file name: its stem in lowercase, anything but
 /// letters and digits made an underscore, cut to length.
 fn emoji_name(file_name: &str) -> String {
@@ -429,6 +447,23 @@ fn manage(space: &mut community::Space, identity: &antiphon_crypto::IdentityKeyP
             })
         }
         C::Listed(on) => space.update(identity, |m| m.listed = on),
+        C::ServerHosted(on) => {
+            if on && space.manifest().nodes.files.is_empty() {
+                return Err("Add a file node first: that's where the files are kept".into());
+            }
+            space.update(identity, |m| m.server_hosted_files = on)
+        }
+        C::FileNode(node) => {
+            let node = node.map(|n| {
+                let (addr, code) = n.split_once('#').unwrap_or((&n, ""));
+                antiphon_crypto::community::NodeRef { addr: addr.trim().to_string(), code: code.trim().to_string() }
+            });
+            space.update(identity, |m| {
+                m.nodes.files = node.into_iter().collect();
+                // With no node left there is nowhere to host files.
+                m.server_hosted_files &= !m.nodes.files.is_empty();
+            })
+        }
         // The engine's: they go to a directory, not to the members.
         C::SubmitListing { .. } | C::WithdrawListing(_) => Ok(Vec::new()),
         // Handled by `Spaces::shared`: they span more than one space.
@@ -601,6 +636,8 @@ fn community_model(store: &Store, s: &community::Space, unread: u32, voice_room:
         slow_mode_secs: m.slow_mode_secs,
         can_set_slow_mode: joined && !group && m.can(&me, perm::MANAGE_COMMUNITY, None),
         board: m.nodes.board.as_ref().map(|b| b.addr.clone()),
+        file_node: m.nodes.files.first().map(|n| n.addr.clone()),
+        server_hosted: m.server_hosted_files,
         moderator: joined && community::is_moderator(m, &me),
         reports: s
             .reports()

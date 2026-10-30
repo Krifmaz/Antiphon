@@ -717,6 +717,8 @@ pub struct Settings {
     pub bands: Vec<BandRow>,
     /// Voice presets can be saved to and loaded from files (desktop only).
     pub preset_files: bool,
+    /// The names of your own saved voice presets.
+    pub saved_presets: Vec<String>,
     /// The microphone test is running, and its level.
     pub mic_test: Option<f32>,
     /// Roughly how many milliseconds hearing yourself adds, to show
@@ -1509,6 +1511,12 @@ pub struct Community {
     /// The mailbox node its board is on, if it has one (spec §11
     /// "Communities at full scale").
     pub board: Option<String>,
+    /// The file node members' files are pinned to, if it has one
+    /// (spec §5 "Server-hosted mode").
+    pub file_node: Option<String>,
+    /// Files shared in it are pinned to its file node, so they stay
+    /// available while the sharer is offline.
+    pub server_hosted: bool,
     /// You can act on reports: an owner, or allowed to remove messages or
     /// people.
     pub moderator: bool,
