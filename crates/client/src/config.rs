@@ -45,18 +45,6 @@ impl Default for ProfileData {
     }
 }
 
-/// Remembered window geometry, restored on the next launch regardless of
-/// `start_maximized`. `x`/`y` are optional since a fresh install has never
-/// placed the window anywhere -- let the OS pick a default position.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct WindowState {
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub x: Option<i32>,
-    pub y: Option<i32>,
-    pub maximized: bool,
-}
-
 /// The app's newer settings, in a table of their own (`stoop` in the
 /// file) apart from the older flat fields.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -260,54 +248,19 @@ pub struct AppConfig {
     /// so the tail of the last word is not clipped.
     #[serde(default)]
     pub ptt_release_ms: f32,
-    /// 0 = follow system, 1 = light, 2 = dark. `#[serde(default)]` on the
-    /// fields below so a config saved before this setting existed still
-    /// loads instead of falling back to defaults wholesale.
-    #[serde(default)]
-    pub theme_mode: i32,
     #[serde(default = "default_text_scale")]
     pub text_scale: f32,
     #[serde(default)]
     pub reduced_motion: bool,
-    /// Start up already listening for an incoming call instead of waiting
-    /// for the user to press "Listen" -- the closest honest meaning of
-    /// "server mode" for a peer-to-peer call: always-on and reachable,
-    /// not a client/server architecture change (there isn't one).
-    #[serde(default)]
-    pub server_mode: bool,
-    /// Force-maximize on launch, regardless of the remembered window size.
-    #[serde(default)]
-    pub start_maximized: bool,
-    #[serde(default)]
-    pub window: WindowState,
     /// Master output (playback) volume in dB, applied to the peer's audio.
     #[serde(default)]
     pub output_gain_db: f32,
-    /// Whether Settings' collapsible sections start expanded or collapsed --
-    /// a single blanket preference (General tab) rather than remembering
-    /// every individual section's state.
-    #[serde(default = "default_sections_expanded")]
-    pub sections_expanded_default: bool,
-    /// "#rrggbb", the accent the previous desktop app used. Read only to
-    /// carry an old setting over; the accent now lives in `stoop`.
-    #[serde(default = "default_accent_hex")]
-    pub accent_hex: String,
-    /// A font family name (e.g. "Consolas"), or "" for the system default.
-    /// Applied window-wide via `Window.default-font-family`, so it reaches
-    /// native widget chrome too, not just this app's own text.
-    #[serde(default)]
-    pub font_family: String,
     /// Path to a user-imported font file (.ttf/.otf/.ttc). Registering a
     /// font with the text engine is in-memory only and doesn't survive a
     /// restart on its own -- this is what lets startup re-register it so
     /// `font_family` (just a family name string) resolves to something.
     #[serde(default)]
     pub custom_font_path: String,
-    /// "#rrggbb" background for Appearance > Theme's "Custom" mode. Only
-    /// takes effect when `theme_mode == 3`; System/Light/Dark keep using
-    /// the OS-derived palette regardless of what this holds.
-    #[serde(default = "default_theme_bg_hex")]
-    pub theme_bg_hex: String,
     /// Path to a user-chosen background picture (a copy in the data
     /// folder's `backgrounds`), or "" for none. Only the path is saved;
     /// the picture is decoded again at each start.
@@ -321,51 +274,18 @@ pub struct AppConfig {
     /// and buttons stay fully opaque regardless.
     #[serde(default = "default_theme_opacity")]
     pub theme_opacity: f32,
-    /// Display order of each tab's collapsible sections, set via "Edit
-    /// layout"'s up/down controls. Sanitized against the canonical id list
-    /// on load (see `sanitize_order`) so a stale or hand-edited value can't
-    /// make a section silently disappear from the UI.
-    #[serde(default = "default_audio_order")]
-    pub audio_section_order: Vec<String>,
-    #[serde(default = "default_appearance_order")]
-    pub appearance_section_order: Vec<String>,
-    #[serde(default = "default_profile_order")]
-    pub profile_section_order: Vec<String>,
-    #[serde(default = "default_call_order")]
-    pub call_section_order: Vec<String>,
 
-    /// Whether calling a raw `host:port` is offered at all (Call settings >
-    /// Advanced).
+    /// Whether calling a raw `host:port` is allowed at all (Settings >
+    /// Network, "Call by address").
     ///
     /// Off by default because a direct connection shows each side the
     /// other's IP address -- spec §3 makes relayed the safe default for
     /// anyone who isn't already a known contact. Turning this on is the
-    /// user deciding they understand that trade, which is why it lives
-    /// under Advanced rather than next to the call button.
+    /// user deciding they understand that trade, which is why it is a
+    /// setting rather than a button beside the address box.
     #[serde(default)]
     pub ip_direct_calling: bool,
 
-    /// Start calls with screen sharing already on.
-    ///
-    /// Screen share is spec §11 deferred and not implemented, so this is
-    /// a stored preference with nothing yet reading it.
-    #[serde(default)]
-    pub start_with_screen_share: bool,
-    /// Start calls with the camera already on. Video is spec §11 deferred
-    /// and not implemented; same story as above.
-    #[serde(default)]
-    pub start_with_camera: bool,
-    /// Join calls with everyone else muted on your end, to be un-muted
-    /// individually by clicking them.
-    #[serde(default)]
-    pub mute_others_by_default: bool,
-    /// Join calls with your own mic muted.
-    #[serde(default)]
-    pub mute_self_on_join: bool,
-    /// Settings sidebar width in logical pixels -- dragged via the resize
-    /// handle between the sidebar and the category content.
-    #[serde(default = "default_sidebar_width")]
-    pub sidebar_width: f32,
     /// How the background image is fitted into the window: 0 cover, 1
     /// contain (letterboxed), 2 stretch (fill, ignores aspect ratio), 3
     /// original (1:1 pixels, centred, never scaled).
@@ -385,29 +305,6 @@ pub struct AppConfig {
     pub theme_image_crop_right: f32,
     #[serde(default)]
     pub theme_image_crop_bottom: f32,
-    /// Same fit/rotation/crop editor, same meaning, for the profile
-    /// avatar image instead of the theme background.
-    #[serde(default)]
-    pub avatar_image_fit: i32,
-    #[serde(default)]
-    pub avatar_image_rotation: f32,
-    #[serde(default)]
-    pub avatar_image_crop_left: f32,
-    #[serde(default)]
-    pub avatar_image_crop_top: f32,
-    #[serde(default)]
-    pub avatar_image_crop_right: f32,
-    #[serde(default)]
-    pub avatar_image_crop_bottom: f32,
-    /// Freeform positions/sizes of the Call tab's panels, set via its own
-    /// "Edit layout" drag-and-resize mode -- the app-wide analogue of the
-    /// section reordering above, but for a canvas of independently
-    /// placeable/resizable panels rather than a fixed vertical list.
-    /// Saved call-screen arrangements (spec §7). The live layout stays in
-    /// the `call_*_rect` fields below; these are snapshots to switch
-    /// between.
-    #[serde(default)]
-    pub saved_layouts: Vec<NamedLayout>,
     /// The call's parts by id (`people`, `code`, `captions`, `replay`,
     /// `soundboard`, `talk-pad`), in the order the call shows them; empty
     /// for the standard order. A part missing here is shown after these.
@@ -512,27 +409,6 @@ pub struct AppConfig {
     /// Do-not-disturb window (spec §13 "schedules, do-not-disturb").
     #[serde(default)]
     pub quiet_hours: crate::notify::QuietHours,
-    #[serde(default = "default_call_connect_rect")]
-    pub call_connect_rect: PanelRect,
-    #[serde(default = "default_call_filetransfer_rect")]
-    pub call_filetransfer_rect: PanelRect,
-    /// Where the invite QR panel sits (spec §4: "QR position
-    /// user-configurable via the UI editor, including hiding it
-    /// entirely").
-    #[serde(default = "default_call_invite_rect")]
-    pub call_invite_rect: PanelRect,
-    /// The profile widget's own rect -- no visibility field alongside it,
-    /// since (unlike the rest) it's never removable.
-    #[serde(default = "default_call_profile_rect")]
-    pub call_profile_rect: PanelRect,
-    #[serde(default = "default_call_chat_rect")]
-    pub call_chat_rect: PanelRect,
-    #[serde(default = "default_true")]
-    pub call_chat_visible: bool,
-    #[serde(default = "default_call_contacts_rect")]
-    pub call_contacts_rect: PanelRect,
-    #[serde(default = "default_true")]
-    pub call_contacts_visible: bool,
     /// Named voice presets (spec §1). Kept alongside the live `chain`
     /// rather than replacing it: the live chain is what you're currently
     /// hearing, presets are snapshots you can jump between.
@@ -542,31 +418,6 @@ pub struct AppConfig {
     /// book, not an identity system -- see `ControlMessage`'s trust note.
     #[serde(default)]
     pub contacts: Vec<Contact>,
-    /// Whether each Call tab panel is shown at all -- "Edit layout"'s
-    /// add/remove-widgets toggles.
-    #[serde(default = "default_true")]
-    pub call_connect_visible: bool,
-    #[serde(default = "default_true")]
-    pub call_filetransfer_visible: bool,
-    /// Off by default. The QR is also on the profile settings screen, and
-    /// a code that identifies you should be shown because you chose to
-    /// show it, not because it happened to be on by default while
-    /// somebody was sharing their screen.
-    #[serde(default)]
-    pub call_invite_visible: bool,
-    /// Path to a user-picked avatar image, or "" for the default
-    /// initial-letter circle. Only the path is saved; the picture is read
-    /// again at each start.
-    #[serde(default)]
-    pub profile_avatar_path: String,
-    /// Which details the compact profile bar shows -- the popup (opened by
-    /// clicking it) always shows everything regardless of these.
-    #[serde(default = "default_true")]
-    pub profile_widget_show_avatar: bool,
-    #[serde(default = "default_true")]
-    pub profile_widget_show_name: bool,
-    #[serde(default = "default_true")]
-    pub profile_widget_show_status: bool,
 }
 
 fn default_true() -> bool {
@@ -710,138 +561,10 @@ pub struct Contact {
     pub pronouns: String,
 }
 
-/// A freeform panel's position and size in logical pixels, relative to its
-/// tab's own canvas origin (top-left of the content area, not the window).
-/// A whole call-screen arrangement, saved under a name (spec §7 "Save
-/// named arrangements").
-///
-/// Holds only the call canvas -- panel positions, sizes and visibility --
-/// and deliberately not colours, fonts or audio settings. Those are
-/// separate axes of taste, and folding them together would mean switching
-/// to a compact layout also changed your theme.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct NamedLayout {
-    pub name: String,
-    pub connect_rect: PanelRect,
-    pub filetransfer_rect: PanelRect,
-    pub profile_rect: PanelRect,
-    pub chat_rect: PanelRect,
-    pub contacts_rect: PanelRect,
-    /// The invite QR (spec §4). Defaulted rather than required, so a
-    /// layout saved before this panel existed still loads -- with the
-    /// panel where a fresh install puts it, not at 0,0 under another one.
-    #[serde(default = "default_call_invite_rect")]
-    pub invite_rect: PanelRect,
-    pub connect_visible: bool,
-    pub filetransfer_visible: bool,
-    pub chat_visible: bool,
-    pub contacts_visible: bool,
-    /// Hidden by default in a saved layout that predates it: someone who
-    /// arranged their panels once should not find a new one dropped on
-    /// top of the arrangement they made.
-    #[serde(default)]
-    pub invite_visible: bool,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub struct PanelRect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-fn default_call_connect_rect() -> PanelRect {
-    PanelRect { x: 0.0, y: 0.0, width: 540.0, height: 190.0 }
-}
-
-fn default_call_filetransfer_rect() -> PanelRect {
-    PanelRect { x: 550.0, y: 0.0, width: 320.0, height: 340.0 }
-}
-
-fn default_call_invite_rect() -> PanelRect {
-    PanelRect { x: 550.0, y: 350.0, width: 260.0, height: 300.0 }
-}
-
-fn default_call_profile_rect() -> PanelRect {
-    PanelRect { x: 550.0, y: 350.0, width: 320.0, height: 130.0 }
-}
-
-fn default_call_chat_rect() -> PanelRect {
-    PanelRect { x: 550.0, y: 500.0, width: 320.0, height: 220.0 }
-}
-
-fn default_call_contacts_rect() -> PanelRect {
-    PanelRect { x: 900.0, y: 0.0, width: 320.0, height: 300.0 }
-}
-
-fn default_sidebar_width() -> f32 {
-    148.0
-}
-
-/// The canonical, exhaustive id list for each tab's reorderable sections --
-/// `sanitize_order` uses these to repair a saved order that's missing an id,
-/// has a stale one, or (from hand-edited JSON) a duplicate. "font" lives
-/// inside "textmotion" (Appearance > Text & motion), not its own section.
-/// Sections the Audio tab renders inside its reorderable loop.
-///
-/// "presets" was missing here while `app.slint` rendered it, and
-/// `sanitize_order` drops ids it doesn't recognise -- so the Voice presets
-/// section could never appear at all. Conversely "miclevel" and "mictest"
-/// were listed here but no section renders them: that UI is a fixed block
-/// at the top of the tab, outside the loop, so they only ever occupied
-/// reorderable slots that drew nothing.
-pub const AUDIO_SECTION_IDS: &[&str] =
-    &["presets", "callcontrols", "aec", "denoise", "gate", "hpf", "lpf", "deesser", "eq", "comp", "limiter", "pitch", "reverb"];
-pub const APPEARANCE_SECTION_IDS: &[&str] = &["accent", "theme", "textmotion", "importexport"];
-pub const PROFILE_SECTION_IDS: &[&str] = &["profile", "about"];
-pub const CALL_SECTION_IDS: &[&str] =
-    &["callstart", "notifications", "soundboard", "transferlimits", "sharedfiles", "captions", "discovery", "callparticipants", "outbox", "calladvanced", "vpn"];
-
-fn default_audio_order() -> Vec<String> {
-    AUDIO_SECTION_IDS.iter().map(ToString::to_string).collect()
-}
-
-fn default_appearance_order() -> Vec<String> {
-    APPEARANCE_SECTION_IDS.iter().map(ToString::to_string).collect()
-}
-
-fn default_profile_order() -> Vec<String> {
-    PROFILE_SECTION_IDS.iter().map(ToString::to_string).collect()
-}
-
 fn default_replay_seconds() -> u32 {
     // Deferred to `state` so the default and the audio ring that honours
     // it cannot drift apart.
     crate::state::REPLAY_SECONDS
-}
-
-fn default_call_order() -> Vec<String> {
-    CALL_SECTION_IDS.iter().map(ToString::to_string).collect()
-}
-
-/// Keeps `loaded` from ever being able to drop a section out of the UI:
-/// unknown ids are dropped, duplicates are collapsed to their first
-/// occurrence, and any canonical id missing from `loaded` is appended (in
-/// canonical order) at the end -- so a stale save from a version with fewer
-/// sections just puts the new ones last, rather than hiding them.
-pub fn sanitize_order(loaded: Vec<String>, canonical: &[&str]) -> Vec<String> {
-    let mut result: Vec<String> = Vec::with_capacity(canonical.len());
-    for id in loaded {
-        if canonical.contains(&id.as_str()) && !result.contains(&id) {
-            result.push(id);
-        }
-    }
-    for id in canonical {
-        if !result.iter().any(|r| r == id) {
-            result.push(id.to_string());
-        }
-    }
-    result
-}
-
-fn default_theme_bg_hex() -> String {
-    "#202020".to_string()
 }
 
 fn default_theme_image_opacity() -> f32 {
@@ -850,15 +573,6 @@ fn default_theme_image_opacity() -> f32 {
 
 fn default_theme_opacity() -> f32 {
     1.0
-}
-
-fn default_sections_expanded() -> bool {
-    true
-}
-
-fn default_accent_hex() -> String {
-    // Encore's cream, so the two apps share a palette.
-    "#f0ead6".to_string()
 }
 
 fn default_text_scale() -> f32 {
@@ -880,26 +594,13 @@ impl Default for AppConfig {
             hangup_key: String::new(),
             replay_key: String::new(),
             va_threshold: 0.05,
-            theme_mode: 0,
             text_scale: 1.0,
             reduced_motion: false,
-            server_mode: false,
-            start_maximized: false,
-            window: WindowState::default(),
             output_gain_db: 0.0,
-            sections_expanded_default: true,
-            accent_hex: default_accent_hex(),
-            font_family: String::new(),
             custom_font_path: String::new(),
-            theme_bg_hex: default_theme_bg_hex(),
             theme_image_path: String::new(),
             theme_image_opacity: default_theme_image_opacity(),
             theme_opacity: default_theme_opacity(),
-            audio_section_order: default_audio_order(),
-            appearance_section_order: default_appearance_order(),
-            profile_section_order: default_profile_order(),
-            call_section_order: default_call_order(),
-            saved_layouts: Vec::new(),
             call_panel_order: Vec::new(),
             call_panels_hidden: Vec::new(),
             call_beside_chat: false,
@@ -961,40 +662,14 @@ impl Default for AppConfig {
             deafen_hold: false,
             ptt_release_ms: 0.0,
             ip_direct_calling: false,
-            start_with_screen_share: false,
-            start_with_camera: false,
-            mute_others_by_default: false,
-            mute_self_on_join: false,
-            sidebar_width: default_sidebar_width(),
             theme_image_fit: 0,
             theme_image_rotation: 0.0,
             theme_image_crop_left: 0.0,
             theme_image_crop_top: 0.0,
             theme_image_crop_right: 0.0,
             theme_image_crop_bottom: 0.0,
-            avatar_image_fit: 0,
-            avatar_image_rotation: 0.0,
-            avatar_image_crop_left: 0.0,
-            avatar_image_crop_top: 0.0,
-            avatar_image_crop_right: 0.0,
-            avatar_image_crop_bottom: 0.0,
-            call_connect_rect: default_call_connect_rect(),
-            call_filetransfer_rect: default_call_filetransfer_rect(),
-            call_invite_rect: default_call_invite_rect(),
-            call_profile_rect: default_call_profile_rect(),
-            call_chat_rect: default_call_chat_rect(),
-            call_chat_visible: true,
-            call_contacts_rect: default_call_contacts_rect(),
-            call_contacts_visible: true,
             voice_presets: Vec::new(),
             contacts: Vec::new(),
-            call_connect_visible: true,
-            call_filetransfer_visible: true,
-            call_invite_visible: false,
-            profile_avatar_path: String::new(),
-            profile_widget_show_avatar: true,
-            profile_widget_show_name: true,
-            profile_widget_show_status: true,
         }
     }
 }
@@ -1184,72 +859,17 @@ mod tests {
         assert_eq!(merged.theme_image_path, "");
     }
 
-    fn sample_layout(name: &str) -> NamedLayout {
-        let r = |x: f32| PanelRect { x, y: 10.0, width: 200.0, height: 120.0 };
-        NamedLayout {
-            name: name.to_string(),
-            connect_rect: r(1.0),
-            filetransfer_rect: r(2.0),
-            profile_rect: r(3.0),
-            chat_rect: r(4.0),
-            contacts_rect: r(5.0),
-            invite_rect: r(6.0),
-            connect_visible: true,
-            filetransfer_visible: false,
-            chat_visible: true,
-            contacts_visible: false,
-            invite_visible: true,
-        }
-    }
-
-    #[test]
-    fn saved_layouts_round_trip_through_json() {
-        let config = AppConfig {
-            saved_layouts: vec![sample_layout("Compact"), sample_layout("Everything")],
-            ..Default::default()
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let back: AppConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(back.saved_layouts, config.saved_layouts);
-    }
-
-    #[test]
-    fn a_config_saved_before_named_layouts_existed_still_loads() {
-        // `saved_layouts` is defaulted, so an older config file opens with
-        // no arrangements rather than failing to parse and resetting
-        // everything else the user had configured.
-        let mut value: serde_json::Value =
-            serde_json::to_value(AppConfig::default()).unwrap();
-        value.as_object_mut().unwrap().remove("saved_layouts");
-
-        let back: AppConfig = serde_json::from_value(value).unwrap();
-        assert!(back.saved_layouts.is_empty());
-    }
-
-    #[test]
-    fn a_layout_keeps_panel_visibility_as_well_as_position() {
-        // Position alone is not an arrangement: a layout that reopened
-        // every panel you had hidden would not be the layout you saved.
-        let layout = sample_layout("Compact");
-        assert!(layout.connect_visible);
-        assert!(!layout.filetransfer_visible);
-        assert!(!layout.contacts_visible);
-    }
-
     #[test]
     fn round_trips_through_json() {
         let cfg = AppConfig::default();
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.ptt_key, back.ptt_key);
-        assert_eq!(cfg.theme_mode, back.theme_mode);
         assert_eq!(cfg.text_scale, back.text_scale);
     }
 
-    /// A config saved before `theme_mode`/`text_scale`/`reduced_motion`/
-    /// `server_mode` existed must still load -- `#[serde(default)]` is what
+    /// A config saved before `text_scale`/`reduced_motion` and the rest
+    /// existed must still load -- `#[serde(default)]` is what
     /// makes that true, and it's easy to add a field later and forget it.
     #[test]
     fn old_config_without_newer_fields_still_loads() {
@@ -1264,50 +884,20 @@ mod tests {
         .to_string();
 
         let cfg: AppConfig = serde_json::from_str(&old_json).expect("old config shape should still parse");
-        assert_eq!(cfg.theme_mode, 0);
         assert_eq!(cfg.text_scale, 1.0);
-        assert!(!cfg.start_maximized);
-        assert!(cfg.window.width.is_none());
         assert!(!cfg.reduced_motion);
-        assert!(!cfg.server_mode);
         assert_eq!(cfg.transmit_mode, 0, "an old config without a transmit mode falls back to push-to-talk");
         assert_eq!(cfg.mute_key, "");
         assert_eq!(cfg.output_gain_db, 0.0);
-        assert!(cfg.sections_expanded_default, "sections should default to expanded, not silently collapse everything on upgrade");
-        assert_eq!(cfg.accent_hex, "#f0ead6");
-        assert_eq!(cfg.font_family, "");
         assert_eq!(cfg.custom_font_path, "");
-        assert_eq!(cfg.theme_bg_hex, "#202020");
         assert_eq!(cfg.theme_image_path, "");
         assert_eq!(cfg.theme_image_opacity, 0.5);
         assert_eq!(cfg.theme_opacity, 1.0);
-        assert_eq!(cfg.audio_section_order, default_audio_order());
-        assert_eq!(cfg.appearance_section_order, default_appearance_order());
-        assert_eq!(cfg.profile_section_order, default_profile_order());
-        assert_eq!(cfg.sidebar_width, 148.0);
         assert_eq!(cfg.theme_image_fit, 0);
         assert_eq!(cfg.theme_image_rotation, 0.0);
         assert_eq!(cfg.theme_image_crop_left, 0.0);
-        assert_eq!(cfg.avatar_image_fit, 0);
-        assert_eq!(cfg.avatar_image_rotation, 0.0);
-        assert_eq!(cfg.avatar_image_crop_left, 0.0);
-        assert_eq!(cfg.call_connect_rect, default_call_connect_rect());
-        assert_eq!(cfg.call_filetransfer_rect, default_call_filetransfer_rect());
-        assert_eq!(cfg.call_invite_rect, default_call_invite_rect());
-        assert_eq!(cfg.call_profile_rect, default_call_profile_rect());
-        assert_eq!(cfg.call_chat_rect, default_call_chat_rect());
-        assert!(cfg.call_chat_visible);
         assert!(cfg.contacts.is_empty(), "an upgrade shouldn't invent contacts");
         assert!(cfg.voice_presets.is_empty(), "an upgrade shouldn't invent presets");
-        assert!(cfg.call_contacts_visible);
-        assert!(cfg.call_connect_visible);
-        assert!(cfg.call_filetransfer_visible);
-        // A panel showing a code that identifies you is opt-in.
-        assert!(!cfg.call_invite_visible);
-        assert_eq!(cfg.profile_avatar_path, "");
-        assert!(cfg.profile_widget_show_avatar);
-        assert!(cfg.profile_widget_show_name);
-        assert!(cfg.profile_widget_show_status);
     }
 
     #[test]
@@ -1330,20 +920,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_order_drops_unknown_ids_and_appends_missing_ones() {
-        let canonical = &["a", "b", "c"];
-        let loaded = vec!["c".to_string(), "stale".to_string(), "c".to_string()];
-        assert_eq!(sanitize_order(loaded, canonical), vec!["c", "a", "b"]);
-    }
-
-    #[test]
-    fn sanitize_order_leaves_a_valid_permutation_untouched() {
-        let canonical = &["a", "b", "c"];
-        let loaded = vec!["c".to_string(), "a".to_string(), "b".to_string()];
-        assert_eq!(sanitize_order(loaded, canonical), vec!["c", "a", "b"]);
-    }
-
-    #[test]
     fn a_profile_name_is_stripped_to_something_safe_to_use_as_a_directory() {
         // The name becomes a path component, so traversal and separators
         // must not survive it.
@@ -1359,20 +935,4 @@ mod tests {
         assert_eq!(sanitize_profile(""), None);
     }
 
-    /// The low-pass stage was in the DSP chain long before it had any UI,
-    /// so a config saved by an older build has an audio order with no
-    /// "lpf" in it. That must gain the section rather than keep hiding it
-    /// -- the whole point of exposing it was that an unreachable stage
-    /// violates spec §0 "User choice".
-    #[test]
-    fn an_audio_order_saved_before_the_low_pass_section_existed_gains_it() {
-        let pre_lpf: Vec<String> = AUDIO_SECTION_IDS
-            .iter()
-            .filter(|id| **id != "lpf")
-            .map(ToString::to_string)
-            .collect();
-        let merged = sanitize_order(pre_lpf, AUDIO_SECTION_IDS);
-        assert!(merged.contains(&"lpf".to_string()));
-        assert_eq!(merged.len(), AUDIO_SECTION_IDS.len());
-    }
 }

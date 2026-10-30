@@ -63,6 +63,7 @@ impl Demo {
                 ..ui::Transfers::default()
             },
             network: ui::Network {
+                ip_direct: Some(false),
                 checks: vec![
                     check("Calling out", CheckState::Good, "Connections you start are what every home router already allows."),
                     check("Your public address", CheckState::Good, "This is the address to give someone so they can reach you."),
@@ -432,6 +433,7 @@ impl Demo {
                 ui::avatars::set(&self.model.me.id, "", &color, |_| None);
                 self.model.me.color = color;
             }
+            Action::IpDirect(on) => self.model.network.ip_direct = Some(on),
             Action::ShareScreen(on) => {
                 self.model.call.sharing = on;
                 self.model.call.video.retain(|t| t.key != "my-screen");

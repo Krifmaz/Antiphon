@@ -50,11 +50,6 @@ fn live() -> &'static Mutex<HashSet<SocketAddr>> {
     LIVE.get_or_init(Default::default)
 }
 
-/// Whether `addr` is the stand-in address of a live circuit.
-pub fn is_circuit(addr: SocketAddr) -> bool {
-    live().lock().unwrap().contains(&addr)
-}
-
 /// Builds a circuit through `hops` to `relay` and returns the socket and
 /// address to use in place of the relay's. The circuit lives as long as
 /// the returned socket does.

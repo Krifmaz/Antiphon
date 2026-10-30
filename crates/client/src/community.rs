@@ -2439,32 +2439,6 @@ impl Store {
         self.hub().appear.get(&hex(&id.0)).cloned().unwrap_or_default()
     }
 
-    /// Changes how you appear in one space, and tells its members.
-    pub fn set_appearance(&self, id: &Key, look: Appearance) -> Result<(), String> {
-        if look.avatar.len() > MAX_AVATAR {
-            return Err("that picture is too big to send".into());
-        }
-        {
-            let _guard = LOCK.lock().unwrap();
-            let mut hub = self.hub();
-            if look == Appearance::default() {
-                hub.appear.remove(&hex(&id.0));
-            } else {
-                hub.appear.insert(hex(&id.0), look);
-            }
-            self.save_hub(&hub);
-        }
-        self.with_space(id, |space, identity| {
-            let card = self.card_for(&space.id(), identity);
-            if space.removed || space.joining.is_some() {
-                // Not in yet: the card goes with the next thing we send.
-                space.learn(card);
-                return Ok(((), Vec::new(), vec![Event::Changed]));
-            }
-            Ok(((), space.refresh_card(card)?, vec![Event::Changed]))
-        })
-    }
-
     fn queue(&self, hub: &mut Hub, outs: Vec<Out>, me: [u8; 32], persona: Option<Key>) {
         for out in outs {
             if out.to == self.identity.public().identity_key || out.to == me {

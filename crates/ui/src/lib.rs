@@ -622,6 +622,8 @@ pub enum Action {
     Relay(String),
     /// Let contacts with no relay of their own listen at yours.
     LendRelay(bool),
+    /// Allow calling a bare `host:port` (desktop only).
+    IpDirect(bool),
     /// Route calls through anonymity-mode hops, or stop.
     Anonymity(bool),
     /// The hops for anonymity mode, comma-separated `host:port[#key]`.

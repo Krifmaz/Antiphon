@@ -582,10 +582,6 @@ pub fn rounds() -> u64 {
     ROUND.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-pub fn decode_identity(hex: &str) -> Option<[u8; 32]> {
-    crate::connection_mode::decode_hex32(hex)
-}
-
 /// How often mail is collected and the outbox retried when nothing
 /// prompts it sooner.
 pub const COURIER_INTERVAL: Duration = Duration::from_secs(60);

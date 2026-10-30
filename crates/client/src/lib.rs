@@ -49,7 +49,6 @@ pub mod reactions;
 pub mod replay_history;
 pub mod sealed_ring;
 pub mod screen_audio;
-pub mod search;
 pub mod sharing;
 pub mod soundboard;
 pub mod sfu_call;

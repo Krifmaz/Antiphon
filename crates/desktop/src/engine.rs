@@ -1896,6 +1896,12 @@ impl Engine {
 
     /// Calls a bare `host:port` someone typed.
     fn call_address(&mut self, address: String) {
+        // Spec §3: someone known only by an address is a stranger, and a
+        // direct call shows them your IP address; that is opted into.
+        if !self.cfg.ip_direct_calling {
+            self.toast("Calling by address is off. Turn on Call by address in Settings > Network first.", ToastKind::Info);
+            return;
+        }
         if self.call.phase == ui::Phase::Connected || self.call.phase == ui::Phase::Dialing {
             self.toast("You're already on a call", ToastKind::Warn);
             return;
@@ -2424,6 +2430,10 @@ impl Engine {
                 self.cfg.anonymity_hops = fallback_relay::parse_list(&text);
                 self.save();
                 self.relisten();
+            }
+            A::IpDirect(on) => {
+                self.cfg.ip_direct_calling = on;
+                self.save();
             }
             A::LendRelay(on) => {
                 self.cfg.lend_relay = on;
@@ -3553,6 +3563,7 @@ impl Engine {
             relay: self.cfg.relay_server.clone(),
             relay_note,
             lend_relay: self.cfg.lend_relay,
+            ip_direct: Some(self.cfg.ip_direct_calling),
             anonymity: self.cfg.anonymity_mode,
             hops: self.cfg.anonymity_hops.join(", "),
             mailboxes: self.mailboxes(),

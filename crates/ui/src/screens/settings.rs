@@ -863,6 +863,14 @@ fn network<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         setting("Open my door when Stoop starts", None, switch("Open my door when Stoop starts", m.settings.open_on_start, |on| Msg::Do(Action::OpenOnStart(on)))),
     ]
     .spacing(12);
+    let listen = match m.network.ip_direct {
+        Some(on) => listen.push(divider()).push(setting(
+            "Call by address",
+            Some("Lets you call a bare address like 192.168.1.20:7000. You and they see each other's IP address, so it's off until you want it; contacts are reached through their invite instead."),
+            switch("Call by address", on, |on| Msg::Do(Action::IpDirect(on))),
+        )),
+        None => listen,
+    };
     column![card(check_card), titled_card("Your door", None, listen)].spacing(14).into()
 }
 

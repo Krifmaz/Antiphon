@@ -579,6 +579,9 @@ pub struct Network {
     pub relay_note: String,
     /// Whether contacts with no relay may listen at yours.
     pub lend_relay: bool,
+    /// Whether calling a bare `host:port` is allowed; `None` where it
+    /// always is (the phone).
+    pub ip_direct: Option<bool>,
     /// Whether anonymity mode is on.
     pub anonymity: bool,
     /// Its hops, comma-separated `host:port[#key]`.

@@ -214,18 +214,10 @@ pub struct ActiveCall {
     /// How loud they are right now (0..1, peak of the last frame played),
     /// for a speaking indicator. Zero while deafened.
     pub peer_level: Arc<Mutex<f32>>,
-    /// An incoming "add me" request awaiting the user's answer (spec §3),
-    /// holding the requester's display name. `None` when there's nothing
-    /// pending.
-    pub pending_friend_request: Arc<Mutex<Option<String>>>,
     /// An introduction the peer sent, waiting for the UI thread to act on
     /// it (spec §4). Handled there rather than here because acting on it
     /// means touching the contact list, which outlives the call.
     pub pending_introduction: Arc<Mutex<Option<crate::introduction::Introduction>>>,
-    /// Set when the *other* side accepts a request we sent -- the UI timer
-    /// drains this and writes the contact to config, since contacts
-    /// outlive any single call and so don't belong to `ActiveCall`.
-    pub friend_accepted: Arc<Mutex<Option<String>>>,
     /// In-call text chat (spec §4). `chat_rev` bumps on every append so
     /// the UI timer can skip rebuilding its message model on the ~20
     /// ticks/second where nothing changed.
@@ -449,11 +441,6 @@ impl ActiveCall {
         }
     }
 
-    /// One line saying what is still waiting, or `None` when nothing is.
-    pub fn outbox_summary(&self, peer_name: &str) -> Option<String> {
-        crate::outbox::summary(&self.outbox.lock().unwrap(), peer_name)
-    }
-
     /// What to show against one of our own messages (spec §8).
     pub fn delivery_status(&self, id: u64) -> crate::outbox::Status {
         crate::outbox::status_of(&self.outbox.lock().unwrap(), id, true)
@@ -504,10 +491,6 @@ impl ActiveCall {
         runtime.spawn(async move {
             let _ = peer.send_control(&message.encode()).await;
         });
-    }
-
-    pub fn send_chat(&self, runtime: &tokio::runtime::Handle, text: &str) {
-        self.send_reply(runtime, text, None);
     }
 
     /// Sends a chat message that answers an earlier one (`reply_to`, by
@@ -698,43 +681,6 @@ impl ActiveCall {
         runtime.spawn(async move {
             let _ = peer.send_control(&ControlMessage::SilentCall.encode()).await;
         });
-    }
-
-    /// Asks the peer to add us (spec §3). `display_name` is our own.
-    pub fn send_friend_request(&self, runtime: &tokio::runtime::Handle, display_name: String) {
-        let peer = self.peer.clone();
-        runtime.spawn(async move {
-            let _ = peer.send_control(&ControlMessage::FriendRequest { display_name }.encode()).await;
-        });
-    }
-
-    /// Accepts the pending request, replying with our own display name so
-    /// the requester can add us back. Returns the requester's name and
-    /// address for the caller to save, or `None` if nothing was pending.
-    pub fn accept_friend_request(&self, runtime: &tokio::runtime::Handle, my_display_name: String) -> Option<(String, String)> {
-        let their_name = self.pending_friend_request.lock().unwrap().take()?;
-        let peer = self.peer.clone();
-        runtime.spawn(async move {
-            let _ = peer.send_control(&ControlMessage::FriendAccept { display_name: my_display_name }.encode()).await;
-        });
-        Some((their_name, self.peer.remote_addr().to_string()))
-    }
-
-    pub fn reject_friend_request(&self, runtime: &tokio::runtime::Handle) {
-        if self.pending_friend_request.lock().unwrap().take().is_none() {
-            return;
-        }
-        let peer = self.peer.clone();
-        runtime.spawn(async move {
-            let _ = peer.send_control(&ControlMessage::FriendReject.encode()).await;
-        });
-    }
-
-    /// Drains a "they accepted" notification into `(name, address)` for the
-    /// caller to persist.
-    pub fn take_friend_accepted(&self) -> Option<(String, String)> {
-        let name = self.friend_accepted.lock().unwrap().take()?;
-        Some((name, self.peer.remote_addr().to_string()))
     }
 
     /// A copy of the replay ring right now, oldest sample first, plus the
@@ -1437,8 +1383,6 @@ pub fn start_pipeline(
     let peer_left = Arc::new(AtomicBool::new(false));
     let pending_introduction: Arc<Mutex<Option<crate::introduction::Introduction>>> =
         Arc::new(Mutex::new(None));
-    let pending_friend_request: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let friend_accepted: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // Sealed in RAM under a key made for this call (spec §2 "Ephemeral by
     // design"); dropping the call drops the key.
     let replay: Arc<Mutex<crate::sealed_ring::SealedRing>> = Arc::new(Mutex::new(Default::default()));
@@ -1769,8 +1713,6 @@ pub fn start_pipeline(
     let recv_ring = peer_wants_ring.clone();
     let recv_left = peer_left.clone();
     let recv_introduction = pending_introduction.clone();
-    let recv_friend_pending = pending_friend_request.clone();
-    let recv_friend_accepted = friend_accepted.clone();
     let video = Arc::new(crate::video::CallVideo::new());
     *group.video.lock().unwrap() = Some(video.clone());
     let peer_card = Arc::new(Mutex::new(None));
@@ -1944,13 +1886,9 @@ pub fn start_pipeline(
                             recv_chat_rev.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    Some(ControlMessage::FriendRequest { display_name }) => {
-                        *recv_friend_pending.lock().unwrap() = Some(display_name);
-                    }
-                    Some(ControlMessage::FriendAccept { display_name }) => {
-                        *recv_friend_accepted.lock().unwrap() = Some(display_name);
-                    }
-                    Some(ControlMessage::FriendReject) => {}
+                    // "Add me" requests from older builds: contacts are
+                    // added by invite or introduction, so these are dropped.
+                    Some(ControlMessage::FriendRequest { .. } | ControlMessage::FriendAccept { .. } | ControlMessage::FriendReject) => {}
                     Some(ControlMessage::Profile(card)) => *recv_card.lock().unwrap() = Some(card),
                     Some(ControlMessage::Devices { list }) => *recv_devices.lock().unwrap() = Some(list),
                     Some(other) => file_transfer::handle_control_message(other, &recv_ft_state, &recv_ft_peer),
@@ -2284,8 +2222,6 @@ pub fn start_pipeline(
         peer_left,
         peer_level,
         pending_introduction,
-        pending_friend_request,
-        friend_accepted,
         chat_log,
         chat_rev,
         reactions,
