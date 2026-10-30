@@ -421,7 +421,8 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     }
     let cards = match tab {
         1 => cards.push(titled_card("Processing", None, processing)),
-        2 if !m.device.phone => cards.push(titled_card(
+        2 => fine_tune(cards, s),
+        3 if !m.device.phone => cards.push(titled_card(
             "Plugins",
             Some("Your own LADSPA, LV2 and VST3 effects, run on your microphone after the processing. A plugin is a program: add only ones you trust."),
             plugins(&s.plugins),
@@ -435,6 +436,64 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
         }
     };
     cards.into()
+}
+
+/// Voice's "Fine-tune" tab (spec §1 "every chain stage toggles
+/// independently"): a card per stage of the chain, in the order the sound
+/// runs through them, each with its switch and, while on, its settings;
+/// then the EQ's bands, and saving the chain to a file and loading one.
+fn fine_tune<'a>(mut cards: iced_widget::Column<'a, Msg>, s: &'a crate::Settings) -> iced_widget::Column<'a, Msg> {
+    for stage in &s.stages {
+        let id = stage.id;
+        let mut body = column![setting(stage.name, Some(stage.help), switch(stage.name, stage.enabled, move |on| Msg::Do(Action::StageOn(id, on))))].spacing(12);
+        if stage.enabled {
+            for p in &stage.params {
+                let param = p.id;
+                body = body.push(param_row(p, move |v| Msg::Do(Action::StageParam(id, param, v))));
+            }
+        }
+        if let Some(db) = stage.reduction_db {
+            // How hard it is working right now: a stage that is on and
+            // doing nothing looks the same as one doing its job until it
+            // is shown.
+            body = body.push(field(
+                "Turning you down by",
+                row![progress_bar(0.0..=24.0, db.min(24.0)).girth(8).style(theme::meter), faint(format_value(db, 0.1, "dB")).size(12).width(84)].spacing(10).align_y(Alignment::Center),
+            ));
+        }
+        cards = cards.push(card(body));
+    }
+
+    let mut eq = column![].spacing(12);
+    if s.bands.is_empty() {
+        eq = eq.push(faint("No EQ bands. Pick a voice preset on the Processing tab to start from one.").size(13));
+    }
+    for (i, band) in s.bands.iter().enumerate() {
+        let mut item = column![setting(band.shape, None, switch(band.shape, band.enabled, move |on| Msg::Do(Action::BandParam(i, "enabled", if on { 1.0 } else { 0.0 }))))].spacing(10);
+        if band.enabled {
+            for p in &band.params {
+                let param = p.id;
+                item = item.push(param_row(p, move |v| Msg::Do(Action::BandParam(i, param, v))));
+            }
+        }
+        eq = eq.push(container(item).padding(10).style(theme::tabs_frame));
+    }
+    cards = cards.push(titled_card("EQ", Some("Shapes the tone of your voice, band by band."), eq));
+
+    if s.preset_files {
+        cards = cards.push(titled_card(
+            "Preset files",
+            Some("Save everything on this tab to a file to share it, or load someone else's. Plugins are never loaded from a file."),
+            row![btn_icon(Icon::Download, "Save to a file…", Btn::Default, Some(Msg::Do(Action::ExportPreset))), btn_icon(Icon::File, "Load a file…", Btn::Ghost, Some(Msg::Do(Action::ImportPreset)))].spacing(10),
+        ));
+    }
+    cards
+}
+
+/// One setting's label, slider and sentence; `on` turns a value into the
+/// message to send.
+fn param_row<'a>(p: &'a crate::ParamRow, on: impl Fn(f32) -> Msg + 'a) -> El<'a, Msg> {
+    column![field(p.name, value_slider(p.name, p.value, p.min, p.max, p.step, p.unit, on)), faint(p.help).size(12)].spacing(4).into()
 }
 
 /// Spec §1 "Plugin Host": the chain's plugins with their controls, and

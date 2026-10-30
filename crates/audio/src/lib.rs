@@ -10,6 +10,7 @@
 #[cfg(target_os = "android")]
 mod aaudio;
 mod chain;
+pub mod controls;
 mod echo_cancel;
 mod device;
 pub mod plugins;

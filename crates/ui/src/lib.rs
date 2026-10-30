@@ -218,8 +218,8 @@ impl Section {
     pub fn tabs(self, desktop: bool) -> &'static [&'static str] {
         match self {
             Section::Account => &["Identity", "Backup file", "Recovery phrase"],
-            Section::Voice if desktop => &["Input & output", "Processing", "Plugins"],
-            Section::Voice => &["Input & output", "Processing"],
+            Section::Voice if desktop => &["Input & output", "Processing", "Fine-tune", "Plugins"],
+            Section::Voice => &["Input & output", "Processing", "Fine-tune"],
             Section::Appearance => &["Theme", "Text & motion"],
             Section::Relays => &["Relay", "Mailboxes"],
             _ => &[],
@@ -561,6 +561,17 @@ pub enum Action {
     AutoGain(bool),
     /// Use a voice preset by name.
     Preset(String),
+    /// Turn a chain stage (by id) on or off.
+    StageOn(&'static str, bool),
+    /// Set a chain stage's setting: stage id, setting id, value.
+    StageParam(&'static str, &'static str, f32),
+    /// Set a setting (by id) of the EQ band at this index; `"enabled"`
+    /// turns the band on (1) or off (0).
+    BandParam(usize, &'static str, f32),
+    /// Save the whole voice chain to a preset file (desktop only).
+    ExportPreset,
+    /// Load the voice chain from a preset file (desktop only).
+    ImportPreset,
     /// Start or stop hearing my own microphone.
     MicTest(bool),
     /// Master output volume, dB.

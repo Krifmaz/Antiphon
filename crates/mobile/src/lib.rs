@@ -71,6 +71,11 @@ pub mod runner;
 mod settings;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod ui;
+// Voice's "Fine-tune" tab, shared word for word with the desktop and all
+// of it used here.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[path = "../../desktop/src/chain_rows.rs"]
+mod chain_rows;
 
 // The desktop's wire-level modules, shared by path. Each is used only in
 // part here (the desktop has screens for things a phone does not offer

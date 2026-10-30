@@ -466,9 +466,44 @@ pub fn volume_slider<'a, M: Clone + 'static>(name: &str, db: f32, width: Length,
     .into()
 }
 
+/// A labelled slider over `min..=max` moving by `step`, with the value and
+/// its `unit` beside it, which a screen reader can read and step like
+/// [`volume_slider`].
+pub fn value_slider<'a, M: Clone + 'static>(name: &str, value: f32, min: f32, max: f32, step: f32, unit: &str, on: impl Fn(f32) -> M + 'a) -> El<'a, M> {
+    let shown = format_value(value, step, unit);
+    let up = on((value + step).min(max));
+    let down = on((value - step).max(min));
+    let focused = Spec::new(Role::Slider, name).value(shown.clone()).steps(Some(&up), Some(&down)).add();
+    iced_widget::row![
+        a11y::ring(iced_widget::slider(min..=max, value, on).step(step).width(Length::Fill).style(theme::slider_style), focused, 8.0),
+        faint(shown).size(12).width(84),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// `value` with as many decimals as `step` needs, and `unit` after it
+/// (": 1" ratios read "4:1", every other unit after a space).
+pub fn format_value(value: f32, step: f32, unit: &str) -> String {
+    let decimals = if step >= 1.0 { 0 } else if step >= 0.1 { 1 } else { 2 };
+    match unit {
+        "" => format!("{value:.decimals$}"),
+        ":1" => format!("{value:.decimals$}:1"),
+        _ => format!("{value:.decimals$} {unit}"),
+    }
+}
+
 #[cfg(test)]
 mod volume_tests {
     use super::*;
+
+    #[test]
+    fn values_show_the_decimals_their_step_needs() {
+        assert_eq!(format_value(-18.0, 1.0, "dB"), "-18 dB");
+        assert_eq!(format_value(0.25, 0.05, ""), "0.25");
+        assert_eq!(format_value(4.0, 0.5, ":1"), "4.0:1");
+    }
 
     #[test]
     fn normal_volume_is_the_middle() {

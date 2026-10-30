@@ -17,6 +17,8 @@ pub struct Demo {
     pub model: ui::Model,
     /// The next message id to hand out.
     next_id: u64,
+    /// The pretend microphone chain the "Fine-tune" tab edits.
+    chain: antiphon_audio::ChainConfig,
 }
 
 impl Demo {
@@ -114,7 +116,10 @@ impl Demo {
         for (name, color) in [("vinyl", [30, 30, 34, 255]), ("porch", [214, 160, 92, 255]), ("yes", [120, 200, 130, 255])] {
             ui::avatars::set(&ui::avatars::emoji_id(CLUB, name), name, "", |_| Some(emoji_picture(color)));
         }
-        Demo { model, next_id: 100 }
+        let chain = antiphon_audio::ChainConfig { eq_bands: antiphon_audio::eq_preset("Warm").unwrap_or_default(), ..antiphon_audio::ChainConfig::default_preset() };
+        let mut demo = Demo { model, next_id: 100, chain };
+        demo.chain_shown();
+        demo
     }
 
     /// Puts a call with Robin on, as if it had been going a while.
@@ -229,6 +234,12 @@ impl Demo {
             vec![line(1, false, "hey! got your invite", "13:30", Some("Today")), line(2, true, "welcome to my stoop", "13:31", None)]
         };
         self.model.conversation = Some(ui::Conversation { person: id.into(), lines, live: self.model.call.with(id), queues: !self.model.call.with(id), expiry: None, recording: None });
+    }
+
+    /// Shows the pretend chain on the "Fine-tune" tab.
+    fn chain_shown(&mut self) {
+        self.model.settings.stages = crate::chain_rows::stages(&self.chain, |_| None);
+        self.model.settings.bands = crate::chain_rows::bands(&self.chain);
     }
 
     /// What an action does to made-up data: enough to click around.
@@ -354,6 +365,11 @@ impl Demo {
             Action::SetName(n) => self.model.me.name = n,
             Action::SetStatus(s) => self.model.me.status = s,
             Action::Preset(p) => self.model.settings.preset = p,
+            Action::StageOn(..) | Action::StageParam(..) | Action::BandParam(..) => {
+                if crate::chain_rows::apply(&mut self.chain, &action) {
+                    self.chain_shown();
+                }
+            }
             Action::Talk(on) => {
                 if let Some(ph) = self.model.phone.as_mut() {
                     ph.talking = on;

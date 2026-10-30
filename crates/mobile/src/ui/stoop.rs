@@ -160,6 +160,8 @@ impl App {
             auto_gain: matches!(chain.gain, antiphon_audio::GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
+            stages: crate::chain_rows::stages(chain, |_| None),
+            bands: crate::chain_rows::bands(chain),
             mic_test: self.engine.mic_test_running().then(|| self.engine.level()),
             reduced_motion: self.settings.reduced_motion,
             // The full version, a hotfix's run number included.
@@ -751,8 +753,12 @@ impl App {
                 self.save();
             }
             Action::Transmit(mode) => self.update(Message::OpenMic(mode != Transmit::PushToTalk)),
-            Action::NoiseSuppression(on) => self.update(Message::Toggle(super::Stage::NoiseSuppress, on)),
-            Action::AutoGain(on) => self.update(Message::Toggle(super::Stage::AutoGain, on)),
+            Action::NoiseSuppression(on) => self.update(Message::Chain(Action::StageOn("noise_suppress", on))),
+            Action::AutoGain(on) => self.update(Message::Chain(Action::StageOn("gain", on))),
+            Action::StageOn(..) | Action::StageParam(..) | Action::BandParam(..) => self.update(Message::Chain(action)),
+            // A phone has no file dialog to save a preset through or pick
+            // one from, so the tab never offers it.
+            Action::ExportPreset | Action::ImportPreset => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

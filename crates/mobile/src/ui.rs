@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use antiphon_audio::{eq_preset, ChainConfig, GainConfig};
+use antiphon_audio::{eq_preset, ChainConfig};
 use antiphon_crypto::{BackupKey, IdentityKeyPair};
 use iced_core::{Element, Length, Size, Theme};
 use iced_widget::{container, qr_code};
@@ -39,16 +39,6 @@ const MODEL_MAX_AGE: Duration = Duration::from_secs(1);
 
 /// The renderer the shared interface is typed against: iced's wgpu one.
 pub type Renderer = iced_widget::Renderer;
-
-/// A stage of the microphone chain, for the switches that turn it on and
-/// off on the Voice screen.
-#[derive(Debug, Clone, Copy)]
-pub enum Stage {
-    /// Removes steady background noise, even under speech.
-    NoiseSuppress,
-    /// Slowly turns a quiet microphone up and a loud one down.
-    AutoGain,
-}
 
 /// Everything a tap or a keystroke can ask the interface to do. Handled
 /// by [`App::update`] on the interface thread; the call, contacts and
@@ -80,8 +70,9 @@ pub enum Message {
     MicTest(bool),
     /// Load a named EQ preset into the chain.
     EqPreset(String),
-    /// Turn a chain stage on or off.
-    Toggle(Stage, bool),
+    /// Change the microphone chain: one of the Fine-tune tab's actions
+    /// (see [`crate::chain_rows::apply`]).
+    Chain(antiphon_ui::Action),
     /// Put the whole chain back to the default preset.
     ResetChain,
 
@@ -1044,15 +1035,10 @@ impl App {
                 self.eq_choice = Some(name);
                 self.chain_changed();
             }
-            Message::Toggle(stage, on) => {
-                let chain = &mut self.settings.chain;
-                match stage {
-                    Stage::NoiseSuppress => chain.noise_suppress.enabled = on,
-                    Stage::AutoGain => match &mut chain.gain {
-                        GainConfig::Fixed { enabled, .. } | GainConfig::Auto { enabled, .. } => *enabled = on,
-                    },
+            Message::Chain(action) => {
+                if crate::chain_rows::apply(&mut self.settings.chain, &action) {
+                    self.chain_changed();
                 }
-                self.chain_changed();
             }
             Message::ResetChain => {
                 self.settings.chain = ChainConfig::default_preset();

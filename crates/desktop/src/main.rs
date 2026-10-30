@@ -15,6 +15,7 @@ mod a11y;
 mod account;
 mod api;
 mod app;
+mod chain_rows;
 mod demo;
 mod engine;
 mod my_devices;

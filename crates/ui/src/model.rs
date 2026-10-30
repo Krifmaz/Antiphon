@@ -659,6 +659,13 @@ pub struct Settings {
     pub preset: String,
     /// The voice presets to choose from.
     pub presets: Vec<String>,
+    /// Every stage of the microphone chain with its settings, in the
+    /// order the sound runs through them, for Voice's "Fine-tune" tab.
+    pub stages: Vec<StageRow>,
+    /// The EQ's bands, for the same tab.
+    pub bands: Vec<BandRow>,
+    /// Voice presets can be saved to and loaded from files (desktop only).
+    pub preset_files: bool,
     /// The microphone test is running, and its level.
     pub mic_test: Option<f32>,
     /// Master output volume, dB.
@@ -709,6 +716,58 @@ pub struct PluginParam {
     pub value: f32,
     /// An on/off switch rather than a range.
     pub toggle: bool,
+}
+
+/// One stage of the microphone chain, as the "Fine-tune" tab shows it.
+#[derive(Clone, Debug, Default)]
+pub struct StageRow {
+    /// The stage's id, handed back in [`crate::Action::StageOn`].
+    pub id: &'static str,
+    /// Its name on screen.
+    pub name: &'static str,
+    /// What it does, in a sentence.
+    pub help: &'static str,
+    /// It is on.
+    pub enabled: bool,
+    /// Its settings, in the order they are shown.
+    pub params: Vec<ParamRow>,
+    /// How far it is turning the voice down right now, in dB, while a
+    /// call is running; `None` for stages with nothing to show or with no
+    /// call.
+    pub reduction_db: Option<f32>,
+}
+
+/// One setting of a chain stage or EQ band.
+#[derive(Clone, Debug, Default)]
+pub struct ParamRow {
+    /// The setting's id, handed back in [`crate::Action::StageParam`] or
+    /// [`crate::Action::BandParam`].
+    pub id: &'static str,
+    /// The slider's label.
+    pub name: &'static str,
+    /// The sentence behind it.
+    pub help: &'static str,
+    /// The unit beside the value ("dB", "Hz", "ms", or empty).
+    pub unit: &'static str,
+    /// The slider's lowest value.
+    pub min: f32,
+    /// The slider's highest value.
+    pub max: f32,
+    /// How far one step moves.
+    pub step: f32,
+    /// The value now.
+    pub value: f32,
+}
+
+/// One band of the EQ.
+#[derive(Clone, Debug, Default)]
+pub struct BandRow {
+    /// Its shape, as a name ("Bell", "Low shelf", ...).
+    pub shape: &'static str,
+    /// It is on.
+    pub enabled: bool,
+    /// Its settings.
+    pub params: Vec<ParamRow>,
 }
 
 /// How the microphone decides to send.

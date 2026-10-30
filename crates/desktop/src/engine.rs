@@ -85,6 +85,8 @@ enum Event {
     EmojiPicked(Result<(String, String, String), String>),
     /// A theme file was chosen and read: use what it says.
     Theme(ui::theme_file::ThemeFile),
+    /// A voice preset file was chosen and read: use its chain.
+    Preset(config::VoicePreset),
     /// The directories were read: what they list, what went wrong, and
     /// the keys pinned for them.
     Directory(Vec<discovery::Listed>, Vec<String>, Vec<String>),
@@ -996,6 +998,48 @@ impl Engine {
         });
     }
 
+    /// Saves the whole voice chain to a preset file the person picks, off
+    /// the window's thread (spec §1 "Voice Presets": export it, share it).
+    fn export_preset(&self) {
+        let name = if self.cfg.chain.name.is_empty() { "My voice".to_string() } else { self.cfg.chain.name.clone() };
+        // Plugins are left out: they are programs on this computer, and
+        // loading the file never brings them in anyway.
+        let preset = config::VoicePreset { chain: ChainConfig { plugins: Vec::new(), ..self.cfg.chain.clone() }, name };
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Save voice preset").set_file_name(format!("{}.json", preset.name)).add_filter("Stoop preset", &["json"]).save_file() else {
+                return;
+            };
+            let (text, kind) = match config::save_preset_to(&path, &preset) {
+                Ok(()) => (format!("Voice preset saved to {}", path.display()), ToastKind::Ok),
+                Err(e) => (format!("Couldn't save the preset: {e}"), ToastKind::Err),
+            };
+            Self::push(&events, Event::Toast(text, kind));
+        });
+    }
+
+    /// Asks for a voice preset file, reads it off the window's thread, and
+    /// hands it back as [`Event::Preset`]. It is parsed as data only.
+    fn import_preset(&self) {
+        /// Far more than any real preset; refused before reading so a
+        /// wrong pick cannot fill memory.
+        const MAX_BYTES: u64 = 1 << 20;
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Load voice preset").add_filter("Stoop preset", &["json"]).pick_file() else { return };
+            let too_big = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES);
+            let parsed = if too_big {
+                Err("That file is too big to be a voice preset.".to_string())
+            } else {
+                config::load_preset_from(&path).map_err(|e| format!("Couldn't read that preset: {e}"))
+            };
+            match parsed {
+                Ok(preset) => Self::push(&events, Event::Preset(preset)),
+                Err(why) => Self::push(&events, Event::Toast(why, ToastKind::Err)),
+            }
+        });
+    }
+
     /// Offers a save dialog for a received file, off the window's thread.
     fn save_received(&self, name: String, stored: PathBuf) {
         let state = self.state.clone();
@@ -1191,6 +1235,17 @@ impl Engine {
             Event::PluginsFound(found) => {
                 self.plugins_scanning = false;
                 self.plugins_found = Some(found);
+            }
+            Event::Preset(preset) => {
+                // A preset is how you sound, not what runs on your
+                // computer: plugins are programs, so a shared file never
+                // brings its own and yours stay as they are.
+                let plugins = std::mem::take(&mut self.cfg.chain.plugins);
+                self.cfg.chain = preset.chain;
+                self.cfg.chain.plugins = plugins;
+                self.cfg.chain.name = preset.name;
+                self.chain_changed();
+                self.toast("Voice preset loaded", ToastKind::Ok);
             }
             Event::Theme(file) => {
                 self.cfg.stoop.theme = file.theme;
@@ -1882,10 +1937,6 @@ impl Engine {
                 self.save();
             }
             A::BindPtt => self.bind_ptt(),
-            A::NoiseSuppression(on) => {
-                self.cfg.chain.noise_suppress.enabled = on;
-                self.chain_changed();
-            }
             A::EchoCancel(on) => {
                 self.cfg.echo_cancel = on;
                 if !on && self.state.echo_cancel.swap(false, Ordering::Relaxed) {
@@ -1931,15 +1982,22 @@ impl Engine {
                 antiphon_client::screen_audio::set_enabled(on);
                 self.save();
             }
-            A::AutoGain(on) => {
-                self.cfg.chain.gain = if on { GainConfig::default() } else { GainConfig::Fixed { enabled: false, gain_db: 0.0 } };
-                self.chain_changed();
-            }
+            // The Processing tab's two switches are the same as the
+            // Fine-tune tab's for those stages.
+            A::NoiseSuppression(on) => self.act(A::StageOn("noise_suppress", on), open),
+            A::AutoGain(on) => self.act(A::StageOn("gain", on), open),
             A::Preset(name) => {
                 self.cfg.chain.eq_bands = if name == NATURAL { Vec::new() } else { antiphon_audio::eq_preset(&name).unwrap_or_default() };
                 self.cfg.chain.name = name;
                 self.chain_changed();
             }
+            A::StageOn(..) | A::StageParam(..) | A::BandParam(..) => {
+                if crate::chain_rows::apply(&mut self.cfg.chain, &action) {
+                    self.chain_changed();
+                }
+            }
+            A::ExportPreset => self.export_preset(),
+            A::ImportPreset => self.import_preset(),
             A::MicTest(on) => self.mic_test(on),
             A::OutputVolume(db) => {
                 self.cfg.output_gain_db = db;
@@ -3112,6 +3170,9 @@ impl Engine {
             auto_gain: matches!(self.cfg.chain.gain, GainConfig::Auto { enabled: true, .. }),
             preset,
             presets,
+            stages: crate::chain_rows::stages(&self.cfg.chain, |id| self.with_call(|a| a.chain.lock().ok().map(|c| c.gain_reduction_db(id))).flatten()),
+            bands: crate::chain_rows::bands(&self.cfg.chain),
+            preset_files: true,
             mic_test: self.state.loopback.lock().unwrap().as_ref().map(|l| l.level().min(1.0)),
             output_db: self.cfg.output_gain_db,
             reduced_motion: self.cfg.reduced_motion,
