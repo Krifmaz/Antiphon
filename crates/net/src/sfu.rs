@@ -441,11 +441,6 @@ impl SfuClient {
         self.room
     }
 
-    /// The SFU this client talks to.
-    pub fn sfu_addr(&self) -> SocketAddr {
-        self.sfu
-    }
-
     /// Everyone else in the room, as of the latest roster.
     pub fn roster(&self) -> Vec<MemberTag> {
         self.roster.borrow().clone()

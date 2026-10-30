@@ -28,9 +28,6 @@ use zeroize::Zeroizing;
 
 use crate::error::CryptoError;
 
-/// The most shares a split can have: x runs over the nonzero bytes.
-pub const MAX_SHARES: u8 = 255;
-
 /// One share, as written down.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {

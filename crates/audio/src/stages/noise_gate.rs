@@ -27,11 +27,6 @@ impl NoiseGate {
         }
     }
 
-    /// Current gate gain in `[0, 1]`, i.e. what the spec's "live meter
-    /// showing what's passing through" would display.
-    pub fn current_gain(&self) -> f32 {
-        self.gain
-    }
 }
 
 impl NoiseGate {

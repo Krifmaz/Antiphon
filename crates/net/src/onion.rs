@@ -759,11 +759,6 @@ impl Circuit {
         self.entry
     }
 
-    /// How many hops the circuit runs through.
-    pub fn hop_count(&self) -> usize {
-        self.layers.hops.len()
-    }
-
     /// Where the circuit's socket is bound: the only address of the
     /// caller's that any relay sees, and only the entry sees it.
     pub fn local_addr(&self) -> Result<SocketAddr, NetError> {

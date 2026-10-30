@@ -41,10 +41,6 @@ impl PitchShift {
         }
     }
 
-    pub fn set_semitones(&mut self, semitones: f32) {
-        self.rate = semitones_to_rate(semitones);
-    }
-
     #[inline]
     fn read_interpolated(&self, pos: f32) -> f32 {
         let n = self.buffer.len() as f32;

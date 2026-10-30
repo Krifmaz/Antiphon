@@ -76,11 +76,6 @@ impl Router {
         self.tunnel.as_ref()
     }
 
-    /// Whether a new socket of this kind would be inside the tunnel.
-    pub fn tunnels(&self, kind: TrafficKind) -> bool {
-        self.routes.includes(kind) && self.tunnel.as_ref().is_some_and(|t| t.is_running())
-    }
-
     /// A socket for `kind`, on `port` (0 for any).
     ///
     /// Routed through the tunnel when the user chose that for this kind and

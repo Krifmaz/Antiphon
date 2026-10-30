@@ -16,8 +16,6 @@ struct ChainStage {
 /// cancellation lives outside the chain because it needs the far end.
 pub struct AudioChain {
     stages: Vec<ChainStage>,
-    /// Plugins in the config that didn't load: name and why.
-    skipped: Vec<(String, String)>,
 }
 
 impl AudioChain {
@@ -100,12 +98,11 @@ impl AudioChain {
         }
 
         // The user's plugins. One that fails to load is left out and
-        // reported (see `skipped`), never allowed to stop the chain.
-        let mut skipped = Vec::new();
+        // logged, never allowed to stop the chain.
         for plugin in &config.plugins {
             match crate::plugins::load(plugin, sample_rate) {
                 Ok(stage) => stages.push(ChainStage { enabled: plugin.enabled, stage }),
-                Err(e) => skipped.push((plugin.name.clone(), e.to_string())),
+                Err(e) => eprintln!("[audio] leaving out plugin {}: {e}", plugin.name),
             }
         }
 
@@ -121,13 +118,7 @@ impl AudioChain {
             stage: Box::new(Reverb::new(sample_rate, rv.room_size, rv.damping, rv.wet_dry)),
         });
 
-        Self { stages, skipped }
-    }
-
-    /// The plugins from the config that couldn't be loaded, with why, so
-    /// the settings can say so instead of the chain going quiet about it.
-    pub fn skipped_plugins(&self) -> &[(String, String)] {
-        &self.skipped
+        Self { stages }
     }
 
     pub fn process(&mut self, samples: &mut [f32]) {

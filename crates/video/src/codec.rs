@@ -141,17 +141,6 @@ impl Encoder {
         self.keyframe = true;
     }
 
-    /// The size frames are sent at, given the source's: what a local
-    /// preview should be drawn at to look like what the other side sees.
-    pub fn sent_size(&self, width: u32, height: u32) -> (u32, u32) {
-        let long = width.max(height);
-        if long <= self.profile.max_side {
-            return (width, height);
-        }
-        let m = self.profile.max_side as u64;
-        (((width as u64 * m) / long as u64).max(1) as u32, ((height as u64 * m) / long as u64).max(1) as u32)
-    }
-
     /// Encodes one frame into datagrams, ready to seal and send. Empty
     /// when nothing changed and no band was due, or when the budget asks
     /// for this frame to be skipped (what changed is then sent with the
@@ -574,7 +563,6 @@ mod tests {
         feed(&mut dec, &enc.encode(&scene(1280, 720, 10)));
         let pic = dec.picture(Stream::Camera).unwrap();
         assert_eq!((pic.width, pic.height), (640, 360));
-        assert_eq!(enc.sent_size(1280, 720), (640, 360));
     }
 
     #[test]

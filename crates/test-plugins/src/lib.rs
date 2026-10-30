@@ -12,8 +12,6 @@
 use std::ffi::{c_char, c_int, c_ulong, c_void};
 use std::path::Path;
 
-/// The label (LADSPA), URI (LV2) the plugin is found by.
-pub const LADSPA_LABEL: &str = "antiphon_test_gain";
 pub const LV2_URI: &str = "urn:antiphon:test:gain";
 
 // ---- LADSPA ---------------------------------------------------------------

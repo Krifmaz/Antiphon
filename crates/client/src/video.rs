@@ -160,11 +160,6 @@ impl CallVideo {
         self.legs.lock().unwrap().get(&leg)?.picture(stream)
     }
 
-    /// Whether video is paused for the link's sake.
-    pub fn paused_for_bandwidth(&self) -> bool {
-        self.share.load(Ordering::Relaxed) == 0
-    }
-
     /// Takes one video datagram from the receive loop.
     pub fn receive(&self, datagram: &[u8]) {
         self.remote.lock().unwrap().push(datagram);

@@ -760,17 +760,6 @@ pub fn banner(_: &Theme) -> container::Style {
     }
 }
 
-/// A box in the accent gradient (the logo tile, the call-stage glow).
-pub fn accent_box(_: &Theme) -> container::Style {
-    let p = look();
-    container::Style {
-        text_color: Some(p.on_accent),
-        background: Some(accent_gradient(&p)),
-        border: Border { color: Color::TRANSPARENT, width: 0.0, radius: 12.0.into() },
-        ..container::Style::default()
-    }
-}
-
 /// The box a call picture sits in: near-black behind letterboxing, with
 /// the panel's border and the given corner radius.
 pub fn video_frame(_: &Theme, radius: f32) -> container::Style {
@@ -845,11 +834,6 @@ pub fn unread(_: &Theme) -> container::Style {
         border: Border { color: Color::TRANSPARENT, width: 0.0, radius: 99.0.into() },
         ..container::Style::default()
     }
-}
-
-/// The dimmed backdrop behind a dialog.
-pub fn modal_bg(_: &Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(Color::from_rgba8(6, 6, 8, 0.62))), ..container::Style::default() }
 }
 
 /// A dialog.

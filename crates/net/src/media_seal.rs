@@ -65,10 +65,6 @@ impl SframeSealer {
         self.leaves.insert(sender, leaf);
     }
 
-    /// Forgets `sender`'s leaf when they leave, so their tag opens nothing more.
-    pub fn remove_sender(&mut self, sender: &MemberTag) {
-        self.leaves.remove(sender);
-    }
 }
 
 impl MediaSealer for SframeSealer {

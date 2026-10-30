@@ -295,11 +295,6 @@ impl Federation {
         }
     }
 
-    /// The addresses of the relays peered with now.
-    pub fn peer_addrs(&self) -> Vec<SocketAddr> {
-        self.peers.keys().copied().collect()
-    }
-
     /// Handles a federation datagram from `from`. `relay` answers lookups.
     pub fn handle(&mut self, from: SocketAddr, bytes: &[u8], relay: &Relay, now: Instant) -> Vec<Action> {
         match Message::decode(bytes) {

@@ -31,7 +31,6 @@
 //! old record could replay it to push a user back onto a route they had
 //! deliberately abandoned.
 
-use sha2::{Digest, Sha256};
 
 use crate::error::CryptoError;
 use crate::identity::{verify_signature, IdentityKeyPair};
@@ -191,12 +190,6 @@ impl SignedRouteRecord {
         })
     }
 
-    /// Short stable digest of the record, handy for logging which version
-    /// of someone's routes a node is holding without logging the routes.
-    pub fn digest_hex(&self) -> String {
-        let digest = Sha256::digest(self.encode());
-        crate::hex::encode(&digest[..8])
-    }
 }
 
 /// Minimal bounds-checked reader. Every `take` validates length first, so
