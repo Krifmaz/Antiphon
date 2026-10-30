@@ -588,7 +588,7 @@ fn link_card<'a>(url: &'a str) -> El<'a, Msg> {
         t(site).size(12.5).color(p.muted),
         t(url).size(14.5).font(theme::semibold()).color(p.info).wrapping(Wrapping::Glyph),
         // Plain http can be read and changed on the way; say so before
-        // the tap, as the classic app's link line did.
+        // the tap.
         faint(if url.starts_with("http://") { "Not encrypted · tap to open in your browser" } else { "Tap to open in your browser" }).size(12),
     ]
     .spacing(4);

@@ -2267,6 +2267,11 @@ impl Engine {
                 self.cfg.output_device = device;
                 self.save();
             }
+            A::VaThreshold(level) => {
+                self.cfg.va_threshold = level.clamp(0.005, 0.3);
+                *self.state.transmit.va_threshold.lock().unwrap() = self.cfg.va_threshold;
+                self.save();
+            }
             A::Transmit(mode) => {
                 self.cfg.transmit_mode = match mode {
                     ui::Transmit::PushToTalk => 0,
@@ -2385,8 +2390,8 @@ impl Engine {
                 self.save();
             }
             A::TextScale(scale) => {
-                // The classic app's range: small enough to fit more, large
-                // enough for low vision, never so far the layout breaks.
+                // Small enough to fit more, large enough for low vision,
+                // never so far the layout breaks.
                 self.cfg.text_scale = scale.clamp(0.85, 1.4);
                 self.save();
             }
@@ -3577,6 +3582,7 @@ impl Engine {
                 MODE_OPEN_MIC => ui::Transmit::Open,
                 _ => ui::Transmit::Voice,
             },
+            va_threshold: Some(self.cfg.va_threshold),
             ptt_key: key_label(&self.cfg.ptt_key),
             mute_key: bound_label(&self.cfg.mute_key),
             deafen_key: bound_label(&self.cfg.deafen_key),
@@ -3985,7 +3991,7 @@ fn relay_invite_secret() -> [u8; 32] {
     secret
 }
 
-/// Builds the shared state the call engine runs on, as the classic app did.
+/// Builds the shared state the call engine runs on.
 pub fn start_state(runtime: tokio::runtime::Handle) -> anyhow::Result<Arc<AppState>> {
     let loaded = config::load();
     antiphon_client::link_quality::set_low_data(loaded.low_data_calls);

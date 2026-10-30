@@ -1,6 +1,6 @@
 # Stoop
 
-<img src="crates/gui/ui/logo.png" width="96" alt="Stoop logo">
+<img src="crates/desktop/assets/logo.png" width="96" alt="Stoop logo">
 
 Stoop was called Antiphon until October 2026. The crates and binaries (`antiphon`, `antiphon-cli`, `antiphon-relay`) keep their old names for now; the app shows the new name and keeps your data in a `Stoop` folder, moved there from the old `Antiphon` one on first launch.
 
@@ -35,7 +35,6 @@ A Cargo workspace, one crate per concern:
 | [`crates/client`](crates/client) | §4, §5, §7, §8, §9, §13 | `antiphon-client`: the call engine and everything around it (contacts, history, outbox, delivery, discovery, file transfer, moderation), shared by both desktop apps |
 | [`crates/desktop`](crates/desktop) | -- | `antiphon`: Stoop for the desktop, the shared interface on the client engine |
 | [`crates/update`](crates/update) | -- | `antiphon-update`: the in-app updater. Looks at the newest GitHub release, downloads the file for this install, checks it against `SHA256SUMS`, and installs it: the Windows installer or MSI run silently, an AppImage replaced in place, a `.deb` handed to the software installer, `Stoop.app` swapped from the `.dmg`, and the APK handed to Android's installer |
-| [`crates/gui`](crates/gui) | §4, §5, §7, §8, §9, §13 | `antiphon-classic`: the previous Slint desktop app, kept while the new one catches up -- freeform call-screen layout editor, full theming, contacts with QR invites, in-call chat with history/edit/delete/reactions, streamed file transfer with resume and rate control, presence, notification rules, moderation, data export, opt-in local crash reports |
 
 Every crate's `lib.rs` doc comment states its scope against the spec.
 
@@ -150,13 +149,6 @@ A restore never deletes the account it replaces; that goes into a
 - `--screenshot-tour <dir>` walks the demo through every screen and saves
   a PNG of each (how `docs/screenshots/iced` is made).
 
-The previous Slint app, with its layout editor, tray icon, soundboard and
-the advanced panels not yet in Stoop, is still there:
-
-```bash
-cargo run -p antiphon-classic
-```
-
 ### CLI
 
 ```bash
@@ -241,7 +233,6 @@ crates/
   client/     antiphon-client: call engine, contacts, history, delivery
   ui/         antiphon-ui: the shared iced interface (desktop + phone)
   desktop/    antiphon: Stoop for the desktop
-  gui/        antiphon-classic (Slint UI) + build.rs compiling ui/app.slint
 docs/         the feature spec
 notes/        where work stopped, for picking up on another machine
 .github/      CI: build + test on Linux/Windows/macOS; reproducible release builds

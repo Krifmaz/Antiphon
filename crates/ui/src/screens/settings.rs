@@ -383,6 +383,30 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
     .into()
 }
 
+/// Voice activation's threshold: a slider, and a meter of your voice with
+/// the threshold marked on it when there is a `level` to show.
+fn va_threshold<'a>(threshold: f32, level: Option<f32>) -> El<'a, Msg> {
+    /// The loudest threshold offered; the meter is scaled to it too, so
+    /// the mark sits under the slider's knob.
+    const MAX: f32 = 0.3;
+    let slider = value_slider("Speech threshold", threshold * 100.0, 0.5, MAX * 100.0, 0.5, "%", |v| Msg::Do(Action::VaThreshold(v / 100.0)));
+    let meter: El<'a, Msg> = match level {
+        Some(level) => {
+            // The mark: a thin line at the threshold's place along the bar.
+            let at = ((threshold / MAX).clamp(0.0, 1.0) * 1000.0) as u16;
+            let mark = row![
+                iced_widget::space().width(Length::FillPortion(at.max(1))),
+                container(iced_widget::space()).width(2).height(12).style(|_| flat(theme::look().text, 1.0)),
+                iced_widget::space().width(Length::FillPortion((1000 - at).max(1))),
+            ];
+            let bar = progress_bar(0.0..=1.0, (level / MAX).min(1.0)).girth(12).style(if level > threshold { theme::meter } else { theme::meter_quiet });
+            column![iced_widget::stack![bar, mark], faint(if level > threshold { "Sending: you're above the line." } else { "Quiet: below the line, nothing is sent." }).size(12)].spacing(6).into()
+        }
+        None => faint("Test your microphone above to see your voice against the line.").size(12).into(),
+    };
+    column![setting("Speech threshold", Some("How loud you must be before the microphone opens. Raise it if it opens for background noise."), slider), meter].spacing(8).into()
+}
+
 /// Appearance's Call layout tab: where the call sits, how wide, and which
 /// of its parts show in what order.
 fn call_layout(l: &crate::CallLayout) -> El<'_, Msg> {
@@ -546,6 +570,12 @@ fn voice<'a>(m: &'a Model, tab: usize) -> El<'a, Msg> {
     let mut talk = column![container(seg).padding(4).style(theme::tabs_frame)].spacing(14);
     if s.transmit == Transmit::PushToTalk && m.device.ptt_keys {
         talk = talk.push(setting(Hotkey::Talk.label(), Some(Hotkey::Talk.help()), key_button(s, Hotkey::Talk)));
+    }
+    if let (Transmit::Voice, Some(threshold)) = (s.transmit, s.va_threshold) {
+        // While the mic test runs (or a call is up) your voice moves the
+        // bar, so you can see where the line sits against it.
+        let level = s.mic_test.or_else(|| m.call.active().then_some(m.call.my_level));
+        talk = talk.push(va_threshold(threshold, level));
     }
     // Spec §1 "mute and deafen, each independently bindable".
     let mut shortcuts = column![].spacing(12);

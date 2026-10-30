@@ -760,6 +760,17 @@ pub fn meter(_: &Theme) -> progress_bar::Style {
     }
 }
 
+/// The microphone meter while it is too quiet to send: muted, so the
+/// change to [`meter`]'s green says "now it opens".
+pub fn meter_quiet(_: &Theme) -> progress_bar::Style {
+    let p = look();
+    progress_bar::Style {
+        background: Background::Color(p.border),
+        bar: Background::Color(p.muted),
+        border: Border { color: Color::TRANSPARENT, width: 0.0, radius: 99.0.into() },
+    }
+}
+
 /// A one-pixel hairline.
 pub fn rule_style(_: &Theme) -> rule::Style {
     rule::Style { color: look().border, radius: 0.0.into(), fill_mode: rule::FillMode::Full, snap: true }

@@ -47,7 +47,7 @@ accesskit_macos = "0.26.3"
 # AT-SPI over D-Bus (Orca).
 accesskit_unix = "0.22.1"
 # The tray icon, as a StatusNotifierItem over D-Bus (no GTK needed). The
-# async-io backend: Slint enables it too, and ksni refuses both at once.
+# async-io backend runs on its own thread, apart from the app's tokio.
 ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 
 [lints]

@@ -1,5 +1,5 @@
-//! Stoop's theme markup: a small declarative format in the style of Slint
-//! markup, used both for the themes built into the app and for the theme
+//! Stoop's theme markup: a small declarative format of nested elements
+//! and properties, used both for the themes built into the app and for the theme
 //! files people export and share.
 //!
 //! A document is one element with a name and a block of properties:

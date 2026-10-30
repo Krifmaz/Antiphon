@@ -538,6 +538,9 @@ pub enum Action {
     Output(String),
     /// How the microphone decides to send.
     Transmit(Transmit),
+    /// How loud you must be for voice activation to open the microphone
+    /// (peak, 0..1; desktop only).
+    VaThreshold(f32),
     /// Wait for the next key press and bind it to this shortcut.
     BindKey(Hotkey),
     /// Unbind a shortcut (not push to talk, which always has a key).

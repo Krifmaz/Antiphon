@@ -42,8 +42,7 @@ type ResendCache = Arc<Mutex<std::collections::VecDeque<(u32, Vec<u8>)>>>;
 /// to voice activation should take effect immediately on a live call and
 /// still be there for the next one.
 /// How the microphone decides to open. Stored as a plain integer because
-/// it crosses into `.slint` (which has no enums shared with Rust) and lives
-/// in an atomic read by the audio send loop on every buffer.
+/// it lives in an atomic read by the audio send loop on every buffer.
 pub const MODE_PTT: u32 = 0;
 pub const MODE_VOICE_ACTIVATION: u32 = 1;
 pub const MODE_OPEN_MIC: u32 = 2;
@@ -65,8 +64,8 @@ pub struct TransmitSettings {
 
     /// Set by the key poller when a shortcut is pressed, cleared by the UI
     /// timer once it has acted. A flag rather than a direct call because
-    /// the poller is a bare thread with no handle to the Slint window, and
-    /// every one of these actions has to run on the UI thread.
+    /// the poller is a bare thread with no handle to the window, and every
+    /// one of these actions has to run on the UI thread.
     pub pending_mute: AtomicBool,
     pub pending_deafen: AtomicBool,
     pub pending_hangup: AtomicBool,

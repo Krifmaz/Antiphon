@@ -4,9 +4,8 @@ description = "Everything the desktop app does that is not drawing: calls, conta
 edition.workspace = true
 version.workspace = true
 
-# The logic both desktop front ends share. It was the body of the Slint
-# app's crate, moved here unchanged so the iced app (crates/desktop) and the
-# Slint one (crates/gui) run the same code until the Slint one is retired.
+# The desktop app's logic apart from drawing it (crates/desktop draws it);
+# the phone app shares parts of it too.
 
 [dependencies]
 anyhow = "1.0.104"

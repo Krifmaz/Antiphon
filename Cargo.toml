@@ -8,7 +8,6 @@ members = [
     "crates/app",
     "crates/client",
     "crates/desktop",
-    "crates/gui",
     "crates/ui",
     "crates/video",
     "crates/relay",

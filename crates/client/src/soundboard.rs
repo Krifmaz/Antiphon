@@ -17,10 +17,6 @@
 //! buttons rather than one button and a mode switch -- a hidden toggle is
 //! exactly how you send a sound you meant to preview.
 //!
-//! Which destination a clip goes to is carried as a plain `bool` across
-//! the callback boundary, since Slint and Rust share no enum; the two
-//! buttons are the readable form of that choice.
-//!
 //! Clips are WAV, mono or stereo, loaded from disk and resampled to the
 //! call's rate. Only WAV: pulling in a decoder for compressed formats is a
 //! dependency and an attack surface for a feature whose whole appeal is

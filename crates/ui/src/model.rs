@@ -653,6 +653,9 @@ pub struct Settings {
     pub output: String,
     /// How the microphone decides to send.
     pub transmit: Transmit,
+    /// How loud (peak, 0..1) the microphone must hear you before voice
+    /// activation opens it; `None` where it cannot be set (the phone).
+    pub va_threshold: Option<f32>,
     /// The push-to-talk key, as a name ("Caps Lock").
     pub ptt_key: String,
     /// The mute shortcut's key, as a name; empty when unbound.

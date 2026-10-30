@@ -82,6 +82,7 @@ impl Demo {
                 input: "Blue Yeti".into(),
                 output: String::new(),
                 transmit: ui::Transmit::Voice,
+                va_threshold: Some(0.05),
                 ptt_key: "Caps Lock".into(),
                 noise_suppression: true,
                 echo_cancel: true,
@@ -386,6 +387,7 @@ impl Demo {
             }
             Action::Font(f) => self.model.settings.font = f,
             Action::Transmit(t) => self.model.settings.transmit = t,
+            Action::VaThreshold(v) => self.model.settings.va_threshold = Some(v),
             Action::NoiseSuppression(on) => self.model.settings.noise_suppression = on,
             Action::EchoCancel(on) => self.model.settings.echo_cancel = on,
             Action::AutoGain(on) => self.model.settings.auto_gain = on,

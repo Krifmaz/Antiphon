@@ -54,8 +54,8 @@ impl Reachability {
     /// The capability table, as rows of (question, answer, what it means).
     ///
     /// Returned as data rather than rendered here so the wording lives in
-    /// one place and can be tested, rather than being spread through a
-    /// `.slint` file where nothing can check it.
+    /// one place and can be tested, rather than being spread through the
+    /// screens where nothing can check it.
     pub fn rows(&self) -> Vec<(&'static str, String, String)> {
         vec![
             (

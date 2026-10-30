@@ -57,8 +57,8 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
-/// Settings only the iced app reads. Kept in their own table so the Slint
-/// app's fields keep their meaning while both front ends exist.
+/// The app's newer settings, in a table of their own (`stoop` in the
+/// file) apart from the older flat fields.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct StoopPrefs {
@@ -288,8 +288,8 @@ pub struct AppConfig {
     /// every individual section's state.
     #[serde(default = "default_sections_expanded")]
     pub sections_expanded_default: bool,
-    /// "#rrggbb". The one user-choosable color; everything else in the UI
-    /// derives from the OS/theme palette (see `global Theme` in app.slint).
+    /// "#rrggbb", the accent the previous desktop app used. Read only to
+    /// carry an old setting over; the accent now lives in `stoop`.
     #[serde(default = "default_accent_hex")]
     pub accent_hex: String,
     /// A font family name (e.g. "Consolas"), or "" for the system default.
@@ -555,9 +555,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub call_invite_visible: bool,
     /// Path to a user-picked avatar image, or "" for the default
-    /// initial-letter circle. Same re-registration-on-startup story as the
-    /// theme background image: the loaded `slint::Image` isn't itself
-    /// persisted, just the path to reload it from.
+    /// initial-letter circle. Only the path is saved; the picture is read
+    /// again at each start.
     #[serde(default)]
     pub profile_avatar_path: String,
     /// Which details the compact profile bar shows -- the popup (opened by

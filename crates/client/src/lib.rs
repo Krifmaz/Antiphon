@@ -2,10 +2,9 @@
 //!
 //! Calls ([`state`]), contacts and settings ([`config`]), chat history
 //! ([`history`]), offline delivery ([`outbox`], [`delivery`]), file
-//! transfer, groups, the VPN, discovery and the rest. This was the body of
-//! the Slint app's crate; it moved here unchanged so the iced desktop app
-//! and the Slint one run the same code, and so the phone app can keep
-//! compiling the wire-level modules in by path from one place.
+//! transfer, groups, the VPN, discovery and the rest. The desktop app
+//! (`crates/desktop`) draws it; the phone app compiles the wire-level
+//! modules in by path from here.
 
 pub mod account_backup;
 pub mod anonymity;
@@ -34,7 +33,6 @@ pub mod group_keys;
 pub mod history;
 pub mod introduction;
 pub mod key_capture;
-pub mod link_preview;
 pub mod link_quality;
 pub mod mail_keys;
 pub mod parts;
@@ -57,7 +55,6 @@ pub mod soundboard;
 pub mod sfu_call;
 pub mod state;
 pub mod swarm;
-pub mod theme_presets;
 pub mod profile;
 pub mod transfer_limits;
 pub mod transfer_queue;

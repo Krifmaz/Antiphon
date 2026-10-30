@@ -91,7 +91,7 @@ fn headless(state: std::sync::Arc<antiphon_client::state::AppState>) -> anyhow::
 
 /// The swirl, for the title bar and taskbar.
 fn window_icon() -> Option<iced::window::Icon> {
-    let img = image::load_from_memory(include_bytes!("../../gui/ui/logo.png")).ok()?.into_rgba8();
+    let img = image::load_from_memory(include_bytes!("../assets/logo.png")).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     iced::window::icon::from_rgba(img.into_raw(), w, h).ok()
 }
