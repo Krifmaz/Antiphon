@@ -579,7 +579,9 @@ fn link_card<'a>(url: &'a str) -> El<'a, Msg> {
     let words = column![
         t(site).size(12.5).color(p.muted),
         t(url).size(14.5).font(theme::semibold()).color(p.info).wrapping(Wrapping::Glyph),
-        faint("Tap to open in your browser").size(12),
+        // Plain http can be read and changed on the way; say so before
+        // the tap, as the classic app's link line did.
+        faint(if url.starts_with("http://") { "Not encrypted · tap to open in your browser" } else { "Tap to open in your browser" }).size(12),
     ]
     .spacing(4);
     let card = container(words).padding(pad(10.0, 12.0, 10.0, 14.0)).width(Length::Fill).style(move |_| container::Style {

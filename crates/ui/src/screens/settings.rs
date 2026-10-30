@@ -285,7 +285,23 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
     if ui.accent_edit.as_deref().is_some_and(|e| e != m.settings.custom_accent) {
         custom_row = custom_row.push(btn("Use colour", Btn::Primary, Some(Msg::AccentSave)));
     }
-    let accent_body = column![accents.wrap(), setting("Your own colour", Some("Any colour as #rrggbb."), custom_row)].spacing(14);
+    // The same colour on three sliders, for picking by eye rather than by
+    // number; moving them only edits, "Use colour" keeps it.
+    let picked = theme::parse_hex(custom_value).unwrap_or_else(|| theme::hex("#8b5cf6"));
+    let (h, sat, v) = theme::to_hsv(picked);
+    let edit = move |h: f32, s: f32, v: f32| Msg::AccentEdit(theme::to_hex(theme::from_hsv(h, s, v)));
+    let picker = row![
+        container(iced_widget::space()).width(44).height(44).style(move |_| flat(picked, 10.0)),
+        column![
+            field("Hue", value_slider("Hue", h, 0.0, 359.0, 1.0, "°", move |h| edit(h, sat, v))),
+            field("Strength", value_slider("Strength", sat * 100.0, 0.0, 100.0, 1.0, "%", move |s| edit(h, s / 100.0, v))),
+            field("Brightness", value_slider("Brightness", v * 100.0, 0.0, 100.0, 1.0, "%", move |v| edit(h, sat, v / 100.0))),
+        ]
+        .spacing(8)
+        .width(Length::Fill),
+    ]
+    .spacing(14);
+    let accent_body = column![accents.wrap(), setting("Your own colour", Some("Pick it with the sliders, or type it as #rrggbb."), custom_row), picker].spacing(14);
 
     let mut fonts = row![].spacing(10);
     // The imported font, when there is one, as a third choice.

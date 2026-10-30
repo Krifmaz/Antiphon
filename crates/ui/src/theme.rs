@@ -253,6 +253,41 @@ pub fn to_hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b))
 }
 
+/// A colour as hue (0 to 360), saturation and value (0 to 1 each), for
+/// the colour picker's sliders.
+pub fn to_hsv(c: Color) -> (f32, f32, f32) {
+    let max = c.r.max(c.g).max(c.b);
+    let min = c.r.min(c.g).min(c.b);
+    let d = max - min;
+    let h = if d == 0.0 {
+        0.0
+    } else if max == c.r {
+        60.0 * ((c.g - c.b) / d).rem_euclid(6.0)
+    } else if max == c.g {
+        60.0 * ((c.b - c.r) / d + 2.0)
+    } else {
+        60.0 * ((c.r - c.g) / d + 4.0)
+    };
+    (h, if max == 0.0 { 0.0 } else { d / max }, max)
+}
+
+/// The colour with hue `h` (degrees), saturation `s` and value `v` (0 to 1).
+pub fn from_hsv(h: f32, s: f32, v: f32) -> Color {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    Color::from_rgb(r + m, g + m, b + m)
+}
+
 /// Relative luminance (0 dark to 1 light) per WCAG, from linearised sRGB.
 fn luminance(c: Color) -> f32 {
     let f = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
@@ -1011,6 +1046,14 @@ pub fn badge(kind: Badge) -> impl Fn(&Theme) -> container::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hsv_round_trips_through_hex() {
+        for hex in ["#8b5cf6", "#14b8a6", "#f59e0b", "#000000", "#ffffff", "#ef4444"] {
+            let (h, s, v) = to_hsv(parse_hex(hex).unwrap());
+            assert_eq!(to_hex(from_hsv(h, s, v)), hex);
+        }
+    }
 
     #[test]
     fn a_font_files_family_is_read_from_it() {
