@@ -344,6 +344,12 @@ impl Demo {
             }
             Action::Theme(t) => self.model.settings.theme = t,
             Action::Accent(a) => self.model.settings.accent = a,
+            Action::Look(i) => {
+                if let Some(look) = ui::theme::LOOKS.get(i) {
+                    self.model.settings.theme = look.theme.into();
+                    self.model.settings.accent = look.accent.into();
+                }
+            }
             Action::CustomAccent(hex) => {
                 self.model.settings.accent = "custom".into();
                 self.model.settings.custom_accent = hex;

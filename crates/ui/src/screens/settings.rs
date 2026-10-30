@@ -317,7 +317,23 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
         .spacing(14)
         .into();
     }
+    let mut looks = row![].spacing(10);
+    for (i, look) in theme::LOOKS.iter().enumerate() {
+        let colours = theme::palette(look.theme, look.accent, "", true);
+        let on = m.settings.theme == look.theme && m.settings.accent == look.accent;
+        let sample = column![
+            container(container(iced_widget::space()).width(Length::Fill).height(8).style(move |_| flat(colours.accent, 4.0)))
+                .padding(10)
+                .width(Length::Fill)
+                .style(move |_| flat(colours.bg, 8.0)),
+            t(look.name).size(12.5).font(theme::semibold()),
+            faint(look.about).size(11.5),
+        ]
+        .spacing(6);
+        looks = looks.push(pressable(sample, Role::Tab, &format!("{} look", look.name), on, if on { Btn::RowOn } else { Btn::Row }, Msg::Do(Action::Look(i))).width(Length::Fixed(150.0)).padding(8));
+    }
     column![
+        titled_card("Ready-made looks", Some("A theme and accent that go together. Pick one, then change either below if you like."), looks.wrap()),
         titled_card("Theme", None, themes),
         titled_card("Accent", Some("Buttons, highlights and the glow behind a call."), accent_body),
         titled_card(

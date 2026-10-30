@@ -709,6 +709,13 @@ impl App {
                 self.settings.theme = theme;
                 self.save();
             }
+            Action::Look(i) => {
+                if let Some(look) = stoop::theme::LOOKS.get(i) {
+                    self.settings.theme = look.theme.to_string();
+                    self.settings.accent = look.accent.to_string();
+                    self.save();
+                }
+            }
             Action::Accent(accent) => {
                 self.settings.accent = accent;
                 self.save();

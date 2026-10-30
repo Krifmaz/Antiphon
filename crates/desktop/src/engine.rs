@@ -1894,6 +1894,13 @@ impl Engine {
                 self.cfg.stoop.theme = theme;
                 self.save();
             }
+            A::Look(i) => {
+                if let Some(look) = ui::theme::LOOKS.get(i) {
+                    self.cfg.stoop.theme = look.theme.to_string();
+                    self.cfg.stoop.accent = look.accent.to_string();
+                    self.save();
+                }
+            }
             A::Accent(accent) => {
                 self.cfg.stoop.accent = accent;
                 self.save();

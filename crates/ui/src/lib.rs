@@ -559,6 +559,9 @@ pub enum Action {
     PluginParam(usize, String, f32),
     /// Automatic level on or off.
     AutoGain(bool),
+    /// Use the gallery's look at this index (see [`theme::LOOKS`]): its
+    /// theme and accent together.
+    Look(usize),
     /// Use a voice preset by name.
     Preset(String),
     /// Turn a chain stage (by id) on or off.

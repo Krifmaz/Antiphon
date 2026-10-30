@@ -160,6 +160,35 @@ pub const ACCENTS: [(&str, &str, &str, &str); 10] = [
     ("red", "Red", "#ef4444", "#ec4899"),
 ];
 
+/// One ready-made look of the gallery (spec §7 "a good default plus a
+/// gallery, so customization is an invitation and never a chore"): a
+/// theme and an accent that are known to go together, so most people pick
+/// a name and never open the colour settings. A look leaves the reading
+/// font alone, which people choose once and would not want to lose for
+/// trying a colour.
+pub struct Look {
+    /// What the gallery calls it.
+    pub name: &'static str,
+    /// One plain line on who it suits.
+    pub about: &'static str,
+    /// The theme's id (see [`THEMES`]).
+    pub theme: &'static str,
+    /// The accent's id (see [`ACCENTS`]).
+    pub accent: &'static str,
+}
+
+/// The gallery, in the order Settings shows it. A test holds every accent
+/// to WCAG's 3:1 against its theme's ground, so none is a look you cannot
+/// see the buttons in.
+pub const LOOKS: [Look; 6] = [
+    Look { name: "Stoop", about: "Cream on warm dark. The look Stoop ships with.", theme: "stoop", accent: "logo" },
+    Look { name: "Night sky", about: "Cool blue on near-black. Easy on the eyes in a dark room.", theme: "dark", accent: "sky" },
+    Look { name: "Ember", about: "Warm amber, for people who find blue light cold.", theme: "stoop", accent: "amber" },
+    Look { name: "Orchid", about: "Violet on deep blue-black.", theme: "dark", accent: "lilac" },
+    Look { name: "Paper", about: "Dark text on a light page, for bright rooms.", theme: "light", accent: "violet" },
+    Look { name: "High contrast", about: "Amber on true black. The strongest separation, for low vision.", theme: "oled", accent: "amber" },
+];
+
 /// `#rrggbb` (or `#rgb`, `#` optional) to a colour; `None` when it is not one.
 pub fn parse_hex(s: &str) -> Option<Color> {
     let h = s.trim().trim_start_matches('#');
@@ -941,6 +970,18 @@ pub fn badge(kind: Badge) -> impl Fn(&Theme) -> container::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_look_is_real_and_its_accent_can_be_seen() {
+        for look in &LOOKS {
+            assert!(THEMES.iter().any(|t| t.0 == look.theme), "{}: no theme {}", look.name, look.theme);
+            assert!(ACCENTS.iter().any(|a| a.0 == look.accent), "{}: no accent {}", look.name, look.accent);
+            let p = palette(look.theme, look.accent, "", true);
+            let (hi, lo) = (luminance(p.accent).max(luminance(p.bg)), luminance(p.accent).min(luminance(p.bg)));
+            let ratio = (hi + 0.05) / (lo + 0.05);
+            assert!(ratio >= 3.0, "{}: accent on ground is only {ratio:.2}:1", look.name);
+        }
+    }
 
     #[test]
     fn bold_reading_text_stays_in_its_own_face() {

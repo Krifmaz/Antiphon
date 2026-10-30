@@ -139,6 +139,14 @@ const TOUR: &[Step] = &[
     Step { name: "settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Appearance)) },
     Step { name: "profile", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Profile)) },
     Step {
+        name: "fine-tune",
+        size: (1280.0, 900.0),
+        setup: |app| {
+            app.go(Route::Settings(Section::Voice));
+            let _ = app.send(Msg::SettingsTab(2));
+        },
+    },
+    Step {
         name: "my-profile",
         size: (1280.0, 820.0),
         setup: |app| {
