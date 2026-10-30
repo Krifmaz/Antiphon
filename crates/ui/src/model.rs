@@ -154,6 +154,10 @@ pub struct Account {
     /// Devices can be removed from here: this device has a way to tell
     /// the account's others.
     pub can_remove_devices: bool,
+    /// The mailboxes this device keeps in touch with the others through,
+    /// editable here (`host:port`). `None` where they come from elsewhere
+    /// (the desktop's Settings > Delivery).
+    pub mailboxes: Option<Vec<String>>,
 }
 
 /// One device on the account, as Settings > Account lists it.

@@ -87,7 +87,7 @@ pub fn devices<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     if let Some(note) = busy_note(m) {
         cards = cards.push(note);
     }
-    cards
+    cards = cards
         .push(titled_card(
             "Move to another device",
             Some("Old device still with you? Open this here, then open the link on the new one. Both need to be on the same Wi-Fi."),
@@ -97,8 +97,41 @@ pub fn devices<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             "Your devices",
             Some("Every device signed in to this account. Each has its own key; removing one stops your other devices sharing with it and signs it out."),
             device_list(m),
-        ))
-        .into()
+        ));
+    if let Some(list) = &m.account.mailboxes {
+        cards = cards.push(titled_card(
+            "Mailboxes for your devices",
+            Some("Where your devices leave each other notes, removals and keys, sealed so only each device can read what's meant for it. Use the same ones as your computer's Settings > Delivery."),
+            mailboxes(ui, list),
+        ));
+    }
+    cards.into()
+}
+
+/// The mailboxes this device shares with the others, each with a way to
+/// take it off, and a box to add one.
+fn mailboxes<'a>(ui: &'a Ui, list: &'a [String]) -> El<'a, Msg> {
+    let mut col = column![].spacing(10);
+    for node in list {
+        let rest: Vec<String> = list.iter().filter(|n| *n != node).cloned().collect();
+        col = col.push(
+            row![t(node.as_str()).size(14).font(theme::mono()).width(Length::Fill), btn("Remove", Btn::Ghost, Some(Msg::Do(Action::DeviceMailboxes(rest))))]
+                .spacing(10)
+                .align_y(Alignment::Center),
+        );
+    }
+    if list.is_empty() {
+        col = col.push(faint("None yet. Your devices can't reach each other until you add one.").size(12.5));
+    }
+    col.push(
+        row![
+            input("Mailbox address", "stoop-device-mailbox", "host:3479", &ui.mailbox_draft).on_input(Msg::MailboxDraft).on_submit(Msg::MailboxAdd).padding([9, 12]).size(14),
+            btn("Add", Btn::Default, (!ui.mailbox_draft.trim().is_empty()).then_some(Msg::MailboxAdd)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .into()
 }
 
 /// The history switch, shared by the move and backup cards.

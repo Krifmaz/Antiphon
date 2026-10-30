@@ -2339,7 +2339,10 @@ impl Store {
     /// name, status and picture chosen for it.
     pub fn card_for(&self, id: &Key, identity: &IdentityKeyPair) -> Card {
         let config = crate::config::load();
-        let record = crate::delivery::my_record(identity, &config.routes, config.strict_mode, config.route_sequence);
+        // The main identity's cards carry its mail key; a separate persona
+        // has none of its own.
+        let keys = if identity.public().identity_key == self.identity.public().identity_key { crate::delivery::my_mail_keys() } else { Default::default() };
+        let record = crate::delivery::my_record_with(identity, &keys, &config.routes, config.strict_mode, config.route_sequence);
         card_as(identity, crate::delivery::encode_record(&record), &config.profile, &self.appearance(id))
     }
 

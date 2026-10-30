@@ -302,6 +302,9 @@ pub struct App {
     /// Seals chat history and the call log. The desktop's key file, made
     /// the desktop's way, in this app's private storage.
     backup_key: Result<BackupKey, String>,
+    /// Syncing with the account's other devices: removals and notes to
+    /// self. `None` without an identity or history key.
+    devices: Option<crate::my_devices::PhoneDevices>,
     /// The address book.
     contacts: Contacts,
     /// The push key and endpoint, and the wake-ups received lately.
@@ -425,6 +428,13 @@ fn card_of(settings: &Settings) -> ProfileCard {
     ProfileCard { bio: settings.bio.clone(), color: settings.color.clone(), avatar: settings.avatar.clone(), pronouns: settings.pronouns.clone() }
 }
 
+/// The people list's line for a conversation: its last message, and when.
+fn preview_of(dir: &std::path::Path, id: &str, key: &BackupKey) -> Option<(String, u64)> {
+    let last = crate::history::load(dir, id, key).into_iter().rev().find(|m| !m.deleted)?;
+    let text = if last.from_me { format!("You: {}", last.text) } else { last.text };
+    Some((text, last.at_secs))
+}
+
 /// Loads this phone's identity from `dir`, creating one on first start.
 fn load_identity(dir: &std::path::Path) -> Result<IdentityKeyPair, String> {
     let path = antiphon_crypto::store::identity_path(dir);
@@ -454,11 +464,19 @@ impl App {
         // The people list shows each person's last message; read once here
         // and kept up to date as messages come and go.
         let mut previews = HashMap::new();
+        let mut devices = None;
+        if let (Ok(identity), Ok(key)) = (&identity, &backup_key) {
+            match crate::my_devices::PhoneDevices::start(&engine.handle(), &dir, identity, key.clone(), settings.device_mailboxes.clone()) {
+                Ok(d) => devices = Some(d),
+                Err(e) => log::warn!("{e}"),
+            }
+        }
         if let Ok(key) = &backup_key {
-            for c in &contacts.list {
-                if let Some(last) = crate::history::load(&dir, &c.identity_key, key).into_iter().rev().find(|m| !m.deleted) {
-                    let text = if last.from_me { format!("You: {}", last.text) } else { last.text };
-                    previews.insert(c.identity_key.clone(), (text, last.at_secs));
+            // The notes conversation's preview comes from the same place.
+            let notes = devices.as_ref().map(|d| d.notes_id());
+            for id in contacts.list.iter().map(|c| &c.identity_key).chain(notes.as_ref()) {
+                if let Some(preview) = preview_of(&dir, id, key) {
+                    previews.insert(id.clone(), preview);
                 }
             }
         }
@@ -488,6 +506,7 @@ impl App {
             mic_permission: platform::has_mic_permission(),
             local_ip: call::local_ip(),
             backup_key,
+            devices,
             calls,
             clear_calls_armed: false,
             save_name: String::new(),
@@ -558,6 +577,21 @@ impl App {
             if let crate::account::Outcome::Toast(text, kind) = o {
                 self.stoop.toast(text, kind);
             }
+        }
+    }
+
+    /// The notes on disk changed: the open notes conversation and the
+    /// notes preview are read again.
+    pub(super) fn notes_changed(&mut self) {
+        let (Some(devices), Ok(key)) = (&self.devices, &self.backup_key) else { return };
+        let id = devices.notes_id();
+        match preview_of(&self.dir, &id, key) {
+            Some(preview) => self.previews.insert(id.clone(), preview),
+            None => self.previews.remove(&id),
+        };
+        if self.chat.as_ref().is_some_and(|c| c.peer_hex == id) {
+            self.chat = None;
+            self.open_chat(&id);
         }
     }
 
@@ -788,6 +822,22 @@ impl App {
     /// nothing happened.
     pub fn poll(&mut self) -> bool {
         let mut changed = self.poll_update();
+
+        // What the account's other devices changed: a removal of this
+        // phone reloads the app on a fresh account; a note or the device
+        // list redraws.
+        match self.devices.as_mut().map(|d| d.poll()) {
+            Some(c) if c.removed => {
+                self.reload_account("This phone was removed from your account on another device.".into());
+                return true;
+            }
+            Some(c) if c.changed => {
+                self.load_devices();
+                self.notes_changed();
+                changed = true;
+            }
+            _ => {}
+        }
 
         for outcome in self.account.poll() {
             match outcome {
@@ -1209,14 +1259,14 @@ impl App {
                     let here = live_here(chat);
                     chat.delete(id, here.as_deref());
                 }
-                    }
+            }
             Message::React(id, emoji) => {
                 if let Some(chat) = self.chat.as_mut() {
                     if let Some(live) = live_here(chat) {
                         chat.react(id, &emoji, &live);
                     }
                 }
-                    }
+            }
             Message::Expiry(expiry) => {
                 let Some(chat) = self.chat.as_mut() else { return };
                 chat.set_expiry(expiry.secs());

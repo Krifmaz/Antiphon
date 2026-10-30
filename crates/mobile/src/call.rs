@@ -264,6 +264,12 @@ impl CallEngine {
         std::mem::take(&mut *self.shared.finished.lock().unwrap())
     }
 
+    /// A handle to the engine's runtime, for the account's device sync to
+    /// run beside the calls.
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
+    }
+
     /// Sets the name sent to the other side in the next call's greeting.
     /// Surrounding whitespace is dropped.
     pub fn set_display_name(&self, name: &str) {

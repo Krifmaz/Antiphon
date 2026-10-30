@@ -30,7 +30,9 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use antiphon_crypto::{Route, RouteRecord, SignedRouteRecord};
-use antiphon_crypto::{mail, IdentityKeyPair};
+use antiphon_crypto::{mail, mail_key, IdentityKeyPair};
+
+use crate::mail_keys::MailKeys;
 use antiphon_net::mailbox::{self, InboxStatus, Label};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
@@ -157,17 +159,31 @@ pub fn inbox_nodes(routes: &[RouteConfig], strict: bool) -> Vec<(RouteKind, Stri
         .collect()
 }
 
-/// Your route list, signed, ready to hand to a contact.
+/// Your route list, signed, ready to hand to a contact: [`my_record_with`]
+/// for an identity that keeps no separate mail key (a persona, a test).
 pub fn my_record(identity: &IdentityKeyPair, routes: &[RouteConfig], strict: bool, sequence: u64) -> SignedRouteRecord {
+    my_record_with(identity, &MailKeys::default(), routes, strict, sequence)
+}
+
+/// Your route list, signed, with inboxes under the account's current mail
+/// key and, once that is not the identity itself, the certificate contacts
+/// seal to (see [`crate::mail_keys`]).
+pub fn my_record_with(identity: &IdentityKeyPair, keys: &MailKeys, routes: &[RouteConfig], strict: bool, sequence: u64) -> SignedRouteRecord {
+    let holder = keys.current(identity);
     let mut out = Vec::new();
     if strict || routes.iter().any(|r| r.kind == RouteKind::Direct && r.enabled) {
         out.push(Route { kind: RouteKind::Direct.wire().to_string(), address: String::new() });
     }
     for (kind, node, _) in inbox_nodes(routes, strict) {
-        let label = mail::inbox_label(identity, &node);
+        let label = mail::inbox_label(&holder, &node);
         out.push(Route { kind: kind.wire().to_string(), address: format!("{node}#{}", hex(&label)) });
     }
-    out.truncate(32);
+    // The certificate always fits: it takes the last place if need be.
+    let cert = keys.cert(identity);
+    out.truncate(if cert.is_some() { 31 } else { 32 });
+    if let Some(cert) = cert {
+        out.push(Route { kind: mail_key::ROUTE_KIND.to_string(), address: cert.to_address() });
+    }
     RouteRecord {
         identity_key: identity.public().identity_key,
         sequence,
@@ -181,6 +197,21 @@ pub fn my_record(identity: &IdentityKeyPair, routes: &[RouteConfig], strict: boo
     .expect("signing our own record cannot fail")
 }
 
+/// The prekey a recipient's record says to seal mail to: their current
+/// mail key, when they publish one their identity signed, else `None`
+/// (seal to the identity's own prekey).
+pub fn mail_key_in(record: &SignedRouteRecord) -> Option<[u8; 32]> {
+    record
+        .record
+        .routes
+        .iter()
+        .filter(|r| r.kind == mail_key::ROUTE_KIND)
+        .filter_map(|r| mail_key::MailKeyCert::from_address(&r.address))
+        .filter(|c| c.verify(&record.record.identity_key).is_ok())
+        .max_by_key(|c| c.epoch)
+        .map(|c| c.prekey)
+}
+
 /// Where in a recipient's record mail can be left: `(node, label)`, in
 /// their order. Direct and anything unparseable are skipped.
 pub fn mailboxes_in(record: &SignedRouteRecord) -> Vec<(String, Label)> {
@@ -188,7 +219,7 @@ pub fn mailboxes_in(record: &SignedRouteRecord) -> Vec<(String, Label)> {
         .record
         .routes
         .iter()
-        .filter(|r| r.kind != RouteKind::Direct.wire())
+        .filter(|r| r.kind != RouteKind::Direct.wire() && r.kind != mail_key::ROUTE_KIND)
         // A phone's push targets live in the same record; they are where
         // to wake it, never where to leave mail.
         .filter(|r| !antiphon_push::Target::is_push_route(r))
@@ -242,7 +273,10 @@ pub async fn send(
         return Sent::NoRoute;
     }
     let plain = serde_json::to_vec(body).expect("a mail body always serializes");
-    let Ok(blob) = mail::seal(identity, their_identity, their_prekey, &plain) else {
+    // Their current mail key when they publish one, so a device they have
+    // since removed can't open it.
+    let prekey = mail_key_in(their_record).unwrap_or(*their_prekey);
+    let Ok(blob) = mail::seal(identity, their_identity, &prekey, &plain) else {
         return Sent::Failed("could not seal the message".into());
     };
     if blob.len() > mailbox::MAX_BLOB {
@@ -303,6 +337,20 @@ pub async fn collect(
     routes: &[RouteConfig],
     strict: bool,
     hosting: bool,
+    keep: impl FnMut(&Received) -> bool,
+) -> Vec<(String, Result<NodeStatus, String>)> {
+    collect_with(identity, &MailKeys::default(), routes, strict, hosting, keep).await
+}
+
+/// [`collect`] for the account: at the inboxes of every mail key still in
+/// use -- the current one, and retired ones contacts may not have heard
+/// are gone (see [`crate::mail_keys`]).
+pub async fn collect_with(
+    identity: &IdentityKeyPair,
+    keys: &MailKeys,
+    routes: &[RouteConfig],
+    strict: bool,
+    hosting: bool,
     mut keep: impl FnMut(&Received) -> bool,
 ) -> Vec<(String, Result<NodeStatus, String>)> {
     let mut report = Vec::new();
@@ -317,7 +365,7 @@ pub async fn collect(
     };
     for (kind, node, code) in inbox_nodes(routes, strict) {
         let leave = hosting && kind == RouteKind::OwnDevices;
-        let status = collect_one(identity, &socket, &node, &code, leave, &mut keep).await;
+        let status = collect_one(identity, keys, &socket, &node, &code, leave, &mut keep).await;
         report.push((node, status));
     }
     report
@@ -331,8 +379,11 @@ pub struct NodeStatus {
     pub collected: usize,
 }
 
+/// Collects one node: the inbox of each mail key in use there. The status
+/// shown is the current key's inbox, the one contacts are told about.
 async fn collect_one(
     identity: &IdentityKeyPair,
+    keys: &MailKeys,
     socket: &AppSocket,
     node: &str,
     code: &[u8],
@@ -340,36 +391,54 @@ async fn collect_one(
     keep: &mut impl FnMut(&Received) -> bool,
 ) -> Result<NodeStatus, String> {
     let addr = resolve(TrafficKind::Messages, node).await.ok_or("could not find that address")?;
-    let label = mail::inbox_label(identity, node);
-    let secret = mail::fetch_secret(identity, node);
-    let started = Instant::now();
-    mailbox::register(socket, addr, label, mail::fetch_hash(&secret), code, NODE_TIMEOUT)
-        .await
-        .map_err(|e| e.to_string())?;
-    let response_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
-    let waiting = mailbox::fetch(socket, addr, label, secret, NODE_TIMEOUT).await.map_err(|e| e.to_string())?;
-    let mut collected = 0;
-    for (id, blob) in waiting {
-        let accepted = match mail::open(identity, &blob) {
-            Ok((sender, plain)) => match serde_json::from_slice::<MailBody>(&plain) {
-                Ok(body) => keep(&Received { from: sender.identity_key, body }),
-                // Opened and authenticated but not ours to parse: drop it
-                // rather than collect it forever.
-                Err(_) => true,
-            },
-            // Not sealed to us. Nobody can ever open it, so holding it
-            // only fills the inbox.
-            Err(_) => true,
-        };
-        if accepted {
-            collected += 1;
-            if !leave_in_place {
-                let _ = mailbox::ack(socket, addr, label, secret, id, NODE_TIMEOUT).await;
+    let now = now_secs();
+    let mut status = None;
+    for holder in keys.holders(identity, now) {
+        let label = mail::inbox_label(&holder, node);
+        let secret = mail::fetch_secret(&holder, node);
+        let started = Instant::now();
+        let registered = mailbox::register(socket, addr, label, mail::fetch_hash(&secret), code, NODE_TIMEOUT).await.map_err(|e| e.to_string());
+        // A retired inbox that won't answer is no reason to fail the node.
+        if status.is_some() && registered.is_err() {
+            continue;
+        }
+        registered?;
+        let response_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        let waiting = mailbox::fetch(socket, addr, label, secret, NODE_TIMEOUT).await.map_err(|e| e.to_string())?;
+        let mut collected = 0;
+        for (id, blob) in waiting {
+            let accepted = match keys.open(identity, &blob, now) {
+                Some((sender, plain)) => match serde_json::from_slice::<MailBody>(&plain) {
+                    Ok(body) => keep(&Received { from: sender.identity_key, body }),
+                    // Opened and authenticated but not ours to parse: drop it
+                    // rather than collect it forever.
+                    Err(_) => true,
+                },
+                // Not sealed to us. Nobody can ever open it, so holding it
+                // only fills the inbox.
+                None => true,
+            };
+            if accepted {
+                collected += 1;
+                if !leave_in_place {
+                    let _ = mailbox::ack(socket, addr, label, secret, id, NODE_TIMEOUT).await;
+                }
             }
         }
+        match status.as_mut() {
+            None => {
+                let inbox = mailbox::status(socket, addr, label, secret, NODE_TIMEOUT).await.unwrap_or_default();
+                status = Some(NodeStatus { response_ms, inbox, collected });
+            }
+            Some(s) => s.collected += collected,
+        }
     }
-    let inbox = mailbox::status(socket, addr, label, secret, NODE_TIMEOUT).await.unwrap_or_default();
-    Ok(NodeStatus { response_ms, inbox, collected })
+    status.ok_or_else(|| "no mail key to collect with".to_string())
+}
+
+/// Now, in unix seconds.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Mailbox nodes on the local network (spec §8 "auto-detect on your
@@ -470,7 +539,17 @@ pub fn my_record_hex() -> String {
 pub fn my_record_bytes() -> Vec<u8> {
     let Some(identity) = IDENTITY.get() else { return Vec::new() };
     let config = crate::config::load();
-    my_record(identity, &config.routes, config.strict_mode, config.route_sequence).encode()
+    my_record_with(identity, &my_mail_keys(), &config.routes, config.strict_mode, config.route_sequence).encode()
+}
+
+/// The account's mail keys as saved in the config folder; epoch 0 (the
+/// identity itself) when there are none or they can't be read.
+pub fn my_mail_keys() -> MailKeys {
+    let Some(dir) = crate::config::config_dir() else { return MailKeys::default() };
+    match crate::history::load_or_create_backup_key(&dir) {
+        Ok(key) => MailKeys::load(&dir, &key),
+        Err(_) => MailKeys::default(),
+    }
 }
 
 /// Run the courier now rather than at its next tick -- after a call
@@ -557,7 +636,8 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
     let mut arrived: Vec<String> = Vec::new();
     let mut strangers = 0;
     let community = crate::community::Store::app();
-    let report = collect(&identity, &config.routes, config.strict_mode, config.hold_mail_for_devices, |r| {
+    let keys = MailKeys::load(&dir, &key);
+    let report = collect_with(&identity, &keys, &config.routes, config.strict_mode, config.hold_mail_for_devices, |r| {
         // A piece of a group chat or community message (spec §9): from
         // members who need not be your contacts. Whether they really are
         // members is the community's to check once it is whole.
@@ -758,6 +838,31 @@ pub fn leave_reply(contact_key_hex: &str, text: &str, expire_after_secs: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rotated_mail_key_is_published_and_moves_the_inboxes() {
+        let me = IdentityKeyPair::generate();
+        let plain = my_record(&me, &with_nodes(), false, 1);
+        assert_eq!(mail_key_in(&plain), None);
+
+        let mut keys = MailKeys::default();
+        keys.rotate(10);
+        let record = my_record_with(&me, &keys, &with_nodes(), false, 2);
+        assert_eq!(mail_key_in(&record), Some(keys.current(&me).public().prekey));
+        // The certificate is not a mailbox, and the inboxes moved.
+        let boxes = mailboxes_in(&record);
+        assert_eq!(boxes.len(), 2);
+        assert_ne!(boxes[0].1, mailboxes_in(&plain)[0].1);
+        assert_eq!(boxes[0].1, mail::inbox_label(&keys.current(&me), "home.example:3479"));
+
+        // Someone else's certificate pasted into the record is ignored.
+        let mallory = IdentityKeyPair::generate();
+        let forged = mail_key::MailKeyCert::issue(&mallory, 99, &mallory);
+        let mut tampered = plain.record.clone();
+        tampered.routes.push(Route { kind: mail_key::ROUTE_KIND.into(), address: forged.to_address() });
+        let tampered = tampered.sign(&me).unwrap();
+        assert_eq!(mail_key_in(&tampered), None);
+    }
 
     fn with_nodes() -> Vec<RouteConfig> {
         let mut r = default_routes();

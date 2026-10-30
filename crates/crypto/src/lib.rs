@@ -71,6 +71,7 @@ pub mod keystore;
 pub mod federation;
 pub mod file_seal;
 pub mod mail;
+pub mod mail_key;
 pub mod memory_seal;
 pub mod mnemonic;
 pub mod onion;

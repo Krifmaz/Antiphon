@@ -30,6 +30,12 @@ futures = { version = "0.3", features = ["executor"] }
 # Wipes the identity seed in an account backup when it is dropped
 # (`account_backup.rs`, shared with the desktop).
 zeroize = "1.9.0"
+# Mail keys, device inbox labels and message ids for syncing with the
+# account's other devices (`device_sync.rs`, `mail_keys.rs`, shared with
+# the desktop).
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 antiphon-audio = { version = "0.1.0", path = "../audio" }
 antiphon-crypto = { version = "0.1.0", path = "../crypto" }

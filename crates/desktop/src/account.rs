@@ -251,6 +251,8 @@ impl AccountState {
             devices: Vec::new(),
             device_sync: String::new(),
             can_remove_devices: true,
+            // The desktop's mailboxes are its Settings > Delivery routes.
+            mailboxes: None,
         }
     }
 

@@ -190,9 +190,7 @@ impl App {
         Model {
             me,
             people,
-            // Notes to self need a mailbox to reach your other devices,
-            // which the phone doesn't keep yet.
-            notes: None,
+            notes: self.notes_person(now),
             call,
             conversation,
             transfers,
@@ -214,10 +212,13 @@ impl App {
                 listen_on_saver: self.settings.listen_on_battery_saver,
                 talking: self.talking,
             }),
-            account: self.account.model(match (&self.identity, self.phrase_visible) {
-                (Ok(identity), true) => Some(antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed())),
-                _ => None,
-            }),
+            account: self.account.model(
+                match (&self.identity, self.phrase_visible) {
+                    (Ok(identity), true) => Some(antiphon_crypto::mnemonic::phrase_from_seed(&identity.master_seed())),
+                    _ => None,
+                },
+                &self.settings.device_mailboxes,
+            ),
             communities: Vec::new(),
             space_invites: Vec::new(),
             channel: None,
@@ -315,6 +316,36 @@ impl App {
         }
     }
 
+    /// The notes-to-self conversation as the people list shows it, when
+    /// the device sync is running.
+    fn notes_person(&self, now: u64) -> Option<Person> {
+        let id = self.devices.as_ref()?.notes_id();
+        let preview = self.previews.get(&id);
+        Some(Person {
+            name: crate::my_devices::NOTES_NAME.into(),
+            last: preview.map(|(text, _)| text.clone()),
+            last_at: preview.map(|(_, at)| data_rules::ago(now, *at)),
+            note_to_self: true,
+            id,
+            ..Default::default()
+        })
+    }
+
+    /// Whether `id` is the notes-to-self conversation.
+    fn is_notes(&self, id: &str) -> bool {
+        self.devices.as_ref().is_some_and(|d| d.notes_id() == id)
+    }
+
+    /// Carries out a change to a note: written here, sent to the account's
+    /// other devices, and the conversation read again.
+    fn note(&mut self, change: impl FnOnce(&crate::my_devices::PhoneDevices) -> Result<(), String>) {
+        let Some(devices) = &self.devices else { return };
+        if let Err(e) = change(devices) {
+            self.stoop.toast(e, ToastKind::Err);
+        }
+        self.notes_changed();
+    }
+
     /// The call as the interface shows it.
     fn call_model(&self, phase: &Phase) -> stoop::Call {
         let talk_hint = Some(if self.settings.open_mic { "Mic is open".to_string() } else { "Hold the pad to talk".to_string() });
@@ -388,6 +419,8 @@ impl App {
     fn conversation_model(&self, id: &str, live: bool) -> Option<stoop::Conversation> {
         let chat = self.chat.as_ref().filter(|c| c.peer_hex == id)?;
         let now = now_secs();
+        // Notes go to this account's own devices, not through a call.
+        let notes = self.is_notes(id);
         let lines = chat
             .messages
             .iter()
@@ -399,7 +432,7 @@ impl App {
                 text: m.text.clone(),
                 time: data_rules::ago(now, m.at_secs),
                 day: None,
-                delivery: match (m.from_me, chat.status(m.id, live)) {
+                delivery: match (m.from_me && !notes, chat.status(m.id, live)) {
                     (false, _) => Delivery::None,
                     (true, crate::outbox::Status::Waiting) => Delivery::Queued,
                     (true, crate::outbox::Status::Sending) => Delivery::Sent,
@@ -419,7 +452,7 @@ impl App {
             person: id.to_string(),
             lines,
             live,
-            queues: !live,
+            queues: !live && !notes,
             expiry: chat.expire_after_secs().map(|s| format!("Messages vanish after {}", super::Expiry::from_secs(Some(s)))),
             recording: None,
         })
@@ -500,8 +533,13 @@ impl App {
 
     /// Carries out one thing the interface asked for.
     pub(super) fn act(&mut self, action: Action) {
+        use crate::device_sync::NoteOp;
         match action {
             Action::Open(id) => self.open_chat(&id),
+            Action::Send { to, text, .. } if self.is_notes(&to) => self.note(|d| d.add_note(&text)),
+            Action::Edit { to, id, text } if self.is_notes(&to) => self.note(|d| d.change_note(NoteOp::Edit { id, text })),
+            Action::Delete { to, id } if self.is_notes(&to) => self.note(|d| d.change_note(NoteOp::Delete { id })),
+            Action::Pin { to, id, pinned } if self.is_notes(&to) => self.note(|d| d.change_note(NoteOp::Pin { id, pinned })),
             Action::Door(true) => self.update(Message::Listen),
             Action::Door(false) => {
                 if matches!(self.engine.phase(), Phase::Listening { .. }) {
@@ -777,9 +815,23 @@ impl App {
                 _ => self.stoop.toast("Your identity or history key didn't load, so the account can't be sent yet.", ToastKind::Err),
             },
             Action::MoveStop => self.account.stop_move(),
-            // Not offered here (`can_remove_devices` is false), so only a
-            // stray action arrives; say where it can be done.
-            Action::RevokeDevice(_) => self.stoop.toast("Remove a device from one of your computers.", ToastKind::Info),
+            Action::RevokeDevice(id) => {
+                let Some(devices) = &self.devices else { return };
+                match devices.revoke(&id) {
+                    Ok(name) => {
+                        self.stoop.toast(format!("Removed {name}. Your other devices have a new mail key it can't read."), ToastKind::Ok);
+                        self.load_devices();
+                    }
+                    Err(e) => self.stoop.toast(e, ToastKind::Err),
+                }
+            }
+            Action::DeviceMailboxes(list) => {
+                self.settings.device_mailboxes = list;
+                self.settings.save(&self.dir);
+                if let Some(devices) = &self.devices {
+                    devices.set_mailboxes(self.settings.device_mailboxes.clone());
+                }
+            }
             Action::MoveReceive(link) => {
                 if self.engine.is_busy() {
                     self.stoop.toast("Hang up before bringing an account here.", ToastKind::Warn);

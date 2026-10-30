@@ -74,14 +74,21 @@ pub fn seal(
 /// Opens mail sealed to `recipient`. Returns who sent it and the body;
 /// anything forged, damaged or meant for someone else is an error.
 pub fn open(recipient: &IdentityKeyPair, sealed: &[u8]) -> Result<(PublicIdentity, Vec<u8>), CryptoError> {
+    open_for(&recipient.public().identity_key, recipient, sealed)
+}
+
+/// Opens mail sealed to the identity `me` under a prekey that `holder`
+/// holds the secret of -- an account's current mail key (see
+/// [`crate::mail_key`]) rather than its identity's own prekey. With
+/// `holder` the identity itself this is [`open`].
+pub fn open_for(me: &[u8; 32], holder: &IdentityKeyPair, sealed: &[u8]) -> Result<(PublicIdentity, Vec<u8>), CryptoError> {
     if sealed.len() < OVERHEAD {
         return Err(CryptoError::DecryptionFailed);
     }
     let (eph_pub, body) = sealed.split_at(32);
     let eph_pub: [u8; 32] = eph_pub.try_into().expect("split at 32");
-    let shared = recipient.prekey_secret().diffie_hellman(&PublicKey::from(eph_pub));
-    let me = recipient.public().identity_key;
-    let plain = cipher(shared.as_bytes(), &eph_pub, &me)
+    let shared = holder.prekey_secret().diffie_hellman(&PublicKey::from(eph_pub));
+    let plain = cipher(shared.as_bytes(), &eph_pub, me)
         .decrypt(&Nonce::from([0u8; 12]), body)
         .map_err(|_| CryptoError::DecryptionFailed)?;
 
@@ -91,7 +98,7 @@ pub fn open(recipient: &IdentityKeyPair, sealed: &[u8]) -> Result<(PublicIdentit
         .try_into()
         .expect("64 bytes");
     let message = &plain[PublicIdentity::ENCODED_LEN + 64..];
-    verify_signature(&sender.identity_key, &signed_bytes(&me, &eph_pub, message), &signature)?;
+    verify_signature(&sender.identity_key, &signed_bytes(me, &eph_pub, message), &signature)?;
     Ok((sender, message.to_vec()))
 }
 

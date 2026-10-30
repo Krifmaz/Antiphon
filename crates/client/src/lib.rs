@@ -35,6 +35,7 @@ pub mod introduction;
 pub mod key_capture;
 pub mod link_preview;
 pub mod link_quality;
+pub mod mail_keys;
 pub mod mixer;
 pub mod moderation;
 pub mod node_picker;

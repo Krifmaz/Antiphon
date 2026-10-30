@@ -25,24 +25,60 @@
 //! already -- nothing readable is ever written there -- and is tried again
 //! every round for up to [`PENDING_LIFETIME`].
 //!
+//! **The mail key.** When a device is removed, the device removing it
+//! makes the account a new mail key ([`crate::mail_keys`]) and sends it here
+//! to every device still listed, sealed to each one's key -- never to the
+//! removed one. So the removed device keeps nothing that opens the
+//! account's future mail.
+//!
+//! **Network.** What sockets and names mean differs between the apps (the
+//! desktop routes messages through the VPN when asked, the phone simply
+//! binds), so a round is given a [`Network`] that answers for it.
+//!
 //! Every message is safe to receive twice (each is left at every node, so
 //! a device reading several nodes may), so nothing here deduplicates more
 //! than that.
 
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use antiphon_crypto::{hex, mail, BackupKey, DeviceKeyPair, IdentityKeyPair, PublicIdentity, SignedDeviceList};
-use antiphon_net::mailbox;
-use antiphon_net::vpn::TrafficKind;
+use antiphon_net::{mailbox, Datagram};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::devices::{self, Accepted};
 use crate::history::{self, StoredMessage};
+use crate::mail_keys::MailKeys;
+
+/// How the app reaches the account's mailbox nodes.
+pub trait Network: Send + Sync + 'static {
+    /// The socket a round talks through.
+    type Socket: Datagram;
+    /// A socket for one round.
+    fn bind(&self) -> impl Future<Output = std::io::Result<Self::Socket>> + Send;
+    /// Where `node` (`host[:port]`) is now.
+    fn resolve(&self, node: &str) -> impl Future<Output = Option<SocketAddr>> + Send;
+    /// The account's mailbox nodes, each with its members code. Asked
+    /// before every round, so a change in settings is picked up.
+    fn nodes(&self) -> Vec<(String, Vec<u8>)>;
+}
+
+/// How long one node gets to answer.
+const NODE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Where pieces of a message wait for the rest.
+const PARTS_FILE: &str = "devices.parts";
+/// Bytes of frame header: message id, index, count.
+const FRAME_HEADER: usize = 8 + 1 + 1;
+/// Bytes of message in one frame, so the sealed frame fits a mailbox.
+const FRAME_DATA: usize = mailbox::MAX_BLOB - mail::OVERHEAD - FRAME_HEADER;
+/// The most frames one message may take (about 200 KB).
+const MAX_FRAMES: usize = 255;
 
 /// The file pending sibling mail waits in.
 pub const OUTBOX_FILE: &str = "devices.outbox";
@@ -70,6 +106,13 @@ pub enum DeviceMail {
     },
     /// A change to the notes-to-self conversation.
     Note(NoteOp),
+    /// The account's new mail key, after a device was removed.
+    MailKey {
+        /// Which key: higher is newer.
+        epoch: u64,
+        /// Its secret, hex. Sealed to the receiving device, like all of this.
+        secret: String,
+    },
 }
 
 /// A change to the notes-to-self conversation, as one device tells the
@@ -129,6 +172,9 @@ pub struct Round {
     pub list_changed: bool,
     /// Notes changed.
     pub notes_changed: bool,
+    /// The account's mail key changed: the route record contacts hold
+    /// should be published again.
+    pub mail_key_changed: bool,
     /// Messages for siblings left this round.
     pub sent: usize,
     /// Messages still waiting for a sibling.
@@ -170,26 +216,116 @@ pub fn send(dir: &Path, device: &DeviceKeyPair, list: &SignedDeviceList, also: O
     if to.is_empty() {
         return Ok(());
     }
-    let plain = serde_json::to_vec(message).expect("device mail always serializes");
+    let frames = frames(&serde_json::to_vec(message).expect("device mail always serializes"))?;
     let mut pending = load_pending(dir);
     for recipient in to {
-        let blob = mail::seal(device, &recipient.identity_key, &recipient.prekey, &plain).map_err(|e| std::io::Error::other(e.to_string()))?;
-        if blob.len() > mailbox::MAX_BLOB {
-            return Err(std::io::Error::other("too long for a mailbox"));
+        for frame in &frames {
+            let blob = mail::seal(device, &recipient.identity_key, &recipient.prekey, frame).map_err(|e| std::io::Error::other(e.to_string()))?;
+            debug_assert!(blob.len() <= mailbox::MAX_BLOB, "frames are cut to fit");
+            let mut id = [0u8; 16];
+            getrandom::fill(&mut id).expect("OS randomness is unavailable");
+            pending.push(Pending { to: hex::encode(&recipient.identity_key), id: hex::encode(&id), blob: hex::encode(&blob), queued_secs: now_secs() });
         }
-        let mut id = [0u8; 16];
-        getrandom::fill(&mut id).expect("OS randomness is unavailable");
-        pending.push(Pending { to: hex::encode(&recipient.identity_key), id: hex::encode(&id), blob: hex::encode(&blob), queued_secs: now_secs() });
     }
     save_pending(dir, &pending)?;
     kick();
     Ok(())
 }
 
+/// Cuts a message into frames that each fit a mailbox once sealed:
+/// `message id[8] index u8 count u8 data`.
+///
+/// A device list or a long note is bigger than one mailbox blob, so every
+/// message travels this way; the receiver puts the pieces back together
+/// ([`reassemble`]).
+fn frames(plain: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+    let chunks: Vec<&[u8]> = if plain.is_empty() { vec![plain] } else { plain.chunks(FRAME_DATA).collect() };
+    if chunks.len() > MAX_FRAMES {
+        return Err(std::io::Error::other("too long to send to your other devices"));
+    }
+    let mut id = [0u8; 8];
+    getrandom::fill(&mut id).expect("OS randomness is unavailable");
+    Ok(chunks
+        .iter()
+        .enumerate()
+        .map(|(i, data)| {
+            let mut frame = Vec::with_capacity(FRAME_HEADER + data.len());
+            frame.extend_from_slice(&id);
+            frame.push(i as u8);
+            frame.push(chunks.len() as u8);
+            frame.extend_from_slice(data);
+            frame
+        })
+        .collect())
+}
+
+/// Pieces of messages still waiting for the rest, by sender and message
+/// id: how many pieces there are, the ones here (index → data, hex), and
+/// when the first came.
+type Parts = std::collections::BTreeMap<String, (u8, std::collections::BTreeMap<u8, String>, u64)>;
+
+/// Takes one frame from `sender` and returns the whole message once every
+/// piece is here. Pieces wait in `devices.parts`, sealed under the history
+/// key (they are readable once opened), for up to [`PENDING_LIFETIME`].
+fn reassemble(dir: &Path, key: &BackupKey, sender: &[u8; 32], frame: &[u8]) -> Option<Vec<u8>> {
+    if frame.len() < FRAME_HEADER {
+        return None;
+    }
+    let (id, index, count, data) = (&frame[..8], frame[8], frame[9], &frame[FRAME_HEADER..]);
+    if count == 0 || index >= count {
+        return None;
+    }
+    if count == 1 {
+        return Some(data.to_vec());
+    }
+    let path = dir.join(PARTS_FILE);
+    let mut parts: Parts = std::fs::read(&path)
+        .ok()
+        .and_then(|b| key.open_content(&b).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let now = now_secs();
+    parts.retain(|_, (_, _, first)| now.saturating_sub(*first) <= PENDING_LIFETIME.as_secs());
+    let slot = format!("{}:{}", hex::encode(sender), hex::encode(id));
+    let entry = parts.entry(slot.clone()).or_insert_with(|| (count, Default::default(), now));
+    if entry.0 != count {
+        return None;
+    }
+    entry.1.insert(index, hex::encode(data));
+    let whole = (entry.1.len() == count as usize).then(|| entry.1.values().filter_map(|h| hex::decode(h)).flatten().collect::<Vec<u8>>());
+    if whole.is_some() {
+        parts.remove(&slot);
+    }
+    let plain = serde_json::to_vec(&parts).expect("parts always serialize");
+    if let Ok(sealed) = key.seal_content(&plain) {
+        let _ = std::fs::write(&path, sealed);
+    }
+    whole
+}
+
 /// Tells the account's other devices about a list change. `removed` is a
 /// device just taken off, which is told too.
 pub fn send_list(dir: &Path, device: &DeviceKeyPair, list: &SignedDeviceList, removed: Option<&PublicIdentity>) -> std::io::Result<()> {
     send(dir, device, list, removed, &DeviceMail::List { list: hex::encode(&list.encode()) })
+}
+
+/// Removes a device from the account, from this one: the shorter list goes
+/// to every device (the removed one included, so it signs out), and a new
+/// mail key to every device still on it. Returns the removed device's name.
+///
+/// The caller then publishes its route record again so contacts seal to
+/// the new key.
+pub fn remove_device(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, device: &DeviceKeyPair, gone: &[u8; 32]) -> Result<String, String> {
+    let before = devices::load_list(dir, &account.public().identity_key);
+    let removed = before.as_ref().and_then(|l| l.credential(gone)).cloned();
+    let list = devices::revoke(dir, account, device, gone)?;
+    let unsent = |e: std::io::Error| format!("Removed, but couldn't tell your devices yet: {e}");
+    send_list(dir, device, &list, removed.as_ref().map(|c| &c.device)).map_err(unsent)?;
+    let mut keys = MailKeys::load(dir, key);
+    let (epoch, secret) = keys.rotate(now_secs());
+    keys.save(dir, key).map_err(|e| format!("Removed, but couldn't save the new mail key: {e}"))?;
+    send(dir, device, &list, None, &DeviceMail::MailKey { epoch, secret: hex::encode(&secret) }).map_err(unsent)?;
+    Ok(removed.map(|c| c.name).unwrap_or_else(|| "The device".into()))
 }
 
 /// Writes a new note here and tells the account's other devices. Returns
@@ -244,23 +380,18 @@ pub fn apply_note(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, op: &N
 
 /// One sync: collect this device's inbox at every node, act on what came,
 /// then leave whatever is waiting for siblings.
-///
-/// `nodes` is the account's inbox nodes with each one's members code, as
-/// `delivery::inbox_nodes` lists them.
-pub async fn round(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, device: &DeviceKeyPair, nodes: &[(String, Vec<u8>)]) -> Round {
+pub async fn round(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, device: &DeviceKeyPair, net: &impl Network) -> Round {
     let mut out = Round::default();
-    let socket = match crate::vpn::bind(TrafficKind::Messages, 0).await {
-        Ok(s) => s,
-        Err(_) => return out,
-    };
+    let Ok(socket) = net.bind().await else { return out };
+    let nodes = net.nodes();
     let account_key = account.public().identity_key;
     let me = device.public().identity_key;
 
-    for (node, code) in nodes {
-        let Some(addr) = crate::delivery::resolve(TrafficKind::Messages, node).await else { continue };
+    for (node, code) in &nodes {
+        let Some(addr) = net.resolve(node).await else { continue };
         let label = inbox_label(account, &me, node);
         let secret = fetch_secret(device, node);
-        let timeout = crate::delivery::NODE_TIMEOUT;
+        let timeout = NODE_TIMEOUT;
         if mailbox::register(&socket, addr, label, mail::fetch_hash(&secret), code, timeout).await.is_err() {
             continue;
         }
@@ -288,9 +419,9 @@ pub async fn round(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, devic
         let (Some(to), Some(blob), Some(id)) = (hex::decode_array::<32>(&p.to), hex::decode(&p.blob), hex::decode_array::<16>(&p.id)) else { continue };
         let listed = list.as_ref().is_some_and(|l| l.authorizes(&to));
         let mut left = false;
-        for (node, _) in nodes {
-            let Some(addr) = crate::delivery::resolve(TrafficKind::Messages, node).await else { continue };
-            if mailbox::deposit(&socket, addr, inbox_label(account, &to, node), id, &blob, crate::delivery::NODE_TIMEOUT).await.is_ok() {
+        for (node, _) in &nodes {
+            let Some(addr) = net.resolve(node).await else { continue };
+            if mailbox::deposit(&socket, addr, inbox_label(account, &to, node), id, &blob, NODE_TIMEOUT).await.is_ok() {
                 left = true;
             }
         }
@@ -309,8 +440,9 @@ pub async fn round(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, devic
 /// Opens and acts on one message from this device's inbox.
 fn receive(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, device: &DeviceKeyPair, blob: &[u8], out: &mut Round) {
     // Sealed to the device's key, never the account's.
-    let Ok((sender, plain)) = mail::open(device, blob) else { return };
+    let Ok((sender, frame)) = mail::open(device, blob) else { return };
     let me = &device.public().identity_key;
+    let Some(plain) = reassemble(dir, key, &sender.identity_key, &frame) else { return };
     let Ok(message) = serde_json::from_slice::<DeviceMail>(&plain) else { return };
     let account_key = account.public().identity_key;
     match message {
@@ -327,46 +459,61 @@ fn receive(dir: &Path, account: &IdentityKeyPair, key: &BackupKey, device: &Devi
             }
         }
         DeviceMail::Note(op) => {
-            // Only from a device the account still lists.
-            let listed = devices::load_list(dir, &account_key).is_some_and(|l| l.authorizes(&sender.identity_key));
-            if listed && apply_note(dir, account, key, &op).unwrap_or(false) {
+            if listed(dir, &account_key, &sender) && apply_note(dir, account, key, &op).unwrap_or(false) {
                 out.notes_changed = true;
+            }
+        }
+        DeviceMail::MailKey { epoch, secret } => {
+            let Some(secret) = hex::decode_array::<32>(&secret) else { return };
+            if !listed(dir, &account_key, &sender) {
+                return;
+            }
+            let mut keys = MailKeys::load(dir, key);
+            if keys.adopt(epoch, secret, now_secs()) && keys.save(dir, key).is_ok() {
+                out.mail_key_changed = true;
             }
         }
     }
 }
 
-// ---- The background loop the desktop app runs. ----
+/// Whether `sender` is a device the account still lists: the only devices
+/// whose notes and keys are believed.
+fn listed(dir: &Path, account: &[u8; 32], sender: &PublicIdentity) -> bool {
+    devices::load_list(dir, account).is_some_and(|l| l.authorizes(&sender.identity_key))
+}
 
-/// This device's keypair, set once at start-up by [`start`].
-static DEVICE: OnceLock<DeviceKeyPair> = OnceLock::new();
+// ---- The background loop the apps run. ----
+
 /// Wakes the loop early: something was queued.
 static KICK: OnceLock<tokio::sync::Notify> = OnceLock::new();
 /// Bumped whenever notes or the device list change, so the app redraws.
 static CHANGES: AtomicU64 = AtomicU64::new(0);
 /// Set when another device removed this one.
 static REMOVED: AtomicBool = AtomicBool::new(false);
+/// Bumped whenever another device sent a new mail key.
+static MAIL_KEY: AtomicU64 = AtomicU64::new(0);
 
 /// Starts syncing with the account's other devices in the background.
-/// `nodes` is asked for the account's inbox nodes before every round, so
-/// a change in Settings > Delivery is picked up.
+/// Aborting the returned task stops it (the phone does, when it loads a
+/// different account without restarting).
 pub fn start(
     runtime: &tokio::runtime::Handle,
     dir: PathBuf,
     account: std::sync::Arc<IdentityKeyPair>,
     key: BackupKey,
     device: DeviceKeyPair,
-    nodes: impl Fn() -> Vec<(String, Vec<u8>)> + Send + Sync + 'static,
-) {
-    if DEVICE.set(device).is_err() {
-        return; // already running
-    }
+    net: impl Network,
+) -> tokio::task::JoinHandle<()> {
+    REMOVED.store(false, Ordering::Relaxed);
     let kick = KICK.get_or_init(tokio::sync::Notify::new);
     runtime.spawn(async move {
-        let device = DEVICE.get().expect("set above");
         loop {
-            let r = round(&dir, &account, &key, device, &nodes()).await;
+            let r = round(&dir, &account, &key, &device, &net).await;
             if r.list_changed || r.notes_changed {
+                CHANGES.fetch_add(1, Ordering::Relaxed);
+            }
+            if r.mail_key_changed {
+                MAIL_KEY.fetch_add(1, Ordering::Relaxed);
                 CHANGES.fetch_add(1, Ordering::Relaxed);
             }
             if r.removed_here {
@@ -376,7 +523,7 @@ pub fn start(
             }
             let _ = tokio::time::timeout(SYNC_INTERVAL, kick.notified()).await;
         }
-    });
+    })
 }
 
 /// Runs the next round now, rather than at its next tick.
@@ -387,6 +534,12 @@ pub fn kick() {
 /// Moves whenever notes or the device list changed from another device.
 pub fn changes() -> u64 {
     CHANGES.load(Ordering::Relaxed)
+}
+
+/// Moves whenever another device sent the account a new mail key: time to
+/// publish the route record again.
+pub fn mail_key_changes() -> u64 {
+    MAIL_KEY.load(Ordering::Relaxed)
 }
 
 /// Another of the account's devices removed this one.
@@ -449,12 +602,49 @@ mod tests {
         addr
     }
 
+    /// Plain sockets and loopback names, as a test sees the network.
+    struct TestNet {
+        /// The mailbox nodes.
+        nodes: Vec<(String, Vec<u8>)>,
+    }
+
+    impl Network for TestNet {
+        type Socket = tokio::net::UdpSocket;
+        async fn bind(&self) -> std::io::Result<Self::Socket> {
+            tokio::net::UdpSocket::bind("127.0.0.1:0").await
+        }
+        async fn resolve(&self, node: &str) -> Option<SocketAddr> {
+            node.parse().ok()
+        }
+        fn nodes(&self) -> Vec<(String, Vec<u8>)> {
+            self.nodes.clone()
+        }
+    }
+
     /// One of the account's devices: its folder and keys.
     struct Device {
         /// Its data folder.
         dir: PathBuf,
         /// Its own keypair.
         keys: DeviceKeyPair,
+    }
+
+    #[test]
+    fn a_long_message_comes_back_whole_from_its_pieces_in_any_order() {
+        let dir = folder("frames");
+        let key = BackupKey::generate();
+        let message: Vec<u8> = (0..3_000u32).map(|i| (i % 251) as u8).collect();
+        let mut pieces = frames(&message).unwrap();
+        assert!(pieces.len() > 1);
+        assert!(pieces.iter().all(|f| f.len() + mail::OVERHEAD <= mailbox::MAX_BLOB));
+        pieces.reverse();
+        let last = pieces.pop().unwrap();
+        for p in &pieces {
+            assert!(reassemble(&dir, &key, &[1; 32], p).is_none());
+        }
+        assert_eq!(reassemble(&dir, &key, &[1; 32], &last), Some(message));
+        // Pieces from someone else never complete another sender's message.
+        assert!(reassemble(&dir, &key, &[2; 32], &pieces[0]).is_none());
     }
 
     #[test]
@@ -470,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn notes_reach_the_other_device_and_a_removed_one_hears_it() {
         let node = node().await;
-        let nodes = vec![(node, Vec::new())];
+        let nodes = TestNet { nodes: vec![(node, Vec::new())] };
         let account = IdentityKeyPair::generate();
         let key = BackupKey::generate();
         let desktop = Device { dir: folder("desktop"), keys: DeviceKeyPair::generate() };
@@ -501,9 +691,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removing_a_device_gives_the_others_a_mail_key_it_never_sees() {
+        let node = node().await;
+        let nodes = TestNet { nodes: vec![(node, Vec::new())] };
+        let account = IdentityKeyPair::generate();
+        let key = BackupKey::generate();
+        let desktop = Device { dir: folder("key-desktop"), keys: DeviceKeyPair::generate() };
+        let laptop = Device { dir: folder("key-laptop"), keys: DeviceKeyPair::generate() };
+        let phone = Device { dir: folder("key-phone"), keys: DeviceKeyPair::generate() };
+        devices::approve(&desktop.dir, &account, &desktop.keys, &laptop.keys.public(), "Laptop").unwrap();
+        let all = devices::approve(&desktop.dir, &account, &desktop.keys, &phone.keys.public(), "Phone").unwrap();
+        for d in [&laptop, &phone] {
+            devices::save_list(&d.dir, &all).unwrap();
+            round(&d.dir, &account, &key, &d.keys, &nodes).await;
+        }
+
+        let name = remove_device(&desktop.dir, &account, &key, &desktop.keys, &phone.keys.public().identity_key).unwrap();
+        assert_eq!(name, "Phone");
+        let sent = MailKeys::load(&desktop.dir, &key);
+        assert_eq!(sent.epoch(), 1);
+        round(&desktop.dir, &account, &key, &desktop.keys, &nodes).await;
+
+        let laptop_round = round(&laptop.dir, &account, &key, &laptop.keys, &nodes).await;
+        assert!(laptop_round.mail_key_changed);
+        assert_eq!(MailKeys::load(&laptop.dir, &key), sent);
+        let phone_round = round(&phone.dir, &account, &key, &phone.keys, &nodes).await;
+        assert!(phone_round.removed_here);
+        assert_eq!(MailKeys::load(&phone.dir, &key).epoch(), 0, "the removed phone never gets the new key");
+    }
+
+    #[tokio::test]
     async fn notes_from_a_removed_device_are_not_believed() {
         let node = node().await;
-        let nodes = vec![(node, Vec::new())];
+        let nodes = TestNet { nodes: vec![(node, Vec::new())] };
         let account = IdentityKeyPair::generate();
         let key = BackupKey::generate();
         let desktop = Device { dir: folder("trust-desktop"), keys: DeviceKeyPair::generate() };

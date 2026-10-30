@@ -60,6 +60,8 @@ mod convert;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod files;
 #[cfg(any(target_os = "android", target_os = "ios"))]
+mod my_devices;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod platform;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod push;
@@ -87,8 +89,16 @@ mod content_store;
 mod control;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/device_sync.rs"]
+mod device_sync;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/devices.rs"]
 mod devices;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/mail_keys.rs"]
+mod mail_keys;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/file_integrity.rs"]

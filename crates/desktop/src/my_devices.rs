@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use antiphon_client::account_backup::{self, Platform};
 use antiphon_client::device_sync::{self, NoteOp};
-use antiphon_client::{config, delivery, devices};
+use antiphon_client::{config, delivery, devices, vpn};
+use antiphon_net::vpn::TrafficKind;
 use antiphon_crypto::{BackupKey, DeviceKeyPair, IdentityKeyPair, SignedDeviceList};
 use antiphon_ui as ui;
 
@@ -34,6 +35,8 @@ pub struct MyDevices {
     list: Option<SignedDeviceList>,
     /// The sync's change count at the last look.
     seen: u64,
+    /// The sync's mail key count at the last look.
+    keys_seen: u64,
 }
 
 /// What changed since the engine last asked.
@@ -43,6 +46,27 @@ pub struct Changes {
     pub changed: bool,
     /// Another device removed this one: the account is gone from here.
     pub removed: bool,
+    /// Another device sent the account a new mail key: publish the route
+    /// record again so contacts seal to it.
+    pub mail_key: bool,
+}
+
+/// The desktop's way to the account's mailboxes: through the VPN when
+/// messages are routed there, to the nodes in Settings > Delivery.
+struct DesktopNet;
+
+impl device_sync::Network for DesktopNet {
+    type Socket = antiphon_net::AppSocket;
+    async fn bind(&self) -> std::io::Result<Self::Socket> {
+        vpn::bind(TrafficKind::Messages, 0).await.map_err(|e| std::io::Error::other(e.to_string()))
+    }
+    async fn resolve(&self, node: &str) -> Option<std::net::SocketAddr> {
+        delivery::resolve(TrafficKind::Messages, node).await
+    }
+    fn nodes(&self) -> Vec<(String, Vec<u8>)> {
+        let cfg = config::load();
+        delivery::inbox_nodes(&cfg.routes, cfg.strict_mode).into_iter().map(|(_, node, code)| (node, code)).collect()
+    }
 }
 
 impl MyDevices {
@@ -52,11 +76,9 @@ impl MyDevices {
         let device = devices::load_or_create_device(dir).map_err(|e| format!("Couldn't load this device's key: {e}"))?;
         let list = devices::ensure(dir, &account, &device, &computer_name())?;
         let copy = DeviceKeyPair::from_master_seed(device.master_seed());
-        device_sync::start(runtime, dir.to_path_buf(), account.clone(), key.clone(), copy, || {
-            let cfg = config::load();
-            delivery::inbox_nodes(&cfg.routes, cfg.strict_mode).into_iter().map(|(_, node, code)| (node, code)).collect()
-        });
-        Ok(Self { dir: dir.to_path_buf(), account, key, device, list: Some(list), seen: device_sync::changes() })
+        // Runs for the life of the app: a different account means a restart.
+        drop(device_sync::start(runtime, dir.to_path_buf(), account.clone(), key.clone(), copy, DesktopNet));
+        Ok(Self { dir: dir.to_path_buf(), account, key, device, list: Some(list), seen: device_sync::changes(), keys_seen: device_sync::mail_key_changes() })
     }
 
     /// A copy of this device's keypair, for a move offer's thread.
@@ -79,7 +101,10 @@ impl MyDevices {
                 eprintln!("[devices] removed from the account, but couldn't erase it here: {e}");
             }
         }
-        Changes { changed: true, removed }
+        let keys = device_sync::mail_key_changes();
+        let mail_key = keys != self.keys_seen;
+        self.keys_seen = keys;
+        Changes { changed: true, removed, mail_key }
     }
 
     /// Reads the device list again (after a move approved a new device).
@@ -87,16 +112,15 @@ impl MyDevices {
         self.list = devices::load_list(&self.dir, &self.account.public().identity_key);
     }
 
-    /// Takes the device with this key (hex) off the account, and tells
-    /// every device -- the removed one included. Returns its name.
+    /// Takes the device with this key (hex) off the account: every device
+    /// is told (the removed one so it signs out), the account gets a new
+    /// mail key the removed device never sees, and the caller publishes
+    /// the route record again. Returns the device's name.
     pub fn revoke(&mut self, id: &str) -> Result<String, String> {
         let gone = antiphon_crypto::hex::decode_array::<32>(id).ok_or("That isn't a device on your account.")?;
-        let removed = self.list.as_ref().and_then(|l| l.credential(&gone)).map(|c| c.device);
-        let next = devices::revoke(&self.dir, &self.account, &self.device, &gone)?;
-        let name = self.list.as_ref().and_then(|l| l.credential(&gone)).map(|c| c.name.clone()).unwrap_or_else(|| "The device".into());
-        device_sync::send_list(&self.dir, &self.device, &next, removed.as_ref()).map_err(|e| format!("Removed, but couldn't tell your devices yet: {e}"))?;
-        self.list = Some(next);
-        Ok(name)
+        let name = device_sync::remove_device(&self.dir, &self.account, &self.key, &self.device, &gone);
+        self.reload();
+        name
     }
 
     /// The account's devices as Settings lists them, this one first.

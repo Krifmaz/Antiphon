@@ -11,9 +11,9 @@
 //!
 //! The phone is one of the account's devices with a key of its own (see
 //! `crate::devices`): a move approves the receiving device into the
-//! account's list, and the list is shown here. Removing a device is done
-//! from a computer for now -- the phone keeps no mailbox to tell the
-//! account's other devices through.
+//! account's list, and the list is shown here, with the mailboxes the
+//! phone keeps in touch with the account's other devices through (see
+//! `crate::my_devices`). Removing a device needs at least one of them.
 //!
 //! Slow work runs on its own thread and is collected by [`PhoneAccount::poll`].
 //! A restore rewrites the account on disk, and the app then reloads
@@ -35,6 +35,16 @@ use crate::platform;
 // The interface checks the passphrase length before asking; the two
 // numbers must agree, or it would offer what the seal then refuses.
 const _: () = assert!(stoop::MIN_PASSPHRASE_CHARS == account_seal::MIN_PASSPHRASE_CHARS);
+
+/// How this phone keeps in touch with the account's other devices, in
+/// words, for `count` mailboxes.
+fn sync_line(count: usize) -> String {
+    match count {
+        0 => "Add a mailbox below -- one your other devices use too -- so this phone can remove a device and share your notes.".into(),
+        1 => "Your devices keep in touch through this mailbox, sealed so only each device can read what's meant for it.".into(),
+        n => format!("Your devices keep in touch through these {n} mailboxes, sealed so only each device can read what's meant for it."),
+    }
+}
 
 /// What the app should do after an account action or poll.
 pub enum Outcome {
@@ -221,8 +231,9 @@ impl PhoneAccount {
     }
 
     /// The section as the interface shows it. `phrase` is the recovery
-    /// phrase while it is shown.
-    pub fn model(&self, phrase: Option<String>) -> stoop::Account {
+    /// phrase while it is shown; `mailboxes` are the ones in Settings >
+    /// Devices.
+    pub fn model(&self, phrase: Option<String>, mailboxes: &[String]) -> stoop::Account {
         stoop::Account {
             phrase,
             busy: self.busy.clone(),
@@ -242,8 +253,9 @@ impl PhoneAccount {
             }),
             can_pick_file: false,
             devices: self.devices.clone(),
-            device_sync: "Remove a device from one of your computers. This phone has no mailbox yet to tell your other devices through.".into(),
-            can_remove_devices: false,
+            device_sync: sync_line(mailboxes.len()),
+            can_remove_devices: !mailboxes.is_empty(),
+            mailboxes: Some(mailboxes.to_vec()),
         }
     }
 

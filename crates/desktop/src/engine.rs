@@ -459,6 +459,9 @@ impl Engine {
                 self.out.push(Out::Relaunch);
                 return;
             }
+            if changes.mail_key {
+                self.publish_routes();
+            }
             if changes.changed {
                 self.load_previews();
                 if self.conv.as_ref().is_some_and(|c| !c.live) {
@@ -665,6 +668,13 @@ impl Engine {
     /// the courier.
     fn save_routes(&mut self) {
         delivery::normalize(&mut self.cfg.routes);
+        self.publish_routes();
+    }
+
+    /// Publishes the route record again under the next sequence -- after
+    /// the route list or the account's mail key changed -- so contacts take
+    /// it over the old one.
+    fn publish_routes(&mut self) {
         self.cfg.route_sequence = (self.cfg.route_sequence + 1).max(now_secs());
         self.save();
         std::thread::spawn(community::refresh_cards);
@@ -2080,10 +2090,17 @@ impl Engine {
                 }
             }
             A::RevokeDevice(id) => match self.devices.as_mut().map(|d| d.revoke(&id)) {
-                Some(Ok(name)) => self.toast(format!("{name} was removed from your account. It signs out when it next hears from your devices."), ToastKind::Ok),
+                Some(Ok(name)) => {
+                    // Contacts learn the new mail key from the next record.
+                    self.publish_routes();
+                    self.toast(format!("{name} was removed from your account. Your mail moved to a new key it doesn't have, and it signs out when it next hears from your devices."), ToastKind::Ok);
+                }
                 Some(Err(e)) => self.toast(e, ToastKind::Err),
                 None => self.toast("Your device list didn't load on this computer.", ToastKind::Err),
             },
+            // Not offered on the desktop (`Account::mailboxes` is `None`):
+            // its mailboxes are Settings > Delivery's.
+            A::DeviceMailboxes(_) => {}
             a @ (A::ShowPhrase(_)
             | A::Restore(_)
             | A::BackupSave { .. }

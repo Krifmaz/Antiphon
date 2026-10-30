@@ -111,16 +111,17 @@ struct Layout {
 const HISTORY_DIRS: [&str; 2] = ["history", "outbox"];
 
 /// Files both apps keep the same way and that always come along: the
-/// account's signed device list (see `crate::devices`). The device's own
+/// account's signed device list (see `crate::devices`) and its mail keys,
+/// sealed under the history key (see `crate::mail_keys`). The device's own
 /// `device.key` is never one of them -- it belongs to the device, not the
 /// account.
-const SHARED_FILES: [&str; 1] = ["devices.list"];
+const SHARED_FILES: [&str; 2] = ["devices.list", "mail.keys"];
 
 /// Files that belong to this device rather than the account: never put
 /// in a bundle, and gone when the device signs out. (A restore keeps the
 /// device key, so the device stays itself, and sets the pending mail
 /// aside with the old account it was meant for.)
-const DEVICE_FILES: [&str; 2] = ["device.key", "devices.outbox"];
+const DEVICE_FILES: [&str; 3] = ["device.key", "devices.outbox", "devices.parts"];
 
 /// One account, ready to seal.
 pub struct Bundle {
@@ -349,7 +350,7 @@ pub fn apply(dir: &Path, platform: Platform, bundle: &Bundle) -> std::io::Result
     // Everything that makes up an account on this device, whichever way
     // the bundle was made: the old account must not leak into the new.
     let layout = platform.layout();
-    let mut ours: Vec<&str> = vec!["identity.key", "backup.key", "devices.outbox"];
+    let mut ours: Vec<&str> = vec!["identity.key", "backup.key", "devices.outbox", "devices.parts"];
     ours.extend(SHARED_FILES);
     ours.extend(layout.files);
     ours.extend(layout.dirs);
@@ -397,6 +398,13 @@ pub fn apply(dir: &Path, platform: Platform, bundle: &Bundle) -> std::io::Result
                 let mut settings = previous("settings.json");
                 for (key, value) in profile {
                     settings.insert(key, value);
+                }
+                // The phone keeps in touch with the account's other devices
+                // through the mailboxes the desktop delivers to, unless it
+                // already has some of its own.
+                let has_own = settings.get("device_mailboxes").and_then(Value::as_array).is_some_and(|m| !m.is_empty());
+                if !has_own {
+                    settings.insert("device_mailboxes".into(), Value::from(desktop_mailboxes(bundle)));
                 }
                 write_file(dir, "settings.json", &serde_json::to_vec_pretty(&settings)?)?;
                 write_file(dir, "contacts.json", &serde_json::to_vec_pretty(&contacts)?)?;
@@ -516,6 +524,31 @@ fn aside_folder(dir: &Path) -> PathBuf {
         n += 1;
     }
     folder
+}
+
+/// The mailbox nodes a desktop bundle delivers to: the enabled routes
+/// other than Direct, without strict mode, and only open ones -- the phone
+/// has no members codes to send. (`crate::delivery::inbox_nodes` reads
+/// the same routes on the desktop; the phone doesn't build that module.)
+fn desktop_mailboxes(bundle: &Bundle) -> Vec<String> {
+    let Some(config) = bundle.json("config.json") else { return Vec::new() };
+    if config.get("strict_mode").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
+    let routes = config.get("routes").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for route in routes {
+        let open = route.get("code").and_then(Value::as_str).unwrap_or_default().is_empty();
+        if route.get("enabled") != Some(&Value::Bool(true)) || route.get("kind").and_then(Value::as_str) == Some("Direct") || !open {
+            continue;
+        }
+        for node in route.get("nodes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::trim) {
+            if !node.is_empty() && !out.iter().any(|n| n == node) {
+                out.push(node.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// The profile fields of `bundle` both apps understand, keyed as the phone
@@ -648,6 +681,26 @@ mod tests {
         apply(&to, Platform::Phone, &Bundle::decode(&bundle.encode()).unwrap()).unwrap();
         assert_eq!(std::fs::read(to.join("devices.list")).unwrap(), b"signed list");
         assert_eq!(std::fs::read(to.join("device.key")).unwrap(), b"the phone's own");
+    }
+
+    #[test]
+    fn a_phone_gets_the_desktops_open_mailboxes_for_its_devices() {
+        let from = temp("mailboxes-from");
+        let (id, key) = desktop_account(&from);
+        let mut config: Value = serde_json::from_slice(&std::fs::read(from.join("config.json")).unwrap()).unwrap();
+        config["routes"] = serde_json::json!([
+            {"kind": "Direct", "enabled": true, "nodes": ["direct.example"]},
+            {"kind": "TrustedNode", "enabled": true, "nodes": [" home.example:3479 ", "home.example:3479"]},
+            {"kind": "CommunityNode", "enabled": true, "nodes": ["members.example"], "code": "secret"},
+            {"kind": "ProjectRelay", "enabled": false, "nodes": ["relay.example"]},
+        ]);
+        std::fs::write(from.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        let bundle = gather(&from, Platform::Desktop, &id, &key, false).unwrap();
+
+        let to = temp("mailboxes-to");
+        apply(&to, Platform::Phone, &bundle).unwrap();
+        let settings: Value = serde_json::from_slice(&std::fs::read(to.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["device_mailboxes"], serde_json::json!(["home.example:3479"]));
     }
 
     #[test]

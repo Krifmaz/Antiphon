@@ -73,6 +73,11 @@ pub struct Settings {
     pub font: String,
     /// Dialogs and panels appear at once instead of sliding.
     pub reduced_motion: bool,
+    /// Mailbox nodes (`host[:port]`) this phone keeps in touch with the
+    /// account's other devices through: notes to self, a removed device,
+    /// a new mail key. Filled in from a computer's delivery routes when the
+    /// account moves here from one.
+    pub device_mailboxes: Vec<String>,
 }
 
 impl Default for Settings {
@@ -106,6 +111,7 @@ impl Default for Settings {
             custom_accent: String::new(),
             font: "inter".into(),
             reduced_motion: false,
+            device_mailboxes: Vec::new(),
         }
     }
 }

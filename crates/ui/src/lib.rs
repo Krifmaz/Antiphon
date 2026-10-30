@@ -655,6 +655,10 @@ pub enum Action {
     /// Take this device (by device key, hex) off the account; it signs out
     /// the next time it hears from this one (the dialog already asked).
     RevokeDevice(String),
+    /// The mailboxes your devices keep in touch through, as the list now
+    /// stands (one added or taken off). Only where [`Account::mailboxes`]
+    /// is offered.
+    DeviceMailboxes(Vec<String>),
     /// A channel is on screen: load its messages and mark it read.
     OpenChannel {
         /// The group chat or community's id.
@@ -970,6 +974,10 @@ pub enum Msg {
     ImportPass(String),
     /// The move link box changed.
     ReceiveLink(String),
+    /// The box for adding a mailbox your devices share changed.
+    MailboxDraft(String),
+    /// Add what is in the mailbox box to the list your devices share.
+    MailboxAdd,
     /// The mobile data limit box changed (digits only are kept).
     LimitEdit(String),
     /// Save the mobile data limit box.
@@ -1121,6 +1129,8 @@ pub struct Ui {
     import_pass: String,
     /// The move link pasted from another device.
     receive_link: String,
+    /// A mailbox address being typed, to add to the list your devices share.
+    mailbox_draft: String,
     /// The mobile data limit box while it is being edited.
     limit_edit: Option<String>,
     /// The new group chat or community's name box.
@@ -1234,6 +1244,7 @@ impl Ui {
             include_history: true,
             import_pass: String::new(),
             receive_link: String::new(),
+            mailbox_draft: String::new(),
             limit_edit: None,
             space_name: String::new(),
             space_group: false,
@@ -1690,6 +1701,16 @@ impl Ui {
             Msg::ReceiveLink(s) => {
                 self.receive_link = s;
                 Vec::new()
+            }
+            Msg::MailboxDraft(s) => {
+                self.mailbox_draft = s;
+                Vec::new()
+            }
+            Msg::MailboxAdd => {
+                let node = self.mailbox_draft.trim().to_string();
+                let Some(list) = model.account.mailboxes.as_ref().filter(|l| !node.is_empty() && !l.contains(&node)) else { return Vec::new() };
+                self.mailbox_draft.clear();
+                vec![Action::DeviceMailboxes(list.iter().cloned().chain([node]).collect())]
             }
             Msg::LimitEdit(s) => {
                 self.limit_edit = Some(s.chars().filter(char::is_ascii_digit).take(6).collect());
