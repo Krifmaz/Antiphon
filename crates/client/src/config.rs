@@ -1092,9 +1092,80 @@ pub fn load_from(path: &std::path::Path) -> anyhow::Result<AppConfig> {
     Ok(serde_json::from_str(&text)?)
 }
 
+/// `config` as a settings file carries it: the preferences only. Who you
+/// know and who you blocked are your data, not settings (a backup or the
+/// data export carries those), and the relay's invite secret and the pin
+/// code are left out so a file shared with a friend gives nothing away.
+pub fn settings_only(config: &AppConfig) -> AppConfig {
+    let defaults = AppConfig::default();
+    AppConfig {
+        contacts: Vec::new(),
+        blocked: Vec::new(),
+        reports: Vec::new(),
+        relay_invite_secret: String::new(),
+        pin_code: String::new(),
+        profile: defaults.profile,
+        first_run: defaults.first_run,
+        calls_completed: 0,
+        ..config.clone()
+    }
+}
+
+/// The settings in `imported` laid over `current`: every preference comes
+/// from the file, while what [`settings_only`] leaves out (contacts,
+/// blocks, reports, secrets, your profile, how far through getting
+/// started you are) stays as it is here. So does the soundboard, whose
+/// clips live in this computer's data folder, and a font or background
+/// picture the file names that this computer doesn't have.
+pub fn with_imported_settings(current: &AppConfig, imported: AppConfig) -> AppConfig {
+    let here = |path: String, ours: &str| if path.is_empty() || std::path::Path::new(&path).exists() { path } else { ours.to_string() };
+    AppConfig {
+        contacts: current.contacts.clone(),
+        blocked: current.blocked.clone(),
+        reports: current.reports.clone(),
+        relay_invite_secret: if imported.relay_invite_secret.is_empty() { current.relay_invite_secret.clone() } else { imported.relay_invite_secret.clone() },
+        pin_code: if imported.pin_code.is_empty() { current.pin_code.clone() } else { imported.pin_code.clone() },
+        profile: current.profile.clone(),
+        first_run: current.first_run,
+        calls_completed: current.calls_completed,
+        sound_clips: current.sound_clips.clone(),
+        custom_font_path: here(imported.custom_font_path.clone(), &current.custom_font_path),
+        theme_image_path: here(imported.theme_image_path.clone(), &current.theme_image_path),
+        ..imported
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_settings_file_carries_preferences_not_people_or_secrets() {
+        let mine = AppConfig {
+            contacts: vec![Contact { name: "Ana".into(), ..Contact::default() }],
+            relay_invite_secret: "s3cret".into(),
+            pin_code: "1234".into(),
+            calls_completed: 9,
+            text_scale: 1.2,
+            ..AppConfig::default()
+        };
+        let file = settings_only(&mine);
+        assert!(file.contacts.is_empty());
+        assert!(file.relay_invite_secret.is_empty() && file.pin_code.is_empty());
+        assert_eq!(file.calls_completed, 0);
+        assert_eq!(file.text_scale, 1.2);
+
+        // Loading someone else's keeps my people and secrets, takes their
+        // preferences, and ignores a picture that isn't on this computer.
+        let theirs = AppConfig { text_scale: 0.9, theme_image_path: "/nowhere/sky.png".into(), ..settings_only(&AppConfig::default()) };
+        let merged = with_imported_settings(&mine, theirs);
+        assert_eq!(merged.contacts, mine.contacts);
+        assert_eq!(merged.relay_invite_secret, "s3cret");
+        assert_eq!(merged.pin_code, "1234");
+        assert_eq!(merged.calls_completed, 9);
+        assert_eq!(merged.text_scale, 0.9);
+        assert_eq!(merged.theme_image_path, "");
+    }
 
     fn sample_layout(name: &str) -> NamedLayout {
         let r = |x: f32| PanelRect { x, y: 10.0, width: 200.0, height: 120.0 };

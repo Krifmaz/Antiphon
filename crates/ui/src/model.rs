@@ -148,8 +148,8 @@ pub struct Account {
     /// Whether this device can show a save or open dialog for a backup
     /// file. A phone without one still saves to Downloads.
     pub can_pick_file: bool,
-    /// Everything can be exported as plain files into a folder (desktop
-    /// only).
+    /// Everything can be exported as plain files into a folder, and the
+    /// settings saved to and loaded from a file (desktop only).
     pub can_export_data: bool,
     /// The account's devices, this one first. Empty until the list loads.
     pub devices: Vec<DeviceRow>,

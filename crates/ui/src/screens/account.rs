@@ -54,6 +54,17 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
                     Some("Settings, contacts, your message history, sound clips and received files, as plain JSON and WAV files in a folder any program can open. Your messages are written out readable, so keep the folder private. Your keys are left out: your recovery phrase brings you back."),
                     btn_icon(Icon::Download, "Export everything…", Btn::Default, idle.then_some(Msg::Do(Action::ExportData))),
                 )
+            }))
+            .push(m.account.can_export_data.then(|| {
+                titled_card(
+                    "Settings file",
+                    Some("Your preferences (sound, shortcuts, look, network) in one file, to set up another computer the same way. Contacts, your profile and passwords stay out of it, and loading one keeps yours."),
+                    row![
+                        btn_icon(Icon::Download, "Export settings…", Btn::Default, idle.then_some(Msg::Do(Action::ExportSettings))),
+                        btn_icon(Icon::File, "Import settings…", Btn::Ghost, idle.then_some(Msg::Do(Action::ImportSettings))),
+                    ]
+                    .spacing(8),
+                )
             })),
         2 => cards
             .push(titled_card(

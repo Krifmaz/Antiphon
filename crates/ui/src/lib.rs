@@ -571,6 +571,11 @@ pub enum Action {
     /// Export everything, readable without Stoop, into a folder the
     /// person picks (spec §13 "take everything with you").
     ExportData,
+    /// Save the preferences to a settings file (desktop only).
+    ExportSettings,
+    /// Load the preferences from a settings file, keeping contacts and
+    /// secrets (desktop only).
+    ImportSettings,
     /// Live captions: the switches, the model, the transcript.
     Captions(CaptionsDo),
     /// The replay history: its mode, playing, saving, clearing.

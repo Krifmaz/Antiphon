@@ -96,6 +96,8 @@ enum Event {
     /// A background picture was decoded; with a path, it was just picked
     /// (and copied there) and becomes the saved one.
     Backdrop(Option<PathBuf>, crate::backdrop::Loaded),
+    /// A settings file was read: lay its preferences over ours.
+    Settings(Box<config::AppConfig>),
     /// A voice preset file was chosen and read: use its chain.
     Preset(config::VoicePreset),
     /// The directories were read: what they list, what went wrong, and
@@ -1238,6 +1240,40 @@ impl Engine {
         });
     }
 
+    /// Saves the preferences (see [`config::settings_only`]) to a file the
+    /// person picks, off the window's thread.
+    fn export_settings(&self) {
+        let file = config::settings_only(&self.cfg);
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Export settings").set_file_name("stoop-settings.json").add_filter("Stoop settings", &["json"]).save_file() else {
+                return;
+            };
+            let (text, kind) = match config::save_to(&path, &file) {
+                Ok(()) => (format!("Settings saved to {}", path.display()), ToastKind::Ok),
+                Err(e) => (format!("Couldn't save the settings: {e}"), ToastKind::Err),
+            };
+            Self::push(&events, Event::Toast(text, kind));
+        });
+    }
+
+    /// Asks for a settings file and reads it off the window's thread; it
+    /// arrives as [`Event::Settings`].
+    fn import_settings(&self) {
+        /// Far more than any real settings file; refused before reading.
+        const MAX_BYTES: u64 = 4 << 20;
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Import settings").add_filter("Stoop settings", &["json"]).pick_file() else { return };
+            let too_big = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES);
+            let read = if too_big { Err("That file is too big to be a settings file.".to_string()) } else { config::load_from(&path).map_err(|e| e.to_string()) };
+            match read {
+                Ok(cfg) => Self::push(&events, Event::Settings(Box::new(cfg))),
+                Err(e) => Self::push(&events, Event::Toast(format!("Couldn't load those settings: {e}"), ToastKind::Err)),
+            }
+        });
+    }
+
     /// Saves the whole voice chain to a preset file the person picks, off
     /// the window's thread (spec §1 "Voice Presets": export it, share it).
     fn export_preset(&self) {
@@ -1496,6 +1532,19 @@ impl Engine {
                     self.save();
                 }
                 self.backdrop = Some(loaded);
+            }
+            Event::Settings(imported) => {
+                // Many settings are only read at start (the door, the
+                // relays, the shortcuts), so the app reopens with them
+                // rather than half applying them now.
+                if self.call.phase != ui::Phase::Idle {
+                    self.toast("Hang up first: loading settings reopens Stoop.", ToastKind::Warn);
+                    return;
+                }
+                self.cfg = config::with_imported_settings(&self.cfg, *imported);
+                self.save();
+                self.toast("Settings loaded. Reopening Stoop…", ToastKind::Ok);
+                self.out.push(Out::Relaunch);
             }
             Event::SoundAdded(clip) => {
                 self.toast(format!("Added \"{}\"", clip.name), ToastKind::Ok);
@@ -2299,6 +2348,8 @@ impl Engine {
                 }
             }
             A::ExportData => self.export_data(),
+            A::ExportSettings => self.export_settings(),
+            A::ImportSettings => self.import_settings(),
             A::Replay(what) => self.replay_do(what),
             A::Sound(what) => self.sound_do(what),
             A::Captions(ui::CaptionsDo::On(on)) => {
