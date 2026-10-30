@@ -36,6 +36,7 @@ impl Demo {
                 status: "Around this evening".into(),
                 bio: "Synths, long walks, terrible puns.".into(),
                 pronouns: "they/them".into(),
+                layout: ui::ProfileLayout::default(),
                 color: "sky".into(),
                 has_picture: false,
                 id: "4be1c07d9f2a83e6b5d4c3f2a1908e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7".into(),
@@ -371,6 +372,7 @@ impl Demo {
             }
             Action::SetBio(bio) => self.model.me.bio = bio,
             Action::SetPronouns(pronouns) => self.model.me.pronouns = pronouns,
+            Action::SetProfileLayout(layout) => self.model.me.layout = layout,
             Action::ProfileColor(color) => {
                 ui::avatars::set(&self.model.me.id, "", &color, |_| None);
                 self.model.me.color = color;

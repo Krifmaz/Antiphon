@@ -134,6 +134,26 @@ const TOUR: &[Step] = &[
     },
     Step { name: "settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Appearance)) },
     Step { name: "profile", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Profile)) },
+    Step {
+        name: "my-profile",
+        size: (1280.0, 820.0),
+        setup: |app| {
+            // The code placed on the banner, so the shot shows where it goes.
+            let layout = app.demo().model.me.layout.with_qr(ui::QrPlace::Banner);
+            app.demo().act(Action::SetProfileLayout(layout));
+            app.go(Route::Profile(None));
+        },
+    },
+    Step { name: "my-profile-edit", size: (1280.0, 820.0), setup: |app| app.go(Route::ProfileEdit) },
+    Step { name: "their-profile", size: (1280.0, 820.0), setup: |app| app.go(Route::Profile(Some(Demo::robin()))) },
+    Step {
+        name: "chat",
+        size: (1280.0, 820.0),
+        setup: |app| {
+            app.demo().act(Action::Hangup);
+            app.go(Route::Person(Demo::robin()));
+        },
+    },
     Step { name: "voice", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Voice)) },
     Step { name: "account", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Account)) },
     Step { name: "community", size: (1280.0, 820.0), setup: |app| app.go(Route::Community(Demo::club(), 0)) },

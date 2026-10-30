@@ -20,6 +20,7 @@ pub mod avatars;
 pub mod icons;
 pub mod markup;
 pub mod model;
+pub mod profile_layout;
 pub mod theme;
 pub mod theme_file;
 pub mod widgets;
@@ -34,6 +35,7 @@ use iced_core::{Point, Size};
 
 pub use avatars::PROFILE_COLORS;
 pub use model::*;
+pub use profile_layout::{ProfileBlock, ProfileLayout, QrPlace};
 
 /// An element of this interface: the default theme, and whichever renderer
 /// the app's build of iced provides.
@@ -71,12 +73,12 @@ pub enum Route {
     Community(String, u32),
     /// A profile page: banner, picture, name, pronouns and About. `None`
     /// is my own, with the way into [`Route::ProfileEdit`]; `Some` is a
-    /// contact's, by id. The phone shows it as its own screen; a desktop,
-    /// which keeps all of this in Settings and the details panel, sends it
-    /// there.
+    /// contact's, by id. Both layouts show it as a page of its own: the
+    /// phone full screen, a wide window in the main area.
     Profile(Option<String>),
-    /// Editing my profile: name, pronouns, status and About on one screen,
-    /// saved together.
+    /// Editing my profile: picture, colour, name, pronouns, status and
+    /// About (saved together), and the page's arrangement and QR code
+    /// (saved as they change).
     ProfileEdit,
 }
 
@@ -452,6 +454,9 @@ pub enum Action {
     SetBio(String),
     /// Save my pronouns ("she/her"), shown beside my name; empty for none.
     SetPronouns(String),
+    /// Save how my own profile page is arranged: its cards' order, which
+    /// are hidden, and where my QR code sits. Kept on this device only.
+    SetProfileLayout(ProfileLayout),
     /// Open a web link from a message in the system's browser.
     OpenLink(String),
     /// Pick my avatar colour, by id from [`PROFILE_COLORS`]; empty for

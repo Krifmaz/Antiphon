@@ -54,8 +54,17 @@ pub fn header<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -> 
                 .width(Length::Fill),
         );
     } else {
-        r = r.push(avatar_dot(&person.name, &person.id, 34.0, super::presence_color(person.presence), p.panel));
-        r = r.push(column![title, faint(sub).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill));
+        // Their pronouns go before where they were reached, as the line a
+        // person reads first; the picture and name open their profile.
+        let sub = if person.pronouns.is_empty() { sub.to_string() } else { format!("{} · {sub}", person.pronouns) };
+        let who = row![
+            avatar_dot(&person.name, &person.id, 34.0, super::presence_color(person.presence), p.panel),
+            column![title, faint(sub).size(12).wrapping(Wrapping::None)].spacing(1),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        let who = pressable(who, crate::a11y::Role::Button, &format!("{}'s profile", person.name), false, Btn::Row, Msg::Nav(crate::Route::Profile(Some(person.id.clone())))).padding([4, 6]);
+        r = r.push(container(who).width(Length::Fill).clip(true));
     }
     let on_this_call = m.call.with(&person.id);
     if !on_this_call && m.call.phase == crate::Phase::Connected {
@@ -101,7 +110,7 @@ pub fn messages<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -
         if first && prev.is_some() {
             col = col.push(space().height(if phone { 14 } else { 10 }));
         }
-        col = col.push(if phone { flat_message(ui, m, person, line, lines, first) } else { message(ui, m, person, line, first) });
+        col = col.push(if phone { flat_message(ui, m, person, line, lines, first) } else { message(ui, m, person, line, lines, first) });
         prev = Some(line);
     }
     if m.conversation.as_ref().is_some_and(|c| c.person == person.id && c.lines.is_empty()) {
@@ -140,19 +149,21 @@ fn day_rule<'a>(day: &'a str) -> El<'a, Msg> {
 }
 
 /// One message: theirs on the left with their avatar, mine on the right
-/// in a tinted bubble. Actions appear under the pointer.
-fn message<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line, first: bool) -> El<'a, Msg> {
+/// in a tinted bubble, a reply with a quote of what it answers over it.
+/// Actions appear under the pointer. `lines` is the whole conversation,
+/// where a reply's quote is looked up.
+fn message<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line, lines: &'a [Line], first: bool) -> El<'a, Msg> {
     // Everything this message registers belongs to it, so focus on any of
     // it keeps its tools within the keyboard's reach (see `a11y::group`).
     crate::a11y::group(Some(line.id));
-    let el = message_body(ui, m, person, line, first);
+    let el = message_body(ui, m, person, line, lines, first);
     crate::a11y::pause(false);
     crate::a11y::group(None);
     el
 }
 
 /// [`message`]'s drawing, inside its keyboard group.
-fn message_body<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Line, first: bool) -> El<'a, Msg> {
+fn message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line, lines: &'a [Line], first: bool) -> El<'a, Msg> {
     let p = theme::look();
     let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
     // Read out as "who: what", in the order the conversation runs.
@@ -236,7 +247,11 @@ fn message_body<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Lin
         }
     }
 
-    let mut stack_col = column![content].spacing(4).align_x(if line.mine { Alignment::End } else { Alignment::Start });
+    let mut stack_col = column![].spacing(4).align_x(if line.mine { Alignment::End } else { Alignment::Start });
+    if let Some(quoted) = line.reply_to.and_then(|id| lines.iter().find(|l| l.id == id)) {
+        stack_col = stack_col.push(bubble_quote(m, person, quoted));
+    }
+    stack_col = stack_col.push(content);
     if !line.reactions.is_empty() {
         let mut rr = row![].spacing(4);
         for (emoji, n) in &line.reactions {
@@ -287,6 +302,7 @@ fn message_body<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Lin
                 .padding([3, 6]),
         );
     }
+    tools = tools.push(icon_btn(Icon::Back, "Reply", Some(Msg::Reply(Some(line.id)))));
     tools = tools.push(icon_btn(Icon::Sparkle, if line.pinned { "Unpin" } else { "Pin" }, Some(Msg::Do(Action::Pin { to: person.id.clone(), id: line.id, pinned: !line.pinned }))));
     if line.mine {
         tools = tools.push(icon_btn(Icon::Edit, "Edit", Some(Msg::EditStart(line.id, line.text.clone()))));
@@ -509,6 +525,37 @@ fn reply_quote<'a>(m: &'a Model, person: &'a Person, quoted: &'a Line) -> El<'a,
     ]
     .spacing(6)
     .align_y(Alignment::Center)
+    .into()
+}
+
+/// The quote over a reply in a wide window's bubbles: a small inset with
+/// a hooked arrow, the quoted writer's name, and the start of what they
+/// said, on the same side as the reply's bubble.
+fn bubble_quote<'a>(m: &'a Model, person: &'a Person, quoted: &'a Line) -> El<'a, Msg> {
+    let p = theme::look();
+    let who = writer(m, person, quoted);
+    let what = if quoted.deleted {
+        "Message deleted".to_string()
+    } else if let Some((name, _)) = quoted.file.as_ref() {
+        format!("File: {name}")
+    } else if quoted.voice.is_some() {
+        "Voice message".to_string()
+    } else {
+        super::clip(&quoted.text, 60)
+    };
+    container(
+        row![
+            icon(Icon::Back, 12.0, p.faint),
+            avatar(who, writer_id(m, person, quoted), 16.0),
+            t(who).size(12.5).font(theme::semibold()).color(p.muted).wrapping(Wrapping::None),
+            container(faint(what).size(12.5).wrapping(Wrapping::None)).clip(true),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([4, 10])
+    .max_width(480)
+    .style(theme::inset)
     .into()
 }
 

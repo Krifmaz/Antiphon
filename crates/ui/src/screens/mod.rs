@@ -11,6 +11,7 @@ mod home;
 mod menu;
 mod panel;
 mod phone;
+mod profile;
 mod settings;
 mod sidebar;
 mod update;
@@ -68,11 +69,14 @@ fn wide<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Route::SettingsMenu => settings::view(ui, m, crate::Section::Profile),
         Route::Spaces => community::list(ui, m, false),
         Route::Community(id, channel) => community::view(ui, m, id, *channel),
-        // A wide window keeps profiles where they always were: mine in
-        // Settings, a contact's in the details panel beside their
-        // conversation.
-        Route::Profile(None) | Route::ProfileEdit => settings::view(ui, m, crate::Section::Profile),
-        Route::Profile(Some(id)) => conversation::view(ui, m, id),
+        // Profiles are pages of their own here too, as on the phone, so
+        // both apps have the same editor and the same placeable QR code.
+        Route::Profile(None) => profile::mine(m, 0.0, false),
+        Route::ProfileEdit => profile::edit(ui, m, false),
+        Route::Profile(Some(id)) => match m.people.iter().find(|p| &p.id == id) {
+            Some(person) => profile::theirs(m, person, 0.0, false),
+            None => conversation::view(ui, m, id),
+        },
     };
     // The notice first, then a newer version, then the screen.
     let main = match (m.notice.as_deref(), update::banner(m, false)) {

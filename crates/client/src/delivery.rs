@@ -209,6 +209,11 @@ pub struct MailBody {
     /// instead of a 1:1 text. See `crate::community`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// The message this one answers, by id, when it was written as a
+    /// reply. Left out when it isn't one, so older builds read the mail
+    /// as before (and show it without its quote).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
 }
 
 /// How a message went out.
@@ -572,6 +577,9 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
         if log.iter().any(|m| !m.from_me && m.id == r.body.id && m.text == r.body.text) {
             return true; // a fan-out copy, or one already collected
         }
+        // A quote of a message this history doesn't hold would point at
+        // nothing; it is kept as a plain message.
+        let reply_to = r.body.reply_to.filter(|q| log.iter().any(|m| m.id == *q));
         log.push(crate::history::StoredMessage {
             id: r.body.id,
             from_me: false,
@@ -581,6 +589,7 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
             deleted: false,
             pinned: false,
             expires_at_secs: contact.expire_after_secs.map(|ttl| r.body.at_secs + ttl),
+            reply_to,
             ..Default::default()
         });
         if crate::history::save(&dir, &hex_key, &key, &log).is_err() {
@@ -659,7 +668,7 @@ async fn round(in_call_with: &(impl Fn() -> Option<[u8; 32]> + Send + Sync)) {
         let mut left = 0;
         let mut failure = None;
         for message in queue.clone() {
-            let body = MailBody { id: message.id, text: message.text.clone(), at_secs: message.queued_at_secs, group: None };
+            let body = MailBody { id: message.id, text: message.text.clone(), at_secs: message.queued_at_secs, group: None, reply_to: message.reply_to };
             match send(&identity, &their_key, &their_prekey, &record, &body, config.route_fan_out).await {
                 Sent::Deposited(_) => {
                     crate::outbox::mark_delivered(&mut queue, message.id);
@@ -702,6 +711,13 @@ fn dedupe_counts(names: &[String]) -> Vec<String> {
 /// the courier to try now. Recorded in your history straight away, like
 /// any message you send.
 pub fn leave_message(contact_key_hex: &str, text: &str, expire_after_secs: Option<u64>) -> Result<(), String> {
+    leave_reply(contact_key_hex, text, expire_after_secs, None)
+}
+
+/// [`leave_message`] for a message that answers an earlier one
+/// (`reply_to`, by id). An id the history doesn't hold is dropped, so the
+/// message still goes, only without its quote.
+pub fn leave_reply(contact_key_hex: &str, text: &str, expire_after_secs: Option<u64>, reply_to: Option<u64>) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("Write something first.".into());
@@ -710,6 +726,7 @@ pub fn leave_message(contact_key_hex: &str, text: &str, expire_after_secs: Optio
     let key = crate::history::load_or_create_backup_key(&dir).map_err(|e| e.to_string())?;
     let mut log = crate::history::load(&dir, contact_key_hex, &key);
     let id = log.iter().map(|m| m.id).max().map(|m| m + 1).unwrap_or(0);
+    let reply_to = reply_to.filter(|r| log.iter().any(|m| m.id == *r));
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     log.push(crate::history::StoredMessage {
         id,
@@ -720,13 +737,14 @@ pub fn leave_message(contact_key_hex: &str, text: &str, expire_after_secs: Optio
         deleted: false,
         pinned: false,
         expires_at_secs: expire_after_secs.map(|t| now + t),
+        reply_to,
         ..Default::default()
     });
     crate::history::save(&dir, contact_key_hex, &key, &log).map_err(|e| e.to_string())?;
     let mut queue = crate::outbox::load(&dir, contact_key_hex, &key);
     crate::outbox::enqueue(
         &mut queue,
-        crate::outbox::Queued { id, text: text.to_string(), queued_at_secs: now, attempts: 0, reply_to: None },
+        crate::outbox::Queued { id, text: text.to_string(), queued_at_secs: now, attempts: 0, reply_to },
     );
     crate::outbox::save(&dir, contact_key_hex, &key, &queue).map_err(|e| e.to_string())?;
     kick();
@@ -811,6 +829,18 @@ mod tests {
         assert_ne!(own_device_code(&me), own_device_code(&IdentityKeyPair::generate()));
     }
 
+    #[test]
+    fn a_reply_keeps_its_quote_in_the_mail_and_older_mail_still_reads() {
+        let reply = MailBody { id: 3, text: "same".into(), at_secs: 1, group: None, reply_to: Some(2) };
+        let back: MailBody = serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        assert_eq!(back.reply_to, Some(2));
+        // Mail from a build before replies has no such field.
+        let old: MailBody = serde_json::from_str(r#"{"id":1,"text":"hi","at_secs":1}"#).unwrap();
+        assert_eq!(old.reply_to, None);
+        let plain = MailBody { reply_to: None, ..old };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("reply_to"), "a plain message is written as before");
+    }
+
     #[tokio::test]
     async fn a_message_goes_through_a_real_node_and_comes_back_out() {
         use antiphon_relay::mailbox::{Mailbox, MailboxLimits};
@@ -834,7 +864,7 @@ mod tests {
         assert!(report[0].1.is_ok(), "{:?}", report[0].1);
 
         let record = my_record(&bob, &routes, false, 1);
-        let body = MailBody { id: 7, text: "back at six".into(), at_secs: 1, group: None };
+        let body = MailBody { id: 7, text: "back at six".into(), at_secs: 1, group: None, reply_to: None };
         let sent = send(&alice, &bob.public().identity_key, &bob.public().prekey, &record, &body, false).await;
         assert_eq!(sent, Sent::Deposited(1));
 

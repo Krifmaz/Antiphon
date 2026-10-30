@@ -60,8 +60,10 @@ pub const MAX_BUNDLE_BYTES: u64 = 1 << 30;
 const MAX_FILES: usize = 200_000;
 
 /// Profile fields both apps understand, copied across when a bundle moves
-/// between a desktop and a phone. Absent fields are left alone.
-const PROFILE_KEYS: [&str; 4] = ["status_message", "bio", "color", "avatar"];
+/// between a desktop and a phone. Absent fields are left alone. The two
+/// `page_` fields are how your own profile page is arranged
+/// (`antiphon_ui::ProfileLayout`), saved the same way by both apps.
+const PROFILE_KEYS: [&str; 7] = ["status_message", "bio", "color", "avatar", "pronouns", "page_blocks", "page_qr"];
 
 /// Which kind of app made, or is restoring, a bundle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

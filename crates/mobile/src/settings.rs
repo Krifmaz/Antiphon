@@ -33,6 +33,13 @@ pub struct Settings {
     /// Your pronouns ("she/her"), sent with your picture and About line;
     /// empty for none.
     pub pronouns: String,
+    /// The cards on your own profile page, in order, a hidden one written
+    /// with a leading `-` (`antiphon_ui::ProfileLayout`). Empty is the
+    /// standard arrangement. Arranges this phone's page only; never sent.
+    pub page_blocks: Vec<String>,
+    /// Where your invite's QR code sits on your profile page: `""` (not
+    /// shown), `"banner"`, `"name"` or `"card"` (`antiphon_ui::QrPlace`).
+    pub page_qr: String,
     /// Your avatar colour's id (`antiphon_ui::PROFILE_COLORS`); empty for
     /// the automatic one.
     pub color: String,
@@ -80,6 +87,8 @@ impl Default for Settings {
             status_message: String::new(),
             bio: String::new(),
             pronouns: String::new(),
+            page_blocks: Vec::new(),
+            page_qr: String::new(),
             color: String::new(),
             avatar: String::new(),
             // On by default: a large file quietly eating a data plan is

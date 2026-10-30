@@ -1584,14 +1584,15 @@ impl Engine {
                     self.state.peer_muted.store(muted, Ordering::Relaxed);
                 }
             }
-            // The desktop keeps 1:1 history in the older chat log, which
-            // has no replies yet: a reply goes as a plain message.
-            A::Send { to, text, reply_to: _ } => {
+            // A reply carries the id it answers, live or by mailbox; an id
+            // the history doesn't hold is dropped on the way and the
+            // message goes plain.
+            A::Send { to, text, reply_to } => {
                 let preview = format!("You: {text}");
                 if self.call_with(&to) {
-                    self.with_call(|a| a.send_chat(&rt, text));
+                    self.with_call(|a| a.send_reply(&rt, text, reply_to));
                 } else if let Some(c) = find_contact(&self.cfg, &to) {
-                    match delivery::leave_message(&c.identity_key, &text, c.expire_after_secs) {
+                    match delivery::leave_reply(&c.identity_key, &text, c.expire_after_secs, reply_to) {
                         Ok(()) => self.conv = None,
                         Err(e) => self.toast(e, ToastKind::Err),
                     }
@@ -1753,6 +1754,12 @@ impl Engine {
             A::SetPronouns(pronouns) => {
                 self.cfg.profile.pronouns = profile::clean_pronouns(&pronouns);
                 self.profile_changed();
+            }
+            // Only this device's page changes, so nothing goes to anyone.
+            A::SetProfileLayout(layout) => {
+                self.cfg.profile.page_blocks = layout.saved_blocks();
+                self.cfg.profile.page_qr = layout.qr.id().to_string();
+                self.save();
             }
             A::OpenLink(url) => open_link(&url),
             A::ProfileColor(color) => {
@@ -2637,6 +2644,7 @@ impl Engine {
             status: self.cfg.profile.status_message.clone(),
             bio: self.cfg.profile.bio.clone(),
             pronouns: self.cfg.profile.pronouns.clone(),
+            layout: ui::ProfileLayout::from_saved(&self.cfg.profile.page_blocks, &self.cfg.profile.page_qr),
             color: self.cfg.profile.color.clone(),
             has_picture: !self.cfg.profile.avatar.is_empty(),
             id,
@@ -3033,6 +3041,7 @@ impl Engine {
                 },
                 edited: m.edited,
                 pinned: m.pinned,
+                reply_to: m.reply_to,
                 ..ui::Line::default()
             };
             if m.deleted {
@@ -3086,6 +3095,7 @@ impl Engine {
                 pinned: e.pinned,
                 reactions: counts,
                 file: None,
+                reply_to: e.reply_to,
                 ..ui::Line::default()
             });
             last_day = Some(day);

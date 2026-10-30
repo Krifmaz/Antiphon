@@ -12,6 +12,7 @@
 //! - **A profile** ([`Route::Profile`]): banner, picture, name, pronouns,
 //!   status and About, with Edit Profile for your own
 //!   ([`Route::ProfileEdit`]) and Message and Call for someone else's.
+//!   Drawn by [`profile`], which a wide window shares.
 //!
 //! The system's status bar and gesture bar are kept clear of every
 //! control, with the app's colours running on underneath them, so the app
@@ -22,7 +23,7 @@ use iced_core::text::Wrapping;
 use iced_core::{Alignment, Background, Border, Color, Length};
 use iced_widget::{button, column, container, row, scrollable, space, stack};
 
-use super::{call, clip, community, conversation, fill, presence_color, settings, sidebar, update};
+use super::{call, clip, community, conversation, fill, presence_color, profile, settings, sidebar, update};
 use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::widgets::*;
@@ -33,12 +34,6 @@ const RAIL: f32 = 68.0;
 
 /// Size of a place's tile on the rail.
 const TILE: f32 = 48.0;
-
-/// Height of the banner across the top of a profile.
-const BANNER: f32 = 112.0;
-
-/// Size of the picture on a profile, which sits half over the banner.
-const PROFILE_AVATAR: f32 = 88.0;
 
 /// The whole phone layout: the current screen, with the call pinned as a
 /// strip while you look at something else.
@@ -60,12 +55,12 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Route::Settings(section) => column![top_bar(section.label(), true), divider(), settings::page(ui, m, *section)].into(),
         Route::Spaces => home(ui, m, community::list(ui, m, true)),
         Route::Community(id, channel) => community::phone(ui, m, id, *channel),
-        Route::Profile(None) => my_profile(m, banner_top),
+        Route::Profile(None) => profile::mine(m, banner_top, true),
         Route::Profile(Some(id)) => match m.people.iter().find(|p| &p.id == id) {
-            Some(person) => their_profile(m, person, banner_top),
+            Some(person) => profile::theirs(m, person, banner_top, true),
             None => home(ui, m, messages_pane(ui, m)),
         },
-        Route::ProfileEdit => edit_profile(ui, m),
+        Route::ProfileEdit => profile::edit(ui, m, true),
         Route::Home => home(ui, m, messages_pane(ui, m)),
     };
     let mut col = column![];
@@ -361,183 +356,6 @@ fn top_bar<'a>(title: &'a str, back: bool) -> El<'a, Msg> {
     }
     r = r.push(t(title).size(17).font(theme::bold()));
     container(r).height(56).padding([0, 10]).align_y(Alignment::Center).into()
-}
-
-/// The colour of someone's banner: their avatar colour, deepened so white
-/// text and the back button read on it.
-fn banner_color(seed: &str) -> Color {
-    let base = crate::avatars::color(seed).unwrap_or_else(|| theme::avatar_color(seed));
-    theme::mix(base, Color::BLACK, 0.45)
-}
-
-/// The top of a profile: the banner in their colour (running up under the
-/// status bar), a round back button on it, and their picture sitting half
-/// over its bottom edge with a ring of the page's colour around it.
-/// `ui_top` is the status bar's height, which the banner runs on under;
-/// `close`, when given, puts a round X on the banner that sends it.
-fn profile_head<'a>(ui_top: f32, name: &'a str, seed: &'a str, close: Option<Msg>) -> El<'a, Msg> {
-    let p = theme::look();
-    let color = banner_color(seed);
-    let banner = container(space()).width(Length::Fill).height(BANNER + ui_top).style(move |_| container::Style {
-        background: Some(Background::Color(color)),
-        ..container::Style::default()
-    });
-    let back: El<'a, Msg> = match close {
-        Some(close) => button(container(icon(Icon::X, 18.0, Color::WHITE)).center(36))
-            .width(36)
-            .height(36)
-            .padding(0)
-            .style(|_, _| button::Style { background: Some(Background::Color(Color::BLACK.scale_alpha(0.45))), border: Border { radius: 99.0.into(), ..Border::default() }, ..button::Style::default() })
-            .on_press(close)
-            .into(),
-        None => space().into(),
-    };
-    let ring = PROFILE_AVATAR + 12.0;
-    let picture = container(avatar(name, seed, PROFILE_AVATAR)).center(ring).style(move |_| container::Style {
-        background: Some(Background::Color(p.panel)),
-        border: Border { radius: (ring / 2.0).into(), ..Border::default() },
-        ..container::Style::default()
-    });
-    let height = BANNER + ui_top + ring / 2.0;
-    stack![
-        column![banner],
-        container(back).padding(pad(ui_top + 10.0, 0.0, 0.0, 12.0)),
-        container(picture).height(height).align_y(Alignment::End).padding(pad(0.0, 0.0, 0.0, 10.0)),
-    ]
-    .height(height)
-    .into()
-}
-
-/// A card on a profile: a small heading, then what it says.
-fn profile_card<'a>(heading: &'a str, body: El<'a, Msg>) -> El<'a, Msg> {
-    container(column![t(heading).size(12.5).font(theme::bold()).color(theme::look().muted), body].spacing(6)).padding([14, 16]).width(Length::Fill).style(theme::card_raised).into()
-}
-
-/// The name, pronouns and status under a profile's picture.
-fn name_block<'a>(name: &'a str, pronouns: &'a str, status: &'a str) -> El<'a, Msg> {
-    let mut col = column![t(name).size(26).font(theme::bold())].spacing(3);
-    if !pronouns.is_empty() {
-        col = col.push(muted(pronouns).size(14));
-    }
-    if !status.is_empty() {
-        col = col.push(row![icon(Icon::Smile, 14.0, theme::look().faint), faint(status).size(13.5)].spacing(6).align_y(Alignment::Center));
-    }
-    col.into()
-}
-
-/// My profile: what the people I call see of me, with Edit Profile.
-/// `top` is how far the banner runs on up under the status bar.
-fn my_profile<'a>(m: &'a Model, top: f32) -> El<'a, Msg> {
-    let head = profile_head(top, &m.me.name, &m.me.id, Some(Msg::Back));
-    let edit = button(
-        row![icon(Icon::Edit, 16.0, theme::look().on_accent), t("Edit Profile").size(15).font(theme::semibold())].spacing(8).align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding([12, 16])
-    .style(|th, st| {
-        let mut s = theme::btn(Btn::Primary)(th, st);
-        s.border.radius = 12.0.into();
-        s
-    })
-    .on_press(Msg::Nav(Route::ProfileEdit));
-    let bio: El<'a, Msg> = if m.me.bio.is_empty() { faint("Nothing yet. Tap Edit Profile to say a line about yourself.").size(14).into() } else { t(m.me.bio.as_str()).size(14.5).into() };
-    let door = if m.me.door_open { "Open: people with your invite can call you now." } else { "Closed: nobody can ring until you open it." };
-    let body = column![
-        name_block(&m.me.name, &m.me.pronouns, &m.me.status),
-        edit,
-        profile_card("About me", bio),
-        profile_card("Your door", row![faint(door).size(13.5).width(Length::Fill), switch("Door open", m.me.door_open, |on| Msg::Do(Action::Door(on)))].spacing(10).align_y(Alignment::Center).into()),
-        profile_card(
-            "Your invite",
-            row![
-                faint("Anyone with it can add you.").size(13.5).width(Length::Fill),
-                btn_icon(Icon::Qr, "Show", Btn::Default, Some(Msg::Dialog(Some(Dialog::Invite)))),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into()
-        ),
-        profile_card("Fingerprint", t(m.me.fingerprint.as_str()).size(12.5).font(theme::mono()).color(theme::look().muted).into()),
-    ]
-    .spacing(14)
-    .padding(pad(8.0, 16.0, 24.0, 16.0));
-    scrollable(column![head, body]).height(Length::Fill).style(theme::scroll).into()
-}
-
-/// Someone else's profile: who they say they are, and the two things you
-/// do with them.
-/// `top` is how far the banner runs on up under the status bar.
-fn their_profile<'a>(m: &'a Model, person: &'a Person, top: f32) -> El<'a, Msg> {
-    let p = theme::look();
-    let head = profile_head(top, &person.name, &person.id, Some(Msg::Back));
-    let can_call = !m.call.active();
-    let actions = row![
-        btn_icon(Icon::Message, "Message", Btn::Primary, Some(Msg::Nav(Route::Person(person.id.clone())))).width(Length::Fill),
-        btn_icon(Icon::Phone, "Call", Btn::Default, can_call.then(|| Msg::Do(Action::Call(person.id.clone())))).width(Length::Fill),
-    ]
-    .spacing(10);
-    let bio: El<'a, Msg> = if person.bio.is_empty() { faint("They haven't said anything about themselves yet.").size(14).into() } else { t(person.bio.as_str()).size(14.5).into() };
-    let trust: El<'a, Msg> = if person.verified {
-        row![icon(Icon::ShieldCheck, 16.0, p.ok), t("Verified: you compared the words on a call").size(13.5).color(p.ok)].spacing(8).align_y(Alignment::Center).into()
-    } else {
-        faint("Not verified yet. On a call, compare the words on screen to make sure it's really them.").size(13.5).into()
-    };
-    let mut body = column![name_block(&person.name, &person.pronouns, ""), actions, profile_card("About me", bio), profile_card("Trust", trust)].spacing(14);
-    if !person.fingerprint.is_empty() {
-        body = body.push(profile_card("Fingerprint", t(person.fingerprint.as_str()).size(12.5).font(theme::mono()).color(p.muted).into()));
-    }
-    if !person.note.is_empty() {
-        body = body.push(profile_card("Note (only you see this)", t(person.note.as_str()).size(14).into()));
-    }
-    scrollable(column![head, container(body).padding(pad(8.0, 16.0, 24.0, 16.0))]).height(Length::Fill).style(theme::scroll).into()
-}
-
-/// Editing my profile: the picture and colour, then name, pronouns, status
-/// and About in one card, saved together from the bar's Save.
-fn edit_profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
-    let p = theme::look();
-    let bar = row![
-        icon_btn(Icon::X, "", Some(Msg::Back)),
-        t("Profile").size(18).font(theme::bold()).width(Length::Fill),
-        button(t("Save").size(15).font(theme::semibold()).color(p.accent2)).padding([8, 12]).style(|_, _| button::Style::default()).on_press(Msg::ProfileSave),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-    let bar = container(bar).height(56).padding([0, 8]).align_y(Alignment::Center);
-
-    let mut picture = row![btn_icon(Icon::Edit, if m.me.has_picture { "Change picture" } else { "Add a picture" }, Btn::Default, Some(Msg::Do(Action::PickAvatar)))].spacing(8);
-    if m.me.has_picture {
-        picture = picture.push(btn_icon(Icon::Trash, "Remove", Btn::Ghost, Some(Msg::Do(Action::RemoveAvatar))));
-    }
-    // The bar above already has the way out.
-    let head = profile_head(0.0, &m.me.name, &m.me.id, None);
-
-    // Your colour sets your banner, and the circle behind your initial
-    // while you have no picture.
-    let auto = theme::avatar_color(&m.me.id);
-    let mut colors = row![swatch(auto, auto, m.me.color.is_empty(), "Automatic", Msg::Do(Action::ProfileColor(String::new())))].spacing(8);
-    for (id, name, hex) in crate::PROFILE_COLORS {
-        let c = theme::hex(hex);
-        colors = colors.push(swatch(c, c, m.me.color == id, name, Msg::Do(Action::ProfileColor(id.to_string()))));
-    }
-
-    let value = |edit: &'a Option<String>, saved: &'a str| edit.as_deref().unwrap_or(saved);
-    let fields = column![
-        field("Display name", input("Display name", "stoop-name", "What people see", value(&ui.name_edit, &m.me.name)).on_input(Msg::NameEdit).padding([11, 12]).size(15)),
-        field("Pronouns", input("Pronouns", "stoop-pronouns", "they/them, she/her…", value(&ui.pronouns_edit, &m.me.pronouns)).on_input(Msg::PronounsEdit).padding([11, 12]).size(15)),
-        field("Status", input("Status", "stoop-status", "Around after six", value(&ui.status_edit, &m.me.status)).on_input(Msg::StatusEdit).padding([11, 12]).size(15)),
-        field("About me", input("About me", "stoop-bio", "A line or two about you", value(&ui.bio_edit, &m.me.bio)).on_input(Msg::BioEdit).on_submit(Msg::ProfileSave).padding([11, 12]).size(15)),
-        faint("Your picture, colour, pronouns and About go to the people you call. They stay on your devices and theirs.").size(12),
-    ]
-    .spacing(14);
-    let body = column![
-        picture,
-        container(scrollable(colors).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0)))).width(Length::Fill),
-        container(fields).padding(16).width(Length::Fill).style(theme::card_raised),
-    ]
-    .spacing(16)
-    .padding(pad(8.0, 16.0, 24.0, 16.0));
-    column![bar, divider(), scrollable(column![head, body]).height(Length::Fill).style(theme::scroll)].into()
 }
 
 #[cfg(test)]

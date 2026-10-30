@@ -269,9 +269,22 @@ fn me_bar<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let door = with_tip(door, if open { "People can call you. Click to close your door." } else { "Click to open your door and take calls." }, iced_widget::tooltip::Position::Top);
     let settings_on = matches!(ui.route, Route::Settings(_) | Route::SettingsMenu);
     let c = &m.call;
-    let me = row![
+    // Your picture and name open your profile page, as in the big chat
+    // apps; the door below the name stays its own switch.
+    let face = pressable(
         avatar_dot(&m.me.name, &m.me.id, 34.0, Some(if open { p.ok } else { p.faint }), p.bg),
-        column![t(clip(&m.me.name, 16)).size(13.5).font(theme::semibold()).wrapping(Wrapping::None), door].spacing(1).width(Length::Fill),
+        crate::a11y::Role::Button,
+        "Your profile",
+        matches!(ui.route, Route::Profile(None) | Route::ProfileEdit),
+        Btn::Row,
+        Msg::Nav(Route::Profile(None)),
+    )
+    .padding(2);
+    let name = pressable(t(clip(&m.me.name, 16)).size(13.5).font(theme::semibold()).wrapping(Wrapping::None), crate::a11y::Role::Button, "Your profile", false, Btn::Row, Msg::Nav(Route::Profile(None)))
+        .padding(0);
+    let me = row![
+        with_tip(face, "Your profile", iced_widget::tooltip::Position::Top),
+        column![name, door].spacing(1).width(Length::Fill),
         icon_btn_kind(
             if c.muted { Icon::MicOff } else { Icon::Mic },
             if c.muted { "Unmute" } else { "Mute" },

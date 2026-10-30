@@ -19,6 +19,15 @@ pub struct ProfileData {
     /// Your pronouns ("she/her"), sent with your card; empty for none.
     #[serde(default)]
     pub pronouns: String,
+    /// The cards on your own profile page, in order, a hidden one written
+    /// with a leading `-` (`antiphon_ui::ProfileLayout`). Empty is the
+    /// standard arrangement. Arranges this device's page only; never sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub page_blocks: Vec<String>,
+    /// Where your invite's QR code sits on your profile page: `""` (not
+    /// shown), `"banner"`, `"name"` or `"card"` (`antiphon_ui::QrPlace`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub page_qr: String,
 }
 
 impl Default for ProfileData {
@@ -30,6 +39,8 @@ impl Default for ProfileData {
             color: String::new(),
             avatar: String::new(),
             pronouns: String::new(),
+            page_blocks: Vec::new(),
+            page_qr: String::new(),
         }
     }
 }

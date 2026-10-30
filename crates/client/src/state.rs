@@ -464,17 +464,19 @@ impl ActiveCall {
     pub fn flush_outbox(&self, runtime: &tokio::runtime::Handle) {
         let queued: Vec<crate::outbox::Queued> = self.outbox.lock().unwrap().clone();
         for message in queued {
-            self.deliver(runtime, message.id, message.text);
+            self.deliver(runtime, message.id, message.text, message.reply_to);
         }
     }
 
     /// Hands one queued message to the transport and clears it on success.
-    fn deliver(&self, runtime: &tokio::runtime::Handle, id: u64, text: String) {
+    /// `reply_to` is the message it answers, carried so the quote survives
+    /// a message that waited in the queue.
+    fn deliver(&self, runtime: &tokio::runtime::Handle, id: u64, text: String, reply_to: Option<u64>) {
         let peer = self.peer.clone();
         let outbox = self.outbox.clone();
         let history = self.history.clone();
         runtime.spawn(async move {
-            if peer.send_control(&ControlMessage::Chat { id, text, reply_to: None }.encode()).await.is_err() {
+            if peer.send_control(&ControlMessage::Chat { id, text, reply_to }.encode()).await.is_err() {
                 // Left in the queue on purpose. Clearing it here is what
                 // makes a sender's log and a receiver's log disagree.
                 return;
@@ -502,22 +504,31 @@ impl ActiveCall {
     }
 
     pub fn send_chat(&self, runtime: &tokio::runtime::Handle, text: String) {
+        self.send_reply(runtime, text, None);
+    }
+
+    /// Sends a chat message that answers an earlier one (`reply_to`, by
+    /// id), or a plain one when `reply_to` is `None`.
+    ///
+    /// The answered message must be in this conversation's log; an id
+    /// that isn't (a stale reply, or a message since lost) is dropped, so
+    /// the message still goes, just without its quote.
+    pub fn send_reply(&self, runtime: &tokio::runtime::Handle, text: String, reply_to: Option<u64>) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
         }
         let id = self.next_chat_id.fetch_add(1, Ordering::Relaxed);
-        self.chat_log.lock().unwrap().push(ChatEntry {
-            id,
-            from_me: true,
-            text: text.clone(),
-            edited: false,
-            deleted: false,
-            pinned: false,
-        });
+        let reply_to = {
+            let mut log = self.chat_log.lock().unwrap();
+            // Only a message this conversation holds can be quoted.
+            let reply_to = reply_to.filter(|r| log.iter().any(|e| e.id == *r));
+            log.push(ChatEntry { id, from_me: true, text: text.clone(), edited: false, deleted: false, pinned: false, reply_to });
+            reply_to
+        };
         self.chat_rev.fetch_add(1, Ordering::Relaxed);
         if let Some(history) = &self.history {
-            history.record(id, true, &text);
+            history.record_reply(id, true, &text, reply_to);
         }
         // Queued *before* the attempt, so a send into a connection that is
         // already dying leaves a record instead of vanishing with its
@@ -530,11 +541,11 @@ impl ActiveCall {
                 .unwrap_or(0);
             crate::outbox::enqueue(
                 &mut queue,
-                crate::outbox::Queued { id, text: text.clone(), queued_at_secs: at_secs, attempts: 1, reply_to: None },
+                crate::outbox::Queued { id, text: text.clone(), queued_at_secs: at_secs, attempts: 1, reply_to },
             );
         }
         self.persist_outbox();
-        self.deliver(runtime, id, text);
+        self.deliver(runtime, id, text, reply_to);
     }
 
     /// Revises one of *our own* messages (spec §13 "edit").
@@ -774,6 +785,9 @@ pub struct ChatEntry {
     pub edited: bool,
     pub deleted: bool,
     pub pinned: bool,
+    /// The message this one answers, by id, when it was written as a
+    /// reply; drawn as a quote above it.
+    pub reply_to: Option<u64>,
 }
 
 impl ChatEntry {
@@ -1404,6 +1418,7 @@ pub fn start_pipeline(
                     edited: m.edited,
                     deleted: m.deleted,
                     pinned: m.pinned,
+                    reply_to: m.reply_to,
                 })
                 .collect()
         })
@@ -1859,18 +1874,16 @@ pub fn start_pipeline(
                         let with = crate::delivery::hex(&recv_link_peer.peer_identity().identity_key);
                         crate::sharing::receive_link(name, size, file_id, key, holders, seeder, with);
                     }
-                    Some(ControlMessage::Chat { id, text, .. }) => {
+                    Some(ControlMessage::Chat { id, text, reply_to }) => {
+                        let mut log = recv_chat_log.lock().unwrap();
+                        // A quote of a message we don't hold would point
+                        // at nothing; it arrives as a plain message.
+                        let reply_to = reply_to.filter(|r| log.iter().any(|e| e.id == *r));
                         if let Some(history) = &recv_history {
-                            history.record(id, false, &text);
+                            history.record_reply(id, false, &text, reply_to);
                         }
-                        recv_chat_log.lock().unwrap().push(ChatEntry {
-                            id,
-                            from_me: false,
-                            text,
-                            edited: false,
-                            deleted: false,
-                            pinned: false,
-                        });
+                        log.push(ChatEntry { id, from_me: false, text, edited: false, deleted: false, pinned: false, reply_to });
+                        drop(log);
                         recv_chat_rev.fetch_add(1, Ordering::Relaxed);
                     }
                     // An edit or delete may only touch a message the *peer*

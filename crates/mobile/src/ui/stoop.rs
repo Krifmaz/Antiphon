@@ -98,6 +98,7 @@ impl App {
             status: self.settings.status_message.clone(),
             bio: self.settings.bio.clone(),
             pronouns: self.settings.pronouns.clone(),
+            layout: stoop::ProfileLayout::from_saved(&self.settings.page_blocks, &self.settings.page_qr),
             color: self.settings.color.clone(),
             has_picture: !self.settings.avatar.is_empty(),
             fingerprint: id.as_bytes().chunks(4).take(8).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(" "),
@@ -605,6 +606,12 @@ impl App {
             Action::SetPronouns(pronouns) => {
                 self.settings.pronouns = crate::profile::clean_pronouns(&pronouns);
                 self.profile_changed();
+            }
+            // Only this phone's page changes, so nothing goes to anyone.
+            Action::SetProfileLayout(layout) => {
+                self.settings.page_blocks = layout.saved_blocks();
+                self.settings.page_qr = layout.qr.id().to_string();
+                self.save();
             }
             Action::OpenLink(url) => {
                 if !crate::platform::open_link(&url) {

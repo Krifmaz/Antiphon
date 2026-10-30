@@ -200,6 +200,8 @@ pub struct Me {
     /// How to refer to me ("she/her"), shown beside my name; empty for
     /// none given.
     pub pronouns: String,
+    /// How my own profile page is arranged, and where my QR code sits on it.
+    pub layout: crate::ProfileLayout,
     /// My avatar colour's id ([`crate::PROFILE_COLORS`]); empty for automatic.
     pub color: String,
     /// Whether I have a profile picture (registered in [`crate::avatars`]).
