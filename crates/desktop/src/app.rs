@@ -64,6 +64,10 @@ pub struct App {
     /// The version being installed, from the moment the download is handed
     /// over until the app closes for it (or the install fails).
     installing: Option<String>,
+    /// The tray icon, on the real engine where a panel shows one. With it,
+    /// closing the window hides it and Stoop keeps its door open.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    tray: Option<crate::tray::Tray>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,8 +85,11 @@ pub enum Message {
     Escape,
     /// Cmd/Ctrl+K or F: jump to search.
     Find,
-    /// The window's close button: hang up, close down, exit.
+    /// The window's close button: hide to the tray when there is one,
+    /// otherwise quit.
     Close,
+    /// Hang up, close down, exit.
+    Quit,
     /// The window was made, this size: lay out for it, attach the
     /// screen-reader adapter, then show it.
     Opened(window::Id, iced::Size),
@@ -282,7 +289,21 @@ impl App {
             Mode::Demo => (Source::Demo(Box::new(Demo::new())), None, None),
             Mode::Tour(dir) => (Source::Demo(Box::new(Demo::new())), Some(dir), None),
         };
-        let mut app = App { ui: Ui::new(), source, tour, system_dark: true, look: Default::default(), theme: theme::iced_theme(&theme::look()), epoch: Instant::now(), updater, installing: None };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let tray = matches!(source, Source::Live { .. }).then(crate::tray::Tray::start).flatten();
+        let mut app = App {
+            ui: Ui::new(),
+            source,
+            tour,
+            system_dark: true,
+            look: Default::default(),
+            theme: theme::iced_theme(&theme::look()),
+            epoch: Instant::now(),
+            updater,
+            installing: None,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            tray,
+        };
         app.stamp_update();
         app.apply_look();
         let mut tasks = vec![iced::system::theme().map(Message::SystemMode)];
@@ -290,6 +311,46 @@ impl App {
             tasks.push(Task::done(Message::TourStep(0)));
         }
         (app, Task::batch(tasks))
+    }
+
+    /// Whether closing the window should hide it: a panel is showing the
+    /// tray icon that brings it back.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn hides_to_tray(&self) -> bool {
+        self.tray.as_ref().is_some_and(crate::tray::Tray::shown)
+    }
+
+    /// No tray here: closing the window quits.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    fn hides_to_tray(&self) -> bool {
+        false
+    }
+
+    /// No tray here, so nothing is ever asked of it.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    fn tray_asks(&self) -> Task<Message> {
+        Task::none()
+    }
+
+    /// Carries out what the tray's menu asked for since the last tick.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn tray_asks(&mut self) -> Task<Message> {
+        let asks = self.tray.as_ref().map(crate::tray::Tray::asks).unwrap_or_default();
+        let mut tasks = Vec::new();
+        for ask in asks {
+            tasks.push(match ask {
+                crate::tray::Ask::Show => window::latest().and_then(|id| window::set_mode(id, window::Mode::Windowed).chain(window::gain_focus(id))),
+                crate::tray::Ask::ToggleMute => {
+                    let muted = self.model().call.muted;
+                    if let Source::Live { engine, .. } = &mut self.source {
+                        engine.act(Action::Mute(!muted), None);
+                    }
+                    Task::none()
+                }
+                crate::tray::Ask::Quit => Task::done(Message::Quit),
+            });
+        }
+        Task::batch(tasks)
     }
 
     /// The current model, whichever source it comes from.
@@ -571,7 +632,7 @@ impl App {
                     }
                 };
                 self.apply_look();
-                task
+                Task::batch([task, self.tray_asks()])
             }
             Message::Frame(now) => {
                 let model = match &self.source {
@@ -602,7 +663,10 @@ impl App {
                 Task::none()
             }
             Message::Find => operation::focus(ui::SEARCH),
-            Message::Close => {
+            // With a tray icon the window only hides: the door stays open
+            // and the tray brings it back.
+            Message::Close if self.hides_to_tray() => window::latest().and_then(|id| window::set_mode(id, window::Mode::Hidden)),
+            Message::Close | Message::Quit => {
                 if let Source::Live { engine, .. } = &mut self.source {
                     engine.shutdown();
                 }

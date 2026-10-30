@@ -21,6 +21,8 @@ mod demo;
 mod engine;
 mod my_devices;
 mod spaces;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod tray;
 
 use std::path::PathBuf;
 

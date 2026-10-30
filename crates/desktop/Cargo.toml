@@ -46,6 +46,8 @@ accesskit_macos = "0.26.3"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # AT-SPI over D-Bus (Orca).
 accesskit_unix = "0.22.1"
+# The tray icon, as a StatusNotifierItem over D-Bus (no GTK needed).
+ksni = "0.3.6"
 
 [lints]
 workspace = true
