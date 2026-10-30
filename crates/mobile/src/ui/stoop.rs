@@ -779,6 +779,8 @@ impl App {
             Action::Replay(_) | Action::Sound(_) => {}
             // A phone follows the system's text size; never offered.
             Action::TextScale(_) => {}
+            // Nor a font file to pick; never offered.
+            Action::ImportFont => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

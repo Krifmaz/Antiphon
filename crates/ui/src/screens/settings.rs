@@ -288,7 +288,9 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
     let accent_body = column![accents.wrap(), setting("Your own colour", Some("Any colour as #rrggbb."), custom_row)].spacing(14);
 
     let mut fonts = row![].spacing(10);
-    for (id, name) in FONTS {
+    // The imported font, when there is one, as a third choice.
+    let custom = (!m.settings.custom_font.is_empty()).then_some((theme::CUSTOM_FONT, m.settings.custom_font.as_str()));
+    for (id, name) in FONTS.into_iter().chain(custom) {
         let on = m.settings.font == id || (m.settings.font.is_empty() && id == FONTS[0].0);
         let sample = column![
             t("Aa Bb Qq 123").size(18).font(theme::font_for(id)),
@@ -320,7 +322,11 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
     .spacing(8);
     if tab == 1 {
         return column![
-            titled_card("Reading font", Some("OpenDyslexic's heavier letter bottoms help some people with dyslexia keep letters in place."), fonts),
+            titled_card(
+                "Reading font",
+                Some("OpenDyslexic's heavier letter bottoms help some people with dyslexia keep letters in place."),
+                column![fonts].push((!m.device.phone).then(|| btn_icon(Icon::File, "Use a font file…", Btn::Ghost, Some(Msg::Do(Action::ImportFont))))).spacing(12),
+            ),
             card(motion),
         ]
         .push(size)

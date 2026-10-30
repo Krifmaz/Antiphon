@@ -702,6 +702,9 @@ pub struct Settings {
     pub output_db: f32,
     /// Animations are off.
     pub reduced_motion: bool,
+    /// The family name of a font the person imported, offered as a
+    /// reading font; empty when there is none (desktop only).
+    pub custom_font: String,
     /// How large the whole interface is drawn, 1 being normal (desktop
     /// only; a phone follows the system's text size). `0` before it is
     /// known, which draws at normal size.

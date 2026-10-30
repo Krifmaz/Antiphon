@@ -140,6 +140,23 @@ fn main() -> anyhow::Result<()> {
     for bytes in theme::FONT_FILES {
         app = app.font(bytes);
     }
+    // A reading font imported earlier, registered before the first frame.
+    if let Some((bytes, family)) = saved_font() {
+        theme::set_custom_font(&family);
+        app = app.font(bytes);
+    }
     app.run()?;
     Ok(())
+}
+
+/// The reading font imported earlier, if its file is still readable: its
+/// bytes and family name.
+fn saved_font() -> Option<(Vec<u8>, String)> {
+    let path = config::load().custom_font_path;
+    if path.is_empty() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let family = theme::font_family(&bytes)?;
+    Some((bytes, family))
 }

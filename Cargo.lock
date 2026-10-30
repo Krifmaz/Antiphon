@@ -706,6 +706,7 @@ dependencies = [
  "iced_widget",
  "serde",
  "serde_json",
+ "ttf-parser",
 ]
 
 [[package]]

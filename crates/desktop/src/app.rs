@@ -386,6 +386,10 @@ impl App {
             match out {
                 Out::Toast(text, kind) => self.ui.toast(text, kind),
                 Out::Copy(text) => tasks.push(iced::clipboard::write(text)),
+                Out::LoadFont(bytes, family) => {
+                    theme::set_custom_font(&family);
+                    tasks.push(iced::font::load(bytes).discard());
+                }
                 Out::Relaunch => {
                     // The toast saying so was queued just before; the new
                     // copy shows the restored account.

@@ -59,10 +59,47 @@ pub const FONT: Font = Font::with_name(FAMILY);
 /// `(id, name)` of the reading fonts Settings offers, in its order.
 pub const FONTS: [(&str, &str); 2] = [("inter", "Inter"), ("opendyslexic", "OpenDyslexic")];
 
-/// The face for a reading-font id (see [`FONTS`]); Inter for anything unknown.
+/// The reading-font id of a font the person imported (see
+/// [`set_custom_font`]).
+pub const CUSTOM_FONT: &str = "custom";
+
+/// The imported font, once registered.
+static CUSTOM: RwLock<Option<Font>> = RwLock::new(None);
+
+/// Makes the imported font with this family name the one
+/// [`CUSTOM_FONT`] stands for. The app loads its file into the text engine
+/// itself. The name is kept for the rest of the run, as the text engine's
+/// font names must be; it is set at start and on each import, a handful
+/// of times at most.
+pub fn set_custom_font(family: &str) {
+    let name: &'static str = Box::leak(family.to_string().into_boxed_str());
+    *CUSTOM.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Font::with_name(name));
+}
+
+/// The imported font's family name, once registered.
+pub fn custom_font_name() -> Option<&'static str> {
+    match CUSTOM.read().unwrap_or_else(std::sync::PoisonError::into_inner).map(|f| f.family) {
+        Some(font::Family::Name(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// The family name inside a font file (`.ttf`, `.otf`, or the first face
+/// of a `.ttc`), preferring the typographic family over the legacy one;
+/// `None` for anything that is not a font with a readable name.
+pub fn font_family(bytes: &[u8]) -> Option<String> {
+    let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+    let names = face.names();
+    let named = |id| names.into_iter().filter(|n| n.name_id == id && n.is_unicode()).find_map(|n| n.to_string());
+    named(ttf_parser::name_id::TYPOGRAPHIC_FAMILY).or_else(|| named(ttf_parser::name_id::FAMILY)).filter(|n| !n.trim().is_empty())
+}
+
+/// The face for a reading-font id (see [`FONTS`] and [`CUSTOM_FONT`]);
+/// Inter for anything unknown, or for an imported font not registered.
 pub fn font_for(id: &str) -> Font {
     match id {
         "opendyslexic" => Font::with_name(DYSLEXIC_FAMILY),
+        CUSTOM_FONT => CUSTOM.read().unwrap_or_else(std::sync::PoisonError::into_inner).unwrap_or(FONT),
         _ => FONT,
     }
 }
@@ -76,8 +113,12 @@ pub fn font_for(id: &str) -> Font {
 /// heavier than regular is asked for at 800, or the bold text would come
 /// out in Inter.
 pub fn weighted(face: Font, weight: font::Weight) -> Font {
+    let custom = *CUSTOM.read().unwrap_or_else(std::sync::PoisonError::into_inner);
     let weight = match face.family {
         font::Family::Name(DYSLEXIC_FAMILY) if weight != font::Weight::Normal => font::Weight::ExtraBold,
+        // An imported font is one file, usually one weight; asking it for
+        // another would swap in a different family mid-sentence.
+        _ if custom.is_some_and(|c| c.family == face.family) => font::Weight::Normal,
         _ => weight,
     };
     Font { weight, ..face }
@@ -970,6 +1011,13 @@ pub fn badge(kind: Badge) -> impl Fn(&Theme) -> container::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_font_files_family_is_read_from_it() {
+        assert_eq!(font_family(FONT_FILES[0]).as_deref(), Some(FAMILY));
+        assert_eq!(font_family(FONT_FILES[3]).as_deref(), Some(DYSLEXIC_FAMILY));
+        assert_eq!(font_family(b"not a font"), None);
+    }
 
     #[test]
     fn every_look_is_real_and_its_accent_can_be_seen() {

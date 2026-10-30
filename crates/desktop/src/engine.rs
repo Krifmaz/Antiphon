@@ -88,6 +88,9 @@ enum Event {
     EmojiPicked(Result<(String, String, String), String>),
     /// A theme file was chosen and read: use what it says.
     Theme(ui::theme_file::ThemeFile),
+    /// A font file was chosen, read and copied in: (where it now is, its
+    /// family name, its bytes).
+    FontImported(PathBuf, String, Vec<u8>),
     /// A soundboard clip was chosen, checked and copied in: list it.
     SoundAdded(antiphon_client::soundboard::SoundClip),
     /// A voice preset file was chosen and read: use its chain.
@@ -118,6 +121,9 @@ pub enum Out {
     /// A group chat or community was made or joined: close the dialog and
     /// open it.
     SpaceCreated(String),
+    /// A font file was imported: load it into the text engine under this
+    /// family name.
+    LoadFont(Vec<u8>, String),
 }
 
 /// Whether the background task is placing a call or waiting for one.
@@ -282,6 +288,8 @@ pub struct Engine {
     replay_seen: Option<u64>,
     /// The newest damaged moment is being offered ("Ask me" mode).
     replay_offer: bool,
+    /// The imported reading font's family name; empty when there is none.
+    custom_font: String,
     /// The last delivery round handled; a new number means messages moved.
     delivery_seen: u64,
     /// The last LAN discovery count handled; a new number means new peers.
@@ -391,6 +399,8 @@ impl Engine {
             captions: crate::captions::Captions::default(),
             replay_seen: None,
             replay_offer: false,
+            // Registered at start, before the window opened (see `main`).
+            custom_font: ui::theme::custom_font_name().unwrap_or_default().to_string(),
             plugins_found: None,
             plugins_scanning: false,
             api: None,
@@ -1064,6 +1074,35 @@ impl Engine {
         });
     }
 
+    /// Asks for a font file, checks it is one, copies it into the data
+    /// folder (so it keeps working after the original moves) and hands it
+    /// back as [`Event::FontImported`], all off the window's thread.
+    fn import_font(&self) {
+        /// Far more than any real font file; refused before reading.
+        const MAX_BYTES: u64 = 32 << 20;
+        let Some(dir) = self.dir.clone() else { return };
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().set_title("Use a font file").add_filter("Font files", &["ttf", "otf", "ttc"]).pick_file() else { return };
+            let imported = (|| {
+                if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > MAX_BYTES {
+                    return Err("That file is too big to be a font.".to_string());
+                }
+                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                let family = ui::theme::font_family(&bytes).ok_or("That file isn't a font Stoop can read.")?;
+                let fonts = dir.join("fonts");
+                std::fs::create_dir_all(&fonts).map_err(|e| e.to_string())?;
+                let dest = fonts.join(path.file_name().ok_or("That file has no name.")?);
+                std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+                Ok((dest, family, bytes))
+            })();
+            match imported {
+                Ok((dest, family, bytes)) => Self::push(&events, Event::FontImported(dest, family, bytes)),
+                Err(why) => Self::push(&events, Event::Toast(format!("Couldn't use that font: {why}"), ToastKind::Err)),
+            }
+        });
+    }
+
     /// Exports everything into a folder the person picks, off the window's
     /// thread (spec §13 "take everything with you, in an open format"):
     /// settings, contacts, decrypted history, sound clips and received
@@ -1337,6 +1376,14 @@ impl Engine {
             Event::PluginsFound(found) => {
                 self.plugins_scanning = false;
                 self.plugins_found = Some(found);
+            }
+            Event::FontImported(path, family, bytes) => {
+                self.cfg.custom_font_path = path.to_string_lossy().into_owned();
+                self.cfg.stoop.font = ui::theme::CUSTOM_FONT.to_string();
+                self.save();
+                self.toast(format!("Reading in {family}"), ToastKind::Ok);
+                self.custom_font.clone_from(&family);
+                self.out.push(Out::LoadFont(bytes, family));
             }
             Event::SoundAdded(clip) => {
                 self.toast(format!("Added \"{}\"", clip.name), ToastKind::Ok);
@@ -2156,6 +2203,7 @@ impl Engine {
                 *self.state.output_gain_db.lock().unwrap() = db;
                 self.save();
             }
+            A::ImportFont => self.import_font(),
             A::TextScale(scale) => {
                 // The classic app's range: small enough to fit more, large
                 // enough for low vision, never so far the layout breaks.
@@ -3371,6 +3419,7 @@ impl Engine {
             output_db: self.cfg.output_gain_db,
             reduced_motion: self.cfg.reduced_motion,
             text_scale: self.cfg.text_scale,
+            custom_font: self.custom_font.clone(),
             notify_messages: self.cfg.stoop.notify_messages,
             open_on_start: self.cfg.stoop.door_on_start,
             version: env!("CARGO_PKG_VERSION").to_string(),

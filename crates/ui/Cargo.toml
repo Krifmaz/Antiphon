@@ -19,6 +19,9 @@ iced_widget = { version = "0.14.0", features = ["svg", "canvas", "qr_code", "ima
 # Current theme files are Stoop's own markup (src/markup.rs), parsed by hand.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Reads the family name out of a font file someone imports, so the text
+# engine can be asked for it by name.
+ttf-parser = "0.25.1"
 
 [lints]
 workspace = true
