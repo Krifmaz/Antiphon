@@ -308,17 +308,17 @@ pub struct AppConfig {
     /// the OS-derived palette regardless of what this holds.
     #[serde(default = "default_theme_bg_hex")]
     pub theme_bg_hex: String,
-    /// Path to a user-chosen background image, or "" for none. Same
-    /// re-registration-on-startup story as `custom_font_path`: the loaded
-    /// `slint::Image` isn't itself persisted, just the path to reload it from.
+    /// Path to a user-chosen background picture (a copy in the data
+    /// folder's `backgrounds`), or "" for none. Only the path is saved;
+    /// the picture is decoded again at each start.
     #[serde(default)]
     pub theme_image_path: String,
     /// 0..1 opacity of the background image over the background color.
     #[serde(default = "default_theme_image_opacity")]
     pub theme_image_opacity: f32,
-    /// 0..1 opacity of the whole background layer (color + image) against
-    /// whatever's behind the window -- panels/text/buttons stay fully
-    /// opaque regardless of this value.
+    /// 0..1: how solid the people list and the cards stay over the
+    /// background picture. Below 1 the picture shows through them; text
+    /// and buttons stay fully opaque regardless.
     #[serde(default = "default_theme_opacity")]
     pub theme_opacity: f32,
     /// Display order of each tab's collapsible sections, set via "Edit
@@ -368,7 +368,7 @@ pub struct AppConfig {
     pub sidebar_width: f32,
     /// How the background image is fitted into the window: 0 cover, 1
     /// contain (letterboxed), 2 stretch (fill, ignores aspect ratio), 3
-    /// original (1:1 pixels, cropped to fit like `cover` with no scaling).
+    /// original (1:1 pixels, centred, never scaled).
     #[serde(default)]
     pub theme_image_fit: i32,
     /// Degrees, -180..180.

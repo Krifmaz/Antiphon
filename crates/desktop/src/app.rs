@@ -52,6 +52,9 @@ pub struct App {
     /// What the look was last built from: theme, accent, custom accent,
     /// reading font, and whether the system is dark.
     look: (String, String, String, String, bool),
+    /// How solid the panels were last made over the background picture
+    /// (1 with none), as compared with the setting.
+    see_through: f32,
     /// The iced theme built from that look. Kept rather than built in
     /// [`App::theme`], which iced calls on every redraw: building one
     /// derives a whole extended palette.
@@ -159,6 +162,15 @@ const TOUR: &[Step] = &[
         setup: |app| {
             app.go(Route::Settings(Section::Voice));
             let _ = app.send(Msg::SettingsTab(3));
+        },
+    },
+    Step {
+        name: "background",
+        size: (1280.0, 900.0),
+        setup: |app| {
+            app.demo().act(Action::Backdrop(ui::BackdropDo::Pick));
+            app.go(Route::Settings(Section::Appearance));
+            let _ = app.send(Msg::SettingsTab(0));
         },
     },
     Step {
@@ -297,6 +309,7 @@ impl App {
             tour,
             system_dark: true,
             look: Default::default(),
+            see_through: 1.0,
             theme: theme::iced_theme(&theme::look()),
             epoch: Instant::now(),
             updater,
@@ -591,12 +604,15 @@ impl App {
         // Compared by reference first: this runs on every tick, and the
         // look only rarely changes.
         let (t, a, c, f) = (&self.look.0, &self.look.1, &self.look.2, &self.look.3);
-        if (&s.theme, &s.accent, &s.custom_accent, &s.font, self.system_dark) != (t, a, c, f, self.look.4) {
+        // Panels go see-through only over a picture.
+        let solid = s.backdrop.as_ref().map_or(1.0, |b| b.panels);
+        if (&s.theme, &s.accent, &s.custom_accent, &s.font, self.system_dark) != (t, a, c, f, self.look.4) || solid != self.see_through {
             let look = (s.theme.clone(), s.accent.clone(), s.custom_accent.clone(), s.font.clone(), self.system_dark);
-            theme::set(theme::palette(&look.0, &look.1, &look.2, look.4));
+            theme::set(theme::see_through(theme::palette(&look.0, &look.1, &look.2, look.4), solid));
             theme::set_font(&look.3);
             self.theme = theme::iced_theme(&theme::look());
             self.look = look;
+            self.see_through = solid;
         }
         let reduced = self.model().settings.reduced_motion;
         self.ui.set_reduced_motion(reduced);
@@ -743,6 +759,12 @@ impl App {
         ];
         if self.ui.animating() {
             subs.push(window::frames().map(Message::Frame));
+        }
+        // An animated background redraws as often as its quickest frame
+        // changes, and not at all with reduced motion.
+        let s = &self.model().settings;
+        if let Some(delay) = s.backdrop.as_ref().and_then(ui::Backdrop::frame_delay).filter(|_| !s.reduced_motion) {
+            subs.push(iced::time::every(delay).map(Message::Frame));
         }
         Subscription::batch(subs)
     }

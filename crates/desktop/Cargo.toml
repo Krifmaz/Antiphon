@@ -24,8 +24,8 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 device_query = "4.0.1"
 getrandom = "0.4.3"
-# The window icon, and the PNGs of `--screenshot-tour`.
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+# The window icon, the PNGs of `--screenshot-tour`, and background pictures.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Native file dialogs: choosing a file to send, saving one received.
 rfd = "0.17.2"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "io-util"] }

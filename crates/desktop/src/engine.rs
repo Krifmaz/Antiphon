@@ -93,6 +93,9 @@ enum Event {
     FontImported(PathBuf, String, Vec<u8>),
     /// A soundboard clip was chosen, checked and copied in: list it.
     SoundAdded(antiphon_client::soundboard::SoundClip),
+    /// A background picture was decoded; with a path, it was just picked
+    /// (and copied there) and becomes the saved one.
+    Backdrop(Option<PathBuf>, crate::backdrop::Loaded),
     /// A voice preset file was chosen and read: use its chain.
     Preset(config::VoicePreset),
     /// The directories were read: what they list, what went wrong, and
@@ -201,6 +204,17 @@ struct QueuedSend {
     peer: String,
 }
 
+/// The saved picture fit (0 fill, 1 fit, 2 stretch, 3 actual size) as
+/// the screens name it.
+fn image_fit(saved: i32) -> ui::ImageFit {
+    match saved {
+        1 => ui::ImageFit::Contain,
+        2 => ui::ImageFit::Stretch,
+        3 => ui::ImageFit::Original,
+        _ => ui::ImageFit::Cover,
+    }
+}
+
 /// The send queue saved in `dir` by a previous run. One that can't be
 /// read starts empty, with a line in the log: losing the list of what was
 /// waiting is better than not starting.
@@ -290,6 +304,8 @@ pub struct Engine {
     replay_offer: bool,
     /// The imported reading font's family name; empty when there is none.
     custom_font: String,
+    /// The background picture, once decoded; `None` when there is none.
+    backdrop: Option<crate::backdrop::Loaded>,
     /// The last delivery round handled; a new number means messages moved.
     delivery_seen: u64,
     /// The last LAN discovery count handled; a new number means new peers.
@@ -401,6 +417,7 @@ impl Engine {
             replay_offer: false,
             // Registered at start, before the window opened (see `main`).
             custom_font: ui::theme::custom_font_name().unwrap_or_default().to_string(),
+            backdrop: None,
             plugins_found: None,
             plugins_scanning: false,
             api: None,
@@ -441,6 +458,7 @@ impl Engine {
         // The shortcuts beyond push to talk, which the shared state
         // starts without.
         engine.sync_transmit();
+        engine.reload_backdrop();
         engine.load_previews();
         engine.api_seen = engine.previews.clone();
         engine.set_api(engine.cfg.local_api || crate::has_flag("--api"));
@@ -1110,6 +1128,86 @@ impl Engine {
         });
     }
 
+    /// Decodes the saved background picture off the window's thread; it
+    /// arrives as [`Event::Backdrop`]. A picture that has gone missing is
+    /// simply not shown.
+    fn reload_backdrop(&self) {
+        if self.cfg.theme_image_path.is_empty() {
+            return;
+        }
+        let path = PathBuf::from(&self.cfg.theme_image_path);
+        let events = self.events.clone();
+        std::thread::spawn(move || match crate::backdrop::load(&path) {
+            Ok(loaded) => Self::push(&events, Event::Backdrop(None, loaded)),
+            Err(e) => Self::push(&events, Event::Toast(format!("Couldn't show the background picture: {e}"), ToastKind::Err)),
+        });
+    }
+
+    /// Carries out a background picture request.
+    fn backdrop_do(&mut self, what: ui::BackdropDo) {
+        use ui::BackdropDo as B;
+        let c = &mut self.cfg;
+        match what {
+            B::Pick => return self.pick_backdrop(),
+            B::Clear => {
+                // The copy in the app's own folder is ours to delete; the
+                // person's original was never touched.
+                let ours = self.dir.as_ref().map(|d| d.join("backgrounds"));
+                if ours.is_some_and(|d| Path::new(&c.theme_image_path).starts_with(d)) {
+                    let _ = std::fs::remove_file(&c.theme_image_path);
+                }
+                c.theme_image_path.clear();
+                self.backdrop = None;
+            }
+            B::Fit(fit) => {
+                c.theme_image_fit = match fit {
+                    ui::ImageFit::Cover => 0,
+                    ui::ImageFit::Contain => 1,
+                    ui::ImageFit::Stretch => 2,
+                    ui::ImageFit::Original => 3,
+                };
+            }
+            B::Rotation(deg) => c.theme_image_rotation = deg.clamp(-180.0, 180.0),
+            B::Crop(edge, pct) => {
+                let pct = pct.clamp(0.0, 90.0);
+                match edge {
+                    0 => c.theme_image_crop_left = pct,
+                    1 => c.theme_image_crop_top = pct,
+                    2 => c.theme_image_crop_right = pct,
+                    _ => c.theme_image_crop_bottom = pct,
+                }
+            }
+            B::Opacity(v) => c.theme_image_opacity = v.clamp(0.0, 1.0),
+            B::Panels(v) => c.theme_opacity = v.clamp(0.0, 1.0),
+        }
+        self.save();
+    }
+
+    /// Asks for a picture, checks it decodes, copies it into the data
+    /// folder (so it keeps showing after the original moves) and hands it
+    /// back as [`Event::Backdrop`], all off the window's thread.
+    fn pick_backdrop(&self) {
+        let Some(dir) = self.dir.clone() else { return };
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let Some(picked) = rfd::FileDialog::new().set_title("Choose a background picture").add_filter("Pictures", &crate::backdrop::EXTENSIONS).pick_file() else { return };
+            let added = crate::backdrop::load(&picked).and_then(|loaded| {
+                let ours = dir.join("backgrounds");
+                std::fs::create_dir_all(&ours).map_err(|e| e.to_string())?;
+                let dest = ours.join(picked.file_name().ok_or("That file has no name.")?);
+                // Picking the copy already there again needs no copying.
+                if dest != picked {
+                    std::fs::copy(&picked, &dest).map_err(|e| e.to_string())?;
+                }
+                Ok((dest, loaded))
+            });
+            match added {
+                Ok((dest, loaded)) => Self::push(&events, Event::Backdrop(Some(dest), loaded)),
+                Err(e) => Self::push(&events, Event::Toast(format!("Couldn't use that picture: {e}"), ToastKind::Err)),
+            }
+        });
+    }
+
     /// Exports everything into a folder the person picks, off the window's
     /// thread (spec §13 "take everything with you, in an open format"):
     /// settings, contacts, decrypted history, sound clips and received
@@ -1391,6 +1489,13 @@ impl Engine {
                 self.toast(format!("Reading in {family}"), ToastKind::Ok);
                 self.custom_font.clone_from(&family);
                 self.out.push(Out::LoadFont(bytes, family));
+            }
+            Event::Backdrop(picked, loaded) => {
+                if let Some(path) = picked {
+                    self.cfg.theme_image_path = path.to_string_lossy().into_owned();
+                    self.save();
+                }
+                self.backdrop = Some(loaded);
             }
             Event::SoundAdded(clip) => {
                 self.toast(format!("Added \"{}\"", clip.name), ToastKind::Ok);
@@ -2214,6 +2319,7 @@ impl Engine {
                 self.save();
             }
             A::ImportFont => self.import_font(),
+            A::Backdrop(what) => self.backdrop_do(what),
             A::TextScale(scale) => {
                 // The classic app's range: small enough to fit more, large
                 // enough for low vision, never so far the layout breaks.
@@ -3433,6 +3539,17 @@ impl Engine {
             reduced_motion: self.cfg.reduced_motion,
             text_scale: self.cfg.text_scale,
             custom_font: self.custom_font.clone(),
+            backdrop: self.backdrop.as_ref().map(|b| ui::Backdrop {
+                frames: b.frames.clone(),
+                size: b.size,
+                started: b.started,
+                fit: image_fit(self.cfg.theme_image_fit),
+                rotation: self.cfg.theme_image_rotation,
+                crop: [self.cfg.theme_image_crop_left, self.cfg.theme_image_crop_top, self.cfg.theme_image_crop_right, self.cfg.theme_image_crop_bottom],
+                opacity: self.cfg.theme_image_opacity,
+                panels: self.cfg.theme_opacity,
+            }),
+            backdrops: true,
             notify_messages: self.cfg.stoop.notify_messages,
             open_on_start: self.cfg.stoop.door_on_start,
             version: env!("CARGO_PKG_VERSION").to_string(),

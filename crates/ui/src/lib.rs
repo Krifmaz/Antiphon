@@ -598,6 +598,9 @@ pub enum Action {
     ImportFont,
     /// Draw the whole interface this much larger or smaller (1 is normal).
     TextScale(f32),
+    /// The background picture: pick, clear, or change how it shows
+    /// (desktop only).
+    Backdrop(BackdropDo),
     /// Turn animations off (or back on).
     ReducedMotion(bool),
     /// Notify about messages while the window is in the background.

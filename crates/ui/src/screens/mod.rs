@@ -35,7 +35,16 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         return container(first_run::view(ui, m)).padding(inset).width(Length::Fill).height(Length::Fill).style(theme::app_bg).into();
     }
     let base = if ui.narrow() { phone::view(ui, m) } else { container(wide(ui, m)).padding(inset).into() };
-    let mut layers = stack![container(base).width(Length::Fill).height(Length::Fill).style(theme::app_bg)];
+    let mut layers = match &m.settings.backdrop {
+        // The ground, the picture over it, and the interface over both
+        // with nothing of its own behind it, so the picture shows.
+        Some(b) => stack![
+            container(space()).width(Length::Fill).height(Length::Fill).style(theme::app_bg),
+            backdrop(ui, b),
+            container(base).width(Length::Fill).height(Length::Fill),
+        ],
+        None => stack![container(base).width(Length::Fill).height(Length::Fill).style(theme::app_bg)],
+    };
     if let Some(d) = ui.dialog_shown.as_ref() {
         let rise = ui.dialog_rise();
         if rise > 0.001 {
@@ -55,6 +64,26 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         layers = layers.push(container(toasts(ui)).padding(inset));
     }
     layers.into()
+}
+
+/// The background picture at its current frame, cropped, turned, fitted
+/// and faded as Settings says.
+fn backdrop<'a>(ui: &Ui, b: &crate::Backdrop) -> El<'a, Msg> {
+    let fit = match b.fit {
+        crate::ImageFit::Cover => iced_core::ContentFit::Cover,
+        crate::ImageFit::Contain => iced_core::ContentFit::Contain,
+        crate::ImageFit::Stretch => iced_core::ContentFit::Fill,
+        crate::ImageFit::Original => iced_core::ContentFit::None,
+    };
+    iced_widget::image(b.frame(ui.now, ui.reduced_motion).clone())
+        .crop(b.crop_region())
+        .content_fit(fit)
+        // Floating: turning it doesn't change the space it is laid out in.
+        .rotation(iced_core::Rotation::Floating(iced_core::Degrees(b.rotation).into()))
+        .opacity(b.opacity.clamp(0.0, 1.0))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// The wide layout: people list, the screen, and the details panel.

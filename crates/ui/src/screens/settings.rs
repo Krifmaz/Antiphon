@@ -375,7 +375,43 @@ fn appearance<'a>(ui: &'a Ui, m: &'a Model, tab: usize) -> El<'a, Msg> {
             files
         ),
     ]
+    .push(m.settings.backdrops.then(|| titled_card("Background picture", Some("A picture or animated GIF behind everything. It stays on this computer."), backdrop(m.settings.backdrop.as_ref()))))
     .spacing(14)
+    .into()
+}
+
+/// The background picture's card: choose one, or, with one set, how it
+/// is fitted, turned, trimmed and faded.
+fn backdrop(b: Option<&crate::Backdrop>) -> El<'_, Msg> {
+    use crate::BackdropDo as B;
+    let Some(b) = b else {
+        return btn_icon(Icon::File, "Choose a picture…", Btn::Default, Some(Msg::Do(Action::Backdrop(B::Pick)))).into();
+    };
+    let files = row![
+        btn_icon(Icon::File, "Change picture…", Btn::Default, Some(Msg::Do(Action::Backdrop(B::Pick)))),
+        btn_sm("Remove", Btn::Ghost, Some(Msg::Do(Action::Backdrop(B::Clear)))),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    let mut fits = row![].spacing(8);
+    for (fit, name) in crate::ImageFit::ALL {
+        let on = b.fit == fit;
+        fits = fits.push(pressable(t(name).size(13), Role::Tab, &format!("{name} the picture"), on, if on { Btn::RowOn } else { Btn::Row }, Msg::Do(Action::Backdrop(B::Fit(fit)))).padding([8, 12]));
+    }
+    let percent = |name: &'static str, value: f32, on: fn(f32) -> B| field(name, value_slider(name, value * 100.0, 0.0, 100.0, 1.0, "%", move |v| Msg::Do(Action::Backdrop(on(v / 100.0)))));
+    let mut crops = column![].spacing(8);
+    for (edge, name) in ["Trim left", "Trim top", "Trim right", "Trim bottom"].into_iter().enumerate() {
+        crops = crops.push(field(name, value_slider(name, b.crop[edge], 0.0, 90.0, 1.0, "%", move |v| Msg::Do(Action::Backdrop(B::Crop(edge, v))))));
+    }
+    column![
+        files,
+        fits.wrap(),
+        percent("Picture strength", b.opacity, B::Opacity),
+        percent("Panels over it", b.panels, B::Panels),
+        field("Turn", value_slider("Turn", b.rotation, -180.0, 180.0, 1.0, "°", |v| Msg::Do(Action::Backdrop(B::Rotation(v))))),
+        crops,
+    ]
+    .spacing(12)
     .into()
 }
 

@@ -434,6 +434,17 @@ pub fn set(p: Palette) {
     *LOOK.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(p);
 }
 
+/// `p` with the people list and the panels made this solid (0..1), so a
+/// background picture shows through them. Text, borders and the accent
+/// are left as they are.
+pub fn see_through(mut p: Palette, solid: f32) -> Palette {
+    let solid = solid.clamp(0.0, 1.0);
+    for c in [&mut p.bg2, &mut p.panel, &mut p.panel2] {
+        c.a *= solid;
+    }
+    p
+}
+
 /// The active look (Stoop with the cream accent before [`set`] was called).
 pub fn look() -> Palette {
     (*LOOK.read().unwrap_or_else(std::sync::PoisonError::into_inner)).unwrap_or_else(|| palette("stoop", "logo", "", true))

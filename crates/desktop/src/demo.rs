@@ -73,6 +73,7 @@ impl Demo {
                 ..Default::default()
             },
             settings: ui::Settings {
+                backdrops: true,
                 theme: "stoop".into(),
                 accent: "logo".into(),
                 font: "inter".into(),
@@ -158,6 +159,27 @@ impl Demo {
             through_codec(antiphon_video::Encoder::camera(), &fake_face(640, 480, [214, 160, 120], [58, 92, 140], [236, 222, 200]), "their-camera", "Robin"),
             mine("my-camera", "You", &fake_face(480, 360, [190, 140, 105], [140, 58, 64], [200, 214, 228])),
         ];
+    }
+
+    /// Carries out a background picture request on the demo's made-up
+    /// picture: "picking" one always gets [`fake_sky`].
+    fn backdrop_do(&mut self, what: ui::BackdropDo) {
+        use ui::BackdropDo as B;
+        let settings = &mut self.model.settings;
+        if what == B::Pick {
+            settings.backdrop = Some(fake_sky(1600, 1000));
+            return;
+        }
+        let Some(b) = settings.backdrop.as_mut() else { return };
+        match what {
+            B::Pick => {}
+            B::Clear => settings.backdrop = None,
+            B::Fit(fit) => b.fit = fit,
+            B::Rotation(deg) => b.rotation = deg,
+            B::Crop(edge, pct) => b.crop[edge.min(3)] = pct,
+            B::Opacity(v) => b.opacity = v,
+            B::Panels(v) => b.panels = v,
+        }
     }
 
     /// Makes the demo a phone (push to talk, the loudspeaker, battery and
@@ -349,6 +371,7 @@ impl Demo {
             }
             Action::Theme(t) => self.model.settings.theme = t,
             Action::TextScale(scale) => self.model.settings.text_scale = scale,
+            Action::Backdrop(what) => self.backdrop_do(what),
             Action::Accent(a) => self.model.settings.accent = a,
             Action::Look(i) => {
                 if let Some(look) = ui::theme::LOOKS.get(i) {
@@ -564,6 +587,31 @@ fn fill_rect(f: &mut antiphon_video::Frame, x: u32, y: u32, w: u32, h: u32, rgb:
             let at = ((row * f.width + col) * 4) as usize;
             f.rgba[at..at + 3].copy_from_slice(&rgb);
         }
+    }
+}
+
+/// A made-up background picture: an evening sky fading to a dark hill, at
+/// the strength and see-through panels Settings starts a picture with.
+fn fake_sky(w: u32, h: u32) -> ui::Backdrop {
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        // Where the hill's edge is in this column comes from a slow wave.
+        let sky = y as f32 / h as f32;
+        for x in 0..w {
+            let ridge = 0.72 + 0.06 * (x as f32 / w as f32 * std::f32::consts::TAU * 1.5).sin();
+            let [r, g, b] = if sky > ridge { [24.0, 30.0, 40.0] } else { [70.0 + 170.0 * sky, 60.0 + 70.0 * sky, 130.0 - 40.0 * sky] };
+            rgba.extend([r as u8, g as u8, b as u8, 255]);
+        }
+    }
+    ui::Backdrop {
+        frames: vec![(iced::widget::image::Handle::from_rgba(w, h, rgba), std::time::Duration::ZERO)].into(),
+        size: (w, h),
+        started: std::time::Instant::now(),
+        fit: ui::ImageFit::Cover,
+        rotation: 0.0,
+        crop: [0.0; 4],
+        opacity: 0.5,
+        panels: 0.85,
     }
 }
 

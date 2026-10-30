@@ -711,6 +711,10 @@ pub struct Settings {
     /// only; a phone follows the system's text size). `0` before it is
     /// known, which draws at normal size.
     pub text_scale: f32,
+    /// The picture behind the interface, when one is set (desktop only).
+    pub backdrop: Option<Backdrop>,
+    /// A background picture can be chosen here (desktop only).
+    pub backdrops: bool,
     /// Show a notification for messages while the window is not focused.
     pub notify_messages: bool,
     /// Open the door (listen for calls) when the app starts.
@@ -864,6 +868,107 @@ pub enum CaptionsDo {
     RemoveModel,
     /// Save this call's captions to a text file.
     SaveTranscript,
+}
+
+/// A picture (or animated GIF) drawn behind the whole interface, and how.
+#[derive(Clone, Debug)]
+pub struct Backdrop {
+    /// The picture's frames, each with how long it stays up; a still
+    /// picture has one. Shared, so a model rebuilt every tick does not
+    /// copy the pixels.
+    pub frames: std::sync::Arc<[(iced_core::image::Handle, std::time::Duration)]>,
+    /// Its size in pixels, `(width, height)`, to crop it by.
+    pub size: (u32, u32),
+    /// When it was loaded: an animation plays from here.
+    pub started: std::time::Instant,
+    /// How it is fitted to the window.
+    pub fit: ImageFit,
+    /// Turned this many degrees clockwise.
+    pub rotation: f32,
+    /// Percent trimmed off each edge before fitting: left, top, right,
+    /// bottom.
+    pub crop: [f32; 4],
+    /// How strongly it shows over the window ground, 0..1.
+    pub opacity: f32,
+    /// How solid the people list and cards stay over it, 0..1: below 1
+    /// the picture shows through them too.
+    pub panels: f32,
+}
+
+impl Backdrop {
+    /// The frame to show `now`: the first when it is still or `still` is
+    /// set (reduced motion), otherwise the one the animation has reached.
+    pub fn frame(&self, now: std::time::Instant, still: bool) -> &iced_core::image::Handle {
+        let total: std::time::Duration = self.frames.iter().map(|f| f.1).sum();
+        if still || self.frames.len() < 2 || total.is_zero() {
+            return &self.frames[0].0;
+        }
+        // Where in one loop of the animation `now` falls.
+        let mut at = now.saturating_duration_since(self.started).as_nanos() % total.as_nanos();
+        for (handle, delay) in self.frames.iter() {
+            if at < delay.as_nanos() {
+                return handle;
+            }
+            at -= delay.as_nanos();
+        }
+        &self.frames[0].0
+    }
+
+    /// The shortest frame delay of an animation, to redraw that often;
+    /// `None` for a still picture.
+    pub fn frame_delay(&self) -> Option<std::time::Duration> {
+        (self.frames.len() > 1).then(|| self.frames.iter().map(|f| f.1).min().unwrap_or_default())
+    }
+
+    /// The part of the picture left after cropping, in its pixels. Never
+    /// empty: each edge's trim is capped so at least one pixel remains.
+    pub fn crop_region(&self) -> iced_core::Rectangle<u32> {
+        let (w, h) = self.size;
+        let cut = |pct: f32, of: u32| ((pct.clamp(0.0, 100.0) / 100.0) * of as f32) as u32;
+        let left = cut(self.crop[0], w).min(w.saturating_sub(1));
+        let top = cut(self.crop[1], h).min(h.saturating_sub(1));
+        let right = cut(self.crop[2], w).min(w.saturating_sub(left + 1));
+        let bottom = cut(self.crop[3], h).min(h.saturating_sub(top + 1));
+        iced_core::Rectangle { x: left, y: top, width: (w - left - right).max(1), height: (h - top - bottom).max(1) }
+    }
+}
+
+/// How a background picture is fitted to the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageFit {
+    /// Fills the window, trimming what overhangs.
+    #[default]
+    Cover,
+    /// Shows all of it, leaving bands of the ground beside it.
+    Contain,
+    /// Stretched to the window, shape and all.
+    Stretch,
+    /// At its own size, centred.
+    Original,
+}
+
+impl ImageFit {
+    /// Every fit, in the order Settings offers them, with its name.
+    pub const ALL: [(Self, &'static str); 4] = [(Self::Cover, "Fill"), (Self::Contain, "Fit"), (Self::Stretch, "Stretch"), (Self::Original, "Actual size")];
+}
+
+/// What the person asks of the background picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BackdropDo {
+    /// Pick a picture file.
+    Pick,
+    /// Take the picture away.
+    Clear,
+    /// Fit it this way.
+    Fit(ImageFit),
+    /// Turn it this many degrees.
+    Rotation(f32),
+    /// Trim this percent off an edge: 0 left, 1 top, 2 right, 3 bottom.
+    Crop(usize, f32),
+    /// Show it this strongly, 0..1.
+    Opacity(f32),
+    /// Keep the panels over it this solid, 0..1.
+    Panels(f32),
 }
 
 /// What happens when the network damages their audio badly enough that
@@ -1252,4 +1357,39 @@ pub struct ChannelView {
     /// The messages, oldest first; [`Line::author`] and
     /// [`Line::author_id`] say who wrote each.
     pub lines: Vec<Line>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A backdrop of `delays.len()` 1x1 frames, `w` by `h` pixels big.
+    fn backdrop(delays: &[u64], w: u32, h: u32) -> Backdrop {
+        let frames: Vec<_> = delays.iter().map(|&ms| (iced_core::image::Handle::from_rgba(1, 1, vec![0; 4]), Duration::from_millis(ms))).collect();
+        Backdrop { frames: frames.into(), size: (w, h), started: Instant::now(), fit: ImageFit::Cover, rotation: 0.0, crop: [0.0; 4], opacity: 1.0, panels: 1.0 }
+    }
+
+    #[test]
+    fn an_animation_loops_through_its_frames() {
+        let b = backdrop(&[100, 200], 1, 1);
+        let at = |ms| b.frame(b.started + Duration::from_millis(ms), false).id();
+        assert_eq!(at(50), b.frames[0].0.id());
+        assert_eq!(at(150), b.frames[1].0.id());
+        assert_eq!(at(350), b.frames[0].0.id());
+        // Reduced motion holds the first frame.
+        assert_eq!(b.frame(b.started + Duration::from_millis(150), true).id(), b.frames[0].0.id());
+        assert_eq!(b.frame_delay(), Some(Duration::from_millis(100)));
+        assert_eq!(backdrop(&[0], 1, 1).frame_delay(), None);
+    }
+
+    #[test]
+    fn cropping_never_leaves_nothing() {
+        let mut b = backdrop(&[0], 200, 100);
+        b.crop = [10.0, 20.0, 30.0, 0.0];
+        assert_eq!(b.crop_region(), iced_core::Rectangle { x: 20, y: 20, width: 120, height: 80 });
+        b.crop = [100.0, 100.0, 100.0, 100.0];
+        let r = b.crop_region();
+        assert!(r.width >= 1 && r.height >= 1 && r.x + r.width <= 200 && r.y + r.height <= 100);
+    }
 }

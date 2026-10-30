@@ -15,6 +15,7 @@ mod a11y;
 mod account;
 mod api;
 mod app;
+mod backdrop;
 mod captions;
 mod chain_rows;
 mod demo;
