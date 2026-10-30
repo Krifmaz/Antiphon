@@ -307,6 +307,9 @@ pub struct App {
     /// What the look was last built from: theme, accent, custom accent
     /// and reading font.
     look: (String, String, String, String),
+    /// The iced theme built from that look, kept because the runner asks
+    /// for it on every frame and building one derives a whole palette.
+    theme: Theme,
     /// The invite link and its QR code, rebuilt only when the link changes.
     qr: Option<(String, Arc<qr_code::Data>)>,
     /// The last message with each person, hex key to (text, unix seconds),
@@ -451,6 +454,7 @@ impl App {
             stale: true,
             refreshed_at: Instant::now(),
             look: Default::default(),
+            theme: antiphon_ui::theme::iced_theme(&antiphon_ui::theme::look()),
             qr: None,
             previews,
             tiles: HashMap::new(),
@@ -1280,7 +1284,7 @@ impl App {
     /// The iced theme for the current palette, which also gives the
     /// colour behind the system bars.
     pub fn theme(&self) -> Theme {
-        antiphon_ui::theme::iced_theme(&antiphon_ui::theme::look())
+        self.theme.clone()
     }
 
     /// The system's insets, in logical pixels, as (top, bottom). The

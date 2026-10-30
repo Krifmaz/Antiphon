@@ -43,12 +43,16 @@ impl App {
         let model = self.build_model();
         self.model = model;
         let s = &self.model.settings;
-        let look = (s.theme.clone(), s.accent.clone(), s.custom_accent.clone(), s.font.clone());
-        if look != self.look {
+        // Compared by reference first: this runs after every change, and
+        // the look only rarely changes.
+        let (t, a, c, f) = (&self.look.0, &self.look.1, &self.look.2, &self.look.3);
+        if (&s.theme, &s.accent, &s.custom_accent, &s.font) != (t, a, c, f) {
+            let look = (s.theme.clone(), s.accent.clone(), s.custom_accent.clone(), s.font.clone());
             // A phone follows its own dark palette for "system": there is
             // no portable way to ask Android or iOS which one it is in here.
             stoop::theme::set(stoop::theme::palette(&look.0, &look.1, &look.2, true));
             stoop::theme::set_font(&look.3);
+            self.theme = stoop::theme::iced_theme(&stoop::theme::look());
             self.look = look;
         }
         self.stoop.set_reduced_motion(self.settings.reduced_motion);
