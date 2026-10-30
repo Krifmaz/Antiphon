@@ -46,8 +46,9 @@ accesskit_macos = "0.26.3"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # AT-SPI over D-Bus (Orca).
 accesskit_unix = "0.22.1"
-# The tray icon, as a StatusNotifierItem over D-Bus (no GTK needed).
-ksni = "0.3.6"
+# The tray icon, as a StatusNotifierItem over D-Bus (no GTK needed). The
+# async-io backend: Slint enables it too, and ksni refuses both at once.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 
 [lints]
 workspace = true
