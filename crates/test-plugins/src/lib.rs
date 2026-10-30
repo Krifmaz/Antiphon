@@ -310,7 +310,8 @@ pub mod vst {
             bus.channelCount = 2;
             copy_w("Main", &mut bus.name);
             bus.busType = BusTypes_::kMain as BusType;
-            bus.flags = BusInfo_::BusFlags_::kDefaultActive;
+            // the SDK's enums are i32 on Windows and u32 elsewhere
+            bus.flags = BusInfo_::BusFlags_::kDefaultActive as _;
             kResultOk
         }
         unsafe fn getRoutingInfo(&self, _: *mut RoutingInfo, _: *mut RoutingInfo) -> tresult {
