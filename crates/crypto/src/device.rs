@@ -54,10 +54,14 @@ pub type DeviceKeyPair = IdentityKeyPair;
 /// identity's signature over both.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DeviceCredential {
+    /// The device's own public keys: what siblings seal to and what its
+    /// signatures verify under.
     pub device: PublicIdentity,
     /// What the user sees -- "Desktop", "Phone". Not security-relevant and
     /// not unique; the device key is the identifier.
     pub name: String,
+    /// When it was approved, unix seconds. Shown, and signed so it can't be
+    /// changed afterwards.
     pub added_at_secs: u64,
     /// The master identity vouching for this device. This is the
     /// cross-signature.
@@ -113,10 +117,12 @@ impl DeviceCredential {
 /// The set of devices currently authorized for an identity.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DeviceList {
+    /// The account (master identity key) these devices speak for.
     pub identity_key: [u8; 32],
     /// Monotonic, same rollback protection as a route record: without it,
     /// a revoked device could replay an older list that still contains it.
     pub sequence: u64,
+    /// The authorized devices, in the order they were added.
     pub devices: Vec<DeviceCredential>,
 }
 
@@ -137,6 +143,8 @@ impl DeviceList {
         out
     }
 
+    /// Signs the list with the master identity it names. Refuses a list
+    /// naming another identity, or one longer than a peer would accept.
     pub fn sign(self, master: &IdentityKeyPair) -> Result<SignedDeviceList, CryptoError> {
         if self.identity_key != master.public().identity_key {
             return Err(CryptoError::MalformedIdentity);
@@ -152,7 +160,9 @@ impl DeviceList {
 /// A device list plus the master signature over it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SignedDeviceList {
+    /// What was signed.
     pub list: DeviceList,
+    /// The master identity's signature over [`DeviceList`]'s signing bytes.
     pub signature: [u8; 64],
 }
 
@@ -200,8 +210,126 @@ impl SignedDeviceList {
             .any(|d| &d.device.identity_key == device_key)
     }
 
+    /// Every device the list authorizes, in the order they were added.
     pub fn devices(&self) -> &[DeviceCredential] {
         &self.list.devices
+    }
+
+    /// The credential for `device_key`, if the list authorizes it.
+    pub fn credential(&self, device_key: &[u8; 32]) -> Option<&DeviceCredential> {
+        self.list.devices.iter().find(|d| &d.device.identity_key == device_key)
+    }
+
+    /// The next list with `credential` added (or, when a device with the
+    /// same key is already listed, put in its place), signed under the
+    /// next sequence number.
+    ///
+    /// `credential` must already verify under this identity -- one made by
+    /// [`DeviceCredential::approve`] with the same master key does.
+    pub fn with_device(&self, master: &IdentityKeyPair, credential: DeviceCredential) -> Result<SignedDeviceList, CryptoError> {
+        credential.verify(&self.list.identity_key)?;
+        let mut devices: Vec<DeviceCredential> =
+            self.list.devices.iter().filter(|d| d.device.identity_key != credential.device.identity_key).cloned().collect();
+        devices.push(credential);
+        DeviceList { identity_key: self.list.identity_key, sequence: self.next_sequence()?, devices }.sign(master)
+    }
+
+    /// The next list without `device_key`: revoking that device. Signed
+    /// under the next sequence number, so anyone holding this list refuses
+    /// the older one that still named it.
+    pub fn without_device(&self, master: &IdentityKeyPair, device_key: &[u8; 32]) -> Result<SignedDeviceList, CryptoError> {
+        let devices = self.list.devices.iter().filter(|d| &d.device.identity_key != device_key).cloned().collect();
+        DeviceList { identity_key: self.list.identity_key, sequence: self.next_sequence()?, devices }.sign(master)
+    }
+
+    /// One past this list's sequence; an error only if it would wrap,
+    /// which would let the oldest list win again.
+    fn next_sequence(&self) -> Result<u64, CryptoError> {
+        self.list.sequence.checked_add(1).ok_or(CryptoError::MalformedDeviceList)
+    }
+
+    /// Wire and file encoding:
+    ///
+    /// ```text
+    /// identity_key[32] sequence u64 BE count u32 BE
+    /// count × ( device[PublicIdentity::ENCODED_LEN] name_len u16 BE name
+    ///           added_at u64 BE master_signature[64] )
+    /// list_signature[64]
+    /// ```
+    ///
+    /// Fixed-width fields and explicit lengths, like [`PublicIdentity::encode`]:
+    /// the bytes are signed, so their layout must never depend on a
+    /// serialization library's choices.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.list.identity_key);
+        out.extend_from_slice(&self.list.sequence.to_be_bytes());
+        out.extend_from_slice(&(self.list.devices.len() as u32).to_be_bytes());
+        for d in &self.list.devices {
+            out.extend_from_slice(&d.device.encode());
+            // Names are capped at MAX_NAME_LEN when approved, so u16 holds them.
+            out.extend_from_slice(&(d.name.len() as u16).to_be_bytes());
+            out.extend_from_slice(d.name.as_bytes());
+            out.extend_from_slice(&d.added_at_secs.to_be_bytes());
+            out.extend_from_slice(&d.master_signature);
+        }
+        out.extend_from_slice(&self.signature);
+        out
+    }
+
+    /// Reads [`SignedDeviceList::encode`]'s layout. Only the shape is
+    /// checked here; call [`SignedDeviceList::verify`] or
+    /// [`SignedDeviceList::accept`] before trusting what it says.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let mut r = Reader { bytes, at: 0 };
+        let identity_key = r.array::<32>()?;
+        let sequence = u64::from_be_bytes(r.array::<8>()?);
+        let count = u32::from_be_bytes(r.array::<4>()?) as usize;
+        // Checked before allocating, so a hostile count can't ask for memory.
+        if count > MAX_DEVICES {
+            return Err(CryptoError::MalformedDeviceList);
+        }
+        let mut devices = Vec::with_capacity(count);
+        for _ in 0..count {
+            let device = PublicIdentity::decode(r.take(PublicIdentity::ENCODED_LEN)?)?;
+            let name_len = u16::from_be_bytes(r.array::<2>()?) as usize;
+            if name_len > MAX_NAME_LEN {
+                return Err(CryptoError::MalformedDeviceList);
+            }
+            let name = String::from_utf8(r.take(name_len)?.to_vec()).map_err(|_| CryptoError::MalformedDeviceList)?;
+            let added_at_secs = u64::from_be_bytes(r.array::<8>()?);
+            let master_signature = r.array::<64>()?;
+            devices.push(DeviceCredential { device, name, added_at_secs, master_signature });
+        }
+        let signature = r.array::<64>()?;
+        if r.at != bytes.len() {
+            return Err(CryptoError::MalformedDeviceList);
+        }
+        Ok(Self { list: DeviceList { identity_key, sequence, devices }, signature })
+    }
+}
+
+/// A cursor over encoded bytes for [`SignedDeviceList::decode`]; every
+/// short read is a malformed list rather than a panic.
+struct Reader<'a> {
+    /// The whole encoding.
+    bytes: &'a [u8],
+    /// How far has been read.
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    /// The next `n` bytes.
+    fn take(&mut self, n: usize) -> Result<&'a [u8], CryptoError> {
+        let end = self.at.checked_add(n).filter(|&e| e <= self.bytes.len()).ok_or(CryptoError::MalformedDeviceList)?;
+        let out = &self.bytes[self.at..end];
+        self.at = end;
+        Ok(out)
+    }
+
+    /// The next `N` bytes as an array.
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], CryptoError> {
+        Ok(self.take(N)?.try_into().expect("take returned N bytes"))
     }
 }
 
@@ -359,6 +487,67 @@ mod tests {
         public.prekey_signature[0] ^= 0x01;
 
         assert!(DeviceCredential::approve(&master, public, "Broken", 0).is_err());
+    }
+
+    #[test]
+    fn a_list_survives_encoding_and_still_verifies() {
+        let master = IdentityKeyPair::generate();
+        let desktop = DeviceKeyPair::generate();
+        let phone = DeviceKeyPair::generate();
+        let signed = list_of(&master, 3, vec![approve(&master, &desktop, "Desktop"), approve(&master, &phone, "Phone ✓")]);
+
+        let back = SignedDeviceList::decode(&signed.encode()).unwrap();
+        assert_eq!(back, signed);
+        assert!(back.verify().is_ok());
+    }
+
+    #[test]
+    fn a_damaged_or_padded_encoding_is_refused() {
+        let master = IdentityKeyPair::generate();
+        let desktop = DeviceKeyPair::generate();
+        let bytes = list_of(&master, 1, vec![approve(&master, &desktop, "Desktop")]).encode();
+
+        assert!(SignedDeviceList::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut padded = bytes.clone();
+        padded.push(0);
+        assert!(SignedDeviceList::decode(&padded).is_err());
+        // A count far past the cap is refused before anything is allocated.
+        let mut huge = bytes;
+        huge[40..44].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(SignedDeviceList::decode(&huge).is_err());
+    }
+
+    #[test]
+    fn adding_and_revoking_step_the_sequence() {
+        let master = IdentityKeyPair::generate();
+        let desktop = DeviceKeyPair::generate();
+        let phone = DeviceKeyPair::generate();
+        let one = list_of(&master, 1, vec![approve(&master, &desktop, "Desktop")]);
+
+        let two = one.with_device(&master, approve(&master, &phone, "Phone")).unwrap();
+        assert_eq!(two.list.sequence, 2);
+        assert!(two.accept(Some(1)).is_ok());
+        assert!(two.authorizes(&phone.public().identity_key));
+        assert_eq!(two.credential(&phone.public().identity_key).unwrap().name, "Phone");
+
+        // Approving the same device again replaces it rather than listing it twice.
+        let renamed = two.with_device(&master, approve(&master, &phone, "Pocket")).unwrap();
+        assert_eq!(renamed.devices().len(), 2);
+        assert_eq!(renamed.credential(&phone.public().identity_key).unwrap().name, "Pocket");
+
+        let three = renamed.without_device(&master, &phone.public().identity_key).unwrap();
+        assert!(!three.authorizes(&phone.public().identity_key));
+        assert!(three.authorizes(&desktop.public().identity_key));
+        assert!(three.accept(Some(renamed.list.sequence)).is_ok());
+    }
+
+    #[test]
+    fn a_credential_from_another_identity_is_not_added() {
+        let master = IdentityKeyPair::generate();
+        let mallory = IdentityKeyPair::generate();
+        let one = list_of(&master, 1, vec![]);
+        let theirs = approve(&mallory, &DeviceKeyPair::generate(), "Intruder");
+        assert!(one.with_device(&master, theirs).is_err());
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::{Action, Delivery, El, Line, Model, Msg, Person, Phase, ReactTarget, 
 
 /// The conversation with `person`: header, call stage, messages and composer.
 pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str) -> El<'a, Msg> {
-    let Some(person) = m.people.iter().find(|p| p.id == id) else {
+    let Some(person) = m.person(id) else {
         return container(empty(Icon::Users, "They are not in your contacts", "They may have been removed.")).center(Length::Fill).into();
     };
     let mut col = column![header(ui, m, person, false), divider()];
@@ -33,8 +33,23 @@ pub fn header<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -> 
     if person.verified {
         title = title.push(with_tip(icon(Icon::ShieldCheck, 15.0, p.ok), "Verified: you compared the words on a call", iced_widget::tooltip::Position::Bottom));
     }
-    let sub = if !person.address.is_empty() { person.address.as_str() } else { "Not reached yet" };
+    let sub = if person.note_to_self {
+        "Only you can read these. They sync to your other devices."
+    } else if !person.address.is_empty() {
+        person.address.as_str()
+    } else {
+        "Not reached yet"
+    };
     let mut r = row![].spacing(10).align_y(Alignment::Center);
+    if person.note_to_self {
+        // Nobody to call, no profile, no details panel: just the name.
+        if phone {
+            r = r.push(icon_btn(Icon::Back, "", Some(Msg::Back)));
+        }
+        r = r.push(avatar(&person.name, &person.id, 34.0));
+        r = r.push(column![title, faint(sub).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill));
+        return container(r).height(theme::HEADER_H).padding([0, if phone { 8 } else { 20 }]).align_y(Alignment::Center).into();
+    }
     if phone {
         r = r.push(icon_btn(Icon::Back, "", Some(Msg::Back)));
         // Who it is, as one button into their profile, the way a chat
@@ -119,6 +134,10 @@ pub fn messages<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -
 
 /// The big avatar and name at the top of the history.
 fn intro<'a>(m: &'a Model, person: &'a Person) -> El<'a, Msg> {
+    if person.note_to_self {
+        let line = "Links, lists, things to remember. Only you can read these, and they show up on every device signed in to your account.";
+        return column![avatar(&person.name, &person.id, 72.0), h1(person.name.as_str()), muted(line).size(13.5)].spacing(10).padding(pad(8.0, 0.0, 22.0, 0.0)).into();
+    }
     let mut line = format!("This is the start of your conversation with {}.", person.name);
     if !person.verified {
         line.push_str(" On your first call, compare the words on screen to make sure it is really them.");
@@ -279,7 +298,11 @@ fn message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line
     // list only for the message with focus: Tab would otherwise stop seven
     // times per message.
     crate::a11y::pause(!active);
-    let mut tools = row![super::reactions::quick(&target, 14.0)].spacing(2).align_y(Alignment::Center);
+    let mut tools = row![].spacing(2).align_y(Alignment::Center);
+    // Reacting to your own notes would tell nobody anything.
+    if !person.note_to_self {
+        tools = tools.push(super::reactions::quick(&target, 14.0));
+    }
     tools = tools.push(icon_btn(Icon::Back, "Reply", Some(Msg::Reply(Some(line.id)))));
     tools = tools.push(icon_btn(Icon::Sparkle, if line.pinned { "Unpin" } else { "Pin" }, Some(Msg::Do(Action::Pin { to: person.id.clone(), id: line.id, pinned: !line.pinned }))));
     if line.mine {
@@ -435,7 +458,11 @@ fn flat_message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a
     // The tools, over the message's top right while it is tapped (or has
     // the keyboard's focus); only then do they join the keyboard's list.
     crate::a11y::pause(!active);
-    let mut tools = row![super::reactions::quick(&target, 15.0)].spacing(2).align_y(Alignment::Center);
+    let mut tools = row![].spacing(2).align_y(Alignment::Center);
+    // Reacting to your own notes would tell nobody anything.
+    if !person.note_to_self {
+        tools = tools.push(super::reactions::quick(&target, 15.0));
+    }
     if line.file.is_none() && line.voice.is_none() {
         tools = tools.push(icon_btn(Icon::Back, "Reply", Some(Msg::Reply(Some(line.id)))));
         tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
@@ -666,7 +693,9 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     let conv = m.conversation.as_ref().filter(|c| c.person == person.id);
     let live = conv.is_some_and(|c| c.live);
     let queues = conv.is_some_and(|c| c.queues);
-    let placeholder = if live {
+    let placeholder = if person.note_to_self {
+        "Write yourself a note".to_string()
+    } else if live {
         format!("Message @{}", person.name)
     } else if queues {
         format!("Leave {} a message", person.name)
@@ -697,7 +726,7 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     // With a queue that outlives the call, a file can be chosen for anyone
     // at any time and goes at the next call with them.
     let on_call = live && m.call.with(&person.id);
-    let file_ok = m.device.files && (on_call || m.transfers.pick_anytime);
+    let file_ok = !person.note_to_self && m.device.files && (on_call || m.transfers.pick_anytime);
     let file_tip = match (file_ok, on_call) {
         (true, true) => "Send a file",
         (true, false) => "Send a file on your next call",
@@ -707,7 +736,7 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
         icon_btn(Icon::Paperclip, file_tip, file_ok.then_some(Msg::Do(Action::SendFile))),
         input,
         // With nothing typed, the button records a voice message instead.
-        if draft.trim().is_empty() && can_send && m.device.voice_messages {
+        if draft.trim().is_empty() && can_send && m.device.voice_messages && !person.note_to_self {
             icon_btn(Icon::Mic, "Record a voice message", Some(Msg::Do(Action::RecordVoice(person.id.clone()))))
         } else {
             icon_btn_kind(Icon::Send, "Send", if draft.trim().is_empty() { Btn::Icon } else { Btn::RowOn }, (can_send && !draft.trim().is_empty()).then_some(Msg::Send))
@@ -716,7 +745,9 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     .spacing(6)
     .align_y(Alignment::Center);
     let mut hint = row![icon(Icon::Lock, 11.0, p.faint), faint("End-to-end encrypted").size(11)].spacing(5).align_y(Alignment::Center);
-    if queues && !live {
+    if person.note_to_self {
+        hint = hint.push(faint("· Synced to your devices").size(11));
+    } else if queues && !live {
         hint = hint.push(faint("· It goes when they're next reachable").size(11));
     }
     if let Some(e) = conv.and_then(|c| c.expiry.as_deref()) {

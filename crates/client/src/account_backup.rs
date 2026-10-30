@@ -110,6 +110,18 @@ struct Layout {
 /// Folders that only come along with history, the same on both apps.
 const HISTORY_DIRS: [&str; 2] = ["history", "outbox"];
 
+/// Files both apps keep the same way and that always come along: the
+/// account's signed device list (see `crate::devices`). The device's own
+/// `device.key` is never one of them -- it belongs to the device, not the
+/// account.
+const SHARED_FILES: [&str; 1] = ["devices.list"];
+
+/// Files that belong to this device rather than the account: never put
+/// in a bundle, and gone when the device signs out. (A restore keeps the
+/// device key, so the device stays itself, and sets the pending mail
+/// aside with the old account it was meant for.)
+const DEVICE_FILES: [&str; 2] = ["device.key", "devices.outbox"];
+
 /// One account, ready to seal.
 pub struct Bundle {
     /// The kind of app that made it.
@@ -292,7 +304,7 @@ pub fn gather(
 ) -> std::io::Result<Bundle> {
     let layout = platform.layout();
     let mut files = Vec::new();
-    for name in layout.files {
+    for name in layout.files.iter().chain(&SHARED_FILES) {
         read_into(dir, name, &mut files)?;
     }
     for name in layout.dirs {
@@ -337,7 +349,8 @@ pub fn apply(dir: &Path, platform: Platform, bundle: &Bundle) -> std::io::Result
     // Everything that makes up an account on this device, whichever way
     // the bundle was made: the old account must not leak into the new.
     let layout = platform.layout();
-    let mut ours: Vec<&str> = vec!["identity.key", "backup.key"];
+    let mut ours: Vec<&str> = vec!["identity.key", "backup.key", "devices.outbox"];
+    ours.extend(SHARED_FILES);
     ours.extend(layout.files);
     ours.extend(layout.dirs);
     ours.extend(layout.history_files);
@@ -360,10 +373,11 @@ pub fn apply(dir: &Path, platform: Platform, bundle: &Bundle) -> std::io::Result
             write_file(dir, path, data)?;
         }
     } else {
-        // History and the outbox are one format on both apps; everything
-        // else is the other app's own file and is translated below.
+        // History, the outbox and the device list are one format on both
+        // apps; everything else is the other app's own file and is
+        // translated below.
         for (path, data) in &bundle.files {
-            if HISTORY_DIRS.iter().any(|d| path.starts_with(&format!("{d}/"))) {
+            if HISTORY_DIRS.iter().any(|d| path.starts_with(&format!("{d}/"))) || SHARED_FILES.contains(&path.as_str()) {
                 write_file(dir, path, data)?;
             }
         }
@@ -415,6 +429,31 @@ pub fn apply(dir: &Path, platform: Platform, bundle: &Bundle) -> std::io::Result
         }
     }
     Ok(Applied { set_aside: moved.then_some(aside), display_name: bundle.display_name(), contacts: bundle.contact_count() })
+}
+
+/// Takes the account off this device for good: what happens when another
+/// of the account's devices removes this one (see `crate::device_sync`).
+///
+/// Unlike a restore, nothing is set aside -- a removed device is most
+/// often a lost or stolen one, and a copy kept beside the original would
+/// defeat the point. The identity, the history key, this device's own key
+/// and every account file go; the app starts again as a new install.
+pub fn sign_out(dir: &Path, platform: Platform) -> std::io::Result<()> {
+    let layout = platform.layout();
+    let files = ["identity.key", "backup.key"].into_iter().chain(SHARED_FILES).chain(DEVICE_FILES).chain(layout.files.iter().copied()).chain(layout.history_files.iter().copied());
+    for name in files {
+        match std::fs::remove_file(dir.join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    for name in layout.dirs.iter().copied().chain(HISTORY_DIRS) {
+        match std::fs::remove_dir_all(dir.join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Replaces only the identity, from a recovery phrase or shares: the old
@@ -591,6 +630,41 @@ mod tests {
         std::fs::create_dir_all(dir.join("history")).unwrap();
         std::fs::write(dir.join("history").join("abab.hist"), b"sealed history").unwrap();
         (IdentityKeyPair::generate(), BackupKey::generate())
+    }
+
+    #[test]
+    fn the_device_list_travels_and_the_device_key_never_does() {
+        let from = temp("devices-from");
+        let (id, key) = desktop_account(&from);
+        std::fs::write(from.join("devices.list"), b"signed list").unwrap();
+        std::fs::write(from.join("device.key"), b"this device only").unwrap();
+        let bundle = gather(&from, Platform::Desktop, &id, &key, false).unwrap();
+        assert!(bundle.files.iter().any(|(p, d)| p == "devices.list" && d == b"signed list"));
+        assert!(bundle.files.iter().all(|(p, _)| p != "device.key"));
+
+        // Across to a phone too: the list is the same format on both.
+        let to = temp("devices-to");
+        std::fs::write(to.join("device.key"), b"the phone's own").unwrap();
+        apply(&to, Platform::Phone, &Bundle::decode(&bundle.encode()).unwrap()).unwrap();
+        assert_eq!(std::fs::read(to.join("devices.list")).unwrap(), b"signed list");
+        assert_eq!(std::fs::read(to.join("device.key")).unwrap(), b"the phone's own");
+    }
+
+    #[test]
+    fn signing_out_leaves_nothing_of_the_account() {
+        let dir = temp("sign-out");
+        desktop_account(&dir);
+        for name in ["identity.key", "backup.key", "device.key", "devices.list", "devices.outbox"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.join("unrelated.log"), b"kept").unwrap();
+        sign_out(&dir, Platform::Desktop).unwrap();
+        for name in ["identity.key", "backup.key", "device.key", "devices.list", "devices.outbox", "config.json", "history"] {
+            assert!(!dir.join(name).exists(), "{name} is gone");
+        }
+        assert!(dir.join("unrelated.log").exists());
+        // Twice is fine: nothing left is not an error.
+        sign_out(&dir, Platform::Desktop).unwrap();
     }
 
     #[test]

@@ -25,10 +25,21 @@
 //! # The exchange
 //!
 //! ```text
-//! new -> old : "STOOPMV1" hello[32]
+//! new -> old : "STOOPMV2" hello[32] device[128] device_proof[32]
 //! old -> new : length u64 BE, sealed account
 //! new -> old : "OK"
 //! ```
+//!
+//! `device` is the new device's own public keys (spec §3 "new devices
+//! added by approving them from an existing device"): the old device signs
+//! them into the account's device list before it seals the account, so the
+//! list the new device receives already names it. `device_proof` binds
+//! those keys to the link the same way `hello` does, so someone relaying
+//! the connection can't swap in keys of their own and get *them* approved.
+//!
+//! The first version's greeting -- `"STOOPMV1" hello[32]`, no device -- is
+//! still accepted; the account then arrives without a new entry in the
+//! list, and the new device signs itself in on its first start.
 //!
 //! Blocking `std::net` on a thread of its own, rather than tokio: it is a
 //! single connection, it runs once in a device's life, and both apps can
@@ -40,6 +51,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use antiphon_crypto::PublicIdentity;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -47,10 +59,14 @@ use zeroize::Zeroizing;
 const SCHEME: &str = "stoop-move:";
 /// The link layout this module writes.
 const LINK_VERSION: &str = "1";
-/// The first bytes the receiving device sends.
+/// The first bytes a receiving device without its own keys sends.
 const HELLO_MAGIC: &[u8; 8] = b"STOOPMV1";
+/// The first bytes a receiving device sends when its own public keys follow.
+const HELLO_MAGIC_V2: &[u8; 8] = b"STOOPMV2";
 /// Label for the hello proof, so it is never the same bytes as the AEAD key.
 const HELLO_LABEL: &[u8] = b"stoop/account-move/hello/v1";
+/// Label for the proof that binds the new device's keys to the link.
+const DEVICE_LABEL: &[u8] = b"stoop/account-move/device/v1";
 /// How long a move offer stays open.
 pub const OFFER_LIFETIME: Duration = Duration::from_secs(10 * 60);
 /// How long either side waits on a quiet connection.
@@ -124,14 +140,28 @@ pub struct MoveSender {
     stop: Arc<AtomicBool>,
 }
 
+/// Makes the account to send once the new device has said who it is: its
+/// public keys (`None` from a device that sent none), in, the encoded
+/// account bundle, not yet sealed, out. Called again if a first attempt
+/// was cut off partway, so it must be safe to repeat for the same device.
+pub type MakeAccount = Box<dyn FnMut(Option<&PublicIdentity>) -> Result<Vec<u8>, String> + Send>;
+
 impl MoveSender {
     /// Opens an offer for `account` (an encoded bundle, not yet sealed) on
     /// `ip`, which should be this device's address on the local network
     /// ([`lan_ip`]). The account is sealed here, under a key made here.
     pub fn start(account: &[u8], ip: IpAddr) -> std::io::Result<Self> {
+        let account = account.to_vec();
+        Self::start_approving(Box::new(move |_| Ok(account.clone())), ip)
+    }
+
+    /// Opens an offer whose account is made only after the new device has
+    /// proved it holds the link and named its own keys, so `make` can
+    /// approve that device into the account's device list and send the
+    /// list along. See [`MakeAccount`].
+    pub fn start_approving(make: MakeAccount, ip: IpAddr) -> std::io::Result<Self> {
         let mut key = [0u8; 32];
         getrandom::fill(&mut key).map_err(|e| std::io::Error::other(e.to_string()))?;
-        let sealed = antiphon_crypto::account_seal::seal_with_key(account, &key).map_err(|e| std::io::Error::other(e.to_string()))?;
         let listener = TcpListener::bind(SocketAddr::new(ip, 0))?;
         // Polled, so the thread notices a stop or the deadline between
         // connection attempts.
@@ -143,7 +173,7 @@ impl MoveSender {
         let thread_stop = stop.clone();
         std::thread::Builder::new()
             .name("account-move".into())
-            .spawn(move || serve(listener, key, sealed, thread_status, thread_stop))?;
+            .spawn(move || serve(listener, key, make, thread_status, thread_stop))?;
         Ok(MoveSender { link, status, stop })
     }
 
@@ -172,7 +202,7 @@ impl Drop for MoveSender {
 /// The offer's thread: accepts until one device takes the account, the
 /// offer is stopped, or it expires. A connection that fails the hello is
 /// dropped and the offer stays open for the real one.
-fn serve(listener: TcpListener, key: [u8; 32], sealed: Vec<u8>, status: Arc<Mutex<MoveStatus>>, stop: Arc<AtomicBool>) {
+fn serve(listener: TcpListener, key: [u8; 32], mut make: MakeAccount, status: Arc<Mutex<MoveStatus>>, stop: Arc<AtomicBool>) {
     let key = Zeroizing::new(key);
     let deadline = Instant::now() + OFFER_LIFETIME;
     let set = |s: MoveStatus| *status.lock().unwrap() = s;
@@ -186,13 +216,19 @@ fn serve(listener: TcpListener, key: [u8; 32], sealed: Vec<u8>, status: Arc<Mute
             return;
         }
         match listener.accept() {
-            Ok((stream, _)) => match send_to(stream, &key, &sealed, &set) {
+            Ok((stream, _)) => match send_to(stream, &key, &mut make, &set) {
                 Ok(true) => {
                     set(MoveStatus::Done);
                     return;
                 }
                 // Not someone with the link: keep waiting for them.
                 Ok(false) => set(MoveStatus::Waiting),
+                // The account could not be made for this device: nothing
+                // was sent, and trying again would fail the same way.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    set(MoveStatus::Failed(e.to_string()));
+                    return;
+                }
                 // The real device, cut off partway: it can open the link
                 // again, so the offer stays open for its retry.
                 Err(_) => set(MoveStatus::Waiting),
@@ -207,8 +243,9 @@ fn serve(listener: TcpListener, key: [u8; 32], sealed: Vec<u8>, status: Arc<Mute
 }
 
 /// Serves one connection. `Ok(false)` when it did not prove it holds the
-/// link, `Ok(true)` when it took the account and said so.
-fn send_to(mut stream: TcpStream, key: &[u8; 32], sealed: &[u8], set: &dyn Fn(MoveStatus)) -> std::io::Result<bool> {
+/// link, `Ok(true)` when it took the account and said so. An error of kind
+/// `InvalidData` means `make` refused, before anything was sent.
+fn send_to(mut stream: TcpStream, key: &[u8; 32], make: &mut MakeAccount, set: &dyn Fn(MoveStatus)) -> std::io::Result<bool> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -216,29 +253,68 @@ fn send_to(mut stream: TcpStream, key: &[u8; 32], sealed: &[u8], set: &dyn Fn(Mo
     if stream.read_exact(&mut greeting).is_err() {
         return Ok(false);
     }
-    if &greeting[..8] != HELLO_MAGIC || !same(&greeting[8..], &hello(key)) {
+    let with_device = match &greeting[..8] {
+        m if m == HELLO_MAGIC => false,
+        m if m == HELLO_MAGIC_V2 => true,
+        _ => return Ok(false),
+    };
+    if !same(&greeting[8..], &hello(key)) {
         return Ok(false);
     }
+    let device = if with_device {
+        let mut rest = [0u8; PublicIdentity::ENCODED_LEN + 32];
+        if stream.read_exact(&mut rest).is_err() {
+            return Ok(false);
+        }
+        let (keys, proof) = rest.split_at(PublicIdentity::ENCODED_LEN);
+        // Keys not bound to this link, or whose own prekey signature is
+        // broken, are treated like a wrong hello: never approved.
+        if !same(proof, &device_proof(key, keys)) {
+            return Ok(false);
+        }
+        match PublicIdentity::decode(keys).and_then(|d| d.verify().map(|()| d)) {
+            Ok(d) => Some(d),
+            Err(_) => return Ok(false),
+        }
+    } else {
+        None
+    };
     set(MoveStatus::Sending);
+    let account = Zeroizing::new(make(device.as_ref()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);
+    let sealed = antiphon_crypto::account_seal::seal_with_key(&account, key).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     stream.write_all(&(sealed.len() as u64).to_be_bytes())?;
-    stream.write_all(sealed)?;
+    stream.write_all(&sealed)?;
     stream.flush()?;
     let mut ok = [0u8; 2];
     stream.read_exact(&mut ok)?;
     Ok(&ok == b"OK")
 }
 
-/// Fetches the account a link offers: the encoded bundle, opened.
+/// Fetches the account a link offers: the encoded bundle, opened. Names no
+/// device of its own; [`receive_as`] is the one that gets this device
+/// approved on the way.
 pub fn receive(link: &MoveLink) -> Result<Zeroizing<Vec<u8>>, String> {
+    receive_as(link, None)
+}
+
+/// Fetches the account a link offers, telling the old device this
+/// device's own public keys so it approves them into the account's device
+/// list before sending.
+pub fn receive_as(link: &MoveLink, device: Option<&PublicIdentity>) -> Result<Zeroizing<Vec<u8>>, String> {
     let unreachable = |e: std::io::Error| {
         format!("Couldn't reach the other device ({e}). Both need to be on the same Wi-Fi, with its Move screen still open.")
     };
     let mut stream = TcpStream::connect_timeout(&link.addr, Duration::from_secs(10)).map_err(unreachable)?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(|e| e.to_string())?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(|e| e.to_string())?;
-    let mut greeting = Vec::with_capacity(40);
-    greeting.extend_from_slice(HELLO_MAGIC);
+    let mut greeting = Vec::with_capacity(8 + 32 + PublicIdentity::ENCODED_LEN + 32);
+    greeting.extend_from_slice(if device.is_some() { HELLO_MAGIC_V2 } else { HELLO_MAGIC });
     greeting.extend_from_slice(&hello(&link.key));
+    if let Some(device) = device {
+        let keys = device.encode();
+        greeting.extend_from_slice(&keys);
+        greeting.extend_from_slice(&device_proof(&link.key, &keys));
+    }
     stream.write_all(&greeting).map_err(unreachable)?;
 
     let lost = |e: std::io::Error| format!("The connection dropped partway ({e}). Try again.");
@@ -261,6 +337,16 @@ fn hello(key: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(HELLO_LABEL);
     h.update(key);
+    h.finalize().into()
+}
+
+/// The proof that `device` (its encoded public keys) came from whoever
+/// holds the link's key.
+fn device_proof(key: &[u8; 32], device: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(DEVICE_LABEL);
+    h.update(key);
+    h.update(device);
     h.finalize().into()
 }
 
@@ -323,6 +409,60 @@ mod tests {
         assert!(receive(&wrong).is_err());
         let got = receive(sender.link()).unwrap();
         assert_eq!(&**got, b"secret");
+    }
+
+    #[test]
+    fn the_new_device_is_named_to_the_old_one() {
+        let phone = antiphon_crypto::IdentityKeyPair::generate().public();
+        let seen = Arc::new(Mutex::new(None));
+        let seen_by_offer = seen.clone();
+        let sender = MoveSender::start_approving(
+            Box::new(move |device| {
+                *seen_by_offer.lock().unwrap() = device.copied();
+                Ok(b"account with the phone approved".to_vec())
+            }),
+            "127.0.0.1".parse().unwrap(),
+        )
+        .unwrap();
+        let got = receive_as(sender.link(), Some(&phone)).unwrap();
+        assert_eq!(&**got, b"account with the phone approved");
+        assert_eq!(*seen.lock().unwrap(), Some(phone));
+        assert_eq!(settle(&sender), MoveStatus::Done);
+    }
+
+    #[test]
+    fn swapped_device_keys_are_never_approved() {
+        let approved = Arc::new(AtomicBool::new(false));
+        let flag = approved.clone();
+        let sender = MoveSender::start_approving(
+            Box::new(move |_| {
+                flag.store(true, Ordering::Relaxed);
+                Ok(b"x".to_vec())
+            }),
+            "127.0.0.1".parse().unwrap(),
+        )
+        .unwrap();
+        // Someone relaying the connection keeps the hello but puts in keys
+        // of their own; the proof was made over the real ones.
+        let real = antiphon_crypto::IdentityKeyPair::generate().public().encode();
+        let theirs = antiphon_crypto::IdentityKeyPair::generate().public().encode();
+        let mut stream = TcpStream::connect(sender.link().addr).unwrap();
+        stream.write_all(HELLO_MAGIC_V2).unwrap();
+        stream.write_all(&hello(&sender.link().key)).unwrap();
+        stream.write_all(&theirs).unwrap();
+        stream.write_all(&device_proof(&sender.link().key, &real)).unwrap();
+        let mut buf = [0u8; 8];
+        assert!(stream.read_exact(&mut buf).is_err(), "nothing is sent");
+        assert!(!approved.load(Ordering::Relaxed));
+        // The offer is still open for the real device.
+        assert!(receive(sender.link()).is_ok());
+    }
+
+    #[test]
+    fn a_refused_device_fails_the_offer_without_sending() {
+        let sender = MoveSender::start_approving(Box::new(|_| Err("no room".into())), "127.0.0.1".parse().unwrap()).unwrap();
+        assert!(receive(sender.link()).is_err());
+        assert_eq!(settle(&sender), MoveStatus::Failed("no room".into()));
     }
 
     #[test]

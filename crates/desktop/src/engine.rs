@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use antiphon_audio::{ChainConfig, GainConfig};
 use antiphon_client::control::{ControlMessage, Hello, ProfileCard};
+use antiphon_client::device_sync::NoteOp;
 use antiphon_client::transfer_queue::{self, Entry, TransferQueue};
 use antiphon_client::voice_message::{self, VoiceLink};
 use antiphon_client::state::{self, AppState, TransmitSettings, MODE_OPEN_MIC, MODE_PTT, MODE_VOICE_ACTIVATION};
@@ -317,6 +318,9 @@ pub struct Engine {
     playing: Option<(String, u64, antiphon_audio::PlaybackHandle, Instant)>,
     /// Settings > Account & backup: phrase, backup files, moving devices.
     account: crate::account::AccountState,
+    /// This computer as one of the account's devices, and notes to self.
+    /// `None` without a data folder or history key to keep them in.
+    devices: Option<crate::my_devices::MyDevices>,
     /// The voice channel we are in, if any.
     voice: Option<VoiceRoom>,
     /// What the community directories listed at the last look.
@@ -393,9 +397,16 @@ impl Engine {
             voice_waiting: None,
             playing: None,
             account: Default::default(),
+            devices: None,
             voice: None,
             directory: ui::Directory::default(),
         };
+        if let (Some(dir), Some(key)) = (&engine.dir, &engine.key) {
+            match crate::my_devices::MyDevices::start(&engine.state.runtime, dir, engine.state.identity.clone(), key.clone()) {
+                Ok(d) => engine.devices = Some(d),
+                Err(e) => eprintln!("[devices] {e}"),
+            }
+        }
         engine.load_previews();
         engine.api_seen = engine.previews.clone();
         engine.set_api(engine.cfg.local_api || crate::has_flag("--api"));
@@ -439,6 +450,22 @@ impl Engine {
     pub fn tick(&mut self, open: Option<&str>) {
         let outcomes = self.account.tick();
         self.account_outcomes(outcomes);
+        // Another of your devices changed the notes or the device list, or
+        // removed this one.
+        if let Some(changes) = self.devices.as_mut().map(|d| d.poll()) {
+            if changes.removed {
+                self.devices = None;
+                self.toast("This computer was removed from your account on another device. Signing out…", ToastKind::Warn);
+                self.out.push(Out::Relaunch);
+                return;
+            }
+            if changes.changed {
+                self.load_previews();
+                if self.conv.as_ref().is_some_and(|c| !c.live) {
+                    self.conv = None;
+                }
+            }
+        }
         let events = std::mem::take(&mut *self.events.lock().unwrap());
         for e in events {
             self.on_event(e);
@@ -1015,14 +1042,13 @@ impl Engine {
     /// Reads the last saved message of every contact, for the list previews.
     fn load_previews(&mut self) {
         let (Some(dir), Some(key)) = (&self.dir, &self.key) else { return };
-        for c in &self.cfg.contacts {
-            if c.identity_key.is_empty() {
-                continue;
-            }
-            let log = history::load(dir, &c.identity_key, key);
+        let notes = self.devices.as_ref().map(|d| d.notes_id());
+        for id in self.cfg.contacts.iter().map(|c| &c.identity_key).filter(|k| !k.is_empty()).chain(&notes) {
+            let log = history::load(dir, id, key);
             if let Some(m) = log.iter().rev().find(|m| !m.deleted) {
-                let text = if m.from_me { format!("You: {}", m.text) } else { m.text.clone() };
-                self.previews.insert(c.identity_key.clone(), (text, m.at_secs));
+                // Every note is yours; "You:" in front of each would say nothing.
+                let text = if m.from_me && notes.as_ref() != Some(id) { format!("You: {}", m.text) } else { m.text.clone() };
+                self.previews.insert(id.clone(), (text, m.at_secs));
             }
         }
     }
@@ -1610,8 +1636,14 @@ impl Engine {
             // the history doesn't hold is dropped on the way and the
             // message goes plain.
             A::Send { to, text, reply_to } => {
-                let preview = format!("You: {text}");
-                if self.call_with(&to) {
+                let notes = self.devices.as_ref().filter(|d| d.notes_id() == to);
+                let preview = if notes.is_some() { text.clone() } else { format!("You: {text}") };
+                if let Some(d) = notes {
+                    match d.add_note(&text) {
+                        Ok(()) => self.conv = None,
+                        Err(e) => self.toast(format!("Couldn't save the note: {e}"), ToastKind::Err),
+                    }
+                } else if self.call_with(&to) {
                     self.with_call(|a| a.send_reply(&rt, text, reply_to));
                 } else if let Some(c) = find_contact(&self.cfg, &to) {
                     match delivery::leave_reply(&c.identity_key, &text, c.expire_after_secs, reply_to) {
@@ -1627,6 +1659,7 @@ impl Engine {
                 } else if let (Some(dir), Some(key)) = (&self.dir, &self.key) {
                     history::apply_edit(dir, &to, key, id, true, &text);
                     self.conv = None;
+                    self.share_note(&to, NoteOp::Edit { id, text });
                 }
             }
             A::Delete { to, id } => {
@@ -1635,6 +1668,7 @@ impl Engine {
                 } else if let (Some(dir), Some(key)) = (&self.dir, &self.key) {
                     history::apply_delete(dir, &to, key, id, true);
                     self.conv = None;
+                    self.share_note(&to, NoteOp::Delete { id });
                 }
             }
             A::React { to, id, emoji } => {
@@ -1650,6 +1684,7 @@ impl Engine {
                 } else if let (Some(dir), Some(key)) = (&self.dir, &self.key) {
                     history::set_pinned(dir, &to, key, id, pinned);
                     self.conv = None;
+                    self.share_note(&to, NoteOp::Pin { id, pinned });
                 }
             }
             A::SendFile => self.send_file(),
@@ -2044,6 +2079,11 @@ impl Engine {
                     Err(why) => self.toast(why, ToastKind::Err),
                 }
             }
+            A::RevokeDevice(id) => match self.devices.as_mut().map(|d| d.revoke(&id)) {
+                Some(Ok(name)) => self.toast(format!("{name} was removed from your account. It signs out when it next hears from your devices."), ToastKind::Ok),
+                Some(Err(e)) => self.toast(e, ToastKind::Err),
+                None => self.toast("Your device list didn't load on this computer.", ToastKind::Err),
+            },
             a @ (A::ShowPhrase(_)
             | A::Restore(_)
             | A::BackupSave { .. }
@@ -2052,7 +2092,8 @@ impl Engine {
             | A::MoveStop
             | A::MoveReceive(_)) => {
                 let in_call = self.busy();
-                let ctx = crate::account::Ctx { dir: self.dir.as_deref(), identity: &self.state.identity, key: self.key.as_ref(), in_call };
+                let device = self.devices.as_ref().map(|d| d.device());
+                let ctx = crate::account::Ctx { dir: self.dir.as_deref(), identity: &self.state.identity, key: self.key.as_ref(), device, in_call };
                 let outcomes = self.account.act(a, ctx);
                 self.account_outcomes(outcomes);
             }
@@ -2633,12 +2674,19 @@ impl Engine {
         let (communities, space_invites, channel) = self.spaces.model(viewing.as_ref().map(|(id, ch)| (id.as_str(), *ch)));
         let me = self.me();
         let people = self.people();
+        let notes = self.notes();
         let mut call = self.call_model();
         call.video = self.video_tiles();
         let conversation = open.and_then(|id| self.conversation(id));
+        let mut account = self.account.model(&self.state.identity);
+        if let Some(d) = &self.devices {
+            account.devices = d.rows();
+            account.device_sync = crate::my_devices::MyDevices::sync_line(&self.cfg);
+        }
         ui::Model {
             me,
             people,
+            notes,
             call,
             conversation,
             transfers: self.transfers(),
@@ -2653,7 +2701,7 @@ impl Engine {
             },
             device: ui::Device { phone: false, files: true, ptt_keys: true, communities: true, voice_messages: true },
             phone: None,
-            account: self.account.model(&self.state.identity),
+            account,
             communities,
             space_invites,
             channel,
@@ -2663,12 +2711,25 @@ impl Engine {
         }
     }
 
+    /// Sends a note change made here to the account's other devices, when
+    /// `to` is the notes conversation.
+    fn share_note(&self, to: &str, op: NoteOp) {
+        if let Some(d) = self.devices.as_ref().filter(|d| d.notes_id() == to) {
+            d.share(op);
+        }
+    }
+
     /// Carries out what the account section asked for.
     fn account_outcomes(&mut self, outcomes: Vec<crate::account::Outcome>) {
         for o in outcomes {
             match o {
                 crate::account::Outcome::Toast(text, kind) => self.toast(text, kind),
                 crate::account::Outcome::Relaunch => self.out.push(Out::Relaunch),
+                crate::account::Outcome::DevicesChanged => {
+                    if let Some(d) = self.devices.as_mut() {
+                        d.reload();
+                    }
+                }
             }
         }
     }
@@ -2746,6 +2807,7 @@ impl Engine {
                     muted: c.muted,
                     pronouns: c.pronouns.clone(),
                     bio: c.bio.clone(),
+                    note_to_self: false,
                     id,
                 }
             })
@@ -2756,6 +2818,21 @@ impl Engine {
             at(b).cmp(&at(a)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         people
+    }
+
+    /// Notes to self as the list shows them, when this computer keeps them.
+    fn notes(&self) -> Option<ui::Person> {
+        let id = self.devices.as_ref()?.notes_id();
+        let (last, last_at) = match self.previews.get(&id) {
+            Some((text, at)) => (Some(text.clone()), Some(short_time(*at))),
+            None => (None, None),
+        };
+        Some(ui::Person { name: crate::my_devices::NOTES_NAME.into(), last, last_at, note_to_self: true, id, ..Default::default() })
+    }
+
+    /// Whether `id` is the notes-to-self conversation.
+    fn is_notes(&self, id: &str) -> bool {
+        self.devices.as_ref().is_some_and(|d| d.notes_id() == id)
     }
 
     /// The call as the interface shows it.
@@ -3033,6 +3110,16 @@ impl Engine {
 
     /// The conversation with `id`, rebuilt only when something changed.
     fn conversation(&mut self, id: &str) -> Option<ui::Conversation> {
+        if self.is_notes(id) {
+            let stale = self.conv.as_ref().is_none_or(|c| c.person != id || c.live);
+            if stale {
+                self.conv = Some(ConvCache { person: id.to_string(), live: false, rev: 0, lines: self.stored_lines(id) });
+            }
+            let lines = self.conv.as_ref().map(|c| c.lines.clone()).unwrap_or_default();
+            // Always "queues": a note is written here at once, and reaches
+            // the other devices through the mailboxes.
+            return Some(ui::Conversation { person: id.to_string(), lines, queues: true, ..Default::default() });
+        }
         let contact = find_contact(&self.cfg, id)?.clone();
         let live = self.call_with(id);
         let rev = if live { self.with_call(|a| a.chat_rev.load(Ordering::Relaxed)).unwrap_or(0) } else { 0 };

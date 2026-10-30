@@ -102,6 +102,18 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, d: &'a Dialog, rise: f32) -> El<'a, Ms
                 rise,
             )
         }
+        Dialog::ConfirmRevokeDevice(id) => {
+            let name = m.account.devices.iter().find(|d| &d.id == id).map(|d| d.name.as_str()).unwrap_or("that device");
+            let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Remove device", Btn::DangerSolid, Some(Msg::Do(Action::RevokeDevice(id.clone()))))].spacing(8);
+            modal(
+                "Remove this device?",
+                muted(format!("{name} stops being part of your account. Your other devices stop sharing anything with it, and the next time it hears from them it signs out and erases the account from itself. Use this for a lost or stolen device.")).size(14),
+                Some(footer.into()),
+                480.0,
+                close,
+                rise,
+            )
+        }
         Dialog::ConfirmReceive => {
             let receive = Action::MoveReceive(ui.receive_link.trim().to_string());
             let footer = row![btn("Cancel", Btn::Ghost, Some(Msg::Dialog(None))), btn("Receive and replace", Btn::DangerSolid, Some(Msg::Do(receive)))].spacing(8);

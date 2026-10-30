@@ -87,6 +87,10 @@ mod content_store;
 mod control;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[path = "../../client/src/devices.rs"]
+mod devices;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/file_integrity.rs"]
 mod file_integrity;
 #[cfg(any(target_os = "android", target_os = "ios"))]

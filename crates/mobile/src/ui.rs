@@ -530,6 +530,7 @@ impl App {
             installing: None,
             update_seen: Default::default(),
         };
+        app.load_devices();
         app.refresh();
         Ok(app)
     }
@@ -547,6 +548,17 @@ impl App {
             // So is an update being looked for or downloaded, whose thread
             // has no way to wake the runner itself.
             || matches!(self.updater.status(), antiphon_update::Status::Checking | antiphon_update::Status::Downloading { .. })
+    }
+
+    /// Makes sure this phone is on the account's device list and reads the
+    /// list for Settings; a problem is shown as a toast.
+    fn load_devices(&mut self) {
+        let Ok(identity) = &self.identity else { return };
+        for o in self.account.load_devices(&self.dir, identity) {
+            if let crate::account::Outcome::Toast(text, kind) = o {
+                self.stoop.toast(text, kind);
+            }
+        }
     }
 
     /// Rebuilds the whole app from what is on disk, after a restore wrote
@@ -1371,6 +1383,8 @@ impl App {
                 // contacts of the restored one would refuse it.
                 self.push = crate::push::Push::load(&self.dir, Some(&restored));
                 self.identity = Ok(restored);
+                // A new account: this phone signs itself into its list.
+                self.load_devices();
                 self.notice = Some("Identity restored.".into());
                 self.restore_text.clear();
                 self.restore_armed = false;

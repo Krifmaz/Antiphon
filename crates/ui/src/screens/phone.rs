@@ -47,7 +47,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let banner_on_top = matches!(ui.route, Route::Profile(_)) && !call_strip && m.notice.is_none() && !update::shown(m);
     let banner_top = if banner_on_top { top } else { 0.0 };
     let screen: El<'a, Msg> = match &ui.route {
-        Route::Person(id) => match m.people.iter().find(|p| &p.id == id) {
+        Route::Person(id) => match m.person(id) {
             Some(person) => chat(ui, m, person),
             None => home(ui, m, messages_pane(ui, m)),
         },
@@ -220,12 +220,13 @@ fn messages_pane<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     .spacing(12)
     .padding(pad(16.0, 12.0, 8.0, 14.0));
 
-    let body: El<'a, Msg> = if m.people.is_empty() {
+    let body: El<'a, Msg> = if m.people.is_empty() && m.notes.is_none() {
         get_started()
     } else {
         let query = ui.search.trim().to_lowercase();
         let mut list = column![].spacing(2).padding(pad(0.0, 6.0, 12.0, 6.0));
-        for person in m.people.iter().filter(|x| query.is_empty() || x.name.to_lowercase().contains(&query)) {
+        // Notes to self first, the way a chat app keeps "saved" at the top.
+        for person in m.notes.iter().chain(&m.people).filter(|x| query.is_empty() || x.name.to_lowercase().contains(&query)) {
             list = list.push(dm_row(m, person));
         }
         scrollable(list).height(Length::Fill).style(theme::scroll).into()

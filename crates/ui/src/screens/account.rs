@@ -6,10 +6,13 @@
 //! rest in Account & backup's tabs):
 //!
 //! 1. **Move to another device** -- the easy path when the old device is
-//!    still in hand: a link and QR code, the new device opens it.
-//! 2. **Backup file** -- a passphrase-locked file to keep somewhere safe,
+//!    still in hand: a link and QR code, the new device opens it. The
+//!    device that sends approves the new one into the account.
+//! 2. **Your devices** -- every device on the account, and removing one
+//!    that was lost or stolen.
+//! 3. **Backup file** -- a passphrase-locked file to keep somewhere safe,
 //!    for when the device is lost.
-//! 3. **Recovery phrase** -- 24 words on paper, the last resort: it brings
+//! 4. **Recovery phrase** -- 24 words on paper, the last resort: it brings
 //!    back who you are, not your contacts.
 //!
 //! Each restore replaces this device's account and asks first (see
@@ -76,7 +79,8 @@ fn identity<'a>(m: &'a Model) -> El<'a, Msg> {
     titled_card("Your identity", Some("Made on this device and never sent anywhere. People who verified you know this fingerprint."), body)
 }
 
-/// Settings > Devices: moving this account to another device.
+/// Settings > Devices: moving this account to another device, and the
+/// devices already on it.
 pub fn devices<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let idle = m.account.busy.is_none();
     let mut cards = column![].spacing(16);
@@ -88,6 +92,11 @@ pub fn devices<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
             "Move to another device",
             Some("Old device still with you? Open this here, then open the link on the new one. Both need to be on the same Wi-Fi."),
             moving(ui, m, idle),
+        ))
+        .push(titled_card(
+            "Your devices",
+            Some("Every device signed in to this account. Each has its own key; removing one stops your other devices sharing with it and signs it out."),
+            device_list(m),
         ))
         .into()
 }
@@ -143,6 +152,31 @@ fn moving<'a>(ui: &'a Ui, m: &'a Model, idle: bool) -> El<'a, Msg> {
     }
     buttons = buttons.push(btn(if mv.done { "Done" } else { "Stop" }, Btn::Ghost, Some(Msg::Do(Action::MoveStop))));
     col.push(buttons).into()
+}
+
+/// The account's devices, each with a way to remove it (but this one).
+fn device_list<'a>(m: &'a Model) -> El<'a, Msg> {
+    let a = &m.account;
+    let mut col = column![].spacing(10);
+    if a.devices.is_empty() {
+        col = col.push(faint("Your device list hasn't loaded.").size(13));
+    }
+    for d in &a.devices {
+        let mut name = row![t(d.name.as_str()).size(14).font(theme::semibold())].spacing(8).align_y(Alignment::Center);
+        if d.this {
+            name = name.push(faint("This device").size(12));
+        }
+        let info = column![name, faint(format!("{} · {}", d.added, d.fingerprint)).size(12)].spacing(2).width(Length::Fill);
+        let mut r = row![info].spacing(10).align_y(Alignment::Center);
+        if !d.this && a.can_remove_devices {
+            r = r.push(btn("Remove", Btn::Ghost, Some(Msg::Dialog(Some(Dialog::ConfirmRevokeDevice(d.id.clone()))))));
+        }
+        col = col.push(r);
+    }
+    if !a.device_sync.is_empty() {
+        col = col.push(divider()).push(faint(a.device_sync.as_str()).size(12.5));
+    }
+    col.into()
 }
 
 /// Backup: the passphrase twice, the history switch, Save.

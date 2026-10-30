@@ -247,6 +247,8 @@ pub enum Dialog {
     /// Are you sure: replace this device's account with the one the move
     /// link in the box offers.
     ConfirmReceive,
+    /// Are you sure: remove this device (by device key, hex) from the account.
+    ConfirmRevokeDevice(String),
     /// Start a group chat or community.
     NewSpace,
     /// Invite one of your people into this group chat or community (by id).
@@ -650,6 +652,9 @@ pub enum Action {
     /// Fetch the account this move link offers and make it this device's
     /// (the dialog already asked).
     MoveReceive(String),
+    /// Take this device (by device key, hex) off the account; it signs out
+    /// the next time it hears from this one (the dialog already asked).
+    RevokeDevice(String),
     /// A channel is on screen: load its messages and mark it read.
     OpenChannel {
         /// The group chat or community's id.

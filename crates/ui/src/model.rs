@@ -15,6 +15,10 @@ pub struct Model {
     pub me: Me,
     /// Contacts, in the order the list shows them.
     pub people: Vec<Person>,
+    /// Notes to self: a conversation with yourself, synced between your
+    /// devices. Listed above your people, never among them -- it can't be
+    /// called, invited or blocked. `None` where the app doesn't offer it.
+    pub notes: Option<Person>,
     /// The call, if any.
     pub call: Call,
     /// The conversation with the person on screen, once the app has loaded
@@ -51,6 +55,14 @@ pub struct Model {
     /// A newer version of Stoop, and getting it (Settings > Updates, and a
     /// line across the top while one is waiting).
     pub update: Update,
+}
+
+impl Model {
+    /// The conversation partner `id` names: one of your people, or your
+    /// notes to self.
+    pub fn person(&self, id: &str) -> Option<&Person> {
+        self.people.iter().chain(&self.notes).find(|p| p.id == id)
+    }
 }
 
 /// The in-app updater, as the screens show it. The app fills this in from
@@ -134,6 +146,29 @@ pub struct Account {
     /// Whether this device can show a save or open dialog for a backup
     /// file. A phone without one still saves to Downloads.
     pub can_pick_file: bool,
+    /// The account's devices, this one first. Empty until the list loads.
+    pub devices: Vec<DeviceRow>,
+    /// How this device keeps in touch with the others, in words: through
+    /// which mailboxes, or what it needs before it can.
+    pub device_sync: String,
+    /// Devices can be removed from here: this device has a way to tell
+    /// the account's others.
+    pub can_remove_devices: bool,
+}
+
+/// One device on the account, as Settings > Account lists it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeviceRow {
+    /// Its device key, hex: what [`crate::Action::RevokeDevice`] names it by.
+    pub id: String,
+    /// What it is called ("Desktop", "Phone").
+    pub name: String,
+    /// When it joined, in words ("Added 3 March 2026").
+    pub added: String,
+    /// The device this is running on.
+    pub this: bool,
+    /// The device key's fingerprint, for telling two of the same name apart.
+    pub fingerprint: String,
 }
 
 /// An open offer to move the account to another device.
@@ -259,6 +294,9 @@ pub struct Person {
     pub bio: String,
     /// Their pronouns, as they last sent them; empty for none given.
     pub pronouns: String,
+    /// Not a contact: your own notes, kept and synced between your devices.
+    /// No calls, files or profile, just messages to yourself.
+    pub note_to_self: bool,
 }
 
 /// What a person last said about being around.

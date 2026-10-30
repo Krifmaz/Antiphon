@@ -17,6 +17,7 @@ mod api;
 mod app;
 mod demo;
 mod engine;
+mod my_devices;
 mod spaces;
 
 use std::path::PathBuf;

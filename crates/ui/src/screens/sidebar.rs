@@ -86,6 +86,10 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         }
         list = list.push(container(head_people(m, &shown)).padding(pad(14.0, 0.0, 2.0, 10.0)));
     }
+    // Notes to self sit above your people, and are not counted among them.
+    if let Some(notes) = m.notes.as_ref().filter(|n| query.is_empty() || n.name.to_lowercase().contains(&query)) {
+        list = list.push(person_row(ui, m, notes));
+    }
     for person in &shown {
         list = list.push(person_row(ui, m, person));
     }

@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use antiphon_client::account_backup::{self, Bundle, Platform};
+use antiphon_client::{device_sync, devices};
 use antiphon_crypto::account_seal;
-use antiphon_crypto::{BackupKey, IdentityKeyPair};
+use antiphon_crypto::{BackupKey, DeviceKeyPair, IdentityKeyPair};
 use antiphon_net::account_move::{self, MoveLink, MoveSender, MoveStatus};
 use antiphon_ui::{self as ui, ToastKind};
 use iced::widget::qr_code;
@@ -32,6 +33,8 @@ pub enum Outcome {
     Toast(String, ToastKind),
     /// The account on disk changed: restart the app to load it.
     Relaunch,
+    /// A move approved a new device into the account's list: read it again.
+    DevicesChanged,
 }
 
 /// A slow job's result, handed back from its thread.
@@ -42,6 +45,8 @@ enum Done {
     Restored(Result<account_backup::Applied, String>),
     /// A move offer opened, or why not.
     Offer(Result<MoveSender, String>),
+    /// A move approved a new device into the account.
+    DevicesChanged,
 }
 
 /// An open move offer and its QR code.
@@ -60,6 +65,9 @@ pub struct Ctx<'a> {
     pub identity: &'a IdentityKeyPair,
     /// The key history is sealed under, if it loaded.
     pub key: Option<&'a BackupKey>,
+    /// This device's own keypair, if it loaded: what a move approves the
+    /// new device with, and what this device asks to be approved as.
+    pub device: Option<DeviceKeyPair>,
     /// A call is up: restoring now would pull the identity out from under it.
     pub in_call: bool,
 }
@@ -143,12 +151,24 @@ impl AccountState {
                     return toast("This computer isn't on a network. Join the same Wi-Fi as your other device.", ToastKind::Err);
                 };
                 let identity = IdentityKeyPair::from_master_seed(ctx.identity.master_seed());
+                let device = ctx.device;
+                let results = self.results.clone();
+                // The account is gathered once the new device has said who
+                // it is, so the list it carries already names that device.
+                let make = move |new: Option<&antiphon_crypto::PublicIdentity>| -> Result<Vec<u8>, String> {
+                    if let (Some(new), Some(device)) = (new, &device) {
+                        let list = devices::approve(&dir, &identity, device, new, "New device")?;
+                        // The account's other devices learn of it too.
+                        if let Err(e) = device_sync::send_list(&dir, device, &list, None) {
+                            eprintln!("[devices] couldn't tell your other devices about the new one: {e}");
+                        }
+                        results.lock().unwrap().push(Done::DevicesChanged);
+                    }
+                    let bundle = account_backup::gather(&dir, Platform::Desktop, &identity, &key, history).map_err(|e| format!("Couldn't read your account: {e}"))?;
+                    Ok(bundle.encode().to_vec())
+                };
                 self.run("Getting your account ready to send…", move || {
-                    Done::Offer(
-                        account_backup::gather(&dir, Platform::Desktop, &identity, &key, history)
-                            .and_then(|bundle| MoveSender::start(&bundle.encode(), ip))
-                            .map_err(|e| format!("Couldn't open the move: {e}")),
-                    )
+                    Done::Offer(MoveSender::start_approving(Box::new(make), ip).map_err(|e| format!("Couldn't open the move: {e}")))
                 });
                 Vec::new()
             }
@@ -164,7 +184,8 @@ impl AccountState {
                 let Some(link) = MoveLink::parse(&text) else {
                     return toast("That isn't a move link. It starts with stoop-move:", ToastKind::Err);
                 };
-                self.run("Receiving your account…", move || Done::Restored(receive(&dir, &link)));
+                let device = ctx.device.map(|d| d.public());
+                self.run("Receiving your account…", move || Done::Restored(receive(&dir, &link, device.as_ref())));
                 Vec::new()
             }
             _ => Vec::new(),
@@ -176,7 +197,10 @@ impl AccountState {
         let mut out = Vec::new();
         let done = std::mem::take(&mut *self.results.lock().unwrap());
         for d in done {
-            self.busy = None;
+            // A device approved mid-move is news from a job still running.
+            if !matches!(d, Done::DevicesChanged) {
+                self.busy = None;
+            }
             match d {
                 Done::Saved(Ok(path)) => out.push(Outcome::Toast(format!("Backup saved to {}", path.display()), ToastKind::Ok)),
                 Done::Saved(Err(e)) => out.push(Outcome::Toast(e, ToastKind::Err)),
@@ -191,6 +215,7 @@ impl AccountState {
                     self.moving = Some(Offer { sender, qr });
                 }
                 Done::Offer(Err(e)) => out.push(Outcome::Toast(e, ToastKind::Err)),
+                Done::DevicesChanged => out.push(Outcome::DevicesChanged),
             }
         }
         if let Some(offer) = &self.moving {
@@ -222,6 +247,10 @@ impl AccountState {
                 }
             }),
             can_pick_file: true,
+            // The engine fills these in from `my_devices`.
+            devices: Vec::new(),
+            device_sync: String::new(),
+            can_remove_devices: true,
         }
     }
 
@@ -250,9 +279,10 @@ fn open_backup(dir: &Path, path: &Path, passphrase: &str) -> Result<account_back
     apply(dir, &plain)
 }
 
-/// Fetches the account a move link offers and makes it this computer's.
-fn receive(dir: &Path, link: &MoveLink) -> Result<account_backup::Applied, String> {
-    let plain = account_move::receive(link)?;
+/// Fetches the account a move link offers and makes it this computer's,
+/// asking the old device to approve this one (`device`) on the way.
+fn receive(dir: &Path, link: &MoveLink, device: Option<&antiphon_crypto::PublicIdentity>) -> Result<account_backup::Applied, String> {
+    let plain = account_move::receive_as(link, device)?;
     apply(dir, &plain)
 }
 

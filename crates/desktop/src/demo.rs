@@ -49,6 +49,7 @@ impl Demo {
                 greeting: "Good evening".into(),
             },
             people,
+            notes: None,
             call: ui::Call::default(),
             conversation: None,
             transfers: ui::Transfers {
@@ -415,6 +416,7 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
         muted: false,
         bio: if id == ROBIN { "Bass, coffee, records. Usually around after eight.".into() } else { String::new() },
         pronouns: if id == ROBIN { "he/him".into() } else { String::new() },
+        note_to_self: false,
     }
 }
 

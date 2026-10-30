@@ -9,6 +9,12 @@
 //! Downloads (there is no save dialog), and a backup file is chosen with
 //! the system picker, whose answer arrives later as a platform event.
 //!
+//! The phone is one of the account's devices with a key of its own (see
+//! `crate::devices`): a move approves the receiving device into the
+//! account's list, and the list is shown here. Removing a device is done
+//! from a computer for now -- the phone keeps no mailbox to tell the
+//! account's other devices through.
+//!
 //! Slow work runs on its own thread and is collected by [`PhoneAccount::poll`].
 //! A restore rewrites the account on disk, and the app then reloads
 //! itself from that disk ([`Outcome::Reload`]).
@@ -17,12 +23,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use antiphon_crypto::account_seal;
-use antiphon_crypto::{BackupKey, IdentityKeyPair};
+use antiphon_crypto::{BackupKey, DeviceKeyPair, IdentityKeyPair, PublicIdentity};
 use antiphon_net::account_move::{self, MoveLink, MoveSender, MoveStatus};
 use antiphon_ui as stoop;
 use iced_widget::qr_code;
 
 use crate::account_backup::{self, Bundle, Platform};
+use crate::devices;
 use crate::platform;
 
 // The interface checks the passphrase length before asking; the two
@@ -45,6 +52,9 @@ enum Done {
     Restored(Result<account_backup::Applied, String>),
     /// A move offer opened, or why not.
     Offer(Result<MoveSender, String>),
+    /// A move approved a new device into the account's list: the list as
+    /// it is now.
+    Devices(Vec<stoop::DeviceRow>),
 }
 
 /// An open move offer and its QR code.
@@ -68,14 +78,34 @@ pub struct PhoneAccount {
     pending_open: Option<String>,
     /// Results from job threads, collected on the next poll.
     results: Arc<Mutex<Vec<Done>>>,
+    /// This phone's own keypair, once [`PhoneAccount::load_devices`] has run.
+    device: Option<DeviceKeyPair>,
+    /// The account's devices as last read, this phone first.
+    devices: Vec<stoop::DeviceRow>,
 }
 
 impl PhoneAccount {
+    /// Loads (or makes) this phone's own key, makes sure the phone is on
+    /// the account's device list, and reads the list for Settings. Called
+    /// at start and whenever the identity changes.
+    pub fn load_devices(&mut self, dir: &Path, identity: &IdentityKeyPair) -> Vec<Outcome> {
+        let device = match devices::load_or_create_device(dir) {
+            Ok(d) => d,
+            Err(e) => return vec![Outcome::Toast(format!("Couldn't load this phone's device key: {e}"), stoop::ToastKind::Err)],
+        };
+        match devices::ensure(dir, identity, &device, "Phone") {
+            Ok(list) => self.devices = rows(&list, &device.public().identity_key),
+            Err(e) => return vec![Outcome::Toast(format!("Couldn't update your device list: {e}"), stoop::ToastKind::Err)],
+        }
+        self.device = Some(device);
+        Vec::new()
+    }
+
     /// Seals the account under `passphrase` and saves it to Downloads (or
     /// the app's own storage, when the phone gives no Downloads folder).
     pub fn save(&mut self, dir: &Path, identity: &IdentityKeyPair, key: &BackupKey, passphrase: String, history: bool) {
         let folder = platform::downloads_dir().unwrap_or_else(|| dir.to_path_buf());
-        let day = chrono_day();
+        let day = day_of(crate::call::now_secs());
         let path = folder.join(format!("stoop-account-{day}.stoopbackup"));
         let (dir, identity, key) = (dir.to_path_buf(), IdentityKeyPair::from_master_seed(identity.master_seed()), key.clone());
         self.run("Locking your backup with the passphrase…", move || {
@@ -119,12 +149,20 @@ impl PhoneAccount {
             return vec![Outcome::Toast("This phone isn't on a network. Join the same Wi-Fi as your other device.".into(), stoop::ToastKind::Err)];
         };
         let (dir, identity, key) = (dir.to_path_buf(), IdentityKeyPair::from_master_seed(identity.master_seed()), key.clone());
+        let device = self.device.as_ref().map(|d| DeviceKeyPair::from_master_seed(d.master_seed()));
+        let results = self.results.clone();
+        // Gathered once the new device has said who it is, so the device
+        // list it carries already names it.
+        let make = move |new: Option<&PublicIdentity>| -> Result<Vec<u8>, String> {
+            if let (Some(new), Some(device)) = (new, &device) {
+                let list = devices::approve(&dir, &identity, device, new, "New device")?;
+                results.lock().unwrap().push(Done::Devices(rows(&list, &device.public().identity_key)));
+            }
+            let bundle = account_backup::gather(&dir, Platform::Phone, &identity, &key, history).map_err(|e| format!("Couldn't read your account: {e}"))?;
+            Ok(bundle.encode().to_vec())
+        };
         self.run("Getting your account ready to send…", move || {
-            Done::Offer(
-                account_backup::gather(&dir, Platform::Phone, &identity, &key, history)
-                    .and_then(|bundle| MoveSender::start(&bundle.encode(), ip))
-                    .map_err(|e| format!("Couldn't open the move: {e}")),
-            )
+            Done::Offer(MoveSender::start_approving(Box::new(make), ip).map_err(|e| format!("Couldn't open the move: {e}")))
         });
         Vec::new()
     }
@@ -140,7 +178,9 @@ impl PhoneAccount {
             return vec![Outcome::Toast("That isn't a move link. It starts with stoop-move:".into(), stoop::ToastKind::Err)];
         };
         let dir = dir.to_path_buf();
-        self.run("Receiving your account…", move || Done::Restored(account_move::receive(&link).and_then(|plain| apply(&dir, &plain))));
+        // The old device approves this phone's own key on the way.
+        let device = self.device.as_ref().map(|d| d.public());
+        self.run("Receiving your account…", move || Done::Restored(account_move::receive_as(&link, device.as_ref()).and_then(|plain| apply(&dir, &plain))));
         Vec::new()
     }
 
@@ -150,7 +190,10 @@ impl PhoneAccount {
         let mut out = Vec::new();
         let done = std::mem::take(&mut *self.results.lock().unwrap());
         for d in done {
-            self.busy = None;
+            // A device approved mid-move is news from a job still running.
+            if !matches!(d, Done::Devices(_)) {
+                self.busy = None;
+            }
             match d {
                 Done::Saved(Ok(path)) => out.push(Outcome::Toast(format!("Backup saved to {}", path.display()), K::Ok)),
                 Done::Saved(Err(e)) | Done::Restored(Err(e)) | Done::Offer(Err(e)) => out.push(Outcome::Toast(e, K::Err)),
@@ -162,6 +205,7 @@ impl PhoneAccount {
                     let qr = qr_code::Data::new(sender.link().to_link().as_bytes()).ok().map(Arc::new);
                     self.moving = Some(Offer { sender, qr });
                 }
+                Done::Devices(rows) => self.devices = rows,
             }
         }
         if self.moving.as_ref().is_some_and(|o| o.sender.status() == MoveStatus::Expired) {
@@ -197,6 +241,9 @@ impl PhoneAccount {
                 }
             }),
             can_pick_file: false,
+            devices: self.devices.clone(),
+            device_sync: "Remove a device from one of your computers. This phone has no mailbox yet to tell your other devices through.".into(),
+            can_remove_devices: false,
         }
     }
 
@@ -211,6 +258,23 @@ impl PhoneAccount {
     }
 }
 
+/// The account's devices as Settings lists them, this phone (`me`) first.
+fn rows(list: &antiphon_crypto::SignedDeviceList, me: &[u8; 32]) -> Vec<stoop::DeviceRow> {
+    let mut rows: Vec<stoop::DeviceRow> = list
+        .devices()
+        .iter()
+        .map(|d| stoop::DeviceRow {
+            id: antiphon_crypto::hex::encode(&d.device.identity_key),
+            name: d.name.clone(),
+            added: format!("Added {}", day_of(d.added_at_secs)),
+            this: &d.device.identity_key == me,
+            fingerprint: antiphon_crypto::fingerprint(&d.device.identity_key),
+        })
+        .collect();
+    rows.sort_by_key(|r| !r.this);
+    rows
+}
+
 /// Decodes an opened bundle and writes it into the app's storage.
 fn apply(dir: &Path, plain: &[u8]) -> Result<account_backup::Applied, String> {
     let bundle = Bundle::decode(plain)?;
@@ -223,11 +287,10 @@ fn capitalise(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
-/// Today's date as `YYYY-MM-DD` (UTC), for the backup's file name. Worked
-/// out from the clock by hand: the phone crate has no date library, and a
-/// file name does not need one.
-fn chrono_day() -> String {
-    let secs = crate::call::now_secs();
+/// The date `secs` (unix seconds) falls on, as `YYYY-MM-DD` (UTC): for the
+/// backup's file name and the device list. Worked out by hand: the phone
+/// crate has no date library, and neither use needs one.
+fn day_of(secs: u64) -> String {
     // Days since 1970-01-01, then Howard Hinnant's civil-from-days.
     let z = (secs / 86_400) as i64 + 719_468;
     let era = z.div_euclid(146_097);

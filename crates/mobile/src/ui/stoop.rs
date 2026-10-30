@@ -190,6 +190,9 @@ impl App {
         Model {
             me,
             people,
+            // Notes to self need a mailbox to reach your other devices,
+            // which the phone doesn't keep yet.
+            notes: None,
             call,
             conversation,
             transfers,
@@ -308,6 +311,7 @@ impl App {
             muted: false,
             bio: String::new(),
             pronouns: String::new(),
+            note_to_self: false,
         }
     }
 
@@ -773,6 +777,9 @@ impl App {
                 _ => self.stoop.toast("Your identity or history key didn't load, so the account can't be sent yet.", ToastKind::Err),
             },
             Action::MoveStop => self.account.stop_move(),
+            // Not offered here (`can_remove_devices` is false), so only a
+            // stray action arrives; say where it can be done.
+            Action::RevokeDevice(_) => self.stoop.toast("Remove a device from one of your computers.", ToastKind::Info),
             Action::MoveReceive(link) => {
                 if self.engine.is_busy() {
                     self.stoop.toast("Hang up before bringing an account here.", ToastKind::Warn);

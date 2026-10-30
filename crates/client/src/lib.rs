@@ -20,6 +20,8 @@ pub mod control;
 pub mod crash_report;
 pub mod data_export;
 pub mod delivery;
+pub mod device_sync;
+pub mod devices;
 pub mod discovery;
 pub mod fallback_relay;
 pub mod file_integrity;
