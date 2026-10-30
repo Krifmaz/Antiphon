@@ -30,6 +30,9 @@ pub struct Settings {
     pub status_message: String,
     /// A line or two about you, sent to the people you call.
     pub bio: String,
+    /// Your pronouns ("she/her"), sent with your picture and About line;
+    /// empty for none.
+    pub pronouns: String,
     /// Your avatar colour's id (`antiphon_ui::PROFILE_COLORS`); empty for
     /// the automatic one.
     pub color: String,
@@ -76,6 +79,7 @@ impl Default for Settings {
             display_name: String::new(),
             status_message: String::new(),
             bio: String::new(),
+            pronouns: String::new(),
             color: String::new(),
             avatar: String::new(),
             // On by default: a large file quietly eating a data plan is

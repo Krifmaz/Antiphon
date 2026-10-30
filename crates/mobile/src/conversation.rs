@@ -118,18 +118,24 @@ impl Conversation {
 
     /// Sends a message now if they are on the call, or queues it for when
     /// they next are.
-    pub fn send(&mut self, text: &str, live: Option<&Live>) {
+    ///
+    /// `reply_to` is the message it answers, by id, when it was written as
+    /// a reply; it is kept with it here and goes with it to them.
+    pub fn send(&mut self, text: &str, reply_to: Option<u64>, live: Option<&Live>) {
         let text = text.trim();
         if text.is_empty() {
             return;
         }
+        // Only a message that is still in this conversation can be
+        // answered; anything else is sent as a plain message.
+        let reply_to = reply_to.filter(|r| self.messages.iter().any(|m| m.id == *r));
         let id = self.next_id;
         self.next_id += 1;
-        self.sink.record(id, true, text);
+        self.sink.record_reply(id, true, text, reply_to);
         match live {
-            Some(live) => live.send(ControlMessage::Chat { id, text: text.to_string() }),
+            Some(live) => live.send(ControlMessage::Chat { id, text: text.to_string(), reply_to }),
             None => {
-                outbox::enqueue(&mut self.outbox, Queued { id, text: text.to_string(), queued_at_secs: now_secs(), attempts: 0 });
+                outbox::enqueue(&mut self.outbox, Queued { id, text: text.to_string(), queued_at_secs: now_secs(), attempts: 0, reply_to });
                 self.save_outbox();
             }
         }
@@ -142,7 +148,7 @@ impl Conversation {
             return;
         }
         for queued in std::mem::take(&mut self.outbox) {
-            live.send(ControlMessage::Chat { id: queued.id, text: queued.text });
+            live.send(ControlMessage::Chat { id: queued.id, text: queued.text, reply_to: queued.reply_to });
         }
         self.save_outbox();
     }
@@ -213,8 +219,11 @@ impl Conversation {
     pub fn receive(&mut self, message: ControlMessage) -> Option<String> {
         let mut new_text = None;
         match message {
-            ControlMessage::Chat { id, text } => {
-                self.sink.record(id, false, &text);
+            ControlMessage::Chat { id, text, reply_to } => {
+                // A reply to something not in this conversation (never
+                // here, or long since gone) is kept as a plain message.
+                let reply_to = reply_to.filter(|r| self.messages.iter().any(|m| m.id == *r));
+                self.sink.record_reply(id, false, &text, reply_to);
                 self.next_id = self.next_id.max(id + 1);
                 new_text = Some(text);
             }

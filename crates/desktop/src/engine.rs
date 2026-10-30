@@ -879,10 +879,11 @@ impl Engine {
         let avatar = if profile::decode_avatar(&card.avatar).is_some() { card.avatar } else { String::new() };
         let bio = profile::clean_bio(&card.bio);
         let color = if ui::avatars::named_color(&card.color).is_some() { card.color } else { String::new() };
+        let pronouns = profile::clean_pronouns(&card.pronouns);
         match key.and_then(|k| contact_mut(&mut self.cfg, k)) {
             Some(c) => {
-                if (&c.avatar, &c.bio, &c.color) != (&avatar, &bio, &color) {
-                    (c.avatar, c.bio, c.color) = (avatar, bio, color);
+                if (&c.avatar, &c.bio, &c.color, &c.pronouns) != (&avatar, &bio, &color, &pronouns) {
+                    (c.avatar, c.bio, c.color, c.pronouns) = (avatar, bio, color, pronouns);
                     self.save();
                 }
             }
@@ -1176,7 +1177,7 @@ impl Engine {
     /// Our profile card as contacts get it.
     fn card(&self) -> ProfileCard {
         let p = &self.cfg.profile;
-        ProfileCard { bio: p.bio.clone(), color: p.color.clone(), avatar: p.avatar.clone() }
+        ProfileCard { bio: p.bio.clone(), color: p.color.clone(), avatar: p.avatar.clone(), pronouns: p.pronouns.clone() }
     }
 
     /// Sends our card to the person on the call, if there is one. Said
@@ -1583,7 +1584,9 @@ impl Engine {
                     self.state.peer_muted.store(muted, Ordering::Relaxed);
                 }
             }
-            A::Send { to, text } => {
+            // The desktop keeps 1:1 history in the older chat log, which
+            // has no replies yet: a reply goes as a plain message.
+            A::Send { to, text, reply_to: _ } => {
                 let preview = format!("You: {text}");
                 if self.call_with(&to) {
                     self.with_call(|a| a.send_chat(&rt, text));
@@ -1747,6 +1750,11 @@ impl Engine {
                 self.cfg.profile.bio = profile::clean_bio(&bio);
                 self.profile_changed();
             }
+            A::SetPronouns(pronouns) => {
+                self.cfg.profile.pronouns = profile::clean_pronouns(&pronouns);
+                self.profile_changed();
+            }
+            A::OpenLink(url) => open_link(&url),
             A::ProfileColor(color) => {
                 self.cfg.profile.color = color;
                 self.profile_changed();
@@ -2170,7 +2178,7 @@ impl Engine {
                 if text.trim().is_empty() {
                     return Err("nothing to send".into());
                 }
-                self.act(ui::Action::Send { to, text }, open);
+                self.act(ui::Action::Send { to, text, reply_to: None }, open);
                 Ok(serde_json::Value::Null)
             }
             "call" => {
@@ -2623,6 +2631,7 @@ impl Engine {
             name,
             status: self.cfg.profile.status_message.clone(),
             bio: self.cfg.profile.bio.clone(),
+            pronouns: self.cfg.profile.pronouns.clone(),
             color: self.cfg.profile.color.clone(),
             has_picture: !self.cfg.profile.avatar.is_empty(),
             id,
@@ -2673,6 +2682,7 @@ impl Engine {
                     .into(),
                     volume_db: c.volume_db,
                     muted: c.muted,
+                    pronouns: c.pronouns.clone(),
                     bio: c.bio.clone(),
                     id,
                 }
@@ -3492,7 +3502,15 @@ fn dirs_downloads() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads")).filter(|p| p.exists())
 }
 
-/// Opens `path` in the file manager.
+/// Opens a web link from a message in the default browser. Only `http`
+/// and `https`, so a message can't have the system open anything else.
+fn open_link(url: &str) {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        open_folder(std::path::Path::new(url));
+    }
+}
+
+/// Opens `path` in the file manager (or, for a web link, the browser).
 fn open_folder(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     let program = "explorer";

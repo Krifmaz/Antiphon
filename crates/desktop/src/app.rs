@@ -175,6 +175,17 @@ const TOUR: &[Step] = &[
     Step { name: "phone-call", size: (400.0, 820.0), setup: |app| app.go(Route::Person(Demo::robin())) },
     Step { name: "phone-spaces", size: (400.0, 820.0), setup: |app| app.go(Route::Spaces) },
     Step { name: "phone-community", size: (400.0, 820.0), setup: |app| app.go(Route::Community(Demo::club(), 0)) },
+    Step { name: "phone-profile", size: (400.0, 820.0), setup: |app| app.go(Route::Profile(None)) },
+    Step { name: "phone-profile-edit", size: (400.0, 820.0), setup: |app| app.go(Route::ProfileEdit) },
+    Step { name: "phone-their-profile", size: (400.0, 820.0), setup: |app| app.go(Route::Profile(Some(Demo::robin()))) },
+    Step {
+        name: "phone-chat",
+        size: (400.0, 820.0),
+        setup: |app| {
+            app.demo().act(Action::Hangup);
+            app.go(Route::Person(Demo::robin()));
+        },
+    },
     Step { name: "phone-settings", size: (1280.0, 820.0), setup: |app| app.go(Route::Settings(Section::Phone)) },
     Step {
         name: "light",

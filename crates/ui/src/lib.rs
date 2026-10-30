@@ -64,6 +64,15 @@ pub enum Route {
     Spaces,
     /// One channel of a group chat or community: (its id, the channel).
     Community(String, u32),
+    /// A profile page: banner, picture, name, pronouns and About. `None`
+    /// is my own, with the way into [`Route::ProfileEdit`]; `Some` is a
+    /// contact's, by id. The phone shows it as its own screen; a desktop,
+    /// which keeps all of this in Settings and the details panel, sends it
+    /// there.
+    Profile(Option<String>),
+    /// Editing my profile: name, pronouns, status and About on one screen,
+    /// saved together.
+    ProfileEdit,
 }
 
 /// A part of Settings.
@@ -233,6 +242,9 @@ pub enum Action {
         to: String,
         /// What it says.
         text: String,
+        /// The message of theirs or mine it answers, by id, when it was
+        /// written as a reply; drawn above it as a quote.
+        reply_to: Option<u64>,
     },
     /// Change the words of a message you sent.
     Edit {
@@ -339,6 +351,10 @@ pub enum Action {
     RemoveAvatar,
     /// Save my About line.
     SetBio(String),
+    /// Save my pronouns ("she/her"), shown beside my name; empty for none.
+    SetPronouns(String),
+    /// Open a web link from a message in the system's browser.
+    OpenLink(String),
     /// Pick my avatar colour, by id from [`PROFILE_COLORS`]; empty for
     /// the automatic one.
     ProfileColor(String),
@@ -731,6 +747,16 @@ pub enum Msg {
     BioEdit(String),
     /// Save my About line.
     BioSave,
+    /// My pronouns are being edited (the profile screen or Settings).
+    PronounsEdit(String),
+    /// Save my pronouns as edited in Settings.
+    PronounsSave,
+    /// Save everything changed on the profile edit screen (name, pronouns,
+    /// status, About) and go back to the profile.
+    ProfileSave,
+    /// Answer this message (by id) with the next one sent, or stop
+    /// answering it (`None`).
+    Reply(Option<u64>),
     /// The relay box is being edited.
     RelayEdit(String),
     /// Save the relay.
@@ -882,6 +908,11 @@ pub struct Ui {
     status_edit: Option<String>,
     /// My About line while it is being edited.
     bio_edit: Option<String>,
+    /// My pronouns as being edited, until saved.
+    pronouns_edit: Option<String>,
+    /// The message the composer is answering, by id, while a reply is
+    /// being written; shown over the composer with a way to drop it.
+    replying: Option<u64>,
     /// The relay while it is being edited.
     relay_edit: Option<String>,
     /// The anonymity hop list while it is being edited.
@@ -1002,6 +1033,8 @@ impl Ui {
             name_edit: None,
             status_edit: None,
             bio_edit: None,
+            pronouns_edit: None,
+            replying: None,
             relay_edit: None,
             hops_edit: None,
             port_edit: None,
@@ -1161,6 +1194,7 @@ impl Ui {
     fn go(&mut self, route: Route) -> Vec<Action> {
         self.editing = None;
         self.menu = None;
+        self.replying = None;
         let open = match &route {
             Route::Person(id) => vec![Action::Open(id.clone())],
             Route::Community(id, channel) => vec![Action::OpenChannel { community: id.clone(), channel: *channel }],
@@ -1194,9 +1228,22 @@ impl Ui {
                     self.set_dialog(None);
                 } else if self.editing.is_some() {
                     self.editing = None;
+                } else if self.replying.is_some() {
+                    self.replying = None;
                 } else if matches!(self.route, Route::Community(..)) {
                     // Out of a channel is back to the list it was opened from.
                     self.route = Route::Spaces;
+                } else if self.route == Route::ProfileEdit {
+                    // Out of editing is back to the profile, unsaved.
+                    self.name_edit = None;
+                    self.status_edit = None;
+                    self.bio_edit = None;
+                    self.pronouns_edit = None;
+                    self.route = Route::Profile(None);
+                } else if let Route::Profile(Some(id)) = &self.route {
+                    // A contact's profile is opened from their conversation.
+                    let id = id.clone();
+                    return self.go(Route::Person(id));
                 } else if self.route != Route::Home {
                     self.route = Route::Home;
                 }
@@ -1242,9 +1289,10 @@ impl Ui {
                 if text.is_empty() {
                     return Vec::new();
                 }
+                let reply_to = self.replying.take();
                 match &self.route {
                     Route::Community(id, channel) => vec![Action::Post { community: id.clone(), channel: *channel, text }],
-                    _ => vec![Action::Send { to: key, text }],
+                    _ => vec![Action::Send { to: key, text, reply_to }],
                 }
             }
             Msg::EditStart(id, text) => {
@@ -1316,6 +1364,50 @@ impl Ui {
                 Some(s) if s.trim() != model.me.status => vec![Action::SetStatus(s.trim().to_string())],
                 _ => Vec::new(),
             },
+            Msg::PronounsEdit(s) => {
+                self.pronouns_edit = Some(s);
+                Vec::new()
+            }
+            Msg::PronounsSave => match self.pronouns_edit.take() {
+                Some(s) if s.trim() != model.me.pronouns => vec![Action::SetPronouns(s.trim().to_string())],
+                _ => Vec::new(),
+            },
+            Msg::ProfileSave => {
+                // Each field that changed becomes its own action, so the
+                // app's rules for each (trimming, length) still apply.
+                let mut out = Vec::new();
+                if let Some(n) = self.name_edit.take().map(|n| n.trim().to_string()) {
+                    if !n.is_empty() && n != model.me.name {
+                        out.push(Action::SetName(n));
+                    }
+                }
+                if let Some(s) = self.pronouns_edit.take().map(|s| s.trim().to_string()) {
+                    if s != model.me.pronouns {
+                        out.push(Action::SetPronouns(s));
+                    }
+                }
+                if let Some(s) = self.status_edit.take().map(|s| s.trim().to_string()) {
+                    if s != model.me.status {
+                        out.push(Action::SetStatus(s));
+                    }
+                }
+                if let Some(s) = self.bio_edit.take().map(|s| s.trim().to_string()) {
+                    if s != model.me.bio {
+                        out.push(Action::SetBio(s));
+                    }
+                }
+                self.route = Route::Profile(None);
+                out
+            }
+            Msg::Reply(id) => {
+                self.replying = id;
+                if id.is_some() {
+                    // Straight into the composer, as a tap on Reply means
+                    // "I am about to type".
+                    return vec![Action::FocusInput(Some(COMPOSER))];
+                }
+                Vec::new()
+            }
             Msg::BioEdit(s) => {
                 self.bio_edit = Some(s);
                 Vec::new()
@@ -1747,8 +1839,48 @@ mod tests {
         ui.update(Msg::Draft("   ".into()), &m);
         assert!(ui.update(Msg::Send, &m).is_empty());
         ui.update(Msg::Draft(" hi ".into()), &m);
-        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Send { to: "ab".into(), text: "hi".into() }]);
+        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Send { to: "ab".into(), text: "hi".into(), reply_to: None }]);
         assert!(ui.update(Msg::Send, &m).is_empty(), "the draft is cleared once sent");
+    }
+
+    #[test]
+    fn a_reply_goes_with_the_next_message_only() {
+        let mut ui = Ui::new();
+        let m = Model::default();
+        ui.update(Msg::Nav(Route::Person("ab".into())), &m);
+        ui.update(Msg::Reply(Some(4)), &m);
+        ui.update(Msg::Draft("same".into()), &m);
+        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Send { to: "ab".into(), text: "same".into(), reply_to: Some(4) }]);
+        ui.update(Msg::Draft("and another".into()), &m);
+        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Send { to: "ab".into(), text: "and another".into(), reply_to: None }]);
+    }
+
+    #[test]
+    fn the_profile_editor_saves_only_what_changed() {
+        let mut ui = Ui::new();
+        let mut m = Model::default();
+        m.me.name = "Azule".into();
+        ui.update(Msg::Nav(Route::Profile(None)), &m);
+        ui.update(Msg::Nav(Route::ProfileEdit), &m);
+        ui.update(Msg::NameEdit("Azule".into()), &m);
+        ui.update(Msg::PronounsEdit(" they/them ".into()), &m);
+        assert_eq!(ui.update(Msg::ProfileSave, &m), vec![Action::SetPronouns("they/them".into())]);
+        assert_eq!(ui.route(), &Route::Profile(None));
+        // Back out of an edit drops it.
+        ui.update(Msg::Nav(Route::ProfileEdit), &m);
+        ui.update(Msg::BioEdit("never saved".into()), &m);
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.route(), &Route::Profile(None));
+        assert!(ui.update(Msg::ProfileSave, &m).is_empty());
+    }
+
+    #[test]
+    fn back_from_a_contacts_profile_is_their_conversation() {
+        let mut ui = Ui::new();
+        let m = Model::default();
+        ui.update(Msg::Nav(Route::Profile(Some("ab".into()))), &m);
+        ui.update(Msg::Back, &m);
+        assert_eq!(ui.open_person(), Some("ab"));
     }
 
     #[test]
@@ -1760,7 +1892,7 @@ mod tests {
         ui.update(Msg::Nav(Route::Person("b".into())), &m);
         assert!(ui.update(Msg::Send, &m).is_empty());
         ui.update(Msg::Nav(Route::Person("a".into())), &m);
-        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Send { to: "a".into(), text: "for a".into() }]);
+        assert_eq!(ui.update(Msg::Send, &m), vec![Action::Send { to: "a".into(), text: "for a".into(), reply_to: None }]);
     }
 
     #[test]

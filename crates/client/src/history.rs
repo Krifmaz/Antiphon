@@ -357,6 +357,12 @@ impl HistorySink {
     /// Persists one message and returns the id it was stored under, so the
     /// caller can later name it in an edit or delete.
     pub fn record(&self, id: u64, from_me: bool, text: &str) -> u64 {
+        self.record_reply(id, from_me, text, None)
+    }
+
+    /// [`record`](Self::record) for a message that answers another, by
+    /// its id in this conversation (`None` for one that answers nothing).
+    pub fn record_reply(&self, id: u64, from_me: bool, text: &str, reply_to: Option<u64>) -> u64 {
         let at_secs = now_secs();
         let message = StoredMessage {
             id,
@@ -367,6 +373,7 @@ impl HistorySink {
             deleted: false,
             pinned: false,
             expires_at_secs: self.expire_after_secs.map(|ttl| at_secs + ttl),
+            reply_to,
             ..Default::default()
         };
         if let Err(e) = append(&self.dir, &self.peer_hex, &self.key, message) {

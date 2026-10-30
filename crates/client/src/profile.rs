@@ -28,6 +28,10 @@ pub const MAX_AVATAR_BYTES: usize = 2200;
 /// The longest About line, in characters.
 pub const MAX_BIO: usize = 160;
 
+/// The longest pronouns may be, in characters: room for "they/she/xe",
+/// not for a second About line.
+pub const MAX_PRONOUNS: usize = 40;
+
 /// Makes the picture to send from an image file's bytes (PNG, JPEG, GIF,
 /// WebP...): the largest centred square, shrunk and compressed. Returns
 /// it as base64, ready for the profile card and the config file.
@@ -129,9 +133,21 @@ pub fn clean_bio(bio: &str) -> String {
     bio.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).take(MAX_BIO).collect()
 }
 
+/// Pronouns as they are kept and sent: one line, spaces collapsed, no
+/// control characters, at most [`MAX_PRONOUNS`] characters.
+pub fn clean_pronouns(pronouns: &str) -> String {
+    pronouns.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).take(MAX_PRONOUNS).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pronouns_are_one_short_line() {
+        assert_eq!(clean_pronouns("  she /\n her "), "she / her");
+        assert_eq!(clean_pronouns(&"x".repeat(100)).chars().count(), MAX_PRONOUNS);
+    }
 
     fn png(w: u32, h: u32) -> Vec<u8> {
         let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 255 / w) as u8, (y * 255 / h) as u8, 120]));
@@ -197,6 +213,7 @@ mod tests {
             bio: clean_bio(&"\u{1F3B8}".repeat(400)),
             color: "lilac".into(),
             avatar: crate::file_transfer::encode_b64(&vec![0xAB; MAX_AVATAR_BYTES]),
+            pronouns: clean_pronouns(&"\u{1F3B8}".repeat(100)),
         };
         let bytes = crate::control::ControlMessage::Profile(card).encode();
         assert!(bytes.len() + 16 + 14 <= 4096, "{} bytes", bytes.len());

@@ -25,14 +25,19 @@ use crate::ui::{App, Renderer};
 #[derive(Debug, Clone, Copy)]
 pub struct Wake;
 
-/// Redraw rate while a level meter is moving.
+/// Redraw rate while only a level meter or a toast is moving: those
+/// read fine at 20 frames a second and the battery is spared the rest.
+/// Anything that slides (a sheet, a swiped list) is drawn at the
+/// display's own rate instead, paced by vsync (see [`Runner::redraw`]).
 const ANIMATION_FRAME: Duration = Duration::from_millis(50);
-/// Redraw rate while a list is gliding after a swipe: the display's own
-/// rate, near enough, since anything less shows as judder.
-const FLING_FRAME: Duration = Duration::from_millis(16);
 /// How often to re-read the insets while the keyboard is up, since it
 /// slides in over several frames and reports no event when it settles.
 const KEYBOARD_POLL: Duration = Duration::from_millis(200);
+/// How long a reading of the system insets is trusted. Reading them is
+/// eight JNI calls on Android; doing that on every frame of a scroll cost
+/// more than drawing the frame. The bars only move when the keyboard
+/// comes or goes, and [`KEYBOARD_POLL`] covers that.
+const INSETS_FRESH: Duration = Duration::from_millis(150);
 
 /// Android: Vulkan first, OpenGL ES if it fails, since older phones ship
 /// Vulkan drivers that enumerate fine and then cannot create a device.
@@ -110,6 +115,9 @@ pub struct Runner {
     fingers: usize,
     /// Status bar and gesture bar or keyboard, in physical pixels.
     insets: (f32, f32),
+    /// When [`Runner::insets`] was last read from the platform, so it is
+    /// re-read at most every [`INSETS_FRESH`].
+    insets_read: Option<Instant>,
     /// Whether the soft keyboard has been asked for, so it is requested or
     /// dismissed only when a text field gains or loses focus.
     keyboard_shown: bool,
@@ -132,6 +140,7 @@ impl Runner {
             events: Vec::new(),
             fingers: 0,
             insets: (0.0, 0.0),
+            insets_read: None,
             keyboard_shown: false,
             fling: crate::fling::Fling::new(),
         }
@@ -241,42 +250,36 @@ impl Runner {
         self.graphics.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0)
     }
 
-    /// Runs queued events through the interface and applies the messages
-    /// they produce.
-    fn process_events(&mut self) {
+    /// Draws one frame, first running every input event that arrived
+    /// since the last one through the interface.
+    ///
+    /// This is the only place the interface is built. Input used to be
+    /// run through a freshly built interface the moment each event came
+    /// in, and a finger dragging across the glass sends one every few
+    /// milliseconds -- so a scroll rebuilt and laid out the whole screen
+    /// several times per frame, then once more to draw it. Now events
+    /// queue up and are handled here, once per frame, in the same build
+    /// that draws: a frame with nothing for the app (a scroll, a press
+    /// highlight) builds the interface exactly once. Only when an event
+    /// produced messages, which can change what is on screen, is it
+    /// rebuilt before drawing.
+    ///
+    /// Frames are paced by the surface's vsync, so while something slides
+    /// (a sheet, a swiped list) this asks for the next frame straight away
+    /// and the display sets the rate.
+    ///
+    /// Also re-reads the system insets now and then, and raises or
+    /// dismisses the soft keyboard to match whether a text field has focus.
+    fn redraw(&mut self) {
         let (Some(app), Some(graphics)) = (self.app.as_mut(), self.graphics.as_mut()) else {
             self.events.clear();
             return;
         };
-        if self.events.is_empty() {
-            return;
+        let now = Instant::now();
+        if self.insets_read.is_none_or(|at| now.duration_since(at) >= INSETS_FRESH) {
+            self.insets = platform::system_insets();
+            self.insets_read = Some(now);
         }
-        let scale = graphics.viewport.scale_factor();
-        let (top, bottom) = (self.insets.0 / scale, self.insets.1 / scale);
-        app.set_insets(top, bottom);
-        let mut interface = UserInterface::build(
-            app.view(),
-            graphics.viewport.logical_size(),
-            std::mem::take(&mut self.cache),
-            &mut graphics.renderer,
-        );
-        let mut messages = Vec::new();
-        let _ = interface.update(&self.events, self.cursor, &mut graphics.renderer, &mut Clipboard, &mut messages);
-        self.events.clear();
-        self.cache = interface.into_cache();
-        for message in messages {
-            app.update(message);
-        }
-        graphics.window.request_redraw();
-    }
-
-    /// Draws one frame. Also re-reads the system insets, and raises or
-    /// dismisses the soft keyboard to match whether a text field has focus.
-    fn redraw(&mut self) {
-        let (Some(app), Some(graphics)) = (self.app.as_mut(), self.graphics.as_mut()) else {
-            return;
-        };
-        self.insets = platform::system_insets();
 
         let size = graphics.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -316,24 +319,45 @@ impl Runner {
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // A swiped list glides on: each frame scrolls by what friction
+        // leaves of the swipe's speed, as a wheel scroll where the finger
+        // left, which is what iced's scrollables move for.
+        if let Some((at, distance)) = self.fling.step(now) {
+            if distance != 0.0 {
+                self.cursor = mouse::Cursor::Available(iced_core::Point::new(at.x, at.y));
+                self.events.push(Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Pixels { x: 0.0, y: distance } }));
+            }
+        }
+
         app.resized(graphics.viewport.logical_size());
         app.frame();
         let scale = graphics.viewport.scale_factor();
         let (top, bottom) = (self.insets.0 / scale, self.insets.1 / scale);
         app.set_insets(top, bottom);
-        let mut interface = UserInterface::build(
-            app.view(),
-            graphics.viewport.logical_size(),
-            std::mem::take(&mut self.cache),
-            &mut graphics.renderer,
-        );
-        let (state, _) = interface.update(
-            &[Event::Window(core_window::Event::RedrawRequested(Instant::now()))],
-            self.cursor,
-            &mut graphics.renderer,
-            &mut Clipboard,
-            &mut Vec::new(),
-        );
+
+        // This frame's input, then the redraw itself, in one pass.
+        let mut events = std::mem::take(&mut self.events);
+        events.push(Event::Window(core_window::Event::RedrawRequested(now)));
+        let mut messages = Vec::new();
+        let mut interface = UserInterface::build(app.view(), graphics.viewport.logical_size(), std::mem::take(&mut self.cache), &mut graphics.renderer);
+        let (mut state, _) = interface.update(&events, self.cursor, &mut graphics.renderer, &mut Clipboard, &mut messages);
+        if !messages.is_empty() {
+            // Something happened: let the app act on it, then build what it
+            // now wants on screen.
+            self.cache = interface.into_cache();
+            for message in messages {
+                app.update(message);
+            }
+            app.set_insets(top, bottom);
+            interface = UserInterface::build(app.view(), graphics.viewport.logical_size(), std::mem::take(&mut self.cache), &mut graphics.renderer);
+            (state, _) = interface.update(
+                &[Event::Window(core_window::Event::RedrawRequested(now))],
+                self.cursor,
+                &mut graphics.renderer,
+                &mut Clipboard,
+                &mut Vec::new(),
+            );
+        }
 
         // A focused text field asks for an input method; on a phone that
         // means raising the soft keyboard, which winit does on request.
@@ -342,6 +366,8 @@ impl Runner {
             if wants_keyboard != self.keyboard_shown {
                 graphics.window.set_ime_allowed(wants_keyboard);
                 self.keyboard_shown = wants_keyboard;
+                // The bars are about to change size: read them afresh.
+                self.insets_read = None;
             }
         }
 
@@ -350,7 +376,14 @@ impl Runner {
         interface.draw(&mut graphics.renderer, &theme, &renderer::Style { text_color: palette.text }, self.cursor);
         self.cache = interface.into_cache();
         graphics.renderer.present(Some(palette.background), frame.texture.format(), &view, &graphics.viewport);
+        graphics.window.pre_present_notify();
         frame.present();
+
+        // Sliding things get the display's full rate: the next frame is
+        // asked for now and vsync holds it back until it is due.
+        if self.fling.active() || app.is_sliding() {
+            graphics.window.request_redraw();
+        }
     }
 }
 
@@ -388,6 +421,9 @@ impl ApplicationHandler<Wake> for Runner {
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         self.graphics = None;
         self.fingers = 0;
+        // Input meant for a window that is gone.
+        self.events.clear();
+        self.fling.cancel();
         if let Some(app) = self.app.as_mut() {
             app.touch_ended();
             app.suspended();
@@ -399,6 +435,7 @@ impl ApplicationHandler<Wake> for Runner {
             for event in platform::take_events() {
                 app.platform_event(event);
             }
+            app.mark_stale();
         }
         if let Some(graphics) = &self.graphics {
             graphics.window.request_redraw();
@@ -416,6 +453,7 @@ impl ApplicationHandler<Wake> for Runner {
                     graphics.needs_configure = true;
                     graphics.window.request_redraw();
                 }
+                self.insets_read = None;
             }
             WindowEvent::Touch(touch) => {
                 let logical = touch.location.to_logical::<f32>(self.scale());
@@ -455,11 +493,15 @@ impl ApplicationHandler<Wake> for Runner {
             _ => {}
         }
 
+        // Queued for the next frame, which handles every event that came
+        // in since the last one in a single pass (see `redraw`).
         let scale = self.scale();
         if let Some(event) = convert::window_event(&event, scale, &mut self.cursor) {
             self.events.push(event);
+            if let Some(graphics) = &self.graphics {
+                graphics.window.request_redraw();
+            }
         }
-        self.process_events();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -469,26 +511,23 @@ impl ApplicationHandler<Wake> for Runner {
         // message still has to reach the history and a notification.
         if let Some(app) = self.app.as_mut() {
             if app.poll() {
+                app.mark_stale();
                 if let Some(graphics) = &self.graphics {
                     graphics.window.request_redraw();
                 }
             }
         }
-        // A swiped list glides on: each frame scrolls by what friction
-        // leaves of the swipe's speed, as a wheel scroll where the finger
-        // left, which is what iced's scrollables move for.
-        if let Some((at, distance)) = self.fling.step(Instant::now()) {
-            if distance != 0.0 {
-                self.cursor = mouse::Cursor::Available(iced_core::Point::new(at.x, at.y));
-                self.events.push(Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Pixels { x: 0.0, y: distance } }));
-                self.process_events();
+        // A fling or a sliding sheet keeps itself going from `redraw`, at
+        // the display's rate; a lift that starts a fling needs its first
+        // frame asked for here.
+        if self.fling.active() {
+            if let Some(graphics) = &self.graphics {
+                graphics.window.request_redraw();
             }
         }
         let animating = self.app.as_ref().is_some_and(App::is_animating);
         let flow = if self.graphics.is_none() {
             ControlFlow::Wait
-        } else if self.fling.active() {
-            ControlFlow::WaitUntil(Instant::now() + FLING_FRAME)
         } else if animating {
             ControlFlow::WaitUntil(Instant::now() + ANIMATION_FRAME)
         } else if self.keyboard_shown {

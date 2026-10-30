@@ -33,6 +33,12 @@ pub trait Platform: Send + Sync + 'static {
     /// The clipboard's text, or `None` when it is empty, holds something
     /// else, or the system refuses to hand it over.
     fn read_clipboard(&self) -> Option<String>;
+    /// Opens a web link from a message in the system's browser. `false`
+    /// when there is nothing to open it with (or no way to ask), so the
+    /// app can offer the link some other way.
+    fn open_link(&self, _url: &str) -> bool {
+        false
+    }
     /// The parts of the screen the system draws over, in physical pixels,
     /// as (top, bottom): status bar, home indicator or gesture bar, and
     /// the soft keyboard while it is up.
@@ -295,6 +301,11 @@ pub fn copy_to_clipboard(text: &str) {
     if let Some(p) = get() {
         p.copy_to_clipboard(text);
     }
+}
+
+/// [`Platform::open_link`]; `false` before a platform is installed.
+pub fn open_link(url: &str) -> bool {
+    get().is_some_and(|p| p.open_link(url))
 }
 
 /// [`Platform::read_clipboard`].

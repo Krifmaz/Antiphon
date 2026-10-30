@@ -153,6 +153,13 @@ pub enum ControlMessage {
         #[serde(default)]
         id: u64,
         text: String,
+        /// The message this one answers, by its id in the same
+        /// conversation, when it was written as a reply (spec §9 "Threads
+        /// and replies"). Left out of the wire form when absent, and
+        /// defaulted when missing, so builds on either side of the change
+        /// still understand each other: an older one just shows the text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<u64>,
     },
     /// The sender revised one of their own messages (spec §13 "edit").
     ///
@@ -249,6 +256,11 @@ pub struct ProfileCard {
     /// Their picture: a small square JPEG, base64 (`crate::profile`), or
     /// empty for none.
     pub avatar: String,
+    /// How to refer to them ("she/her"), at most
+    /// `crate::profile::MAX_PRONOUNS` characters; empty for none given.
+    /// Defaulted so a card from a build before pronouns still decodes.
+    #[serde(default)]
+    pub pronouns: String,
 }
 
 /// One piece of an MLS message. A Welcome carries the whole ratchet tree
@@ -369,9 +381,9 @@ mod tests {
 
     #[test]
     fn chat_round_trips() {
-        let msg = ControlMessage::Chat { id: 42, text: "hey, can you hear me?".to_string() };
+        let msg = ControlMessage::Chat { id: 42, text: "hey, can you hear me?".to_string(), reply_to: None };
         match ControlMessage::decode(&msg.encode()).unwrap() {
-            ControlMessage::Chat { id, text } => {
+            ControlMessage::Chat { id, text, .. } => {
                 assert_eq!(id, 42);
                 assert_eq!(text, "hey, can you hear me?");
             }
@@ -463,11 +475,34 @@ mod tests {
         // Chat is understood rather than dropped.
         let raw = br#"{"kind":"Chat","text":"hello"}"#;
         match ControlMessage::decode(raw).unwrap() {
-            ControlMessage::Chat { id, text } => {
+            ControlMessage::Chat { id, text, reply_to } => {
                 assert_eq!(id, 0);
+                assert_eq!(reply_to, None);
                 assert_eq!(text, "hello");
             }
             other => panic!("expected Chat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reply_round_trips_and_a_plain_message_leaves_it_off_the_wire() {
+        let reply = ControlMessage::Chat { id: 7, text: "same".into(), reply_to: Some(3) };
+        match ControlMessage::decode(&reply.encode()).unwrap() {
+            ControlMessage::Chat { reply_to, .. } => assert_eq!(reply_to, Some(3)),
+            other => panic!("expected Chat, got {other:?}"),
+        }
+        // A message that answers nothing looks exactly as it did before
+        // replies, so an older build reads it the same.
+        let plain = ControlMessage::Chat { id: 8, text: "hi".into(), reply_to: None };
+        assert!(!String::from_utf8(plain.encode()).unwrap().contains("reply_to"));
+    }
+
+    #[test]
+    fn a_card_from_before_pronouns_still_decodes() {
+        let raw = br#"{"kind":"Profile","bio":"hi","color":"","avatar":""}"#;
+        match ControlMessage::decode(raw).unwrap() {
+            ControlMessage::Profile(card) => assert_eq!(card.pronouns, ""),
+            other => panic!("expected Profile, got {other:?}"),
         }
     }
 

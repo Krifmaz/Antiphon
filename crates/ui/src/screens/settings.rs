@@ -108,10 +108,11 @@ fn profile<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     }
     let fields = column![
         field("Name", edit_box("Name", "stoop-name", "What people see", &ui.name_edit, &m.me.name, Msg::NameEdit, Msg::NameSave)),
+        field("Pronouns", edit_box("Pronouns", "stoop-pronouns", "they/them, she/her…", &ui.pronouns_edit, &m.me.pronouns, Msg::PronounsEdit, Msg::PronounsSave)),
         field("Status", edit_box("Status", "stoop-status", "Around after six", &ui.status_edit, &m.me.status, Msg::StatusEdit, Msg::StatusSave)),
         field("About you", edit_box("About you", "stoop-bio", "A line or two people see in your details", &ui.bio_edit, &m.me.bio, Msg::BioEdit, Msg::BioSave)),
         field("Colour", colors),
-        faint("Your picture, About line and colour go to the people you call. They stay on your devices and theirs.").size(12),
+        faint("Your picture, pronouns, About line and colour go to the people you call. They stay on your devices and theirs.").size(12),
     ]
     .spacing(14);
     let identity = column![

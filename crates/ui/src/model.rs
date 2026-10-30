@@ -153,6 +153,9 @@ pub struct Me {
     pub status: String,
     /// A line or two about me, shown to contacts.
     pub bio: String,
+    /// How to refer to me ("she/her"), shown beside my name; empty for
+    /// none given.
+    pub pronouns: String,
     /// My avatar colour's id ([`crate::PROFILE_COLORS`]); empty for automatic.
     pub color: String,
     /// Whether I have a profile picture (registered in [`crate::avatars`]).
@@ -208,6 +211,8 @@ pub struct Person {
     pub muted: bool,
     /// What they say about themselves, as they last sent it.
     pub bio: String,
+    /// Their pronouns, as they last sent them; empty for none given.
+    pub pronouns: String,
 }
 
 /// What a person last said about being around.
@@ -371,6 +376,9 @@ pub struct Line {
     pub file: Option<(String, String)>,
     /// A voice message instead of text.
     pub voice: Option<VoiceClip>,
+    /// The message this one answers, by id within the conversation; the
+    /// screen quotes it above this one when it is still there.
+    pub reply_to: Option<u64>,
 }
 
 /// A voice message in a conversation.

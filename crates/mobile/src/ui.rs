@@ -15,7 +15,7 @@ mod stoop;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use antiphon_audio::{eq_preset, ChainConfig, GainConfig};
 use antiphon_crypto::{BackupKey, IdentityKeyPair};
@@ -31,6 +31,11 @@ use crate::data_rules::{self, CellularMeter, DataSettings, Link};
 use crate::files::{self, FileManager};
 use crate::platform::{self, BackgroundWork, Network};
 use crate::settings::Settings;
+
+/// The longest the model goes without a rebuild while nothing reports a
+/// change (see [`App::frame`]): long enough that a steady screen costs
+/// next to nothing, short enough that "3m ago" and the like never lag.
+const MODEL_MAX_AGE: Duration = Duration::from_secs(1);
 
 /// The renderer the shared interface is typed against: iced's wgpu one.
 pub type Renderer = iced_widget::Renderer;
@@ -317,6 +322,9 @@ pub struct App {
     chat: Option<Conversation>,
     /// The message box.
     draft: String,
+    /// The message the draft answers, by id, when the interface sent it
+    /// as a reply; taken by the next send.
+    reply_to: Option<u64>,
     /// The id of our message being edited, if the message box holds an
     /// edit.
     editing: Option<u64>,
@@ -363,6 +371,13 @@ pub struct App {
     /// What the interface draws, rebuilt by [`refresh`](Self::refresh)
     /// after every change and before every frame.
     model: antiphon_ui::Model,
+    /// Something the model is built from may have changed (the engine
+    /// delivered, the platform reported), so the next frame rebuilds it.
+    stale: bool,
+    /// When the model was last rebuilt. A frame with nothing new still
+    /// rebuilds it once this is [`MODEL_MAX_AGE`] old, which keeps clock
+    /// text ("3m") and anything that changes without telling anyone fresh.
+    refreshed_at: Instant,
     /// What the look was last built from: theme, accent, custom accent
     /// and reading font.
     look: (String, String, String, String),
@@ -398,7 +413,7 @@ pub struct App {
 
 /// The profile card the saved settings describe, as sent to contacts.
 fn card_of(settings: &Settings) -> ProfileCard {
-    ProfileCard { bio: settings.bio.clone(), color: settings.color.clone(), avatar: settings.avatar.clone() }
+    ProfileCard { bio: settings.bio.clone(), color: settings.color.clone(), avatar: settings.avatar.clone(), pronouns: settings.pronouns.clone() }
 }
 
 /// Loads this phone's identity from `dir`, creating one on first start.
@@ -469,6 +484,7 @@ impl App {
             dialled: None,
             chat: None,
             draft: String::new(),
+            reply_to: None,
             editing: None,
             unread: 0,
             live_peer: None,
@@ -482,6 +498,8 @@ impl App {
             background_work: BackgroundWork::default(),
             stoop: antiphon_ui::Ui::new(),
             model: antiphon_ui::Model::default(),
+            stale: true,
+            refreshed_at: Instant::now(),
             look: Default::default(),
             qr: None,
             previews,
@@ -933,11 +951,12 @@ impl App {
             avatar: if crate::profile::decode_avatar(&card.avatar).is_some() { card.avatar } else { String::new() },
             bio: crate::profile::clean_bio(&card.bio),
             color: if antiphon_ui::avatars::named_color(&card.color).is_some() { card.color } else { String::new() },
+            pronouns: crate::profile::clean_pronouns(&card.pronouns),
         };
         antiphon_ui::avatars::set(peer_hex, &card.avatar, &card.color, crate::profile::decode_avatar);
         if let Some(c) = self.contacts.by_key_mut(peer_hex) {
-            if (&c.avatar, &c.bio, &c.color) != (&card.avatar, &card.bio, &card.color) {
-                (c.avatar, c.bio, c.color) = (card.avatar.clone(), card.bio.clone(), card.color.clone());
+            if (&c.avatar, &c.bio, &c.color, &c.pronouns) != (&card.avatar, &card.bio, &card.color, &card.pronouns) {
+                (c.avatar, c.bio, c.color, c.pronouns) = (card.avatar.clone(), card.bio.clone(), card.color.clone(), card.pronouns.clone());
                 self.contacts.save(&self.dir);
             }
         }
@@ -1150,7 +1169,7 @@ impl App {
                             self.notice = Some("That message can no longer be edited.".into());
                         }
                     }
-                    None => chat.send(&self.draft, here.as_deref()),
+                    None => chat.send(&self.draft, self.reply_to.take(), here.as_deref()),
                 }
                 self.draft.clear();
             }
@@ -1378,9 +1397,33 @@ impl App {
     }
 
     /// A frame is about to be drawn: moves animations and timers on, and
-    /// brings the model up to date (meters, the call clock).
+    /// brings the model up to date when it may be out of date.
+    ///
+    /// The model is rebuilt only when something it is built from may have
+    /// changed, while a call or a meter is live (the levels and the clock
+    /// move every frame), or once it is [`MODEL_MAX_AGE`] old. Rebuilding
+    /// it copies every contact and the whole open conversation, so doing
+    /// that on each of the sixty frames a second that a sheet slides or a
+    /// list glides was most of what made the phone feel slow.
     pub fn frame(&mut self) {
-        let _ = self.stoop.update(antiphon_ui::Msg::Frame(Instant::now()), &self.model);
-        self.refresh();
+        let now = Instant::now();
+        let _ = self.stoop.update(antiphon_ui::Msg::Frame(now), &self.model);
+        let live = self.engine.mic_test_running() || matches!(self.engine.phase(), Phase::Connected { .. } | Phase::Dialing { .. }) || self.account.active();
+        if self.stale || live || now.duration_since(self.refreshed_at) >= MODEL_MAX_AGE {
+            self.refresh();
+        }
+    }
+
+    /// Marks the model out of date, for the next frame to rebuild: the
+    /// runner calls this when the engine or the platform had news.
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    /// Whether something on screen is sliding (a sheet rising, a panel
+    /// opening), which the runner then draws at the display's full rate
+    /// rather than [`App::is_animating`]'s slower tick.
+    pub fn is_sliding(&self) -> bool {
+        self.stoop.animating()
     }
 }

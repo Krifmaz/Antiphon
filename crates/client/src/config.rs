@@ -16,6 +16,9 @@ pub struct ProfileData {
     /// Kept here, in the config file, so a backup of the config carries it.
     #[serde(default)]
     pub avatar: String,
+    /// Your pronouns ("she/her"), sent with your card; empty for none.
+    #[serde(default)]
+    pub pronouns: String,
 }
 
 impl Default for ProfileData {
@@ -26,6 +29,7 @@ impl Default for ProfileData {
             bio: String::new(),
             color: String::new(),
             avatar: String::new(),
+            pronouns: String::new(),
         }
     }
 }
@@ -677,6 +681,9 @@ pub struct Contact {
     /// Their picture, as they last sent it: a small JPEG, base64.
     #[serde(default)]
     pub avatar: String,
+    /// Their pronouns, as they last sent them; empty for none given.
+    #[serde(default)]
+    pub pronouns: String,
 }
 
 /// A freeform panel's position and size in logical pixels, relative to its

@@ -37,6 +37,8 @@ pub struct Contact {
     pub color: String,
     /// Their profile picture as they last sent it (small JPEG, base64).
     pub avatar: String,
+    /// Their pronouns as they last sent them; empty for none given.
+    pub pronouns: String,
 }
 
 impl Contact {

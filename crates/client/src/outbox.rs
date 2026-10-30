@@ -46,6 +46,10 @@ pub struct Queued {
     /// "still trying" honestly rather than implying nothing has happened.
     #[serde(default)]
     pub attempts: u32,
+    /// The message it answers, by id, when it was written as a reply; it
+    /// goes out with it. Defaulted, so a queue saved before replies loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
 }
 
 /// What the sender is told about a message.
@@ -226,7 +230,7 @@ mod tests {
     }
 
     fn message(id: u64, at: u64) -> Queued {
-        Queued { id, text: format!("m{id}"), queued_at_secs: at, attempts: 0 }
+        Queued { id, text: format!("m{id}"), queued_at_secs: at, attempts: 0, reply_to: None }
     }
 
     #[test]

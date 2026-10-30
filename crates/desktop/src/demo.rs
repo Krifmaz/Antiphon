@@ -35,6 +35,7 @@ impl Demo {
                 name: "Azule".into(),
                 status: "Around this evening".into(),
                 bio: "Synths, long walks, terrible puns.".into(),
+                pronouns: "they/them".into(),
                 color: "sky".into(),
                 has_picture: false,
                 id: "4be1c07d9f2a83e6b5d4c3f2a1908e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7".into(),
@@ -214,7 +215,7 @@ impl Demo {
                 line(2, true, "yes!! saturday works", "19:15", None),
                 line(3, true, "should I bring anything", "19:15", None),
                 Line { reactions: vec![("👍".into(), 1)], ..line(4, false, "just yourself. and maybe that lemon thing", "19:20", None) },
-                line(5, true, "deal 🍋", "19:21", None),
+                Line { reply_to: Some(4), ..line(5, true, "deal 🍋 here's the recipe https://www.bbcgoodfood.com/recipes/lemon-drizzle-cake", "19:21", None) },
                 Line { pinned: true, ..line(6, false, "Address is 14 Larkspur Lane, ring twice", "09:03", Some("Today")) },
                 Line { voice: Some(ui::VoiceClip { seconds: 14, ..Default::default() }), ..line(9, false, "Voice message (0:14)", "09:05", None) },
                 line(7, true, "got it. calling you in a sec", "13:58", None),
@@ -256,11 +257,11 @@ impl Demo {
             Action::Mute(on) => self.model.call.muted = on,
             Action::Deafen(on) => self.model.call.deafened = on,
             Action::PeerVolume(db) => self.model.call.peer_volume_db = db,
-            Action::Send { to, text } => {
+            Action::Send { to, text, reply_to } => {
                 self.next_id += 1;
                 if let Some(c) = self.model.conversation.as_mut().filter(|c| c.person == to) {
                     let delivery = if c.live { Delivery::Delivered } else { Delivery::Queued };
-                    c.lines.push(Line { delivery, ..line(self.next_id, true, &text, "now", None) });
+                    c.lines.push(Line { delivery, reply_to, ..line(self.next_id, true, &text, "now", None) });
                 }
             }
             Action::OpenChannel { community, channel } => self.open_channel(&community, channel),
@@ -367,6 +368,7 @@ impl Demo {
                 }
             }
             Action::SetBio(bio) => self.model.me.bio = bio,
+            Action::SetPronouns(pronouns) => self.model.me.pronouns = pronouns,
             Action::ProfileColor(color) => {
                 ui::avatars::set(&self.model.me.id, "", &color, |_| None);
                 self.model.me.color = color;
@@ -408,6 +410,7 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
         volume_db: 0.0,
         muted: false,
         bio: if id == ROBIN { "Bass, coffee, records. Usually around after eight.".into() } else { String::new() },
+        pronouns: if id == ROBIN { "he/him".into() } else { String::new() },
     }
 }
 

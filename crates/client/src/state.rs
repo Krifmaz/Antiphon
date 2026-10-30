@@ -474,7 +474,7 @@ impl ActiveCall {
         let outbox = self.outbox.clone();
         let history = self.history.clone();
         runtime.spawn(async move {
-            if peer.send_control(&ControlMessage::Chat { id, text }.encode()).await.is_err() {
+            if peer.send_control(&ControlMessage::Chat { id, text, reply_to: None }.encode()).await.is_err() {
                 // Left in the queue on purpose. Clearing it here is what
                 // makes a sender's log and a receiver's log disagree.
                 return;
@@ -530,7 +530,7 @@ impl ActiveCall {
                 .unwrap_or(0);
             crate::outbox::enqueue(
                 &mut queue,
-                crate::outbox::Queued { id, text: text.clone(), queued_at_secs: at_secs, attempts: 1 },
+                crate::outbox::Queued { id, text: text.clone(), queued_at_secs: at_secs, attempts: 1, reply_to: None },
             );
         }
         self.persist_outbox();
@@ -1859,7 +1859,7 @@ pub fn start_pipeline(
                         let with = crate::delivery::hex(&recv_link_peer.peer_identity().identity_key);
                         crate::sharing::receive_link(name, size, file_id, key, holders, seeder, with);
                     }
-                    Some(ControlMessage::Chat { id, text }) => {
+                    Some(ControlMessage::Chat { id, text, .. }) => {
                         if let Some(history) = &recv_history {
                             history.record(id, false, &text);
                         }

@@ -2,7 +2,7 @@
 //! them, the messages, files on their way, and the composer.
 
 use iced_core::text::Wrapping;
-use iced_core::{Alignment, ContentFit, Length};
+use iced_core::{Alignment, Border, ContentFit, Length};
 use iced_widget::{button, column, container, hover, image, progress_bar, row, scrollable, space};
 
 use super::{call, fill};
@@ -40,9 +40,23 @@ pub fn header<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -> 
     let mut r = row![].spacing(10).align_y(Alignment::Center);
     if phone {
         r = r.push(icon_btn(Icon::Back, "", Some(Msg::Back)));
+        // Who it is, as one button into their profile, the way a chat
+        // app's header opens the person.
+        let who = row![
+            avatar_dot(&person.name, &person.id, 34.0, super::presence_color(person.presence), p.panel),
+            container(title.push(icon(Icon::Chevron, 14.0, p.faint))).clip(true),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        r = r.push(
+            pressable(who, crate::a11y::Role::Button, &format!("{}'s profile", person.name), false, Btn::Row, Msg::Nav(crate::Route::Profile(Some(person.id.clone()))))
+                .padding([4, 6])
+                .width(Length::Fill),
+        );
+    } else {
+        r = r.push(avatar_dot(&person.name, &person.id, 34.0, super::presence_color(person.presence), p.panel));
+        r = r.push(column![title, faint(sub).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill));
     }
-    r = r.push(avatar_dot(&person.name, &person.id, 34.0, super::presence_color(person.presence), p.panel));
-    r = r.push(column![title, faint(sub).size(12).wrapping(Wrapping::None)].spacing(1).width(Length::Fill));
     let on_this_call = m.call.with(&person.id);
     if !on_this_call && m.call.phase == crate::Phase::Connected {
         // On a call with someone else: this one can be brought into it.
@@ -82,11 +96,12 @@ pub fn messages<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -
             col = col.push(day_rule(day));
             prev = None;
         }
-        let first = prev.is_none_or(|q| q.mine != line.mine || q.author != line.author);
+        // A reply always starts a new group, so its quote sits over a name.
+        let first = prev.is_none_or(|q| q.mine != line.mine || q.author != line.author) || line.reply_to.is_some();
         if first && prev.is_some() {
-            col = col.push(space().height(10));
+            col = col.push(space().height(if phone { 14 } else { 10 }));
         }
-        col = col.push(message(ui, m, person, line, first));
+        col = col.push(if phone { flat_message(ui, m, person, line, lines, first) } else { message(ui, m, person, line, first) });
         prev = Some(line);
     }
     if m.conversation.as_ref().is_some_and(|c| c.person == person.id && c.lines.is_empty()) {
@@ -290,6 +305,262 @@ fn message_body<'a>(ui: &'a Ui, _m: &'a Model, person: &'a Person, line: &'a Lin
     }
 }
 
+/// One message as a phone draws it, the way the big chat apps do: every
+/// message down the left, the first of a run under the writer's picture,
+/// name and time, the rest just their words. A reply carries a small quote
+/// of what it answers above it, a link a card below it. Tapping a message
+/// brings up its tools (react, reply, copy, and edit and delete for mine);
+/// on a touch screen the "pointer" stays where the finger lifted.
+fn flat_message<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line, lines: &'a [Line], first: bool) -> El<'a, Msg> {
+    crate::a11y::group(Some(line.id));
+    let el = flat_message_body(ui, m, person, line, lines, first);
+    crate::a11y::pause(false);
+    crate::a11y::group(None);
+    el
+}
+
+/// Who wrote `line`, by name: me, the person the conversation is with, or
+/// the author it names in a conversation with more people in it.
+fn writer<'a>(m: &'a Model, person: &'a Person, line: &'a Line) -> &'a str {
+    if line.mine {
+        m.me.name.as_str()
+    } else if line.author.is_empty() {
+        person.name.as_str()
+    } else {
+        line.author.as_str()
+    }
+}
+
+/// The id whose picture and colour stand for `line`'s writer.
+fn writer_id<'a>(m: &'a Model, person: &'a Person, line: &'a Line) -> &'a str {
+    if line.mine {
+        m.me.id.as_str()
+    } else if line.author_id.is_empty() {
+        person.id.as_str()
+    } else {
+        line.author_id.as_str()
+    }
+}
+
+/// [`flat_message`]'s drawing, inside its keyboard group.
+fn flat_message_body<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, line: &'a Line, lines: &'a [Line], first: bool) -> El<'a, Msg> {
+    let p = theme::look();
+    let who = writer(m, person, line);
+    let said = match line.file.as_ref() {
+        Some((name, size)) => format!("{who} sent a file: {name}, {size}"),
+        None => format!("{who}: {}", line.text),
+    };
+    let focused = crate::a11y::Spec::new(crate::a11y::Role::Message, said).add();
+    let active = ui.active_message == Some(line.id);
+    let editing = ui.editing.as_ref().filter(|(id, _)| *id == line.id);
+
+    // What it says: an edit box while I change it, a voice clip or file
+    // as a card, otherwise its words with a card per link under them.
+    let content: El<'a, Msg> = if let Some((_, draft)) = editing {
+        column![
+            input("Edit message", crate::EDIT_BOX, "", draft).on_input(Msg::EditDraft).on_submit(Msg::EditSave).padding([8, 10]).size(15),
+            row![fill(), btn_sm("Cancel", Btn::Ghost, Some(Msg::EditCancel)), btn_sm("Save", Btn::Primary, Some(Msg::EditSave))].spacing(6).align_y(Alignment::Center),
+        ]
+        .spacing(6)
+        .into()
+    } else if let Some(clip) = line.voice {
+        let play = round_btn(
+            if clip.playing { Icon::Stop } else { Icon::Play },
+            if clip.playing { "Stop" } else { "Play" },
+            if clip.playing { Btn::RoundOn } else { Btn::Round },
+            Some(Msg::Do(Action::PlayVoice { to: person.id.clone(), id: line.id })),
+            34.0,
+        );
+        let length = format!("{}:{:02}", clip.seconds / 60, clip.seconds % 60);
+        let sub = if clip.fetching { format!("{length} · getting it") } else { length };
+        container(row![play, column![t("Voice message").size(14).font(theme::semibold()), faint(sub).size(12)].spacing(2)].spacing(10).align_y(Alignment::Center))
+            .padding([8, 12])
+            .style(theme::card_raised)
+            .into()
+    } else if let Some((name, size)) = line.file.as_ref() {
+        container(
+            row![
+                container(icon(Icon::File, 18.0, p.accent2)).center(36).style(theme::inset),
+                column![t(name.as_str()).size(14).font(theme::semibold()), faint(size.as_str()).size(12)].spacing(2),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding([10, 12])
+        .style(theme::card_raised)
+        .into()
+    } else if line.deleted {
+        faint("Message deleted").size(14).into()
+    } else {
+        let mut col = column![t(line.text.as_str()).size(15.5).wrapping(Wrapping::WordOrGlyph)].spacing(6);
+        if line.edited {
+            col = col.push(faint("(edited)").size(11.5));
+        }
+        for url in links(&line.text).into_iter().take(3) {
+            col = col.push(link_card(url));
+        }
+        col.into()
+    };
+
+    let mut body = column![].spacing(3).width(Length::Fill);
+    if first {
+        let mut head = row![t(who).size(15.5).font(theme::bold()).color(if line.mine { p.accent2 } else { p.text }).wrapping(Wrapping::None), faint(line.time.as_str()).size(11.5)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+        if line.pinned {
+            head = head.push(icon(Icon::Sparkle, 11.0, p.accent2));
+        }
+        body = body.push(head);
+    }
+    body = body.push(content);
+    if !line.reactions.is_empty() {
+        let mut rr = row![].spacing(4);
+        for (emoji, n) in &line.reactions {
+            rr = rr.push(
+                pressable(
+                    row![t(emoji.as_str()).size(14), t(n.to_string()).size(12).color(p.muted)].spacing(4).align_y(Alignment::Center),
+                    crate::a11y::Role::Button,
+                    &format!("{emoji} {n}"),
+                    false,
+                    Btn::Default,
+                    Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: emoji.clone() }),
+                )
+                .padding([3, 9]),
+            );
+        }
+        body = body.push(rr);
+    }
+    if line.mine {
+        let (label, color) = match line.delivery {
+            Delivery::Queued => ("Waiting until they're reachable", p.warn),
+            Delivery::Failed => ("Not delivered", p.err),
+            _ => ("", p.faint),
+        };
+        if !label.is_empty() {
+            body = body.push(t(label).size(11.5).color(color));
+        }
+    }
+
+    let lead: El<'a, Msg> = if first { avatar(who, writer_id(m, person, line), 40.0) } else { space().width(40).into() };
+    let mut whole = column![].spacing(4);
+    if let Some(quoted) = line.reply_to.and_then(|id| lines.iter().find(|l| l.id == id)) {
+        whole = whole.push(reply_quote(m, person, quoted));
+    }
+    whole = whole.push(row![lead, body].spacing(12).align_y(Alignment::Start));
+
+    if editing.is_some() || line.deleted {
+        return container(whole).padding([2, 0]).into();
+    }
+    // The tools, over the message's top right while it is tapped (or has
+    // the keyboard's focus); only then do they join the keyboard's list.
+    crate::a11y::pause(!active);
+    let mut tools = row![].spacing(2).align_y(Alignment::Center);
+    for e in QUICK {
+        tools = tools.push(
+            pressable(t(e).size(15), crate::a11y::Role::Button, &format!("React {e}"), false, Btn::Ghost, Msg::Do(Action::React { to: person.id.clone(), id: line.id, emoji: e.to_string() }))
+                .padding([4, 7]),
+        );
+    }
+    if line.file.is_none() && line.voice.is_none() {
+        tools = tools.push(icon_btn(Icon::Back, "Reply", Some(Msg::Reply(Some(line.id)))));
+        tools = tools.push(icon_btn(Icon::Copy, "Copy", Some(Msg::Copy(line.text.clone(), "Message"))));
+        if line.mine {
+            tools = tools.push(icon_btn(Icon::Edit, "Edit", Some(Msg::EditStart(line.id, line.text.clone()))));
+        }
+    }
+    if line.mine {
+        tools = tools.push(icon_btn(Icon::Trash, "Delete", Some(Msg::Do(Action::Delete { to: person.id.clone(), id: line.id }))));
+    }
+    crate::a11y::pause(false);
+    let bar = container(tools).padding(3).style(theme::menu_pop);
+    let overlay = container(bar).width(Length::Fill).align_x(Alignment::End);
+    let row_el = crate::a11y::ring(container(whole).padding([2, 0]).width(Length::Fill), focused, 10.0);
+    if active {
+        iced_widget::stack![row_el, overlay].into()
+    } else {
+        hover(row_el, overlay)
+    }
+}
+
+/// The small quote over a reply: a hooked line from the avatar column,
+/// the quoted writer's picture and name, and the start of what they said.
+fn reply_quote<'a>(m: &'a Model, person: &'a Person, quoted: &'a Line) -> El<'a, Msg> {
+    let p = theme::look();
+    let who = writer(m, person, quoted);
+    let what = if quoted.deleted {
+        "Message deleted".to_string()
+    } else if let Some((name, _)) = quoted.file.as_ref() {
+        format!("File: {name}")
+    } else if quoted.voice.is_some() {
+        "Voice message".to_string()
+    } else {
+        super::clip(&quoted.text, 44)
+    };
+    // The hook: a corner from over the avatar's middle across to the
+    // quote, as chat apps join a reply to what it answers. Two hairlines
+    // laid over each other, since a border can't leave out sides.
+    let stroke = move |_: &iced_core::Theme| container::Style { background: Some(iced_core::Background::Color(p.faint.scale_alpha(0.7))), ..container::Style::default() };
+    let hook = iced_widget::stack![container(space()).width(24).height(2).style(stroke), container(space()).width(2).height(11).style(stroke)];
+    row![
+        container(hook).padding(pad(10.0, 0.0, 0.0, 19.0)).width(52),
+        avatar(who, writer_id(m, person, quoted), 16.0),
+        t(who).size(13).font(theme::semibold()).color(p.muted).wrapping(Wrapping::None),
+        container(faint(what).size(13).wrapping(Wrapping::None)).width(Length::Fill).clip(true),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// The web links in `text`: each word that starts `http://` or `https://`,
+/// without the punctuation a sentence may have put after it.
+pub fn links(text: &str) -> Vec<&str> {
+    text.split_whitespace()
+        .filter(|w| w.starts_with("https://") || w.starts_with("http://"))
+        .map(|w| w.trim_end_matches(['.', ',', ')', '!', '?', ';', ':', '"', '\'']))
+        .filter(|w| host(w).is_some_and(|h| !h.is_empty()))
+        .collect()
+}
+
+/// The site a link points at, without `www.`: "youtube.com" for
+/// `https://www.youtube.com/watch?v=…`. `None` for something that isn't a
+/// web link.
+pub fn host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = &rest[..end];
+    // Credentials before an @, and a port after a colon, are not where it
+    // goes.
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    Some(host.strip_prefix("www.").unwrap_or(host))
+}
+
+/// A card under a message for a link in it: the site's name and the link
+/// itself, with an accent edge down its left, as chat apps show a preview.
+/// Nothing is fetched from the site: asking it for a title would tell it
+/// who is talking to whom, which this app never does. A tap opens it.
+fn link_card<'a>(url: &'a str) -> El<'a, Msg> {
+    let p = theme::look();
+    let site = host(url).unwrap_or(url);
+    let words = column![
+        t(site).size(12.5).color(p.muted),
+        t(url).size(14.5).font(theme::semibold()).color(p.info).wrapping(Wrapping::Glyph),
+        faint("Tap to open in your browser").size(12),
+    ]
+    .spacing(4);
+    let card = container(words).padding(pad(10.0, 12.0, 10.0, 14.0)).width(Length::Fill).style(move |_| container::Style {
+        background: Some(iced_core::Background::Color(p.bg2)),
+        // The accent edge: a thick left border, as a quote is drawn.
+        border: Border { color: p.border, width: 1.0, radius: 10.0.into() },
+        shadow: iced_core::Shadow { color: p.accent2, offset: iced_core::Vector::new(-3.0, 0.0), blur_radius: 0.0 },
+        ..container::Style::default()
+    });
+    pressable(container(card).max_width(520), crate::a11y::Role::Button, &format!("Open {site}"), false, Btn::Ghost, Msg::Do(Action::OpenLink(url.to_string())))
+        .padding(pad(0.0, 0.0, 0.0, 3.0))
+        .into()
+}
+
 /// A file they offered, files on their way, and those waiting their turn.
 pub fn transfers<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
     let p = theme::look();
@@ -390,7 +661,7 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     let live = conv.is_some_and(|c| c.live);
     let queues = conv.is_some_and(|c| c.queues);
     let placeholder = if live {
-        format!("Message {}", person.name)
+        format!("Message @{}", person.name)
     } else if queues {
         format!("Leave {} a message", person.name)
     } else {
@@ -445,5 +716,42 @@ pub fn composer<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg>
     if let Some(e) = conv.and_then(|c| c.expiry.as_deref()) {
         hint = hint.push(badge_icon(Icon::Clock, e, Badge::Plain));
     }
-    column![container(bar).padding([2, 8]).style(theme::composer), container(hint).padding([0, 6])].spacing(6).into()
+    let mut col = column![].spacing(6);
+    // Answering a message: who and what, over the bar, with a way out.
+    let lines = conv.map(|c| c.lines.as_slice()).unwrap_or(&[]);
+    if let Some(quoted) = ui.replying.and_then(|id| lines.iter().find(|l| l.id == id)) {
+        let who = writer(m, person, quoted);
+        col = col.push(
+            container(
+                row![
+                    icon(Icon::Back, 14.0, p.muted),
+                    t(format!("Replying to {who}")).size(13).color(p.muted).width(Length::Fill),
+                    icon_btn(Icon::X, "Stop replying", Some(Msg::Reply(None))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding(pad(0.0, 4.0, 0.0, 12.0))
+            .style(theme::inset),
+        );
+    }
+    col.push(container(bar).padding([2, 8]).style(theme::composer)).push(container(hint).padding([0, 6])).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn links_are_found_without_trailing_punctuation() {
+        assert_eq!(links("see https://example.com/a?b=1, and http://x.org."), vec!["https://example.com/a?b=1", "http://x.org"]);
+        assert!(links("no links, just ftp://nope and https://").is_empty());
+    }
+
+    #[test]
+    fn a_link_names_its_site() {
+        assert_eq!(host("https://www.youtube.com/shorts/abc"), Some("youtube.com"));
+        assert_eq!(host("http://user@example.org:8080/x"), Some("example.org"));
+        assert_eq!(host("stoop://abc"), None);
+    }
 }

@@ -65,6 +65,11 @@ fn wide<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Route::Settings(section) => settings::view(ui, m, *section),
         Route::Spaces => community::list(ui, m, false),
         Route::Community(id, channel) => community::view(ui, m, id, *channel),
+        // A wide window keeps profiles where they always were: mine in
+        // Settings, a contact's in the details panel beside their
+        // conversation.
+        Route::Profile(None) | Route::ProfileEdit => settings::view(ui, m, crate::Section::Profile),
+        Route::Profile(Some(id)) => conversation::view(ui, m, id),
     };
     let main = match m.notice.as_deref() {
         Some(n) => column![notice(n), main].into(),

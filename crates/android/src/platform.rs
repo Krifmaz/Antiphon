@@ -54,6 +54,10 @@ impl Platform for Android {
         read_clipboard()
     }
 
+    fn open_link(&self, url: &str) -> bool {
+        open_link(url)
+    }
+
     fn system_insets(&self) -> (f32, f32) {
         system_insets()
     }
@@ -267,6 +271,27 @@ fn clipboard_manager<'a>(env: &mut JNIEnv<'a>, activity: &JObject) -> jni::error
     let name = env.new_string("clipboard")?;
     env.call_method(activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&name)])?
         .l()
+}
+
+/// Hands a web link to whatever opens links on this phone (the browser,
+/// or the app the link belongs to), as `ACTION_VIEW` on its URI. Only
+/// `http` and `https`: a message must not be able to start any other
+/// kind of intent. `false` when nothing could take it.
+fn open_link(url: &str) -> bool {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return false;
+    }
+    with_activity("opening a link", |env, activity| {
+        let text = env.new_string(url)?;
+        let uri = env.call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&text)])?.l()?;
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;Landroid/net/Uri;)V", &[JValue::Object(&action), JValue::Object(&uri)])?;
+        // Throws ActivityNotFoundException when nothing opens links;
+        // `with_activity` clears it and this returns `false`.
+        env.call_method(activity, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)])?;
+        Ok(())
+    })
+    .is_some()
 }
 
 /// Copies `text` to the system clipboard.

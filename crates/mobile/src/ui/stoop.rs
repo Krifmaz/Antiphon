@@ -39,6 +39,8 @@ impl App {
     /// Rebuilds the model the interface draws. Called after every change;
     /// cheap enough for that, since it reads what is already in memory.
     pub(super) fn refresh(&mut self) {
+        self.stale = false;
+        self.refreshed_at = std::time::Instant::now();
         let model = self.build_model();
         self.model = model;
         let s = &self.model.settings;
@@ -95,6 +97,7 @@ impl App {
             name: self.settings.display_name.clone(),
             status: self.settings.status_message.clone(),
             bio: self.settings.bio.clone(),
+            pronouns: self.settings.pronouns.clone(),
             color: self.settings.color.clone(),
             has_picture: !self.settings.avatar.is_empty(),
             fingerprint: id.as_bytes().chunks(4).take(8).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(" "),
@@ -114,7 +117,7 @@ impl App {
             .iter()
             .map(|c| {
                 stoop::avatars::set(&c.identity_key, &c.avatar, &c.color, crate::profile::decode_avatar);
-                Person { fingerprint: c.fingerprint(), bio: c.bio.clone(), ..self.person(&c.identity_key, c.name.clone(), c.address.clone(), c.verified, live_peer.as_deref(), now) }
+                Person { fingerprint: c.fingerprint(), bio: c.bio.clone(), pronouns: c.pronouns.clone(), ..self.person(&c.identity_key, c.name.clone(), c.address.clone(), c.verified, live_peer.as_deref(), now) }
             })
             .collect();
         // Someone not saved can still call: they get a row for the length
@@ -238,6 +241,7 @@ impl App {
             volume_db: 0.0,
             muted: false,
             bio: String::new(),
+            pronouns: String::new(),
         }
     }
 
@@ -341,6 +345,8 @@ impl App {
                 },
                 edited: m.edited,
                 pinned: m.pinned,
+                deleted: m.deleted,
+                reply_to: m.reply_to,
                 reactions: reactions.remove(&m.id).unwrap_or_default(),
                 file: None,
                 ..Line::default()
@@ -454,9 +460,10 @@ impl App {
             Action::Deafen(_) | Action::PeerVolume(_) | Action::Volume(..) | Action::MuteFor(..) | Action::OutputVolume(_) => {
                 self.stoop.toast("The phone's volume buttons set this for now", ToastKind::Info);
             }
-            Action::Send { to, text } => {
+            Action::Send { to, text, reply_to } => {
                 self.open_chat(&to);
                 self.draft = text;
+                self.reply_to = reply_to;
                 self.update(Message::SendChat);
             }
             Action::Edit { to, id, text } => {
@@ -528,6 +535,17 @@ impl App {
             Action::SetBio(bio) => {
                 self.settings.bio = crate::profile::clean_bio(&bio);
                 self.profile_changed();
+            }
+            Action::SetPronouns(pronouns) => {
+                self.settings.pronouns = crate::profile::clean_pronouns(&pronouns);
+                self.profile_changed();
+            }
+            Action::OpenLink(url) => {
+                if !crate::platform::open_link(&url) {
+                    // No browser to hand it to: the next best thing.
+                    crate::platform::copy_to_clipboard(&url);
+                    self.stoop.toast("Couldn't open it, so the link is copied", ToastKind::Info);
+                }
             }
             Action::ProfileColor(color) => {
                 self.settings.color = color;

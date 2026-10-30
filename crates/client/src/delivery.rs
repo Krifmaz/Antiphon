@@ -726,7 +726,7 @@ pub fn leave_message(contact_key_hex: &str, text: &str, expire_after_secs: Optio
     let mut queue = crate::outbox::load(&dir, contact_key_hex, &key);
     crate::outbox::enqueue(
         &mut queue,
-        crate::outbox::Queued { id, text: text.to_string(), queued_at_secs: now, attempts: 0 },
+        crate::outbox::Queued { id, text: text.to_string(), queued_at_secs: now, attempts: 0, reply_to: None },
     );
     crate::outbox::save(&dir, contact_key_hex, &key, &queue).map_err(|e| e.to_string())?;
     kick();

@@ -5099,6 +5099,7 @@ fn contacts_from_ui(app: &MainWindow) -> Vec<config::Contact> {
                 bio: previous.map(|p| p.bio.clone()).unwrap_or_default(),
                 color: previous.map(|p| p.color.clone()).unwrap_or_default(),
                 avatar: previous.map(|p| p.avatar.clone()).unwrap_or_default(),
+                pronouns: previous.map(|p| p.pronouns.clone()).unwrap_or_default(),
             }
         })
         .collect()
