@@ -250,7 +250,14 @@ pub mod vst {
 
     use vst3::{uid, Class, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
-    /// The processor's class id, as the host saves it.
+    /// The processor's class id, as the host saves it: the id's bytes as
+    /// stored, which on Windows are COM-style (first three groups
+    /// little-endian).
+    #[cfg(target_os = "windows")]
+    pub const CID_TEXT: &str = "D4C3B2A1F6E51807293A4B5C6D7E8F90";
+    /// The processor's class id, as the host saves it: the id's bytes as
+    /// stored.
+    #[cfg(not(target_os = "windows"))]
     pub const CID_TEXT: &str = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
     const PROCESSOR: TUID = uid(0xA1B2C3D4, 0xE5F60718, 0x293A4B5C, 0x6D7E8F90);
     const CONTROLLER: TUID = uid(0x0F1E2D3C, 0x4B5A6978, 0x8796A5B4, 0xC3D2E1F0);
