@@ -218,7 +218,39 @@ fn notifications<'a>(m: &'a Model) -> El<'a, Msg> {
         Some("Show a notification when a message arrives and Stoop is in the background."),
         switch("Message notifications", m.settings.notify_messages, |on| Msg::Do(Action::NotifyMessages(on))),
     );
-    card(notify).into()
+    let Some(c) = &m.settings.calls else { return card(notify).into() };
+    let knock = column![
+        setting(
+            "Knock by default",
+            Some("The Call button knocks: they see you're around, without a ring. The button beside it rings."),
+            switch("Knock by default", c.knock_default, |on| Msg::Do(Action::KnockDefault(on))),
+        ),
+        divider(),
+        setting("Shift+click does the other one", None, switch("Shift+click does the other one", c.shift_flips, |on| Msg::Do(Action::ShiftFlips(on)))),
+    ]
+    .spacing(12);
+    let at = crate::Ring::ALL.iter().position(|(r, _)| *r == c.default_ring).unwrap_or(0);
+    let default_ring = tabs(crate::Ring::ALL.iter().map(|&(r, name)| (name, Msg::Do(Action::DefaultRing(r)))).collect(), at);
+    let (quiet_on, from, to) = c.quiet;
+    let hours = |min: u32| min as f32 / 60.0;
+    let mut quiet = column![setting(
+        "Quiet hours",
+        Some("Between these times a call that would ring shows up quietly instead."),
+        switch("Quiet hours", quiet_on, move |on| Msg::Do(Action::QuietHours(on, from, to))),
+    )]
+    .spacing(12);
+    if quiet_on {
+        quiet = quiet
+            .push(field("From", value_slider("Quiet from", hours(from), 0.0, 23.5, 0.5, "h", move |h| Msg::Do(Action::QuietHours(true, (h * 60.0) as u32, to)))))
+            .push(field("Until", value_slider("Quiet until", hours(to), 0.0, 23.5, 0.5, "h", move |h| Msg::Do(Action::QuietHours(true, from, (h * 60.0) as u32)))));
+    }
+    column![
+        card(notify),
+        titled_card("Starting a call", Some("A knock is a quiet call: it shows up for them without ringing, and you can still ring them after all."), knock),
+        titled_card("When someone calls", Some("Your settings always win: a caller can't ring through them. Each contact's own choice is in their details."), column![field("Anyone without their own setting", default_ring), divider(), quiet].spacing(12)),
+    ]
+    .spacing(14)
+    .into()
 }
 
 /// Appearance's tab `tab`: 0 the theme, accent colour and theme files;

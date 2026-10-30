@@ -316,6 +316,7 @@ impl App {
             fingerprint: key_hex.as_bytes().chunks(4).take(8).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(" "),
             note: String::new(),
             ring_rule: String::new(),
+            ring: None,
             route: "Direct".into(),
             volume_db: 0.0,
             muted: false,
@@ -791,6 +792,16 @@ impl App {
             Action::VaThreshold(_) => {}
             // Nor talk keys to latch or delay, nor a record preview.
             Action::PttLatch(_) | Action::PttRelease(_) | Action::RecordPreview => {}
+            // A knock calls as usual here: the phone has no ring settings
+            // to offer yet, so it never shows the knock button either.
+            Action::Knock(id) => self.update(Message::CallContact(id)),
+            Action::Escalate
+            | Action::KnockDefault(_)
+            | Action::ShiftFlips(_)
+            | Action::DefaultRing(_)
+            | Action::QuietHours(..)
+            | Action::RingRule(..)
+            | Action::SpaceRing(..) => {}
             Action::EchoCancel(_) => {}
             // A phone has no screen share to send the sound of.
             Action::ScreenAudio(_) => {}

@@ -85,6 +85,7 @@ impl Demo {
                 transmit: ui::Transmit::Voice,
                 va_threshold: Some(0.05),
                 monitor_ms: 30,
+                calls: Some(ui::CallPrefs { quiet: (false, 22 * 60, 7 * 60), ..ui::CallPrefs::default() }),
                 record_preview: Some(false),
                 ptt_key: "Caps Lock".into(),
                 noise_suppression: true,
@@ -163,6 +164,11 @@ impl Demo {
             through_codec(antiphon_video::Encoder::camera(), &fake_face(640, 480, [214, 160, 120], [58, 92, 140], [236, 222, 200]), "their-camera", "Robin"),
             mine("my-camera", "You", &fake_face(480, 360, [190, 140, 105], [140, 58, 64], [200, 214, 228])),
         ];
+    }
+
+    /// The demo's call settings, to change.
+    fn calls(&mut self) -> &mut ui::CallPrefs {
+        self.model.settings.calls.get_or_insert_with(ui::CallPrefs::default)
     }
 
     /// Carries out a background picture request on the demo's made-up
@@ -436,6 +442,15 @@ impl Demo {
                 self.model.me.color = color;
             }
             Action::IpDirect(on) => self.model.network.ip_direct = Some(on),
+            Action::RingRule(id, ring) => {
+                if let Some(p) = self.model.people.iter_mut().find(|p| p.id == id) {
+                    p.ring = Some(ring);
+                }
+            }
+            Action::KnockDefault(on) => self.calls().knock_default = on,
+            Action::ShiftFlips(on) => self.calls().shift_flips = on,
+            Action::DefaultRing(ring) => self.calls().default_ring = ring,
+            Action::QuietHours(on, from, to) => self.calls().quiet = (on, from, to),
             Action::ShareScreen(on) => {
                 self.model.call.sharing = on;
                 self.model.call.video.retain(|t| t.key != "my-screen");
@@ -469,6 +484,7 @@ fn person(id: &str, name: &str, presence: Presence, verified: bool, last: &str, 
         fingerprint: id.as_bytes().chunks(2).take(8).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(":"),
         note: if id == ROBIN { "Neighbour from the old flat. Plays bass.".into() } else { String::new() },
         ring_rule: "Rings out loud".into(),
+        ring: Some(ui::Ring::Loud),
         route: "Automatic".into(),
         volume_db: 0.0,
         muted: false,

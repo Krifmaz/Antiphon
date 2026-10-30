@@ -802,6 +802,7 @@ fn on_event(event: Event, status: event::Status, window: window::Id) -> Option<M
     let free = status == event::Status::Ignored;
     match event {
         Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::Ui(Msg::Cursor(position))),
+        Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(Message::Ui(Msg::Shift(modifiers.shift()))),
         Event::Window(window::Event::Resized(size)) => Some(Message::Ui(Msg::Resized(size))),
         Event::Window(window::Event::Opened { size, .. }) => Some(Message::Opened(window, size)),
         Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),

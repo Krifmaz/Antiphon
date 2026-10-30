@@ -101,7 +101,12 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Msg> {
     col = col.push(section("Note", note.into()));
 
     let mut calls = column![].spacing(8);
-    if !person.ring_rule.is_empty() {
+    if let Some(ring) = person.ring {
+        // Spec §9: whether they may ring you, whoever started the call.
+        let at = crate::Ring::ALL.iter().position(|(r, _)| *r == ring).unwrap_or(0);
+        let choices = crate::Ring::ALL.iter().map(|&(r, name)| (name, Msg::Do(Action::RingRule(person.id.clone(), r)))).collect();
+        calls = calls.push(column![faint("When they call").size(12), tabs(choices, at)].spacing(6));
+    } else if !person.ring_rule.is_empty() {
         calls = calls.push(kv("Rings through", &person.ring_rule));
     }
     if !person.route.is_empty() {

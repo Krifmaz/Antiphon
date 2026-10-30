@@ -97,10 +97,20 @@ pub fn header<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person, phone: bool) -> 
         }
     } else if !on_this_call {
         let can_call = !m.call.active();
+        // Spec §9: a second button for the other way to call, so a knock
+        // never depends on knowing a modifier key.
+        let (main, other) = match &m.settings.calls {
+            Some(c) if c.knock_default => ("Knock", Some("Ring")),
+            Some(_) => ("Call", Some("Knock")),
+            None => ("Call", None),
+        };
+        if let Some(other) = other {
+            r = r.push(btn_icon(Icon::Door, other, Btn::Ghost, can_call.then(|| Msg::Do(Action::Knock(person.id.clone())))));
+        }
         if phone {
-            r = r.push(icon_btn(Icon::Phone, "Call", can_call.then(|| Msg::Do(Action::Call(person.id.clone())))));
+            r = r.push(icon_btn(Icon::Phone, main, can_call.then(|| Msg::Do(Action::Call(person.id.clone())))));
         } else {
-            r = r.push(btn_icon(Icon::Phone, "Call", Btn::Primary, can_call.then(|| Msg::Do(Action::Call(person.id.clone())))));
+            r = r.push(btn_icon(Icon::Phone, main, Btn::Primary, can_call.then(|| Msg::Do(Action::Call(person.id.clone())))));
         }
     }
     if !phone {

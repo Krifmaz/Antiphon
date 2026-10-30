@@ -642,15 +642,6 @@ impl ActiveCall {
         true
     }
 
-    /// Marks this call as silent for the other side (spec §9).
-    ///
-    /// Sent immediately after connecting, as a courtesy. It cannot make
-    /// their app ring -- only ask it not to.
-    /// Withdraws an earlier knock, asking for the receiver's normal rules
-    /// to apply after all (spec §9).
-    ///
-    /// Does not restart the call: the connection, the keys and the audio
-    /// all continue, and only the notification decision is revisited.
     /// Whether the call is still up: the receive loop is running and the
     /// other side has not said it left.
     pub fn is_live(&self) -> bool {
@@ -669,17 +660,15 @@ impl ActiveCall {
         });
     }
 
+    /// Withdraws an earlier knock, asking for the receiver's normal rules
+    /// to apply after all (spec §9).
+    ///
+    /// Does not restart the call: the connection, the keys and the audio
+    /// all continue, and only the notification decision is revisited.
     pub fn escalate(&self, runtime: &tokio::runtime::Handle) {
         let peer = self.peer.clone();
         runtime.spawn(async move {
             let _ = peer.send_control(&ControlMessage::EscalateCall.encode()).await;
-        });
-    }
-
-    pub fn announce_silent(&self, runtime: &tokio::runtime::Handle) {
-        let peer = self.peer.clone();
-        runtime.spawn(async move {
-            let _ = peer.send_control(&ControlMessage::SilentCall.encode()).await;
         });
     }
 

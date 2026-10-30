@@ -369,8 +369,26 @@ pub enum Action {
     Open(String),
     /// Open or close the door (listen for calls).
     Door(bool),
-    /// Call a contact.
+    /// Call a contact: ring them, or knock if knocking is the default.
     Call(String),
+    /// The other way to call a contact: knock (a silent call, spec §9), or
+    /// ring if knocking is the default.
+    Knock(String),
+    /// Ring the person you knocked on after all.
+    Escalate,
+    /// Make the Call button knock (and the other button ring).
+    KnockDefault(bool),
+    /// Let Shift+click on Call do the other one.
+    ShiftFlips(bool),
+    /// What a call from someone with no rule of their own does.
+    DefaultRing(Ring),
+    /// Do-not-disturb: on, from and to (minutes from midnight).
+    QuietHours(bool, u32, u32),
+    /// Whether this contact may ring you.
+    RingRule(String, Ring),
+    /// Whether people you share this space with may ring you; `None`
+    /// follows your default.
+    SpaceRing(String, Option<Ring>),
     /// Bring a contact into the call that is running (spec §3 group calls).
     AddToCall(String),
     /// Call an address that is not a contact.
@@ -1100,6 +1118,8 @@ pub enum Msg {
     DismissToast(u64),
     /// Where the pointer is, so a right-click menu opens under it.
     Cursor(Point),
+    /// Shift is held (true) or let go, so Shift+click on Call can knock.
+    Shift(bool),
     /// Open the right-click menu for a person, or close it.
     Menu(Option<String>),
     /// Copy text and say so.
@@ -1240,6 +1260,8 @@ pub struct Ui {
     epoch: Instant,
     /// Animations off: everything jumps to its end state.
     reduced_motion: bool,
+    /// Shift is held down.
+    shift: bool,
     /// The strips the phone's system draws over, in logical pixels, as
     /// (top, bottom): the status bar and camera cutout, and the gesture
     /// bar (or the keyboard while it is up). The layout keeps every
@@ -1328,6 +1350,7 @@ impl Ui {
             now,
             epoch: now,
             reduced_motion: false,
+            shift: false,
             video_focus: None,
             insets: (0.0, 0.0),
             accent_edit: None,
@@ -1470,6 +1493,10 @@ impl Ui {
         match msg {
             Msg::Resized(size) => {
                 self.size = size;
+                Vec::new()
+            }
+            Msg::Shift(down) => {
+                self.shift = down;
                 Vec::new()
             }
             Msg::Frame(now) => {
@@ -2012,11 +2039,17 @@ impl Ui {
                 actions
             }
             Msg::Do(action) => {
+                // Shift+click swaps ringing and knocking, when asked for.
+                let action = match action {
+                    Action::Call(id) if self.shift && model.settings.calls.as_ref().is_some_and(|c| c.shift_flips) => Action::Knock(id),
+                    Action::Knock(id) if self.shift && model.settings.calls.as_ref().is_some_and(|c| c.shift_flips) => Action::Call(id),
+                    other => other,
+                };
                 match &action {
                     // A reaction picked in the picker closes it; one tapped
                     // on a message had nothing open to close.
                     Action::React { .. } | Action::ReactPost { .. } if matches!(self.dialog, Some(Dialog::ReactPicker(_))) => self.set_dialog(None),
-                    Action::Call(_) | Action::AddToCall(_) => self.menu = None,
+                    Action::Call(_) | Action::Knock(_) | Action::AddToCall(_) => self.menu = None,
                     Action::Remove(_) | Action::Block(_) => {
                         self.set_dialog(None);
                         self.route = Route::Home;

@@ -582,6 +582,17 @@ pub fn notify<'a>(m: &'a Model, id: &'a str) -> El<'a, Msg> {
         field(if c.group { "Notify me about" } else { "For the whole community" }, whole),
     ]
     .spacing(14);
+    // Spec §9: may people from here who aren't your contacts ring you?
+    if m.settings.calls.is_some() {
+        let ring = |r: Option<crate::Ring>| Msg::Do(Action::SpaceRing(c.id.clone(), r));
+        let at = match c.ring {
+            None => 0,
+            Some(r) => crate::Ring::ALL.iter().position(|(q, _)| *q == r).unwrap_or(0) + 1,
+        };
+        let mut choices = vec![("Default", ring(None))];
+        choices.extend(crate::Ring::ALL.iter().map(|&(r, name)| (name, ring(Some(r)))));
+        col = col.push(field("Calls from people here who aren't your contacts", tabs(choices, at)));
+    }
     if !c.group && !c.channels.is_empty() {
         let mut rows = column![label("Channels")].spacing(8);
         for ch in &c.channels {

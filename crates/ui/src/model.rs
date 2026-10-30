@@ -293,6 +293,9 @@ pub struct Person {
     pub note: String,
     /// When they may ring through ("Always", "Contacts only", ...).
     pub ring_rule: String,
+    /// The same, as a choice to change; `None` where it can't be changed
+    /// here (the phone).
+    pub ring: Option<Ring>,
     /// How a call to them is placed ("Automatic", "Direct only", ...).
     pub route: String,
     /// How loud they are for you, dB (0 is unchanged). Remembered per person.
@@ -327,6 +330,9 @@ pub enum Presence {
 pub struct Call {
     /// Where the call is.
     pub phase: Phase,
+    /// You knocked rather than rang (spec §9 silent call), and can still
+    /// ring them after all.
+    pub knocking: bool,
     /// The contact on the call, when they are one.
     pub peer: Option<String>,
     /// Their name, or the address for a stranger.
@@ -737,6 +743,9 @@ pub struct Settings {
     pub call_layout: CallLayout,
     /// Show a notification for messages while the window is not focused.
     pub notify_messages: bool,
+    /// How calls start and arrive (spec §9); `None` where they can't be
+    /// set (the phone).
+    pub calls: Option<CallPrefs>,
     /// Open the door (listen for calls) when the app starts.
     pub open_on_start: bool,
     /// The app's version, for About.
@@ -951,6 +960,39 @@ impl Backdrop {
         let bottom = cut(self.crop[3], h).min(h.saturating_sub(top + 1));
         iced_core::Rectangle { x: left, y: top, width: (w - left - right).max(1), height: (h - top - bottom).max(1) }
     }
+}
+
+/// How much attention an incoming call may ask for (spec §9 "Receiver
+/// settings always win").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ring {
+    /// It rings out loud.
+    #[default]
+    Loud,
+    /// It shows up quietly.
+    Quiet,
+    /// Nothing at all.
+    Never,
+}
+
+impl Ring {
+    /// Every choice, in the order offered, with its name.
+    pub const ALL: [(Self, &'static str); 3] = [(Self::Loud, "Ring"), (Self::Quiet, "Quietly"), (Self::Never, "Never")];
+}
+
+/// How calls start and arrive, as Settings shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CallPrefs {
+    /// The Call button knocks (a silent call) and the second button rings,
+    /// instead of the other way round.
+    pub knock_default: bool,
+    /// Shift+click on Call does the other one.
+    pub shift_flips: bool,
+    /// What a call from someone with no rule of their own does.
+    pub default_ring: Ring,
+    /// Do-not-disturb: on, and from and to, in minutes from midnight.
+    /// While on, a call that would ring only shows up quietly.
+    pub quiet: (bool, u32, u32),
 }
 
 /// A part of the call that can be moved, hidden or shown again. The
@@ -1349,6 +1391,10 @@ pub struct Community {
     pub join_link: Option<String>,
     /// Which of its messages notify you.
     pub notify: Notify,
+    /// Whether people you share it with may ring you, when they are not
+    /// your contacts (spec §9 "per-community ring settings"); `None`
+    /// follows your default.
+    pub ring: Option<Ring>,
     /// Its custom emoji's names, written `:name:`; their pictures are
     /// registered in [`crate::avatars`] under [`crate::avatars::emoji_id`].
     pub emoji: Vec<String>,

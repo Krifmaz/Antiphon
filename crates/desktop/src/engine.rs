@@ -164,6 +164,10 @@ struct CallInfo {
     status: Option<String>,
     /// When the call ended, to clear the reason after [`ENDED_FOR`].
     ended_at: Option<Instant>,
+    /// We knocked (a silent call, spec §9) and haven't rung them since.
+    knocking: bool,
+    /// They called us; a ring they ask for later is acted on.
+    incoming: bool,
 }
 
 /// The rate voice messages are decoded and played at.
@@ -544,6 +548,7 @@ impl Engine {
 
         self.captions.tick(&self.state, self.dir.as_deref(), self.cfg.captions_enabled, self.cfg.captions_own_voice);
         self.watch_replay();
+        self.watch_escalation();
 
         // The far end hung up, or the connection died under us.
         let ended = self.state.call.lock().unwrap().as_ref().is_some_and(|a| !a.is_live());
@@ -924,7 +929,7 @@ impl Engine {
         if self.state.call.lock().unwrap().is_some() {
             self.add_to_call(contact);
         } else {
-            self.dial(contact);
+            self.dial(contact, self.cfg.start_call_silently);
         }
     }
 
@@ -1415,18 +1420,17 @@ impl Engine {
                     warning,
                     status: None,
                     ended_at: None,
+                    knocking: !incoming && self.call.knocking,
+                    incoming,
                 };
                 // Our picture, About line and colour go out at the start
                 // of every call, so they always see the current ones.
                 self.send_card();
                 if incoming {
-                    let ring = delivery::unhex32(&peer).map(|k| ring_outcome(&k, false)).unwrap_or(notify::Outcome::Ring);
-                    if ring != notify::Outcome::Ignore {
-                        self.toast(format!("{name} came by"), ToastKind::Info);
-                    }
-                    if known {
-                        self.out.push(Out::Show(ui::Route::Person(peer)));
-                    }
+                    // Spec §9: the caller may ask for quiet; the receiver's
+                    // own rules decide, and can only make it quieter.
+                    let silent = self.with_call(|a| a.peer_wants_silent.load(Ordering::Relaxed)).unwrap_or(false);
+                    self.announce_caller(&peer, &name, known, silent);
                 }
             }
             Event::Failed(why) => {
@@ -1847,18 +1851,49 @@ impl Engine {
     }
 
     /// Calls a saved contact, by the route their contact says (direct, DHT lookup or relay).
-    fn call_contact(&mut self, id: &str) {
+    fn call_contact(&mut self, id: &str, silent: bool) {
         if self.call.phase == ui::Phase::Connected || self.call.phase == ui::Phase::Dialing {
             self.toast("You're already on a call", ToastKind::Warn);
             return;
         }
         let Some(contact) = find_contact(&self.cfg, id).cloned() else { return };
-        self.dial(contact);
+        self.dial(contact, silent);
+    }
+
+    /// Says that `name` (contact id `peer`) called, as loudly as the
+    /// receiver's rules allow: ringing opens their conversation, a quiet
+    /// arrival only says so, and Never shows nothing.
+    fn announce_caller(&mut self, peer: &str, name: &str, known: bool, silent: bool) {
+        match delivery::unhex32(peer).map(|k| ring_outcome(&k, silent)).unwrap_or(notify::Outcome::Ring) {
+            notify::Outcome::Ring => {
+                self.toast(format!("{name} came by"), ToastKind::Info);
+                if known {
+                    self.out.push(Out::Show(ui::Route::Person(peer.to_string())));
+                }
+            }
+            notify::Outcome::Notify => self.toast(format!("{name} knocked: they're around if you want to talk"), ToastKind::Info),
+            notify::Outcome::Ignore => {}
+        }
+    }
+
+    /// Acts on a knock the caller turned into a ring (spec §9 "escalate"):
+    /// the receiver's rules are read again, without the caller's quiet.
+    fn watch_escalation(&mut self) {
+        if !self.call.incoming || self.call.phase != ui::Phase::Connected {
+            return;
+        }
+        if self.with_call(|a| a.peer_wants_ring.swap(false, Ordering::Relaxed)) == Some(true) {
+            let (peer, name, known) = (self.call.peer.clone(), self.call.name.clone(), self.call.peer.is_some());
+            if let Some(peer) = peer {
+                self.announce_caller(&peer, &name, known, false);
+            }
+        }
     }
 
     /// Calls `contact` (saved, or made up from an invite link) by the route
-    /// it says: direct, DHT lookup or relay.
-    fn dial(&mut self, contact: config::Contact) {
+    /// it says: direct, DHT lookup or relay. With `silent`, it is a knock:
+    /// the other side is asked not to ring (spec §9).
+    fn dial(&mut self, contact: config::Contact, silent: bool) {
         let id = contact.identity_key.clone();
         if moderation::is_blocked(&self.cfg.blocked, &contact.identity_key) {
             self.toast(format!("{} is blocked", contact.name), ToastKind::Warn);
@@ -1872,8 +1907,9 @@ impl Engine {
             }
         };
         self.stop_task();
-        self.call = CallInfo { phase: ui::Phase::Dialing, peer: Some(id), name: contact.name.clone(), ..CallInfo::default() };
-        let args = self.pipeline_args();
+        self.call = CallInfo { phase: ui::Phase::Dialing, peer: Some(id), name: contact.name.clone(), knocking: silent, ..CallInfo::default() };
+        let mut args = self.pipeline_args();
+        args.hello.wants_silent = silent;
         let identity = self.state.identity.clone();
         let lookup = self.cfg.dht_enabled && !contact.identity_key.is_empty();
         let handle = self.state.runtime.spawn(async move {
@@ -1997,7 +2033,37 @@ impl Engine {
                 self.cfg.stoop.door_on_start = on;
                 self.save();
             }
-            A::Call(id) => self.call_contact(&id),
+            A::Call(id) => self.call_contact(&id, self.cfg.start_call_silently),
+            A::Knock(id) => self.call_contact(&id, !self.cfg.start_call_silently),
+            A::Escalate => {
+                let rt = self.state.runtime.clone();
+                if self.with_call(|a| a.escalate(&rt)).is_some() {
+                    self.call.knocking = false;
+                    self.toast("Ringing them", ToastKind::Info);
+                }
+            }
+            A::KnockDefault(on) => {
+                self.cfg.start_call_silently = on;
+                self.save();
+            }
+            A::ShiftFlips(on) => {
+                self.cfg.silent_call_mode = i32::from(on);
+                self.save();
+            }
+            A::DefaultRing(ring) => {
+                self.cfg.default_ring_rule = ring_rule(ring).to_i32();
+                self.save();
+            }
+            A::QuietHours(on, from, to) => {
+                self.cfg.quiet_hours = notify::QuietHours { enabled: on, start_minute: from.min(1439), end_minute: to.min(1439) };
+                self.save();
+            }
+            A::RingRule(id, ring) => {
+                if let Some(c) = self.cfg.contacts.iter_mut().find(|c| c.identity_key == id) {
+                    c.ring_rule = ring_rule(ring).to_i32();
+                    self.save();
+                }
+            }
             A::AddToCall(id) => {
                 if let Some(contact) = find_contact(&self.cfg, &id).cloned() {
                     self.toast(format!("Adding {}...", contact.name), ToastKind::Info);
@@ -2561,6 +2627,7 @@ impl Engine {
             | A::InviteToSpace { .. }
             | A::AddChannel { .. }
             | A::SpaceNotify { .. }
+            | A::SpaceRing(..)
             | A::RemoveEmoji { .. }
             | A::ManageSpace { .. }
             | A::LeaveSpace(_)) => {
@@ -3345,6 +3412,7 @@ impl Engine {
                         notify::RingRule::Never => "Never",
                     }
                     .into(),
+                    ring: Some(ring_choice(notify::RingRule::from_i32(c.ring_rule))),
                     route: match connection_mode::Override::from_i32(c.connection_mode) {
                         connection_mode::Override::Auto => "Automatic",
                         connection_mode::Override::Direct => "Direct only",
@@ -3387,6 +3455,7 @@ impl Engine {
     fn call_model(&self) -> ui::Call {
         let c = &self.call;
         let mut m = ui::Call {
+            knocking: self.call.knocking && self.call.phase == ui::Phase::Connected,
             phase: c.phase.clone(),
             peer: c.peer.clone(),
             peer_name: c.name.clone(),
@@ -3682,6 +3751,12 @@ impl Engine {
             backdrops: true,
             call_layout: self.call_layout(),
             notify_messages: self.cfg.stoop.notify_messages,
+            calls: Some(ui::CallPrefs {
+                knock_default: self.cfg.start_call_silently,
+                shift_flips: self.cfg.silent_call_mode != 0,
+                default_ring: ring_choice(notify::RingRule::from_i32(self.cfg.default_ring_rule)),
+                quiet: (self.cfg.quiet_hours.enabled, self.cfg.quiet_hours.start_minute, self.cfg.quiet_hours.end_minute),
+            }),
             open_on_start: self.cfg.stoop.door_on_start,
             version: env!("CARGO_PKG_VERSION").to_string(),
             data_dir: self.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default(),
@@ -3991,12 +4066,37 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity
     }
 }
 
-/// What an incoming call from this identity may do (spec §9).
+/// What an incoming call from this identity may do (spec §9): a
+/// contact's own rule; for anyone else, the rules of the spaces you share
+/// with them (the strictest wins); else your default.
 fn ring_outcome(key: &[u8; 32], caller_wants_silent: bool) -> notify::Outcome {
     let hex = connection_mode::encode_hex32(key);
     let cfg = config::load();
-    let rule = cfg.contacts.iter().find(|c| c.identity_key == hex).map(|c| c.ring_rule).unwrap_or(cfg.default_ring_rule);
-    notify::decide(notify::RingRule::from_i32(rule), cfg.quiet_hours, notify::current_minute_of_day(), caller_wants_silent)
+    let rule = match cfg.contacts.iter().find(|c| c.identity_key == hex) {
+        Some(c) => notify::RingRule::from_i32(c.ring_rule),
+        None => community::Store::app()
+            .and_then(|store| notify::shared_rule(store.rules_for(key)))
+            .unwrap_or_else(|| notify::RingRule::from_i32(cfg.default_ring_rule)),
+    };
+    notify::decide(rule, cfg.quiet_hours, notify::current_minute_of_day(), caller_wants_silent)
+}
+
+/// The screens' ring choice as the settings keep it.
+pub fn ring_rule(ring: ui::Ring) -> notify::RingRule {
+    match ring {
+        ui::Ring::Loud => notify::RingRule::Always,
+        ui::Ring::Quiet => notify::RingRule::SilentOnly,
+        ui::Ring::Never => notify::RingRule::Never,
+    }
+}
+
+/// A saved ring rule as the screens show it.
+pub fn ring_choice(rule: notify::RingRule) -> ui::Ring {
+    match rule {
+        notify::RingRule::Always => ui::Ring::Loud,
+        notify::RingRule::SilentOnly => ui::Ring::Quiet,
+        notify::RingRule::Never => ui::Ring::Never,
+    }
 }
 
 /// This contact's EQ, built once at connect.

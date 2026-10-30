@@ -246,6 +246,17 @@ impl Spaces {
                     Ok(((), outs, vec![Event::Changed]))
                 })?;
             }
+            A::SpaceRing(community, ring) => {
+                let id = key(&community)?;
+                // A space whose calls were set to Never used to count as
+                // muted for messages too. Pin what its messages do now, so
+                // this choice is about calls alone.
+                if store.notify_setting(&id, None).is_none() {
+                    let level = notify_level_shown(&store, &id);
+                    store.set_notify(&id, None, Some(from_ui(level)));
+                }
+                store.set_ring_rule(&id, ring.map(crate::engine::ring_rule));
+            }
             A::SpaceNotify { community, channel, level } => {
                 let id = key(&community)?;
                 // The whole space has no "follow" setting: it is the default.
@@ -466,6 +477,17 @@ fn to_ui(n: community::Notify) -> ui::Notify {
     }
 }
 
+/// Which messages of space `id` notify you, as the screens show it. A
+/// space muted with the older ring rule (before these settings existed)
+/// shows as muted.
+fn notify_level_shown(store: &Store, id: &Key) -> ui::Notify {
+    match store.notify_setting(id, None) {
+        Some(n) => to_ui(n),
+        None if store.ring_rule(id) == Some(antiphon_client::notify::RingRule::Never) => ui::Notify::Nothing,
+        None => ui::Notify::All,
+    }
+}
+
 /// The screens' notification setting as the store keeps it.
 fn from_ui(n: ui::Notify) -> community::Notify {
     match n {
@@ -544,12 +566,8 @@ fn community_model(store: &Store, s: &community::Space, unread: u32, voice_room:
                 notify: store.notify_setting(&s.id(), Some(c.id)).map(to_ui),
             })
             .collect(),
-        // A space muted with the older ring rule shows as muted here too.
-        notify: match store.notify_setting(&s.id(), None) {
-            Some(n) => to_ui(n),
-            None if store.ring_rule(&s.id()) == Some(antiphon_client::notify::RingRule::Never) => ui::Notify::Nothing,
-            None => ui::Notify::All,
-        },
+        notify: notify_level_shown(store, &s.id()),
+        ring: store.ring_rule(&s.id()).map(crate::engine::ring_choice),
         members,
         unread,
         waiting: if s.joining.is_some() {

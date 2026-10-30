@@ -13,7 +13,7 @@ use crate::{Action, Dialog, El, Model, Msg, Route, Ui};
 /// How wide the menu card is.
 const WIDTH: f32 = 264.0;
 /// Roughly how tall the menu is, to keep it on screen near the bottom edge.
-const HEIGHT: f32 = 236.0;
+const HEIGHT: f32 = 272.0;
 
 /// The menu as a layer over the window, or nothing when it is closed.
 pub fn layer<'a>(ui: &'a Ui, m: &'a Model) -> Option<El<'a, Msg>> {
@@ -57,9 +57,11 @@ pub fn layer<'a>(ui: &'a Ui, m: &'a Model) -> Option<El<'a, Msg>> {
         ),
         divider(),
         item(Icon::Phone, format!("Call {first}"), Msg::Do(Action::Call(id.clone())), false),
-        item(Icon::Message, "Open conversation".into(), Msg::Nav(Route::Person(id.clone())), false),
-        item(Icon::Trash, "Remove…".into(), Msg::Dialog(Some(Dialog::ConfirmRemove(id.clone()))), true),
     ]
+    // Knocking is offered where calls can be set up for it (spec §9).
+    .push(m.settings.calls.is_some().then(|| item(Icon::Door, format!("Knock on {first}"), Msg::Do(Action::Knock(id.clone())), false)))
+    .push(item(Icon::Message, "Open conversation".into(), Msg::Nav(Route::Person(id.clone())), false))
+    .push(item(Icon::Trash, "Remove…".into(), Msg::Dialog(Some(Dialog::ConfirmRemove(id.clone()))), true))
     .spacing(4);
     let menu = container(body).padding(10).width(WIDTH).style(theme::menu_pop);
 

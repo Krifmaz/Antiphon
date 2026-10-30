@@ -189,14 +189,34 @@ fn code_strip<'a>(m: &'a Model) -> El<'a, Msg> {
 
 /// Mute, deafen, a file, their volume, leave.
 fn controls<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
+    let c = &m.call;
+    let size = if compact { 44.0 } else { 52.0 };
+    if c.phase != Phase::Connected {
+        return row![round_btn(Icon::PhoneOff, "Stop calling", Btn::DangerSolid, Some(Msg::Do(Action::Hangup)), size)].into();
+    }
+    if c.knocking {
+        // Spec §9 "escalate": the knock becomes a ring without starting
+        // over, so the call keeps going whichever they answer.
+        return column![
+            row![btn_icon(Icon::Phone, "Ring them after all", Btn::Primary, Some(Msg::Do(Action::Escalate))), faint("You knocked: they see you're around, without a ring.").size(12.5)]
+                .spacing(12)
+                .align_y(Alignment::Center),
+            controls_row(m, compact),
+        ]
+        .spacing(12)
+        .align_x(Alignment::Center)
+        .into();
+    }
+    controls_row(m, compact)
+}
+
+/// The round buttons of a connected call.
+fn controls_row<'a>(m: &'a Model, compact: bool) -> El<'a, Msg> {
     let p = theme::look();
     let c = &m.call;
     // A phone with every control showing has seven of them across about
     // 370 pixels: a touch smaller and closer, so none falls off the edge.
     let size = if compact { 44.0 } else { 52.0 };
-    if c.phase != Phase::Connected {
-        return row![round_btn(Icon::PhoneOff, "Stop calling", Btn::DangerSolid, Some(Msg::Do(Action::Hangup)), size)].into();
-    }
     let mut r = row![
         round_btn(
             if c.muted { Icon::MicOff } else { Icon::Mic },
