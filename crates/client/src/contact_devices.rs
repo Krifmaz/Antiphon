@@ -10,6 +10,9 @@
 //!
 //! - **Mail** carries a proof over the recipient and the body
 //!   ([`mail_message`]); **calls** carry one in the Hello ([`hello_message`]);
+//!   **group chat and community messages** carry one over the message
+//!   ([`prove_wire`]), and members learn each other's lists from the cards
+//!   they pass around;
 //!   **route records** carry one as a route of their own ([`prove_record`],
 //!   [`PROOF_ROUTE_KIND`]), which also covers the mail-key certificate.
 //! - **Device lists** reach contacts with the devices' endorsements, on
@@ -51,6 +54,8 @@ const MAIL: &[u8] = b"mail";
 const HELLO: &[u8] = b"hello";
 /// What a proof on a route record is made for.
 const ROUTE: &[u8] = b"route";
+/// What a proof on a group chat or community message is made for.
+const WIRE: &[u8] = b"wire";
 
 /// What is kept about one contact.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -71,7 +76,22 @@ struct Entry {
     /// Our device list's sequence when it was last pushed to them.
     #[serde(default)]
     sent_list: u64,
+    /// Devices of theirs (keys, hex) a list they sent took off: refused at
+    /// once, with no wait for a newer list that might name them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removed: Vec<String>,
 }
+
+impl Entry {
+    /// Makes `list` theirs; a device it names is no longer one they removed.
+    fn take(&mut self, list: &SignedDeviceList) {
+        self.removed.retain(|d| hex::decode_array::<32>(d).is_none_or(|d| !list.authorizes(&d)));
+        self.list = Some(hex::encode(&list.encode()));
+    }
+}
+
+/// The most removed devices remembered per contact.
+const MAX_REMOVED: usize = 64;
 
 /// Whether to believe something a contact's device signed.
 #[derive(Clone, Debug, PartialEq)]
@@ -147,7 +167,15 @@ impl ContactDevices {
             Err(_) => Offer::Invalid,
             Ok(Judged::Unchanged) => Offer::Unchanged,
             Ok(Judged::Accepted) => {
-                entry.list = Some(hex::encode(&carried.list.encode()));
+                for gone in known.iter().flat_map(SignedDeviceList::devices).filter(|d| !carried.list.authorizes(&d.device.identity_key)) {
+                    let gone = hex::encode(&gone.device.identity_key);
+                    if !entry.removed.contains(&gone) {
+                        entry.removed.push(gone);
+                    }
+                }
+                let excess = entry.removed.len().saturating_sub(MAX_REMOVED);
+                entry.removed.drain(..excess);
+                entry.take(&carried.list);
                 // A pending list this one supersedes is moot.
                 entry.pending = None;
                 Offer::Updated
@@ -164,6 +192,11 @@ impl ContactDevices {
         }
     }
 
+    /// Whether `device` is one a list from `who` took off.
+    pub fn is_removed(&self, who: &[u8; 32], device: &[u8; 32]) -> bool {
+        self.entries.get(&hex::encode(who)).is_some_and(|e| e.removed.contains(&hex::encode(device)))
+    }
+
     /// Whether `who` offered a list none of their known devices endorses.
     pub fn has_pending(&self, who: &[u8; 32]) -> bool {
         self.entries.get(&hex::encode(who)).is_some_and(|e| e.pending.is_some())
@@ -174,7 +207,7 @@ impl ContactDevices {
     pub fn trust_pending(&mut self, who: &[u8; 32]) -> bool {
         let Some(entry) = self.entries.get_mut(&hex::encode(who)) else { return false };
         let Some(carried) = entry.pending.take().and_then(|h| hex::decode(&h)).and_then(|b| CarriedList::decode(&b).ok()) else { return false };
-        entry.list = Some(hex::encode(&carried.list.encode()));
+        entry.take(&carried.list);
         true
     }
 
@@ -192,6 +225,12 @@ impl ContactDevices {
     /// body as signed (without its proof).
     pub fn check_mail(&self, who: &[u8; 32], me: &[u8; 32], proof: Option<&DeviceProof>, body: &[u8]) -> Trust {
         self.check(who, proof, MAIL, &mail_message(me, body))
+    }
+
+    /// Whether to believe a group chat or community message from `who`:
+    /// `signed` is the message as proved (`crate::community::fragments`).
+    pub fn check_wire(&self, who: &[u8; 32], proof: Option<&DeviceProof>, signed: &[u8]) -> Trust {
+        self.check(who, proof, WIRE, signed)
     }
 
     /// Whether to believe the call from `who` to `me` is from one of their
@@ -295,9 +334,12 @@ impl CallCheck {
         let parsed = hex::decode(proof).and_then(|b| DeviceProof::decode(&b).ok());
         if known.check_hello(who, me, parsed.as_ref()) == Trust::Refused {
             let since = *self.refused_since.get_or_insert(now);
-            // Their list may still be on its way; once it is here, or the
-            // grace is over, the call goes.
-            if list.is_some() || now.duration_since(since) >= CALL_GRACE {
+            // Only a well-signed Hello from a device never seen removed
+            // could be a new device their list (on its way) names; anything
+            // else goes now, as does that once the list is here or the
+            // grace is over.
+            let maybe_new = parsed.is_some_and(|p| p.verify(HELLO, &hello_message(who, me)).is_ok() && !known.is_removed(who, &p.device));
+            if !maybe_new || list.is_some() || now.duration_since(since) >= CALL_GRACE {
                 self.settled = true;
                 out.push(CallEvent::Refuse);
             }
@@ -330,6 +372,11 @@ pub fn hello_message(from: &[u8; 32], to: &[u8; 32]) -> Vec<u8> {
 /// This device's proof for its Hello to `to`, as an account `from`.
 pub fn prove_hello(device: &DeviceKeyPair, from: &[u8; 32], to: &[u8; 32]) -> DeviceProof {
     DeviceProof::sign(device, HELLO, &hello_message(from, to))
+}
+
+/// This device's proof for a group chat or community message.
+pub fn prove_wire(device: &DeviceKeyPair, signed: &[u8]) -> DeviceProof {
+    DeviceProof::sign(device, WIRE, signed)
 }
 
 /// This device's proof for mail to `recipient` with this body.
@@ -451,6 +498,28 @@ mod tests {
         assert_eq!(known.check_hello(&who, &me, Some(&prove_hello(&a.laptop, &who, &me))), Trust::Refused);
         assert_eq!(known.check_hello(&who, &me, Some(&prove_hello(&a.desktop, &who, &me))), Trust::Device("Desktop".into()));
 
+        assert!(known.is_removed(&who, &a.laptop.public().identity_key));
+        assert!(!known.is_removed(&who, &a.desktop.public().identity_key));
+        // A call from it is refused the moment its Hello is looked at, with
+        // no wait for a device list.
+        let dir = std::env::temp_dir().join(format!("stoop-call-check-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = BackupKey::generate();
+        known.save(&dir, &key).unwrap();
+        let proof = hex::encode(&prove_hello(&a.laptop, &who, &me).encode());
+        let mut check = CallCheck::default();
+        assert_eq!(check.step(&dir, &key, &who, &me, Heard { proof: Some(&proof), list: None }, Instant::now()), vec![CallEvent::Refuse]);
+        // An unsigned Hello too.
+        let mut check = CallCheck::default();
+        assert_eq!(check.step(&dir, &key, &who, &me, Heard { proof: Some(""), list: None }, Instant::now()), vec![CallEvent::Refuse]);
+        // A device never seen waits for the list that may name it.
+        let new = DeviceKeyPair::generate();
+        let proof = hex::encode(&prove_hello(&new, &who, &me).encode());
+        let mut check = CallCheck::default();
+        let start = Instant::now();
+        assert!(check.step(&dir, &key, &who, &me, Heard { proof: Some(&proof), list: None }, start).is_empty());
+        assert_eq!(check.step(&dir, &key, &who, &me, Heard { proof: Some(&proof), list: None }, start + CALL_GRACE), vec![CallEvent::Refuse]);
+
         // The laptop, holding the master seed, signs itself back in.
         let forged = without.with_device(&a.master, DeviceCredential::approve(&a.master, a.laptop.public(), "Laptop", 2).unwrap()).unwrap();
         assert_eq!(known.offer(&who, &carried(&forged, &[&a.laptop])), Offer::Unendorsed);
@@ -458,6 +527,7 @@ mod tests {
         assert!(known.has_pending(&who));
         // Only the user can let that list in.
         assert!(known.trust_pending(&who));
+        assert!(!known.is_removed(&who, &a.laptop.public().identity_key));
         assert_eq!(known.check_mail(&who, &me, Some(&from_laptop), b"hi"), Trust::Device("Laptop".into()));
     }
 

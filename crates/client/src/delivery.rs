@@ -620,6 +620,11 @@ pub fn my_devices_hex() -> String {
     crate::devices::carried(&dir, &me.public().identity_key).map(|c| antiphon_crypto::hex::encode(&c.encode())).unwrap_or_default()
 }
 
+/// This device's keypair, once set.
+pub fn device() -> Option<Arc<DeviceKeyPair>> {
+    DEVICE.get().cloned()
+}
+
 /// Opens the device lists contacts showed this device, lets `f` read or
 /// change them, and saves them. `None` without a data folder or history key.
 pub fn with_contact_devices<R>(f: impl FnOnce(&mut ContactDevices) -> R) -> Option<R> {

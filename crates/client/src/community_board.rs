@@ -175,7 +175,7 @@ mod tests {
     fn a_full_size_fragment_fits_one_entry() {
         let wire = crate::community::Wire::App { community: Key([1; 32]), data: "x".repeat(4000) };
         let me = IdentityKeyPair::generate();
-        for f in crate::community::fragments(&wire) {
+        for f in crate::community::fragments(&wire, Some(&IdentityKeyPair::generate())) {
             assert!(seal(&Key([0; 32]), &key(1, 1), &me, &f).len() <= antiphon_net::board::MAX_ENTRY);
         }
     }

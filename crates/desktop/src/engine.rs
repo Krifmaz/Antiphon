@@ -495,6 +495,10 @@ impl Engine {
             }
             if changes.mail_key {
                 self.publish_routes();
+            } else if changes.changed {
+                // The device list may have changed: spaces' members get the
+                // new one on our cards (`publish_routes` does this too).
+                std::thread::spawn(community::refresh_cards);
             }
             if changes.changed {
                 self.load_previews();

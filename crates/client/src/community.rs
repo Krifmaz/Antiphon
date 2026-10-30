@@ -150,6 +150,12 @@ pub struct Card {
     /// "no picture".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    /// Their account's device list with its endorsements
+    /// (`antiphon_crypto::CarriedList`), hex: which of their devices may
+    /// speak for them (see `crate::contact_devices`). Like the picture,
+    /// `None` is "not included", and bulk cards leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<String>,
 }
 
 /// The largest picture a card may carry, as base64. A 48 px thumbnail;
@@ -165,6 +171,7 @@ impl Card {
             name: name.chars().filter(|c| !c.is_control()).take(80).collect(),
             status: String::new(),
             avatar: None,
+            devices: None,
         }
     }
 
@@ -175,9 +182,9 @@ impl Card {
         self
     }
 
-    /// Without the picture, for passing many cards at once.
+    /// Without the picture or device list, for passing many cards at once.
     pub fn slim(&self) -> Self {
-        Self { avatar: None, ..self.clone() }
+        Self { avatar: None, devices: None, ..self.clone() }
     }
 
     fn has_avatar(&self) -> bool {
@@ -819,6 +826,9 @@ impl Space {
         if let Some(old) = self.cards.iter().find(|c| c.key == card.key) {
             if card.avatar.is_none() {
                 card.avatar.clone_from(&old.avatar);
+            }
+            if card.devices.is_none() {
+                card.devices.clone_from(&old.devices);
             }
         }
         match self.cards.iter_mut().find(|c| c.key == card.key) {
@@ -1876,9 +1886,29 @@ pub const FRAGMENT_BYTES: usize = 540;
 const MAX_FRAGMENTS: usize = 4000;
 const MAX_PARTIAL: usize = 128;
 
+/// The field a [`Wire`]'s device proof is appended under. Unknown to
+/// older builds, which ignore it.
+const PROOF_FIELD: &[u8] = b",\"dv\":\"";
+/// Bytes the proof adds to a [`Wire`]'s JSON: the field, the proof as hex,
+/// and the closing quote and brace.
+const PROOF_SUFFIX: usize = PROOF_FIELD.len() + 2 * antiphon_crypto::DeviceProof::ENCODED_LEN + 2;
+
 /// A [`Wire`] as base64 fragments: `msg id (8) | part (2) | parts (2) | data`.
-pub fn fragments(wire: &Wire) -> Vec<String> {
-    let bytes = serde_json::to_vec(wire).expect("a wire message serializes");
+///
+/// Sent as the account's main identity, the JSON carries `device`'s proof
+/// over the rest of it (`crate::contact_devices::prove_wire`), so members
+/// can refuse a message from a device the account removed. A separate
+/// identity's messages carry none: that would tie it to this device.
+pub fn fragments(wire: &Wire, device: Option<&antiphon_crypto::DeviceKeyPair>) -> Vec<String> {
+    let mut bytes = serde_json::to_vec(wire).expect("a wire message serializes");
+    if let Some(device) = device {
+        let proof = crate::contact_devices::prove_wire(device, &bytes);
+        // `bytes` is a JSON object: the proof goes in before its brace.
+        bytes.pop();
+        bytes.extend_from_slice(PROOF_FIELD);
+        bytes.extend_from_slice(antiphon_crypto::hex::encode(&proof.encode()).as_bytes());
+        bytes.extend_from_slice(b"\"}");
+    }
     let msg = random_id().to_be_bytes();
     let chunks: Vec<&[u8]> = bytes.chunks(FRAGMENT_BYTES).collect();
     let parts = chunks.len() as u16;
@@ -1893,6 +1923,31 @@ pub fn fragments(wire: &Wire) -> Vec<String> {
             b64(&f)
         })
         .collect()
+}
+
+/// A whole [`Wire`] as it arrived, with the device proof it carried.
+pub struct Opened {
+    /// The message.
+    pub wire: Wire,
+    /// The device proof, and the bytes it covers.
+    pub proof: Option<(antiphon_crypto::DeviceProof, Vec<u8>)>,
+}
+
+impl Opened {
+    /// Reads a whole message's bytes, taking its proof off the end.
+    fn read(bytes: &[u8]) -> Option<Self> {
+        let wire = serde_json::from_slice(bytes).ok()?;
+        let proof = bytes
+            .len()
+            .checked_sub(PROOF_SUFFIX)
+            .filter(|&at| bytes[at..].starts_with(PROOF_FIELD) && bytes.ends_with(b"\"}"))
+            .and_then(|at| {
+                let proof = antiphon_crypto::hex::decode(std::str::from_utf8(&bytes[at + PROOF_FIELD.len()..bytes.len() - 2]).ok()?)?;
+                let proof = antiphon_crypto::DeviceProof::decode(&proof).ok()?;
+                Some((proof, [&bytes[..at], b"}"].concat()))
+            });
+        Some(Self { wire, proof })
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -1913,6 +1968,11 @@ pub struct Reassembly {
 impl Reassembly {
     /// Adds one fragment; the whole message once it is complete.
     pub fn feed(&mut self, from: [u8; 32], fragment: &str) -> Option<Wire> {
+        self.feed_opened(from, fragment).map(|o| o.wire)
+    }
+
+    /// [`Reassembly::feed`], keeping the message's device proof.
+    pub fn feed_opened(&mut self, from: [u8; 32], fragment: &str) -> Option<Opened> {
         let raw = decode_b64(fragment)?;
         if raw.len() < 12 {
             return None;
@@ -1925,7 +1985,7 @@ impl Reassembly {
         }
         let data = &raw[12..];
         if parts == 1 {
-            return serde_json::from_slice(data).ok();
+            return Opened::read(data);
         }
         let at = match self.partial.iter().position(|p| p.from.0 == from && p.msg == msg) {
             Some(at) => at,
@@ -1950,7 +2010,7 @@ impl Reassembly {
         for piece in p.parts.into_iter().flatten() {
             whole.extend(decode_b64(&piece)?);
         }
-        serde_json::from_slice(&whole).ok()
+        Opened::read(&whole)
     }
 
     /// Drops what has waited more than two weeks -- longer than any
@@ -2213,6 +2273,7 @@ impl JoinLink {
             name: String::new(),
             status: String::new(),
             avatar: None,
+            devices: None,
         };
         host.valid().then_some(Self { community, host })
     }
@@ -2346,7 +2407,13 @@ impl Store {
         // needn't learn which device wrote the card.
         let keys = if identity.public().identity_key == self.identity.public().identity_key { crate::delivery::my_mail_keys() } else { Default::default() };
         let record = crate::delivery::my_record_with(identity, &keys, None, &config.routes, config.strict_mode, config.route_sequence);
-        card_as(identity, crate::delivery::encode_record(&record), &config.profile, &self.appearance(id))
+        let mut card = card_as(identity, crate::delivery::encode_record(&record), &config.profile, &self.appearance(id));
+        // The account's devices, so members can refuse one it removed. Not
+        // a separate identity's: that would tie it to the account.
+        if identity.public().identity_key == self.identity.public().identity_key {
+            card.devices = Some(crate::delivery::my_devices_hex()).filter(|l| !l.is_empty());
+        }
+        card
     }
 
     pub fn appearance(&self, id: &Key) -> Appearance {
@@ -2384,7 +2451,8 @@ impl Store {
             if out.to == self.identity.public().identity_key || out.to == me {
                 continue;
             }
-            for fragment in fragments(&out.wire) {
+            let device = if persona.is_none() { crate::delivery::device() } else { None };
+            for fragment in fragments(&out.wire, device.as_deref()) {
                 if hub.outbox.len() < MAX_OUTBOX {
                     hub.outbox.push(Queued { to: Key(out.to), id: random_id(), fragment, attempts: 0, persona });
                 }
@@ -2420,14 +2488,16 @@ impl Store {
             let (epoch, welcome) = match &wire {
                 Wire::Commit { commit, .. } => (epoch_of(commit), None),
                 Wire::App { data, .. } if !everyone.is_empty() && everyone.iter().all(|k| to.contains(k)) => (epoch_of(data), None),
-                Wire::Welcome { .. } if to.len() == 1 && fragments(&wire).len() > WELCOME_INLINE => (space.epoch(), Some(Key(to[0]))),
+                Wire::Welcome { .. } if to.len() == 1 && fragments(&wire, None).len() > WELCOME_INLINE => (space.epoch(), Some(Key(to[0]))),
                 _ => (None, None),
             };
             let Some(key) = epoch.and_then(|e| space.board_key(e)).cloned() else {
                 rest.extend(to.into_iter().map(|to| Out { to, wire: wire.clone() }));
                 continue;
             };
-            for (i, fragment) in fragments(&wire).into_iter().enumerate() {
+            let main = identity.public().identity_key == self.identity.public().identity_key;
+            let device = if main { crate::delivery::device() } else { None };
+            for (i, fragment) in fragments(&wire, device.as_deref()).into_iter().enumerate() {
                 if hub.board_out.len() >= MAX_BOARD_OUT {
                     break;
                 }
@@ -2732,16 +2802,45 @@ impl Store {
             let _guard = LOCK.lock().unwrap();
             let mut hub = self.hub();
             hub.reassembly.expire(now_secs());
-            let wire = hub.reassembly.feed(from, fragment);
+            let opened = hub.reassembly.feed_opened(from, fragment);
             self.save_hub(&hub);
-            wire
+            opened
         };
-        match wire {
+        match wire.and_then(|o| self.admit(from, o)) {
             Some(Wire::Invite { .. }) if !invites => {}
             Some(wire) => self.receive(from, wire),
             None => {}
         }
         true
+    }
+
+    /// Lets a whole message from `from` through only if it comes from one
+    /// of their account's devices, as far as their device list -- from the
+    /// card in the message, or the one they last gave a space we share --
+    /// says. Messages from someone whose list we've never had pass, as do
+    /// a separate identity's (which have none).
+    fn admit(&self, from: [u8; 32], opened: Opened) -> Option<Wire> {
+        let mut lists: Vec<String> = Vec::new();
+        if let Wire::Invite { card, .. } | Wire::Join { card, .. } | Wire::Knock { card, .. } = &opened.wire {
+            lists.extend(card.devices.clone().filter(|_| card.key.0 == from));
+        }
+        if let Some(space) = opened.wire.community().and_then(|id| self.load(&id)) {
+            lists.extend(space.card(&from).and_then(|c| c.devices.clone()));
+        }
+        let mut known = crate::contact_devices::ContactDevices::load(&self.dir, &self.key);
+        let mut offered = false;
+        for list in &lists {
+            if let Some(carried) = unhex(list).and_then(|b| antiphon_crypto::CarriedList::decode(&b).ok()) {
+                offered |= known.offer(&from, &carried) != crate::contact_devices::Offer::Unchanged;
+            }
+        }
+        if offered {
+            if let Err(e) = known.save(&self.dir, &self.key) {
+                eprintln!("[community] couldn't save a member's devices: {e}");
+            }
+        }
+        let (proof, signed) = opened.proof.as_ref().map_or((None, &[][..]), |(p, b)| (Some(p), b.as_slice()));
+        (known.check_wire(&from, proof, signed) != crate::contact_devices::Trust::Refused).then_some(opened.wire)
     }
 
     /// The spaces we are in under a separate identity, and that identity:
@@ -3097,15 +3196,15 @@ impl Store {
         if fragments.is_empty() {
             return;
         }
-        let wires: Vec<([u8; 32], Wire)> = {
+        let wires = {
             let _guard = LOCK.lock().unwrap();
             let mut hub = self.hub();
             hub.reassembly.expire(now_secs());
-            let wires = fragments.into_iter().filter_map(|(from, f)| Some((from, hub.reassembly.feed(from, &f)?))).collect();
+            let wires: Vec<([u8; 32], Opened)> = fragments.into_iter().filter_map(|(from, f)| Some((from, hub.reassembly.feed_opened(from, &f)?))).collect();
             self.save_hub(&hub);
             wires
         };
-        for (from, wire) in wires {
+        for (from, wire) in wires.into_iter().filter_map(|(from, o)| Some((from, self.admit(from, o)?))) {
             // Invitations come by mail, never by a board.
             if !matches!(wire, Wire::Invite { .. }) {
                 self.receive(from, wire);
@@ -3392,7 +3491,7 @@ pub fn refresh_cards() {
             // compare what it says, not its bytes.
             let seq = |c: &Card| c.record().map(|r| (r.record.sequence, r.record.routes));
             let same = space.card(&space.me()).is_some_and(|old| {
-                old.name == card.name && old.status == card.status && old.avatar == card.avatar && seq(old) == seq(&card)
+                old.name == card.name && old.status == card.status && old.avatar == card.avatar && old.devices == card.devices && seq(old) == seq(&card)
             });
             if same {
                 return Ok(((), Vec::new(), Vec::new()));
@@ -3533,7 +3632,7 @@ mod tests {
                 // Through the wire format, fragments and all.
                 let mut r = Reassembly::default();
                 let mut wire = None;
-                for f in fragments(&out.wire) {
+                for f in fragments(&out.wire, None) {
                     wire = r.feed(from_key, &f).or(wire);
                 }
                 let wire = wire.expect("reassembled");
@@ -4117,11 +4216,51 @@ mod tests {
     }
 
     #[test]
+    fn a_member_removed_device_is_refused_once_their_card_says_so() {
+        use antiphon_crypto::{CarriedList, DeviceCredential, DeviceKeyPair, DeviceList};
+        let dir = std::env::temp_dir().join(format!("stoop-community-devices-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let me = store(&dir, "me");
+        let them = IdentityKeyPair::generate();
+        let from = them.public().identity_key;
+        let (desktop, laptop) = (DeviceKeyPair::generate(), DeviceKeyPair::generate());
+        let both = DeviceList {
+            identity_key: from,
+            sequence: 1,
+            devices: vec![DeviceCredential::approve(&them, desktop.public(), "Desktop", 1).unwrap(), DeviceCredential::approve(&them, laptop.public(), "Laptop", 1).unwrap()],
+        }
+        .sign(&them)
+        .unwrap();
+        let without = both.without_device(&them, &laptop.public().identity_key).unwrap();
+        let carried = CarriedList { endorsements: vec![without.endorse(&desktop)], list: without };
+        let mut card = Card::mine(&them, String::new(), "Sam");
+        let knock = |card: &Card, device: Option<&DeviceKeyPair>| {
+            let wire = Wire::Knock { community: Key([9; 32]), card: card.clone(), proof: None, ticket: None };
+            let mut r = Reassembly::default();
+            fragments(&wire, device).iter().fold(None, |got, f| r.feed_opened(from, f).or(got)).unwrap()
+        };
+        // Their devices unknown: anything passes, proof or not.
+        assert!(me.admit(from, knock(&card, None)).is_some());
+        assert!(me.admit(from, knock(&card, Some(&laptop))).is_some());
+        // Their card brings the list without the laptop.
+        card.devices = Some(hex(&carried.encode()));
+        assert!(me.admit(from, knock(&card, Some(&desktop))).is_some());
+        assert!(me.admit(from, knock(&card, Some(&laptop))).is_none(), "the removed laptop");
+        card.devices = None;
+        assert!(me.admit(from, knock(&card, None)).is_none(), "no proof once the list is known");
+        assert!(me.admit(from, knock(&card, Some(&desktop))).is_some());
+        // The proof is a field older builds ignore: the message still reads.
+        let wire = Wire::ManifestRequest { community: Key([9; 32]), since: 3 };
+        let signed = fragments(&wire, Some(&desktop));
+        assert_eq!(Reassembly::default().feed(from, &signed[0]), Some(wire));
+    }
+
+    #[test]
     fn fragments_fit_a_mailbox_and_reassemble_in_any_order() {
         let alice = IdentityKeyPair::generate();
         let bob = IdentityKeyPair::generate();
         let wire = Wire::App { community: Key([1; 32]), data: b64(&vec![7u8; 3000]) };
-        let mut frags = fragments(&wire);
+        let mut frags = fragments(&wire, None);
         assert!(frags.len() > 1);
         // Each, sealed in a mail body, fits a mailbox blob.
         for f in &frags {
@@ -4179,7 +4318,7 @@ mod tests {
                 }
                 for (from, out) in std::mem::take(&mut outs) {
                     let card = own.iter().chain(cards).find(|c| c.key.0 == out.to).expect("a card for everyone");
-                    for f in fragments(&out.wire) {
+                    for f in fragments(&out.wire, None) {
                         let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f), ..Default::default() };
                         let sent = crate::delivery::send(&people[from].id, &out.to, &card.prekey().unwrap(), &card.record().unwrap(), &body, false).await;
                         assert_eq!(sent, crate::delivery::Sent::Deposited(1));
@@ -4282,7 +4421,7 @@ mod tests {
             }
             for (from, out) in std::mem::take(&mut outs) {
                 let card = cards.iter().find(|c| c.key.0 == out.to).expect("a card for everyone");
-                for f in fragments(&out.wire) {
+                for f in fragments(&out.wire, None) {
                     let body = crate::delivery::MailBody { id: random_id(), text: String::new(), at_secs: 1, group: Some(f), ..Default::default() };
                     let sent = crate::delivery::send(from, &out.to, &card.prekey().unwrap(), &card.record().unwrap(), &body, false).await;
                     assert_eq!(sent, crate::delivery::Sent::Deposited(1));
