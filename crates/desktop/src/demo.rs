@@ -82,6 +82,17 @@ impl Demo {
                     seeding: true,
                     seed_port: "6005".into(),
                     vpn: ui::Vpn { routes: (false, true, true), status: "Off".into(), ..ui::Vpn::default() },
+                    shared: vec![
+                        ui::SharedRow { id: "f1".into(), name: "saturday-mix.flac".into(), detail: "48.2 MB · from Robin Okafor".into(), status: "Available".into(), mine: false },
+                        ui::SharedRow {
+                            id: "f2".into(),
+                            name: "listening-notes.pdf".into(),
+                            detail: "1.1 MB · in The listening club".into(),
+                            status: "Sender offline — will resume when they're back".into(),
+                            mine: false,
+                        },
+                        ui::SharedRow { id: "f3".into(), name: "setlist.txt".into(), detail: "3 KB · with Theo Park".into(), status: "Available".into(), mine: true },
+                    ],
                     ..ui::NetworkMore::default()
                 }),
                 ..Default::default()

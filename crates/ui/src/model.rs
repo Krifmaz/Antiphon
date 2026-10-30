@@ -1008,6 +1008,29 @@ pub struct NetworkMore {
     pub pin_code_set: bool,
     /// The VPN (spec §6 "Bring your own VPN").
     pub vpn: Vpn,
+    /// Files shared with you and by you that outlive the call, newest
+    /// first (spec §5 "Seeding", "Pinning").
+    pub shared: Vec<SharedRow>,
+    /// Something about sharing as a whole, such as why anonymous seeding
+    /// sent nothing; empty when there is nothing to say.
+    pub shared_notice: String,
+}
+
+/// One file in the shared-files list.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SharedRow {
+    /// The file's id (hex), which the actions name it by.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// Its size and who it is shared with or came from.
+    pub detail: String,
+    /// Whether it can be fetched ("Available", "Sender offline — will
+    /// resume when they're back", "No longer shared"), or how a download
+    /// is going (spec §5 "Availability status — always visible").
+    pub status: String,
+    /// You shared it, so there is nothing to download.
+    pub mine: bool,
 }
 
 /// Bring-your-own VPN, as Settings shows it.

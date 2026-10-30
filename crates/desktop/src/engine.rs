@@ -331,6 +331,9 @@ pub struct Engine {
     /// and the store revision they were read at, so the sealed list is
     /// only opened again when it changed.
     vpn_configs: (u64, Vec<(String, String)>),
+    /// The shared-files list as Settings shows it, and the sharing
+    /// revision it was built at, for the same reason.
+    shared_rows: (u64, Vec<ui::SharedRow>),
     /// The relay the peer last told us about, saved to their contact.
     peer_relay_saved: String,
     /// The VPN routes the peer last told us about, saved to their contact.
@@ -453,6 +456,7 @@ impl Engine {
             delivery_seen: 0,
             discovery_seen: 0,
             vpn_configs: (u64::MAX, Vec::new()),
+            shared_rows: (u64::MAX, Vec::new()),
             peer_relay_saved: String::new(),
             peer_routes_saved: String::new(),
             call_check: Default::default(),
@@ -608,6 +612,10 @@ impl Engine {
         let vpn_rev = vpn::revision();
         if vpn_rev != self.vpn_configs.0 {
             self.vpn_configs = (vpn_rev, vpn::load().iter().map(|e| (e.id.clone(), format!("{} · {}", e.name, vpn::describe(e)))).collect());
+        }
+        let shared_rev = sharing::revision();
+        if shared_rev != self.shared_rows.0 {
+            self.shared_rows = (shared_rev, self.shared_files());
         }
 
         // Keyboard shortcuts raised by the key poller thread.
@@ -2660,6 +2668,16 @@ impl Engine {
                 self.save();
             }
             A::VpnImport => self.import_vpn(),
+            A::SharedCheck => sharing::check_all(&self.state.runtime),
+            A::SharedForget(id) => sharing::forget(&id),
+            A::SharedDownload(id) => {
+                let Some(name) = self.shared_rows.1.iter().find(|f| f.id == id).map(|f| f.name.clone()) else { return };
+                let runtime = self.state.runtime.clone();
+                std::thread::spawn(move || {
+                    let Some(dest) = rfd::FileDialog::new().set_title("Save the shared file").set_file_name(&name).save_file() else { return };
+                    sharing::download(&runtime, &id, dest);
+                });
+            }
             A::VpnUse(id) => {
                 self.cfg.vpn_active = id;
                 self.save();
@@ -3879,7 +3897,28 @@ impl Engine {
                 kill_switch: c.vpn_kill_switch,
                 status: vpn::status_line(),
             },
+            shared: self.shared_rows.1.clone(),
+            shared_notice: sharing::notice(),
         }
+    }
+
+    /// The shared-files list, each with its size, who it is shared with
+    /// (a contact by their name here, a community by its name) and its
+    /// last known availability.
+    fn shared_files(&self) -> Vec<ui::SharedRow> {
+        sharing::load()
+            .into_iter()
+            .map(|f| {
+                let whom = match f.with.strip_prefix("community:") {
+                    Some(id) => format!("in {}", self.spaces.name_of(id).unwrap_or("a community")),
+                    None => {
+                        let name = self.cfg.contacts.iter().find(|c| c.identity_key.eq_ignore_ascii_case(&f.with)).map_or("someone", |c| c.name.as_str());
+                        if f.mine { format!("with {name}") } else { format!("from {name}") }
+                    }
+                };
+                ui::SharedRow { status: sharing::status(&f.file_id), detail: format!("{} · {whom}", human_size(f.size)), id: f.file_id, name: f.name, mine: f.mine }
+            })
+            .collect()
     }
 
     /// The settings screen's values.
@@ -4387,6 +4426,9 @@ pub fn start_state(runtime: tokio::runtime::Handle) -> anyhow::Result<Arc<AppSta
     }
     delivery::set_hosting(&state.runtime, loaded.hold_mail_for_devices, loaded.hold_mail_port);
     sharing::set_seeding(&state.runtime, loaded.seeding, loaded.seed_port);
+    // Every shared file shows whether it can still be fetched, from the
+    // start (spec §5 "Availability status — always visible").
+    sharing::check_all(&state.runtime);
     vpn::apply(
         &state.runtime,
         loaded.vpn_enabled,

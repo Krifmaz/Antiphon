@@ -665,6 +665,13 @@ pub enum Action {
     VpnUse(String),
     /// Delete this imported VPN config (by id).
     VpnDelete(String),
+    /// Ask the holders of every shared file whether it is still there.
+    SharedCheck,
+    /// Download a shared file (its id) to a place the person picks.
+    SharedDownload(String),
+    /// Take a shared file (its id) off the list, and stop sharing it if
+    /// this computer was.
+    SharedForget(String),
     /// Route calls through anonymity-mode hops, or stop.
     Anonymity(bool),
     /// The hops for anonymity mode, comma-separated `host:port[#key]`.

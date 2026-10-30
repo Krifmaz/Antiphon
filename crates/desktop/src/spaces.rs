@@ -37,6 +37,11 @@ pub struct Spaces {
 }
 
 impl Spaces {
+    /// The name of the community with this id (hex), as last built.
+    pub fn name_of(&self, id: &str) -> Option<&str> {
+        self.communities.iter().find(|c| c.id == id).map(|c| c.name.as_str())
+    }
+
     /// What the screens show: every space, the invitations, and the
     /// messages of `viewing` (the channel on screen, which counts as read).
     pub fn model(&mut self, viewing: Option<(&str, u32)>) -> (Vec<ui::Community>, Vec<ui::SpaceInvite>, Option<ui::ChannelView>) {

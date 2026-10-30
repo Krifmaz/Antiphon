@@ -1141,6 +1141,43 @@ fn sharing<'a>(ui: &'a Ui, more: &'a NetworkMore) -> El<'a, Msg> {
     titled_card("Sharing files", None, col)
 }
 
+/// The files shared with you and by you, each with whether it can still
+/// be fetched (spec §5 "Availability status — always visible on every
+/// file").
+fn shared_files(more: &NetworkMore) -> El<'_, Msg> {
+    let p = theme::look();
+    let mut col = column![].spacing(10);
+    if !more.shared_notice.is_empty() {
+        col = col.push(t(more.shared_notice.as_str()).size(12.5).color(p.warn));
+    }
+    if more.shared.is_empty() {
+        col = col.push(faint("Nothing yet. Files sent in a call or posted in a community show up here.").size(13));
+    }
+    for f in &more.shared {
+        let status = if f.status.is_empty() { "Not checked yet" } else { f.status.as_str() };
+        let color = match status {
+            "Available" => p.ok,
+            "No longer shared" => p.err,
+            _ => p.muted,
+        };
+        let mut actions = row![].spacing(6).align_y(Alignment::Center);
+        if !f.mine {
+            actions = actions.push(btn_sm("Download", Btn::Default, Some(Msg::Do(Action::SharedDownload(f.id.clone())))));
+        }
+        actions = actions.push(btn_icon(Icon::Trash, "Forget", Btn::Ghost, Some(Msg::Do(Action::SharedForget(f.id.clone())))));
+        col = col.push(
+            row![
+                column![t(f.name.as_str()).size(13.5).font(theme::semibold()), faint(f.detail.as_str()).size(12), t(status).size(12).color(color)].spacing(2).width(Length::Fill),
+                actions,
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        );
+    }
+    let head = row![h3("Shared files"), fill(), btn_icon(Icon::Refresh, "Check what's still there", Btn::Ghost, Some(Msg::Do(Action::SharedCheck)))].align_y(Alignment::Center);
+    card(column![head, col].spacing(14)).into()
+}
+
 /// Anonymity routing, and whether programs on this computer may act as
 /// you.
 fn privacy<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
@@ -1212,7 +1249,10 @@ fn data<'a>(ui: &'a Ui, m: &'a Model) -> El<'a, Msg> {
         Some("Voice only, at the least data that stays clear. Calls already lower their quality by themselves when the connection is poor."),
         switch("Low data calls", m.settings.low_data, |on| Msg::Do(Action::LowData(on))),
     );
-    let cards = column![titled_card("Calls", None, low_data)].spacing(14).push(m.network.more.as_ref().map(|more| sharing(ui, more)));
+    let cards = column![titled_card("Calls", None, low_data)]
+        .spacing(14)
+        .push(m.network.more.as_ref().map(|more| sharing(ui, more)))
+        .push(m.network.more.as_ref().map(shared_files));
     let Some(ph) = m.phone.as_ref() else { return cards.into() };
     let background = column![
         setting(
