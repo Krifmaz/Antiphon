@@ -95,13 +95,13 @@ impl Spaces {
 
     /// Says we are in voice channel `channel` of `community`, with our
     /// invite link to be reached by.
-    pub fn voice_join(&mut self, community: &str, channel: u32, invite: &str) -> Result<(), String> {
+    pub fn voice_join(&self, community: &str, channel: u32, invite: &str) -> Result<(), String> {
         let store = Store::app().ok_or("Your identity isn't loaded yet")?;
         store.with_space(&key(community)?, |space, _| Ok(((), space.voice_join(channel, invite)?, Vec::new())))
     }
 
     /// Says we left voice channel `channel` of `community`.
-    pub fn voice_leave(&mut self, community: &str, channel: u32) -> Result<(), String> {
+    pub fn voice_leave(&self, community: &str, channel: u32) -> Result<(), String> {
         let store = Store::app().ok_or("Your identity isn't loaded yet")?;
         store.with_space(&key(community)?, |space, _| Ok(((), space.voice_leave(channel)?, Vec::new())))
     }
@@ -177,7 +177,7 @@ impl Spaces {
 
     /// Carries out one of the space actions. Returns the id of a space just
     /// made (for the screen to open), or why the action failed.
-    pub fn act(&mut self, action: ui::Action) -> Result<Option<String>, String> {
+    pub fn act(&self, action: ui::Action) -> Result<Option<String>, String> {
         use ui::Action as A;
         let store = Store::app().ok_or("Your identity isn't loaded yet")?;
         match action {
@@ -249,7 +249,7 @@ impl Spaces {
             A::SpaceNotify { community, channel, level } => {
                 let id = key(&community)?;
                 // The whole space has no "follow" setting: it is the default.
-                let level = level.or(channel.is_none().then_some(ui::Notify::All)).map(from_ui);
+                let level = level.or_else(|| channel.is_none().then_some(ui::Notify::All)).map(from_ui);
                 store.set_notify(&id, channel, level);
             }
             A::RemoveEmoji { community, name } => {

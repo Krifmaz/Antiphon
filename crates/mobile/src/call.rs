@@ -547,7 +547,7 @@ async fn resolve(target: &str) -> Result<(SocketAddr, Option<[u8; 32]>), String>
 
 /// Connects, runs the call until hung up, and returns the line to show
 /// afterwards. Errors are the same: a line to show.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "each argument is a distinct handle the call task owns or borrows")]
 async fn run(
     shared: &Arc<Shared>,
     generation: u64,
@@ -559,7 +559,7 @@ async fn run(
     facts: &mut Facts,
 ) -> Result<String, String> {
     if let Mode::Call { target } = &mode {
-        facts.remote = target.clone();
+        facts.remote.clone_from(target);
     }
     let (peer, expected) = match mode {
         Mode::Listen { port } => {
@@ -724,7 +724,7 @@ async fn talk(
                 }
                 Received::Control(bytes) => match ControlMessage::decode(&bytes) {
                     Some(ControlMessage::LinkReport { loss_pct, sent_ms, echo_ms, held_ms }) => {
-                        recv_link.on_report(0, loss_pct, sent_ms, echo_ms, held_ms)
+                        recv_link.on_report(0, loss_pct, sent_ms, echo_ms, held_ms);
                     }
                     // The conversation and its history belong to the
                     // interface, so these wait for it there.
@@ -794,7 +794,7 @@ async fn talk(
                 let popped = jitter.lock().unwrap().pop_ready();
                 match popped {
                     PopResult::Frame(samples) | PopResult::Recovered(samples) | PopResult::Concealed(samples) => {
-                        sink.push(&samples)
+                        sink.push(&samples);
                     }
                     PopResult::Empty => break,
                 }

@@ -29,7 +29,7 @@ fn shrink(frame: &Frame, w: u32, h: u32) -> Frame {
     let mut sums = vec![0u32; w * 4];
     for y in 0..h {
         let (y0, y1) = (y * sh / h, ((y + 1) * sh / h).max(y * sh / h + 1));
-        sums.iter_mut().for_each(|s| *s = 0);
+        sums.fill(0);
         for sy in y0..y1 {
             let row = &frame.rgba[sy * sw * 4..(sy + 1) * sw * 4];
             for (x, &(x0, x1)) in cols.iter().enumerate() {

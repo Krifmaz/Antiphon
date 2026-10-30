@@ -91,7 +91,7 @@ pub fn download(release: &Release, asset: &Asset, dir: &Path, progress: &dyn Fn(
 
     let result = (|| {
         let mut response = agent.get(&asset.url).call().map_err(|e| format!("couldn't download {} ({e})", asset.name))?;
-        let total = response.body().content_length().or((asset.size > 0).then_some(asset.size));
+        let total = response.body().content_length().or_else(|| (asset.size > 0).then_some(asset.size));
         let mut body = response.body_mut().as_reader();
         let mut file = File::create(&part).map_err(|e| format!("couldn't write {} ({e})", part.display()))?;
         let mut hash = Sha256::new();

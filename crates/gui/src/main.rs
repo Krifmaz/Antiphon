@@ -1197,7 +1197,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
 
             state.runtime.spawn_blocking(move || {
                 let result =
-                    state::record_until(input.as_deref(), stop, voice_message::MAX_SECONDS);
+                    state::record_until(input.as_deref(), &stop, voice_message::MAX_SECONDS);
                 slint::invoke_from_event_loop(move || {
                     let Some(app) = window_weak2.upgrade() else { return };
                     app.set_voice_recording(false);
@@ -1488,7 +1488,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let Some(app) = window_weak.upgrade() else { return };
             let call = state.call.lock().unwrap();
             if let Some(active) = call.as_ref() {
-                active.edit_chat(&state.runtime, id as u64, text.to_string());
+                active.edit_chat(&state.runtime, id as u64, &text);
             }
             drop(call);
             app.set_chat_input("".into());
@@ -2173,7 +2173,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
             let Some(app) = window_weak.upgrade() else { return };
             let call = state.call.lock().unwrap();
             if let Some(active) = call.as_ref() {
-                active.send_chat(&state.runtime, text.to_string());
+                active.send_chat(&state.runtime, &text);
                 // Cleared here (not in .slint) so both the Enter-key and
                 // Send-button paths clear it from one place.
                 app.set_chat_input("".into());
@@ -2833,7 +2833,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                 let call = state.call.lock().unwrap();
                 match call.as_ref() {
                     Some(active) if encode_identity_key(&active.peer_identity().identity_key) == contact.identity_key => {
-                        active.send_chat(&state.runtime, text.clone());
+                        active.send_chat(&state.runtime, &text);
                         true
                     }
                     _ => false,
@@ -3217,7 +3217,7 @@ fn wire_main_window(main_window: &MainWindow, tray: &AppTrayIcon, app_state: &Ar
                     } else {
                         let call = state.call.lock().unwrap();
                         match call.as_ref() {
-                            Some(active) => active.send_chat(&state.runtime, rest.to_string()),
+                            Some(active) => active.send_chat(&state.runtime, rest),
                             None => lines.push("not connected".into()),
                         }
                     }
@@ -3902,8 +3902,8 @@ fn finish_connect(
             match state::start_pipeline(
                 peer,
                 config,
-                input_device,
-                output_device,
+                input_device.as_deref(),
+                output_device.as_deref(),
                 transmit,
                 output_gain_db,
                 state.replay_seconds.clone(),
@@ -6847,7 +6847,7 @@ fn wire_communities(main_window: &MainWindow, app_state: &Arc<AppState>) {
                         getrandom::fill(&mut b).map_err(|e| e.to_string())?;
                         let mid = u64::from_le_bytes(b) >> 1;
                         let post = community::Post::File { id: mid, channel, name: name.clone(), size, file_id: file_id.clone(), key: key.clone(), holders: holders.clone(), at_secs };
-                        let outs = space.share_file(post)?;
+                        let outs = space.share_file(&post)?;
                         Ok(((), outs, vec![community::Event::File { channel, id: mid, sender: space.me(), name, size, file_id, key, holders, at_secs }]))
                     })
                 })();

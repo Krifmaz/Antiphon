@@ -430,19 +430,6 @@ impl FileManager {
         Ok(target.display().to_string())
     }
 
-    /// Pauses or resumes the file being sent at the user's request. A
-    /// resume does not override a hold from the data rules; the next poll
-    /// releases it when the rules allow.
-    pub fn set_user_paused(&mut self, live: Option<&Live>, paused: bool) {
-        let Some(active) = self.active.as_mut() else { return };
-        active.user_paused = paused;
-        if let (Some(live), Stage::Sending(_)) = (live, &active.stage) {
-            if active.held.is_none() || paused {
-                file_transfer::set_paused(&live.files, paused);
-            }
-        }
-    }
-
     /// Stops the file being sent and tells the other side.
     pub fn cancel_active(&mut self, live: Option<&Live>) {
         let Some(active) = self.active.take() else { return };
@@ -471,7 +458,7 @@ impl FileManager {
     }
 
     /// Declines the pending offer and tells the sender.
-    pub fn decline_offer(&mut self, live: &Live) {
+    pub fn decline_offer(&self, live: &Live) {
         if let Some(transfer_id) = file_transfer::reject_offer(&live.files) {
             live.send(ControlMessage::FileReject { transfer_id });
         }
@@ -479,7 +466,7 @@ impl FileManager {
 
     /// Stops a file being received. Only offered while nothing is being
     /// sent: the desktop's `cancel` takes the outgoing transfer first.
-    pub fn cancel_incoming(&mut self, live: &Live) {
+    pub fn cancel_incoming(&self, live: &Live) {
         if live.files.lock().unwrap().outgoing.is_some() {
             return;
         }

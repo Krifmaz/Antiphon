@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn unknown_repeated_and_missing_cards_still_give_a_whole_layout() {
-        let saved: Vec<String> = ["fingerprint", "banana", "-about", "fingerprint"].iter().map(std::string::ToString::to_string).collect();
+        let saved: Vec<String> = ["fingerprint", "banana", "-about", "fingerprint"].iter().map(ToString::to_string).collect();
         let layout = ProfileLayout::from_saved(&saved, "somewhere-new");
         assert_eq!(layout.blocks.len(), ProfileBlock::ALL.len());
         assert_eq!(layout.blocks[0], (ProfileBlock::Fingerprint, true));

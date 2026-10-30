@@ -100,6 +100,7 @@ fn windows(target: &Target, file: &Path) -> Result<After, String> {
 
 /// Keeps a console window from flashing up for a command run from the app
 /// (Windows only; elsewhere there is none to hide).
+#[cfg_attr(not(windows), expect(clippy::needless_pass_by_ref_mut, reason = "only Windows has a console flag to set"))]
 fn hide_console(command: &mut Command) {
     #[cfg(windows)]
     {

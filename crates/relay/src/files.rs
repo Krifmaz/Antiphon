@@ -184,7 +184,7 @@ impl FileStore {
     }
 
     /// Starts holding a file whose hashes are known and checked.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "each argument is a distinct fact about the file being held")]
     pub fn begin(
         &mut self,
         id: FileId,
@@ -500,7 +500,7 @@ impl FileHost {
                 }
                 let chunks = file_seal::chunk_count(size) as usize;
                 let read_token = (read_token != [0; 32]).then_some(read_token);
-                self.pending.entry(file).or_insert(Pending { size, uploader, read_token, hashes: vec![None; chunks] });
+                self.pending.entry(file).or_insert_with(|| Pending { size, uploader, read_token, hashes: vec![None; chunks] });
                 Some(Message::PutOk { which: PUT_INFO_ACK })
             }
             Message::PutHashes { file, uploader, page, hashes } => {
@@ -570,7 +570,7 @@ mod tests {
         FileHost::new(FileStore::open(&temp_dir("t")).unwrap(), policy, contacts)
     }
 
-    fn ask(h: &mut FileHost, m: Message, now_secs: u64) -> Message {
+    fn ask(h: &mut FileHost, m: &Message, now_secs: u64) -> Message {
         let out = h.handle(FROM, &m.encode(), Instant::now(), now_secs);
         Message::decode(&out[0].1).unwrap()
     }
@@ -591,9 +591,9 @@ mod tests {
     fn a_seeded_file_is_served_to_people_with_the_token_only() {
         let mut h = host(HostPolicy::default(), Arc::new(|_| false));
         let (id, token, chunks) = seed(&mut h, &[5u8; 3000], Scope::Conversation);
-        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 0), Message::InfoReply { size: 3000, chunks: 3 });
-        assert_eq!(ask(&mut h, Message::Chunk { file: id, token, index: 2 }, 0), Message::ChunkData { index: 2, data: chunks[2].clone() });
-        assert_eq!(ask(&mut h, Message::Chunk { file: id, token: [0; 32], index: 2 }, 0), Message::Refused(Refusal::Forbidden));
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token }, 0), Message::InfoReply { size: 3000, chunks: 3 });
+        assert_eq!(ask(&mut h, &Message::Chunk { file: id, token, index: 2 }, 0), Message::ChunkData { index: 2, data: chunks[2].clone() });
+        assert_eq!(ask(&mut h, &Message::Chunk { file: id, token: [0; 32], index: 2 }, 0), Message::Refused(Refusal::Forbidden));
     }
 
     #[test]
@@ -606,17 +606,17 @@ mod tests {
             .with_members(Arc::new(move |c, k| *c == choir && *k == member_key));
         let (id, token, _) = seed(&mut h, b"rehearsal notes", Scope::Community(choir));
         let (other, other_token, _) = seed(&mut h, b"another community's", Scope::Community([8; 32]));
-        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token }, 100), Message::Refused(Refusal::NotAContact));
         // Being a contact is not being a member.
         let claim = |who: &IdentityKeyPair, file| Message::Claim { file, identity: who.public().identity_key, at_secs: 100, signature: who.sign(&claim_bytes(&file, 100)) };
-        assert_eq!(ask(&mut h, claim(&contact, id), 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, &claim(&contact, id), 100), Message::Refused(Refusal::NotAContact));
         // Nor is a member of one community a member of another.
-        assert_eq!(ask(&mut h, claim(&member, other), 100), Message::Refused(Refusal::NotAContact));
-        assert_eq!(ask(&mut h, Message::Info { file: other, token: other_token }, 100), Message::Refused(Refusal::NotAContact));
-        assert_eq!(ask(&mut h, claim(&member, id), 100), Message::ClaimOk);
-        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 100), Message::InfoReply { size: 15, chunks: 1 });
+        assert_eq!(ask(&mut h, &claim(&member, other), 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, &Message::Info { file: other, token: other_token }, 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, &claim(&member, id), 100), Message::ClaimOk);
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token }, 100), Message::InfoReply { size: 15, chunks: 1 });
         // The read token is still needed on top.
-        assert_eq!(ask(&mut h, Message::Info { file: id, token: [0; 32] }, 100), Message::Refused(Refusal::Forbidden));
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token: [0; 32] }, 100), Message::Refused(Refusal::Forbidden));
     }
 
     #[test]
@@ -626,26 +626,26 @@ mod tests {
         let friend_key = friend.public().identity_key;
         let mut h = host(HostPolicy::default(), Arc::new(move |k| *k == friend_key));
         let (id, token, _) = seed(&mut h, b"hello", Scope::Contacts);
-        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token }, 100), Message::Refused(Refusal::NotAContact));
         let bad = Message::Claim {
             file: id,
             identity: stranger.public().identity_key,
             at_secs: 100,
             signature: stranger.sign(&claim_bytes(&id, 100)),
         };
-        assert_eq!(ask(&mut h, bad, 100), Message::Refused(Refusal::NotAContact));
+        assert_eq!(ask(&mut h, &bad, 100), Message::Refused(Refusal::NotAContact));
         let stale = Message::Claim { file: id, identity: friend_key, at_secs: 100, signature: friend.sign(&claim_bytes(&id, 100)) };
-        assert_eq!(ask(&mut h, stale, 100 + 3600), Message::Refused(Refusal::NotAContact), "replayed an hour later");
+        assert_eq!(ask(&mut h, &stale, 100 + 3600), Message::Refused(Refusal::NotAContact), "replayed an hour later");
         let good = Message::Claim { file: id, identity: friend_key, at_secs: 100, signature: friend.sign(&claim_bytes(&id, 100)) };
-        assert_eq!(ask(&mut h, good, 100), Message::ClaimOk);
-        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 100), Message::InfoReply { size: 5, chunks: 1 });
+        assert_eq!(ask(&mut h, &good, 100), Message::ClaimOk);
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token }, 100), Message::InfoReply { size: 5, chunks: 1 });
     }
 
     #[test]
     fn hashes_come_in_pages() {
         let mut h = host(HostPolicy::default(), Arc::new(|_| false));
         let (id, token, chunks) = seed(&mut h, &vec![1u8; CHUNK * 40], Scope::Conversation);
-        let Message::HashPage { hashes, .. } = ask(&mut h, Message::Hashes { file: id, token, page: 1 }, 0) else { panic!() };
+        let Message::HashPage { hashes, .. } = ask(&mut h, &Message::Hashes { file: id, token, page: 1 }, 0) else { panic!() };
         assert_eq!(hashes.len(), 8);
         assert_eq!(hashes[0], file_seal::chunk_hash(&chunks[32]));
     }
@@ -661,36 +661,36 @@ mod tests {
         let token = file_seal::read_token(&key);
         let up = [9u8; 32];
         assert_eq!(
-            ask(&mut h, Message::PutInfo { file: id, size: 2500, uploader: up, read_token: token, code: vec![] }, 0),
+            ask(&mut h, &Message::PutInfo { file: id, size: 2500, uploader: up, read_token: token, code: vec![] }, 0),
             Message::PutOk { which: PUT_INFO_ACK }
         );
-        assert_eq!(ask(&mut h, Message::PutHashes { file: id, uploader: up, page: 0, hashes }, 0), Message::PutOk { which: 0 });
+        assert_eq!(ask(&mut h, &Message::PutHashes { file: id, uploader: up, page: 0, hashes }, 0), Message::PutOk { which: 0 });
         let mut forged = chunks[1].clone();
         forged[0] ^= 1;
         assert_eq!(
-            ask(&mut h, Message::PutChunk { file: id, uploader: up, index: 1, data: forged }, 0),
+            ask(&mut h, &Message::PutChunk { file: id, uploader: up, index: 1, data: forged }, 0),
             Message::Refused(Refusal::BadData)
         );
         for (i, c) in chunks.iter().enumerate() {
-            ask(&mut h, Message::PutChunk { file: id, uploader: up, index: i as u32, data: c.clone() }, 0);
+            ask(&mut h, &Message::PutChunk { file: id, uploader: up, index: i as u32, data: c.clone() }, 0);
         }
         assert!(h.store.meta(&id).unwrap().complete());
-        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 0), Message::InfoReply { size: 2500, chunks: 3 });
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token }, 0), Message::InfoReply { size: 2500, chunks: 3 });
 
         let big = Message::PutInfo { file: [7; 32], size: 9_000, uploader: up, read_token: [0; 32], code: vec![] };
-        assert_eq!(ask(&mut h, big, 0), Message::Refused(Refusal::OverQuota));
+        assert_eq!(ask(&mut h, &big, 0), Message::Refused(Refusal::OverQuota));
     }
 
     #[test]
     fn uploads_are_off_unless_switched_on_and_codes_are_checked() {
         let mut h = host(HostPolicy::default(), Arc::new(|_| false));
         let m = Message::PutInfo { file: [1; 32], size: 10, uploader: [0; 32], read_token: [0; 32], code: vec![] };
-        assert_eq!(ask(&mut h, m.clone(), 0), Message::Refused(Refusal::Disabled));
+        assert_eq!(ask(&mut h, &m, 0), Message::Refused(Refusal::Disabled));
         let mut h = host(
             HostPolicy { accept_uploads: true, upload_code: Some(b"guild".to_vec()), ..Default::default() },
             Arc::new(|_| false),
         );
-        assert_eq!(ask(&mut h, m, 0), Message::Refused(Refusal::Forbidden));
+        assert_eq!(ask(&mut h, &m, 0), Message::Refused(Refusal::Forbidden));
     }
 
     #[test]
@@ -698,13 +698,13 @@ mod tests {
         let mut h = host(HostPolicy { retention: Retention::UnopenedDays(1), ..Default::default() }, Arc::new(|_| false));
         let (id, token, _) = seed(&mut h, b"short-lived", Scope::Conversation);
         let (kept, kept_token, _) = seed(&mut h, b"opened", Scope::Conversation);
-        ask(&mut h, Message::Chunk { file: kept, token: kept_token, index: 0 }, 10);
+        ask(&mut h, &Message::Chunk { file: kept, token: kept_token, index: 0 }, 10);
         assert_eq!(h.sweep(86_400 + 1), 1);
-        assert_eq!(ask(&mut h, Message::Info { file: id, token }, 0), Message::Refused(Refusal::NoLongerShared));
+        assert_eq!(ask(&mut h, &Message::Info { file: id, token }, 0), Message::Refused(Refusal::NoLongerShared));
         assert!(h.store.meta(&kept).is_some());
         assert!(h.store.purge(&kept));
-        assert_eq!(ask(&mut h, Message::Info { file: kept, token: kept_token }, 0), Message::Refused(Refusal::NoLongerShared));
-        assert_eq!(ask(&mut h, Message::Info { file: [3; 32], token }, 0), Message::Refused(Refusal::NotHere));
+        assert_eq!(ask(&mut h, &Message::Info { file: kept, token: kept_token }, 0), Message::Refused(Refusal::NoLongerShared));
+        assert_eq!(ask(&mut h, &Message::Info { file: [3; 32], token }, 0), Message::Refused(Refusal::NotHere));
     }
 
     #[test]

@@ -59,14 +59,14 @@ impl Capture {
     /// the system or missing is an error here rather than a silent black
     /// picture later.
     pub fn camera(index: u32) -> Result<Self, String> {
-        Self::spawn("camera", move |shared, opened| camera_thread(index, shared, opened))
+        Self::spawn("camera", move |shared, opened| camera_thread(index, &shared, &opened))
     }
 
     /// Starts capturing screen `index` (from [`screens`]). On Wayland the
     /// system asks the user which screen or window to share; that choice
     /// wins over `index`.
     pub fn screen(index: u32) -> Result<Self, String> {
-        Self::spawn("screen", move |shared, opened| screen_thread(index, shared, opened))
+        Self::spawn("screen", move |shared, opened| screen_thread(index, &shared, &opened))
     }
 
     /// Runs `body` on a new thread and waits for it to report the device
@@ -165,7 +165,7 @@ fn camera_allowed() -> bool {
 
 /// The camera thread: opens the camera, then reads frames until told to
 /// stop or the camera goes away.
-fn camera_thread(index: u32, shared: Arc<Shared>, opened: mpsc::Sender<Result<(), String>>) {
+fn camera_thread(index: u32, shared: &Shared, opened: &mpsc::Sender<Result<(), String>>) {
     if !camera_allowed() {
         let _ = opened.send(Err("Camera access is turned off for Stoop in your system settings".into()));
         return;
@@ -224,7 +224,7 @@ fn to_frame(buf: &nokhwa::Buffer) -> Result<Frame, String> {
 }
 
 /// The screen thread: records screen `index` until told to stop.
-fn screen_thread(index: u32, shared: Arc<Shared>, opened: mpsc::Sender<Result<(), String>>) {
+fn screen_thread(index: u32, shared: &Shared, opened: &mpsc::Sender<Result<(), String>>) {
     let started = xcap::Monitor::all()
         .map_err(|e| e.to_string())
         .and_then(|all| all.into_iter().nth(index as usize).ok_or_else(|| "That screen is not connected".to_string()))

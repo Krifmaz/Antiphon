@@ -129,7 +129,7 @@ impl Captioner {
         let seg_stats = stats.clone();
         thread::Builder::new()
             .name("captions-segmenter".into())
-            .spawn(move || segmenter(frame_rx, seg_tx, seg_stop, seg_stats))
+            .spawn(move || segmenter(&frame_rx, &seg_tx, &seg_stop, &seg_stats))
             .expect("spawn captions segmenter");
 
         let asr_stop = stop.clone();
@@ -145,7 +145,7 @@ impl Captioner {
                     }
                 };
                 events(Event::Ready);
-                recogniser(&mut model, seg_rx, asr_stop, asr_stats, &mut events);
+                recogniser(&mut model, &seg_rx, &asr_stop, &asr_stats, &mut events);
             })
             .expect("spawn captions recogniser");
 
@@ -172,7 +172,7 @@ impl Drop for Captioner {
 
 const POLL: Duration = Duration::from_millis(100);
 
-fn segmenter(rx: Receiver<Frame>, tx: SyncSender<Segment>, stop: Arc<AtomicBool>, stats: Arc<Stats>) {
+fn segmenter(rx: &Receiver<Frame>, tx: &SyncSender<Segment>, stop: &AtomicBool, stats: &Stats) {
     let mut speakers: HashMap<SourceId, (u32, Resampler, Vad)> = HashMap::new();
     let mut resampled = Vec::new();
     while !stop.load(Ordering::Relaxed) {
@@ -200,9 +200,9 @@ fn segmenter(rx: Receiver<Frame>, tx: SyncSender<Segment>, stop: Arc<AtomicBool>
 
 fn recogniser<T: Transcriber>(
     model: &mut T,
-    rx: Receiver<Segment>,
-    stop: Arc<AtomicBool>,
-    stats: Arc<Stats>,
+    rx: &Receiver<Segment>,
+    stop: &AtomicBool,
+    stats: &Stats,
     events: &mut impl FnMut(Event),
 ) {
     while !stop.load(Ordering::Relaxed) {

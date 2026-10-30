@@ -287,7 +287,7 @@ unsafe extern "C" fn on_output<F: FnMut(&mut [f32])>(
 /// `user` must be valid for `callback` until the returned stream is
 /// dropped, and `free` must free it.
 unsafe fn open(
-    builder: Builder,
+    builder: &Builder,
     callback: unsafe extern "C" fn(*mut AAudioStream, *mut c_void, *mut c_void, i32) -> i32,
     user: *mut c_void,
     free: unsafe fn(*mut c_void),
@@ -351,7 +351,7 @@ where
     let user = Box::into_raw(Box::new(on_frame)).cast::<c_void>();
     // SAFETY: `user` is a `Box<F>`, which `free_box::<F>` frees, and it is
     // kept alive by the returned stream.
-    match unsafe { open(builder, on_input::<F>, user, free_box::<F>) } {
+    match unsafe { open(&builder, on_input::<F>, user, free_box::<F>) } {
         Ok(mut stream) => {
             // SAFETY: the stream is live.
             let session = unsafe { (api.get_session_id)(stream.raw.as_ptr()) };
@@ -381,7 +381,7 @@ where
     }
     let user = Box::into_raw(Box::new(fill)).cast::<c_void>();
     // SAFETY: as in `open_capture`.
-    unsafe { open(builder, on_output::<F>, user, free_box::<F>) }.inspect_err(|_| {
+    unsafe { open(&builder, on_output::<F>, user, free_box::<F>) }.inspect_err(|_| {
         // SAFETY: `open` failed, so AAudio has let go of `user`.
         unsafe { free_box::<F>(user) }
     })

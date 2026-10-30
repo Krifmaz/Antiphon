@@ -189,7 +189,7 @@ pub fn fetch(runtime: &tokio::runtime::Handle, link: &VoiceLink, from_key_hex: &
     let Some(dir) = clip_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
     crate::sharing::receive_link(
-        link.name.clone(),
+        &link.name,
         link.size,
         link.file_id.clone(),
         link.key.clone(),

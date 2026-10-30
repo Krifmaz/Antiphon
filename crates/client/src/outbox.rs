@@ -69,7 +69,7 @@ pub enum Status {
 
 impl Status {
     /// The exact wording the spec asks for (§8).
-    pub fn wording(&self) -> &'static str {
+    pub fn wording(self) -> &'static str {
         match self {
             Status::Sending => "Sending",
             Status::Waiting => "Waiting for them to come online",

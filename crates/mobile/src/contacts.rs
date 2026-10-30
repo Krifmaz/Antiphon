@@ -166,30 +166,6 @@ impl Contacts {
         Ok(format!("Added {name}."))
     }
 
-    /// Saves the person on the current call. `address` is what was dialled
-    /// or empty for an incoming call, whose source port is not where they
-    /// listen.
-    pub fn add_from_call(&mut self, name: &str, key: &[u8; 32], address: &str, now_secs: u64) {
-        let key_hex = hex(key);
-        if let Some(existing) = self.by_key_mut(&key_hex) {
-            existing.name = name.trim().to_string();
-            return;
-        }
-        // What was dialled may have been an invite; only its address is
-        // kept, since the key is stored on its own.
-        let address = Invite::parse(address).map(|i| i.address).unwrap_or_else(|_| address.to_string());
-        self.list.push(Contact {
-            name: name.trim().to_string(),
-            identity_key: key_hex,
-            address,
-            verified: false,
-            first_seen_secs: now_secs,
-            expire_after_secs: None,
-            ..Contact::default()
-        });
-        self.sort();
-    }
-
     /// Forgets the contact with this key. Their history and outbox files are
     /// left alone; deleting a contact is not deleting a conversation.
     pub fn remove(&mut self, key_hex: &str) {

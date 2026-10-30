@@ -818,7 +818,7 @@ impl Space {
         }
         if let Some(old) = self.cards.iter().find(|c| c.key == card.key) {
             if card.avatar.is_none() {
-                card.avatar = old.avatar.clone();
+                card.avatar.clone_from(&old.avatar);
             }
         }
         match self.cards.iter_mut().find(|c| c.key == card.key) {
@@ -840,8 +840,9 @@ impl Space {
         self.readers().into_iter().filter(|k| *k != self.me).collect()
     }
 
-    fn to_all(&self, wire: Wire, skip: &[[u8; 32]]) -> Vec<Out> {
-        self.others_in_group().into_iter().filter(|k| !skip.contains(k)).map(|to| Out { to, wire: wire.clone() }).collect()
+    /// `wire` addressed to everyone else in the group.
+    fn to_all(&self, wire: &Wire) -> Vec<Out> {
+        self.others_in_group().into_iter().map(|to| Out { to, wire: wire.clone() }).collect()
     }
 
     fn push_manifest(&mut self, signed: SignedManifest, m: Manifest) {
@@ -873,17 +874,16 @@ impl Space {
 
     fn send(&mut self, post: &Post) -> Result<Vec<Out>, String> {
         let wire = self.encrypt(post)?;
-        Ok(self.to_all(wire, &[]))
+        Ok(self.to_all(&wire))
     }
 
     /// Sends `post`, which belongs to `channel`, only to those who may
     /// read that channel (everyone, for an open one).
     fn send_in(&mut self, channel: Option<u32>, post: &Post) -> Result<Vec<Out>, String> {
         let wire = self.encrypt(post)?;
-        let Some(channel) = channel else { return Ok(self.to_all(wire, &[])) };
+        let Some(channel) = channel else { return Ok(self.to_all(&wire)) };
         let m = self.manifest();
-        let to: Vec<[u8; 32]> = self.others_in_group().into_iter().filter(|k| m.can_read(channel, k)).collect();
-        Ok(to.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
+        Ok(self.others_in_group().into_iter().filter(|k| m.can_read(channel, k)).map(|to| Out { to, wire: wire.clone() }).collect())
     }
 
     /// A manifest change: tell everyone, then bring the group in line.
@@ -934,7 +934,7 @@ impl Space {
         Ok(before.into_iter().map(|to| Out { to, wire: wire.clone() }).collect())
     }
 
-    fn commit_add(&mut self, key_package: &[u8], card: Card) -> Result<Vec<Out>, String> {
+    fn commit_add(&mut self, key_package: &[u8], card: &Card) -> Result<Vec<Out>, String> {
         let before = self.others_in_group();
         self.note_epoch();
         let state = b64(&self.mls.save());
@@ -1092,8 +1092,10 @@ impl Space {
         Ok((outs, Event::Reacted { id, author, sender: self.me, emoji: emoji.to_string(), on }))
     }
 
-    pub fn share_file(&mut self, post: Post) -> Result<Vec<Out>, String> {
-        let channel = match &post {
+    /// Shares a file in a channel: `post` is a [`Post::File`] link, sent
+    /// only to those who may read its channel.
+    pub fn share_file(&mut self, post: &Post) -> Result<Vec<Out>, String> {
+        let channel = match post {
             Post::File { channel, .. } => Some(*channel),
             _ => None,
         };
@@ -1101,7 +1103,7 @@ impl Space {
             return Err("that channel is private and you're not one of its readers".into());
         }
         self.pace_mine(now_secs())?;
-        self.send_in(channel, &post)
+        self.send_in(channel, post)
     }
 
     // ---- voice channels ----
@@ -1472,7 +1474,7 @@ impl Space {
                     self.admit(identity, from, &card)?;
                 }
                 self.learn(card.clone());
-                h.outs.extend(self.commit_add(&kp, card)?);
+                h.outs.extend(self.commit_add(&kp, &card)?);
                 h.events.push(Event::Changed);
                 Ok(())
             }
@@ -1601,7 +1603,7 @@ impl Space {
         match prev.redo {
             Some(Redo::Add { key_package, card }) => {
                 if !self.readers().contains(&card.key.0) && self.manifest().is_member(&card.key.0) {
-                    h.outs.extend(self.commit_add(&unb64(&key_package)?, card)?);
+                    h.outs.extend(self.commit_add(&unb64(&key_package)?, &card)?);
                 }
             }
             Some(Redo::Remove { .. }) => h.outs.extend(self.converge(true)),
@@ -2487,11 +2489,11 @@ impl Store {
                     });
                     let _ = crate::history::save(&self.dir, &log, &self.key, &all);
                     if *sender != me {
-                        crate::sharing::receive_link(name.clone(), *size, file_id.clone(), key.clone(), holders.clone(), None, format!("community:{}", hex(&id.0)));
+                        crate::sharing::receive_link(name, *size, file_id.clone(), key.clone(), holders.clone(), None, format!("community:{}", hex(&id.0)));
                     }
                 }
                 Event::Edited { id: mid, sender, text } => self.rewrite(space, *mid, sender, |m| {
-                    m.text = text.clone();
+                    m.text.clone_from(text);
                     m.edited = true;
                 }),
                 Event::Deleted { id: mid, author } => self.rewrite(space, *mid, author, |m| {
@@ -3484,7 +3486,7 @@ mod tests {
         }
         /// The key they're in their space as.
         fn here(&self) -> [u8; 32] {
-            self.space.as_ref().map_or(self.key(), super::Space::me)
+            self.space.as_ref().map_or_else(|| self.key(), Space::me)
         }
         /// Who they act as in their space.
         fn acting(&self) -> IdentityKeyPair {

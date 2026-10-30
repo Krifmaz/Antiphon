@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -319,7 +319,7 @@ impl TunnelSocket {
     /// The address inside the tunnel. Not reachable from outside unless
     /// the VPN provider forwards a port to it.
     pub fn local_addr(&self) -> SocketAddr {
-        let ip = self.tunnel.config.addresses.first().map(|a| a.addr).unwrap_or(IpAddr::from([0, 0, 0, 0]));
+        let ip = self.tunnel.config.addresses.first().map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.addr);
         SocketAddr::new(ip, self.port)
     }
 

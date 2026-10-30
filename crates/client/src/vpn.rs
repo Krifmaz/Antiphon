@@ -230,7 +230,7 @@ fn disconnect_inner() {
 async fn connect(name: String, conf: String) {
     {
         let mut active = ACTIVE.lock().unwrap();
-        active.name = name.clone();
+        active.name.clone_from(&name);
         active.error = None;
     }
     bump();

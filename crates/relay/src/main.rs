@@ -2,6 +2,7 @@
 //! host and a group-call SFU (spec §3). See the library docs
 //! for exactly what it holds and for how long.
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -223,6 +224,7 @@ fn load_push_identity(path: &std::path::Path) -> anyhow::Result<antiphon_crypto:
 
 /// The push sender the options ask for: UnifiedPush always, APNs when a
 /// key was given (and this build has the `apns` feature).
+#[cfg_attr(not(feature = "apns"), expect(clippy::unnecessary_wraps, reason = "only reading an APNs key can fail"))]
 fn push_sender(args: &Args) -> anyhow::Result<antiphon_push::send::Sender> {
     let sender = antiphon_push::send::Sender::new();
     #[cfg(feature = "apns")]
@@ -614,9 +616,10 @@ fn load_submitted(path: &std::path::Path) -> Vec<([u8; 32], ListingEntry)> {
 /// Writes the submitted entries, in the form [`load_submitted`] reads.
 fn save_submitted(path: &std::path::Path, entries: &[([u8; 32], ListingEntry)]) -> std::io::Result<()> {
     let clean = |s: &str| s.replace(['|', '\n', '\r'], " ");
-    let text: String = entries
-        .iter()
-        .map(|(k, e)| format!("{} | {} | {} | {}\n", federation::encode_hex(k), clean(&e.name), clean(&e.description), clean(&e.invite)))
-        .collect();
+    let text = entries.iter().fold(String::new(), |mut text, (k, e)| {
+        // Writing to a String cannot fail.
+        let _ = writeln!(text, "{} | {} | {} | {}", federation::encode_hex(k), clean(&e.name), clean(&e.description), clean(&e.invite));
+        text
+    });
     std::fs::write(path, text)
 }

@@ -236,12 +236,12 @@ impl Parser<'_> {
         self.space();
         match self.peek() {
             Some(b'(') => self.collection(),
-            Some(b'_') => self.blank_label(),
+            Some(b'_') => Ok(self.blank_label()),
             _ => Ok(Term::Iri(self.iri()?)),
         }
     }
 
-    fn blank_label(&mut self) -> Result<Term, String> {
+    fn blank_label(&mut self) -> Term {
         // `_:name` -- a labelled blank node; labels map to fresh numbers
         // per document through the prefix table under a reserved key.
         self.at += 2;
@@ -251,13 +251,13 @@ impl Parser<'_> {
         }
         let key = format!("\0_:{}", String::from_utf8_lossy(&self.src[start..self.at]));
         if let Some(n) = self.prefixes.get(&key) {
-            return Ok(Term::Blank(n.parse().unwrap_or(0)));
+            return Term::Blank(n.parse().unwrap_or(0));
         }
         let node = self.new_blank();
         if let Term::Blank(n) = node {
             self.prefixes.insert(key, n.to_string());
         }
-        Ok(node)
+        node
     }
 
     fn predicate_objects(&mut self, subject: &Term) -> Result<(), String> {
@@ -301,7 +301,7 @@ impl Parser<'_> {
                 Ok(node)
             }
             Some(b'(') => self.collection(),
-            Some(b'_') if self.src.get(self.at + 1) == Some(&b':') => self.blank_label(),
+            Some(b'_') if self.src.get(self.at + 1) == Some(&b':') => Ok(self.blank_label()),
             Some(b'"' | b'\'') => self.literal(),
             Some(c) if c.is_ascii_digit() || c == b'-' || c == b'+' || c == b'.' => Ok(Term::Literal(self.number())),
             _ if self.starts_with_bare("true") => {

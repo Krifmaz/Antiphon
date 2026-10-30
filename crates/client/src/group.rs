@@ -743,6 +743,8 @@ mod tests {
             keep.push(b);
         }
         assert_eq!(group.people(), MAX_PEOPLE);
+        // The far ends were only kept so their connections stayed up.
+        drop(keep);
     }
 
     #[tokio::test]

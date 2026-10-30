@@ -160,7 +160,7 @@ mod tests {
     use super::*;
 
     fn order(ids: &[&str]) -> Vec<String> {
-        ids.iter().map(std::string::ToString::to_string).collect()
+        ids.iter().map(ToString::to_string).collect()
     }
 
     #[test]

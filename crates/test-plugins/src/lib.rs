@@ -8,7 +8,6 @@
 //! port, so the host's event-buffer handling is exercised, and its
 //! descriptions are written by [`write_lv2_bundle`].
 
-#![allow(non_snake_case, non_upper_case_globals)]
 
 use std::ffi::{c_char, c_int, c_ulong, c_void};
 use std::path::Path;

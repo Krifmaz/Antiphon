@@ -7,7 +7,7 @@
 //! commands for wg-quick to run as root; they are ignored too, and never
 //! run -- importing a file must not execute anything in it.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -210,10 +210,10 @@ impl WgConfig {
         }
         let missing = |section, key| ConfigError::Missing { section, key };
         let config = Self {
-            private_key: private_key.ok_or(missing("Interface", "PrivateKey"))?,
-            peer_public_key: public.ok_or(missing("Peer", "PublicKey"))?,
+            private_key: private_key.ok_or_else(|| missing("Interface", "PrivateKey"))?,
+            peer_public_key: public.ok_or_else(|| missing("Peer", "PublicKey"))?,
             preshared_key: psk,
-            endpoint: endpoint.ok_or(missing("Peer", "Endpoint"))?,
+            endpoint: endpoint.ok_or_else(|| missing("Peer", "Endpoint"))?,
             persistent_keepalive: keepalive,
             dns,
             addresses,
@@ -250,20 +250,24 @@ impl WgConfig {
     pub fn to_conf(&self) -> Zeroizing<String> {
         let b64 = |k: &[u8; 32]| base64::engine::general_purpose::STANDARD.encode(k);
         let join = |v: &[IpNet]| v.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-        let mut s = format!("[Interface]\nPrivateKey = {}\nAddress = {}\n", b64(&self.private_key), join(&self.addresses));
+        // Written straight into the zeroized buffer rather than through
+        // `format!` temporaries, so the keys leave fewer copies behind.
+        // Writing to a String cannot fail.
+        let mut s = Zeroizing::new(String::with_capacity(512));
+        let _ = write!(s, "[Interface]\nPrivateKey = {}\nAddress = {}\n", Zeroizing::new(b64(&self.private_key)).as_str(), join(&self.addresses));
         if !self.dns.is_empty() {
             let dns: Vec<String> = self.dns.iter().map(ToString::to_string).collect();
-            s += &format!("DNS = {}\n", dns.join(", "));
+            let _ = writeln!(s, "DNS = {}", dns.join(", "));
         }
-        s += &format!("\n[Peer]\nPublicKey = {}\n", b64(&self.peer_public_key));
+        let _ = write!(s, "\n[Peer]\nPublicKey = {}\n", b64(&self.peer_public_key));
         if let Some(psk) = &self.preshared_key {
-            s += &format!("PresharedKey = {}\n", b64(psk));
+            let _ = writeln!(s, "PresharedKey = {}", Zeroizing::new(b64(psk)).as_str());
         }
-        s += &format!("Endpoint = {}\nAllowedIPs = {}\n", self.endpoint, join(&self.allowed_ips));
+        let _ = write!(s, "Endpoint = {}\nAllowedIPs = {}\n", self.endpoint, join(&self.allowed_ips));
         if let Some(k) = self.persistent_keepalive {
-            s += &format!("PersistentKeepalive = {}\n", k.as_secs());
+            let _ = writeln!(s, "PersistentKeepalive = {}", k.as_secs());
         }
-        Zeroizing::new(s)
+        s
     }
 }
 

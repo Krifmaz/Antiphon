@@ -744,8 +744,8 @@ impl Engine {
     /// Asks `directory` to list a community with `description` (`None`
     /// takes it off), signed by the key we are in it as, which alone can
     /// change it later.
-    fn submit_listing(&mut self, community: String, directory: String, description: Option<String>) {
-        let made = self.spaces.listing(&community, description.as_deref());
+    fn submit_listing(&mut self, community: &str, directory: String, description: Option<&str>) {
+        let made = self.spaces.listing(community, description);
         let (entry, identity) = match made {
             Ok(made) => made,
             Err(e) => {
@@ -913,7 +913,7 @@ impl Engine {
             }
         }
         if let Some(routes) = save_routes {
-            self.peer_routes_saved = routes.clone();
+            self.peer_routes_saved.clone_from(&routes);
             if let Some(k) = key.as_deref().and_then(delivery::unhex32) {
                 save_peer_routes(&k, &routes);
                 self.cfg = config::load();
@@ -954,7 +954,7 @@ impl Engine {
 
     /// Saves the theme, accent and reading font to a theme file the person
     /// picks, off the window's thread.
-    fn export_theme(&mut self) {
+    fn export_theme(&self) {
         let s = &self.cfg.stoop;
         let file = ui::theme_file::ThemeFile::new(&s.theme, &s.accent, &s.custom_accent, &s.font);
         let events = self.events.clone();
@@ -978,7 +978,7 @@ impl Engine {
     /// Asks for a theme file, reads and checks it off the window's thread,
     /// and hands it back as [`Event::Theme`]. Nothing in it is run: it is
     /// parsed as data and every value checked (see `theme_file`).
-    fn import_theme(&mut self) {
+    fn import_theme(&self) {
         let events = self.events.clone();
         std::thread::spawn(move || {
             let Some(path) = rfd::FileDialog::new().set_title("Import theme").add_filter("Stoop theme", &ui::theme_file::EXTENSIONS).pick_file() else { return };
@@ -997,7 +997,7 @@ impl Engine {
     }
 
     /// Offers a save dialog for a received file, off the window's thread.
-    fn save_received(&mut self, name: String, stored: PathBuf) {
+    fn save_received(&self, name: String, stored: PathBuf) {
         let state = self.state.clone();
         let events = self.events.clone();
         std::thread::spawn(move || {
@@ -1160,7 +1160,7 @@ impl Engine {
                 self.ptt_capturing = false;
                 match r {
                     Ok(name) => {
-                        self.cfg.ptt_key = name.clone();
+                        self.cfg.ptt_key.clone_from(&name);
                         self.sync_transmit();
                         self.save();
                         self.toast(format!("Push to talk is now {name}"), ToastKind::Ok);
@@ -1255,7 +1255,7 @@ impl Engine {
 
     /// Saves a changed profile and tells the person on the call. The name
     /// and status ride in `Hello`, which goes out again too.
-    fn profile_changed(&mut self) {
+    fn profile_changed(&self) {
         self.save();
         self.send_card();
         let hello = self.hello();
@@ -1373,7 +1373,7 @@ impl Engine {
     /// Works out, in the background, which relay to use: yours, your
     /// fallbacks, the mesh's, or a contact's lent relay -- and learns the
     /// mesh from whichever answers.
-    fn choose_relay(&mut self) {
+    fn choose_relay(&self) {
         let cfg = self.cfg.clone();
         let events = self.events.clone();
         self.state.runtime.spawn(async move {
@@ -1400,7 +1400,7 @@ impl Engine {
     }
 
     /// Asks the router to forward our port inward, in the background.
-    fn map_port(&mut self) {
+    fn map_port(&self) {
         let port = self.cfg.stoop.port;
         let state = self.state.clone();
         let events = self.events.clone();
@@ -1654,7 +1654,7 @@ impl Engine {
                         Err(e) => self.toast(format!("Couldn't save the note: {e}"), ToastKind::Err),
                     }
                 } else if self.call_with(&to) {
-                    self.with_call(|a| a.send_reply(&rt, text, reply_to));
+                    self.with_call(|a| a.send_reply(&rt, &text, reply_to));
                 } else if let Some(c) = find_contact(&self.cfg, &to) {
                     match delivery::leave_reply(&c.identity_key, &text, c.expire_after_secs, reply_to) {
                         Ok(()) => self.conv = None,
@@ -1665,7 +1665,7 @@ impl Engine {
             }
             A::Edit { to, id, text } => {
                 if self.call_with(&to) {
-                    self.with_call(|a| a.edit_chat(&rt, id, text));
+                    self.with_call(|a| a.edit_chat(&rt, id, &text));
                 } else if let (Some(dir), Some(key)) = (&self.dir, &self.key) {
                     history::apply_edit(dir, &to, key, id, true, &text);
                     self.conv = None;
@@ -1739,7 +1739,7 @@ impl Engine {
                 self.send_queue.remove(id);
                 self.save_queue();
             }
-            A::AddPerson { name, invite } => self.add_person(name, invite),
+            A::AddPerson { name, invite } => self.add_person(&name, &invite),
             A::Remove(id) => {
                 if let Some(i) = contact_index(&self.cfg, &id) {
                     let gone = self.cfg.contacts.remove(i);
@@ -2033,8 +2033,8 @@ impl Engine {
             | A::ListenOnSaver(_) => {}
             A::OpenChannel { community, channel } => self.viewing = Some((community, channel)),
             A::ManageSpace { community, change: ui::SpaceChange::JoinVoice(channel) } => self.join_voice(community, channel),
-            A::ManageSpace { community, change: ui::SpaceChange::SubmitListing { directory, description } } => self.submit_listing(community, directory, Some(description)),
-            A::ManageSpace { community, change: ui::SpaceChange::WithdrawListing(directory) } => self.submit_listing(community, directory, None),
+            A::ManageSpace { community, change: ui::SpaceChange::SubmitListing { directory, description } } => self.submit_listing(&community, directory, Some(&description)),
+            A::ManageSpace { community, change: ui::SpaceChange::WithdrawListing(directory) } => self.submit_listing(&community, directory, None),
             A::ManageSpace {
                 community,
                 change: change @ (ui::SpaceChange::StartShared(_) | ui::SpaceChange::JoinShared(_) | ui::SpaceChange::AskIntoShared(_) | ui::SpaceChange::UnlistShared(_) | ui::SpaceChange::NewAllyLink),
@@ -2360,7 +2360,7 @@ impl Engine {
         ui::Plugins { chain, found, scanning: self.plugins_scanning }
     }
 
-    fn chain_changed(&mut self) {
+    fn chain_changed(&self) {
         let chain = self.cfg.chain.clone();
         self.with_call(|a| a.apply_chain_config(chain));
         self.save();
@@ -2429,7 +2429,7 @@ impl Engine {
         let (t_stop, t_send) = (stop.clone(), send.clone());
         let (input, chain, rt, events, who) = (self.cfg.input_device.clone(), self.cfg.chain.clone(), self.state.runtime.clone(), self.events.clone(), to.clone());
         std::thread::spawn(move || {
-            let (rate, mut samples) = match state::record_until(input.as_deref(), t_stop, voice_message::MAX_SECONDS) {
+            let (rate, mut samples) = match state::record_until(input.as_deref(), &t_stop, voice_message::MAX_SECONDS) {
                 Ok(recorded) => recorded,
                 Err(e) => {
                     Engine::push(&events, Event::VoiceSent(Err(format!("Couldn't record: {e}"))));
@@ -2632,13 +2632,10 @@ impl Engine {
     }
 
     /// Adds a contact from an invite link typed or pasted as `text`.
-    fn add_person(&mut self, name: String, text: String) {
-        let invite = match antiphon_crypto::Invite::parse(text.trim()) {
-            Ok(invite) => invite,
-            Err(_) => {
-                self.out.push(Out::AddFailed("That isn't an invite link. Ask them to copy it again from their Invite button.".into()));
-                return;
-            }
+    fn add_person(&mut self, name: &str, text: &str) {
+        let Ok(invite) = antiphon_crypto::Invite::parse(text.trim()) else {
+            self.out.push(Out::AddFailed("That isn't an invite link. Ask them to copy it again from their Invite button.".into()));
+            return;
         };
         let key = connection_mode::encode_hex32(&invite.identity_key);
         if key == connection_mode::encode_hex32(&self.state.identity.public().identity_key) {
@@ -2648,10 +2645,10 @@ impl Engine {
         let secret = invite.relay_secret.as_ref().map(connection_mode::encode_hex32).unwrap_or_default();
         if let Some(existing) = self.cfg.contacts.iter_mut().find(|c| c.identity_key == key) {
             if !invite.address.is_empty() {
-                existing.address = invite.address.clone();
+                existing.address.clone_from(&invite.address);
             }
             if !invite.relay.is_empty() {
-                existing.relay = invite.relay.clone();
+                existing.relay.clone_from(&invite.relay);
                 existing.relay_secret = secret;
                 existing.lends_relay = invite.lends_relay;
             }
@@ -2867,7 +2864,7 @@ impl Engine {
             ..ui::Call::default()
         };
         if c.phase == ui::Phase::Dialing {
-            m.talk_hint = c.status.clone();
+            m.talk_hint.clone_from(&c.status);
         }
         let call = self.state.call.lock().unwrap();
         if let Some(a) = call.as_ref() {
@@ -3318,8 +3315,8 @@ impl Connect {
         let started = state::start_pipeline(
             peer,
             self.chain,
-            self.input,
-            self.output,
+            self.input.as_deref(),
+            self.output.as_deref(),
             state.transmit.clone(),
             state.output_gain_db.clone(),
             state.replay_seconds.clone(),
@@ -3400,7 +3397,7 @@ fn evaluate_peer_trust(remote_addr: &str, peer: &antiphon_crypto::PublicIdentity
         .or_else(|| (!relayed).then(|| cfg.contacts.iter().position(|c| c.identity_key.is_empty() && c.address == remote_addr)).flatten())?;
     let prekey_hex = connection_mode::encode_hex32(&peer.prekey);
     if cfg.contacts[index].identity_key == key_hex && cfg.contacts[index].prekey != prekey_hex {
-        cfg.contacts[index].prekey = prekey_hex.clone();
+        cfg.contacts[index].prekey.clone_from(&prekey_hex);
         config::save(&cfg);
     }
     let contact = &cfg.contacts[index];
@@ -3668,12 +3665,12 @@ fn dirs_downloads() -> Option<PathBuf> {
 /// and `https`, so a message can't have the system open anything else.
 fn open_link(url: &str) {
     if url.starts_with("https://") || url.starts_with("http://") {
-        open_folder(std::path::Path::new(url));
+        open_folder(Path::new(url));
     }
 }
 
 /// Opens `path` in the file manager (or, for a web link, the browser).
-fn open_folder(path: &std::path::Path) {
+fn open_folder(path: &Path) {
     #[cfg(target_os = "windows")]
     let program = "explorer";
     #[cfg(target_os = "macos")]

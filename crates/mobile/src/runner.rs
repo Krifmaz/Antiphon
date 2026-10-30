@@ -171,7 +171,7 @@ impl Runner {
     /// Creates the window and the wgpu surface, device and renderer for it,
     /// trying each backend in [`GRAPHICS_BACKENDS`] in turn. The error
     /// names the last backend's failure.
-    fn create_graphics(&mut self, event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
+    fn create_graphics(&self, event_loop: &ActiveEventLoop) -> Result<Graphics, String> {
         let window = Arc::new(
             event_loop
                 .create_window(Window::default_attributes().with_title("Stoop"))
@@ -227,7 +227,7 @@ impl Runner {
                 .or_else(|| capabilities.formats.first().copied())
                 .ok_or("the surface supports no formats")?;
 
-            let engine = Engine::new(&adapter, device.clone(), queue.clone(), format, None, Shell::headless());
+            let engine = Engine::new(&adapter, device.clone(), queue, format, None, Shell::headless());
             // Stoop's own face, Inter, bundled so every phone draws the
             // interface the same; Fira Sans stays as the fallback.
             {

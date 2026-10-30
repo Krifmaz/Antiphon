@@ -79,12 +79,6 @@ impl Conversation {
         self.sink.expire_after_secs
     }
 
-    /// Applies to messages sent or received from now on; ones already
-    /// written keep the expiry they were written with, as on the desktop.
-    pub fn set_expiry(&mut self, secs: Option<u64>) {
-        self.sink.expire_after_secs = secs;
-    }
-
     /// Rereads the history from disk, which also drops expired messages.
     fn reload(&mut self) {
         self.messages = self.sink.load_all();

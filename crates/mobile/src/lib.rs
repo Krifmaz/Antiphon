@@ -76,71 +76,70 @@ mod ui;
 // part here (the desktop has screens for things a phone does not offer
 // yet), hence `dead_code`; none of them is edited for the phone's sake.
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/account_backup.rs"]
 mod account_backup;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/content_store.rs"]
 mod content_store;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/control.rs"]
 mod control;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/device_sync.rs"]
 mod device_sync;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
 #[path = "../../client/src/devices.rs"]
 mod devices;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/mail_keys.rs"]
 mod mail_keys;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/file_integrity.rs"]
 mod file_integrity;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/file_preview.rs"]
 mod file_preview;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/file_transfer.rs"]
 mod file_transfer;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/history.rs"]
 mod history;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/link_quality.rs"]
 mod link_quality;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/outbox.rs"]
 mod outbox;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, clippy::missing_docs_in_private_items, reason = "a desktop module shared by path: the phone uses part of it, and its private items are not documented yet")]
 #[path = "../../client/src/pacer.rs"]
 mod pacer;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/profile.rs"]
 mod profile;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/reactions.rs"]
 mod reactions;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/transfer_limits.rs"]
 mod transfer_limits;
 #[cfg(any(target_os = "android", target_os = "ios"))]
-#[allow(dead_code, missing_docs, clippy::missing_docs_in_private_items)]
+#[expect(dead_code, reason = "a desktop module shared by path: the phone uses only part of it")]
 #[path = "../../client/src/video.rs"]
 mod video;
 

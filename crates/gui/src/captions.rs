@@ -128,7 +128,7 @@ pub fn wire(main_window: &MainWindow, app_state: &Arc<AppState>) {
             }
             let progress = Arc::new(Progress::default());
             c.download = Some(progress.clone());
-            std::thread::spawn(move || model_files::download(&dir, progress));
+            std::thread::spawn(move || model_files::download(&dir, &progress));
         });
     }
     {

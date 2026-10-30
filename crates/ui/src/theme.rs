@@ -236,7 +236,7 @@ pub fn partner(c: Color) -> Color {
 pub fn palette(theme: &str, accent: &str, custom: &str, system_dark: bool) -> Palette {
     let theme = if theme == "system" { if system_dark { "stoop" } else { "light" } } else { theme };
     // An unknown id falls back to Stoop, the first bundled theme.
-    let base = bundled().iter().find(|b| b.id == theme).unwrap_or(&bundled()[0]);
+    let base = bundled().iter().find(|b| b.id == theme).unwrap_or_else(|| &bundled()[0]);
     let dark = base.dark;
     let (a, b) = match ACCENTS.iter().find(|x| x.0 == accent) {
         Some(x) => (hex(x.2), hex(x.3)),

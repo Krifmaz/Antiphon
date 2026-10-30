@@ -42,7 +42,9 @@ async fn vpn_server(psk: Option<[u8; 32]>) -> (SocketAddr, WgConfig, tokio::task
         b64(&public_key(&server_key)),
     );
     if let Some(psk) = psk {
-        conf += &format!("PresharedKey = {}\n", b64(&psk));
+        conf.push_str("PresharedKey = ");
+        conf.push_str(&b64(&psk));
+        conf.push('\n');
     }
     let config = WgConfig::parse(&conf).unwrap();
 

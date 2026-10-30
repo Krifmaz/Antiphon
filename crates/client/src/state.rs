@@ -503,7 +503,7 @@ impl ActiveCall {
         });
     }
 
-    pub fn send_chat(&self, runtime: &tokio::runtime::Handle, text: String) {
+    pub fn send_chat(&self, runtime: &tokio::runtime::Handle, text: &str) {
         self.send_reply(runtime, text, None);
     }
 
@@ -513,7 +513,7 @@ impl ActiveCall {
     /// The answered message must be in this conversation's log; an id
     /// that isn't (a stale reply, or a message since lost) is dropped, so
     /// the message still goes, just without its quote.
-    pub fn send_reply(&self, runtime: &tokio::runtime::Handle, text: String, reply_to: Option<u64>) {
+    pub fn send_reply(&self, runtime: &tokio::runtime::Handle, text: &str, reply_to: Option<u64>) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -552,7 +552,7 @@ impl ActiveCall {
     ///
     /// Refuses to touch a message the peer sent: editing their words would
     /// not be an edit, it would be a forgery.
-    pub fn edit_chat(&self, runtime: &tokio::runtime::Handle, id: u64, text: String) -> bool {
+    pub fn edit_chat(&self, runtime: &tokio::runtime::Handle, id: u64, text: &str) -> bool {
         let text = text.trim().to_string();
         if text.is_empty() {
             return false;
@@ -562,7 +562,7 @@ impl ActiveCall {
             let Some(entry) = log.iter_mut().find(|e| e.id == id && e.from_me && !e.deleted) else {
                 return false;
             };
-            entry.text = text.clone();
+            entry.text.clone_from(&text);
             entry.edited = true;
         }
         self.chat_rev.fetch_add(1, Ordering::Relaxed);
@@ -1147,7 +1147,7 @@ pub async fn establish_punch(
 /// Blocks, so call it from `spawn_blocking` -- never the UI thread.
 pub fn record_until(
     input_device: Option<&str>,
-    stop: Arc<AtomicBool>,
+    stop: &AtomicBool,
     max_seconds: u32,
 ) -> Result<(u32, Vec<f32>)> {
     let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -1325,14 +1325,12 @@ pub fn start_loopback(
 /// devices and starts the call running. Mirrors `antiphon-cli`'s `run_call`,
 /// but returns live handles instead of blocking, since the GUI needs to
 /// keep going (settings can change mid-call, mute/deafen can toggle, etc).
-// One call site, and every argument is a distinct live handle the call
-// needs -- a parameter struct would only move the list.
-#[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "one call site, and every argument is a distinct live handle the call needs; a parameter struct would only move the list")]
 pub fn start_pipeline(
     peer: PeerConnection,
     config: ChainConfig,
-    input_device: Option<String>,
-    output_device: Option<String>,
+    input_device: Option<&str>,
+    output_device: Option<&str>,
     transmit: Arc<TransmitSettings>,
     output_gain_db: Arc<Mutex<f32>>,
     // How many seconds of received audio the Replay ring keeps (spec §2).
@@ -1446,7 +1444,7 @@ pub fn start_pipeline(
     // Recently sent audio, so a peer's resend request can be answered.
     let resend_cache: ResendCache = Arc::new(Mutex::new(std::collections::VecDeque::new()));
 
-    let (monitor_playback, monitor_sink) = start_playback(output_device.as_deref(), MONITOR_LATENCY_MS as f32 / 1000.0)?;
+    let (monitor_playback, monitor_sink) = start_playback(output_device, MONITOR_LATENCY_MS as f32 / 1000.0)?;
     let monitor_sink = Arc::new(Mutex::new(monitor_sink));
 
     // Best-effort: sent a few times a beat apart in case the first UDP
@@ -1551,7 +1549,7 @@ pub fn start_pipeline(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
     let capture_tx = tx.clone();
     let level_for_capture = mic_level.clone();
-    let capture = start_capture(input_device.as_deref(), move |samples: &[f32]| {
+    let capture = start_capture(input_device, move |samples: &[f32]| {
         let peak = samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
         if let Ok(mut lvl) = level_for_capture.lock() {
             *lvl = peak;
@@ -1732,7 +1730,7 @@ pub fn start_pipeline(
         }
     });
 
-    let (playback, playback_sink) = start_playback(output_device.as_deref(), 0.5)?;
+    let (playback, playback_sink) = start_playback(output_device, 0.5)?;
     let playback_sink = Arc::new(Mutex::new(playback_sink));
 
     // Frames land here in *arrival* order (UDP doesn't guarantee delivery
@@ -1872,7 +1870,7 @@ pub fn start_pipeline(
                             a
                         });
                         let with = crate::delivery::hex(&recv_link_peer.peer_identity().identity_key);
-                        crate::sharing::receive_link(name, size, file_id, key, holders, seeder, with);
+                        crate::sharing::receive_link(&name, size, file_id, key, holders, seeder, with);
                     }
                     Some(ControlMessage::Chat { id, text, reply_to }) => {
                         let mut log = recv_chat_log.lock().unwrap();
@@ -1894,7 +1892,7 @@ pub fn start_pipeline(
                         if let Some(entry) =
                             log.iter_mut().find(|e| e.id == id && !e.from_me && !e.deleted)
                         {
-                            entry.text = text.clone();
+                            entry.text.clone_from(&text);
                             entry.edited = true;
                             drop(log);
                             if let Some(history) = &recv_history {

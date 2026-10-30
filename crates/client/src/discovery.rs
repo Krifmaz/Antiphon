@@ -166,12 +166,12 @@ pub fn apply(contact: &mut Contact, sequence: u64, found: &Whereabouts) -> bool 
     contact.dht_sequence = Some(sequence);
     if let Some(address) = found.addresses.first() {
         if contact.address != *address {
-            contact.address = address.clone();
+            contact.address.clone_from(address);
             changed = true;
         }
     }
     if !found.relay.is_empty() && contact.relay != found.relay {
-        contact.relay = found.relay.clone();
+        contact.relay.clone_from(&found.relay);
         changed = true;
     }
     if !found.route_record.is_empty() {

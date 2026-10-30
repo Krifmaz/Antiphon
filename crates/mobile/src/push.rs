@@ -145,7 +145,7 @@ impl Push {
         };
         if let Some(identity) = identity {
             if push.record_is_ours(identity) {
-                *PUBLISHED.lock().unwrap() = push.saved.record.clone();
+                (*PUBLISHED.lock().unwrap()).clone_from(&push.saved.record);
             } else if !push.saved.endpoint.is_empty() {
                 let endpoint = push.saved.endpoint.clone();
                 let _ = push.registered(&endpoint, identity);
@@ -173,7 +173,7 @@ impl Push {
     pub fn registered(&mut self, reported: &str, identity: &IdentityKeyPair) -> Result<(), String> {
         let transport = Transport::from_platform(reported).ok_or("the push address the phone gave is not one Stoop can use")?;
         if self.saved.endpoint == reported && self.record_is_ours(identity) {
-            *PUBLISHED.lock().unwrap() = self.saved.record.clone();
+            (*PUBLISHED.lock().unwrap()).clone_from(&self.saved.record);
             return Ok(());
         }
         let now = crate::call::now_secs();
@@ -195,7 +195,7 @@ impl Push {
         if let Err(e) = std::fs::write(saved_path(&self.dir), json) {
             log::warn!("could not save the push address: {e}");
         }
-        *PUBLISHED.lock().unwrap() = self.saved.record.clone();
+        (*PUBLISHED.lock().unwrap()).clone_from(&self.saved.record);
         Ok(())
     }
 

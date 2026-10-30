@@ -266,27 +266,33 @@ pub fn default_route_via_vpn() -> Option<bool> {
     default_route_interface().map(|name| is_vpn_interface(&name))
 }
 
-/// The interface the default route leaves through, by name.
+/// The interface the default route leaves through, by name: from the
+/// routing table file on Linux.
+#[cfg(target_os = "linux")]
 fn default_route_interface() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let table = std::fs::read_to_string("/proc/net/route").ok()?;
-        return default_interface_from_proc_route(&table);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let out = std::process::Command::new("route").args(["-n", "get", "default"]).output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        return text
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("interface:").map(|s| s.trim().to_string()));
-    }
-    #[expect(unreachable_code)]
+    let table = std::fs::read_to_string("/proc/net/route").ok()?;
+    default_interface_from_proc_route(&table)
+}
+
+/// The interface the default route leaves through, by name: from `route`
+/// on macOS.
+#[cfg(target_os = "macos")]
+fn default_route_interface() -> Option<String> {
+    let out = std::process::Command::new("route").args(["-n", "get", "default"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|l| l.trim().strip_prefix("interface:").map(|s| s.trim().to_string()))
+}
+
+/// The interface the default route leaves through: unknown elsewhere.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn default_route_interface() -> Option<String> {
     None
 }
 
 /// The interface of the `00000000` destination with the lowest metric.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Only Linux reads a routing table file; the tests check the parser on
+/// every platform.
+#[cfg(any(target_os = "linux", test))]
 fn default_interface_from_proc_route(table: &str) -> Option<String> {
     table
         .lines()

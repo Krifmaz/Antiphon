@@ -439,7 +439,7 @@ pub fn share_in_community(
 
 /// A link arrived. `seeder` is the sender's own address, when they're
 /// seeding and the call is direct.
-pub fn receive_link(name: String, size: u64, file_id: String, key: String, mut holders: Vec<String>, seeder: Option<SocketAddr>, with: String) {
+pub fn receive_link(name: &str, size: u64, file_id: String, key: String, mut holders: Vec<String>, seeder: Option<SocketAddr>, with: String) {
     // Checked before keeping anything: a link whose key is not 32 bytes
     // could never be opened.
     if unhex32(&file_id).is_none() || unhex32(&key).is_none() {

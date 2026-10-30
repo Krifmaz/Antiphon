@@ -145,7 +145,7 @@ pub extern "system" fn Java_org_antiphon_app_Native_networkChanged(_env: JNIEnv,
             return;
         }
         let now = platform::network();
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if *last != Some(now) {
             *last = Some(now);
             post(PlatformEvent::NetworkChanged(now));

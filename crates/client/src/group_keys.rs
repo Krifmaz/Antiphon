@@ -254,7 +254,7 @@ impl GroupKeys {
             ControlMessage::MlsCommit(p) => (Kind::Commit, p),
             _ => return out,
         };
-        let Some(bytes) = Self::reassemble(mls, link, part) else { return out };
+        let Some(bytes) = Self::reassemble(mls, link, &part) else { return out };
 
         match kind {
             Kind::KeyPackage => {
@@ -308,7 +308,7 @@ impl GroupKeys {
         out
     }
 
-    fn reassemble(mls: &mut Mls, link: Link, part: MlsPart) -> Option<Vec<u8>> {
+    fn reassemble(mls: &mut Mls, link: Link, part: &MlsPart) -> Option<Vec<u8>> {
         if part.parts == 0 || part.parts > MAX_PARTS || part.part >= part.parts {
             return None;
         }
@@ -458,13 +458,13 @@ mod tests {
         let mut got = None;
         for m in parts {
             let ControlMessage::MlsCommit(p) = m else { panic!() };
-            got = Mls::reassemble_for_test(mls, p).or(got);
+            got = Mls::reassemble_for_test(mls, &p).or(got);
         }
         assert_eq!(got.unwrap(), big);
     }
 
     impl Mls {
-        fn reassemble_for_test(&mut self, p: MlsPart) -> Option<Vec<u8>> {
+        fn reassemble_for_test(&mut self, p: &MlsPart) -> Option<Vec<u8>> {
             GroupKeys::reassemble(self, Link::Primary, p)
         }
     }

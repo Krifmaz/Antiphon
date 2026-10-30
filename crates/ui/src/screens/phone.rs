@@ -282,7 +282,9 @@ fn dm_row<'a>(m: &'a Model, person: &'a Person) -> El<'a, Msg> {
     let body = row![avatar_dot(&person.name, &person.id, 44.0, dot, p.panel), column![top, bottom].spacing(3).width(Length::Fill)].spacing(12).align_y(Alignment::Center);
     let mut said = person.name.clone();
     if unread {
-        said.push_str(&format!(", {} unread", person.unread));
+        said.push_str(", ");
+        said.push_str(&person.unread.to_string());
+        said.push_str(" unread");
     }
     let open = Msg::Nav(Route::Person(person.id.clone()));
     let menu = Msg::Menu(Some(person.id.clone()));

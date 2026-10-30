@@ -469,13 +469,14 @@ pub fn sign_out(dir: &Path, platform: Platform) -> std::io::Result<()> {
 /// settings stay. Returns where the old key went, if there was one.
 pub fn replace_identity(dir: &Path, identity: &IdentityKeyPair) -> std::io::Result<Option<PathBuf>> {
     let path = antiphon_crypto::store::identity_path(dir);
-    let mut aside = None;
-    if path.exists() {
+    let aside = if path.exists() {
         let folder = aside_folder(dir);
         std::fs::create_dir_all(&folder)?;
         std::fs::rename(&path, folder.join("identity.key"))?;
-        aside = Some(folder);
-    }
+        Some(folder)
+    } else {
+        None
+    };
     antiphon_crypto::store::save(&path, identity)?;
     Ok(aside)
 }

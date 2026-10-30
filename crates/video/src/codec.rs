@@ -402,12 +402,11 @@ impl Decoder {
             heard: Instant::now(),
         });
         canvas.heard = Instant::now();
-        let mut changed = false;
-        if (canvas.frame.width, canvas.frame.height) != (w, h) {
+        let mut changed = (canvas.frame.width, canvas.frame.height) != (w, h);
+        if changed {
             canvas.frame = Frame::solid(w, h, [17, 17, 20, 255]);
             canvas.painted = false;
             canvas.version += 1;
-            changed = true;
         }
         let Some(whole) = self.reassembler.push(header, bytes) else { return changed };
         let Some(patch) = Patch::from_bytes(&whole) else { return changed };

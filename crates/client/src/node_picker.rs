@@ -47,7 +47,7 @@ pub fn add(routes: &mut Vec<RouteConfig>, node: &NodeLink) -> Result<RouteKind, 
     }
     route.nodes.push(node.address.clone());
     if kind == RouteKind::CommunityNode {
-        route.code = node.code.clone();
+        route.code.clone_from(&node.code);
     }
     route.enabled = true;
     Ok(kind)

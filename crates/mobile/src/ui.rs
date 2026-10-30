@@ -40,63 +40,17 @@ const MODEL_MAX_AGE: Duration = Duration::from_secs(1);
 /// The renderer the shared interface is typed against: iced's wgpu one.
 pub type Renderer = iced_widget::Renderer;
 
-/// A stage of the microphone chain, for the switch that turns it on and
+/// A stage of the microphone chain, for the switches that turn it on and
 /// off on the Voice screen.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // the full voice chain screen; see the note on `Message`
 pub enum Stage {
     /// Removes steady background noise, even under speech.
     NoiseSuppress,
-    /// Mutes the microphone between words.
-    NoiseGate,
-    /// Cuts rumble below the voice.
-    HighPass,
-    /// Cuts hiss above the voice.
-    LowPass,
-    /// Softens sibilants.
-    DeEsser,
-    /// Evens out loud and quiet moments.
-    Compressor,
-    /// A hard ceiling against clipping.
-    Limiter,
     /// Slowly turns a quiet microphone up and a loud one down.
     AutoGain,
-    /// Raises or lowers the voice.
-    PitchShift,
-    /// Adds a room around the voice.
-    Reverb,
 }
 
-/// A slider on the Voice screen, each setting one field of the chain.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // the full voice chain screen; see the note on `Message`
-pub enum Param {
-    /// How hard noise suppression works, from 0 to 1.
-    SuppressStrength,
-    /// The noise gate's threshold, in dB.
-    GateThreshold,
-    /// The high-pass filter's cutoff, in Hz.
-    HighPassCutoff,
-    /// The low-pass filter's cutoff, in Hz.
-    LowPassCutoff,
-    /// The compressor's threshold, in dB.
-    CompressorThreshold,
-    /// The compressor's ratio, as the `n` in `n:1`.
-    CompressorRatio,
-    /// The pitch shift, in semitones up (positive) or down.
-    PitchSemitones,
-    /// How much of the reverb is heard against the dry voice, from 0 to 1.
-    ReverbMix,
-    /// The reverb's room size, from 0 to 1.
-    ReverbRoom,
-}
-
-/// Everything a tap or a keystroke can ask the interface to do.
-///
-/// The variants marked `allow(dead_code)` belong to phone screens the
-/// shared interface does not have yet -- the file queue, recent calls,
-/// the full voice chain, saving a caller, the message timer. Their rules
-/// stay here, tested by use before, so those screens only need drawing. Handled
+/// Everything a tap or a keystroke can ask the interface to do. Handled
 /// by [`App::update`] on the interface thread; the call, contacts and
 /// settings ones change state and save it straight away.
 #[derive(Debug, Clone)]
@@ -128,21 +82,12 @@ pub enum Message {
     EqPreset(String),
     /// Turn a chain stage on or off.
     Toggle(Stage, bool),
-    /// Move a chain slider to a new value, in that slider's units.
-    #[allow(dead_code)] // see the note on `Message`
-    Param(Param, f32),
     /// Put the whole chain back to the default preset.
     ResetChain,
 
     // Contacts.
     /// Call the contact with this key (hex).
     CallContact(String),
-    /// The name box for saving the person on the call changed.
-    #[allow(dead_code)] // see the note on `Message`
-    SaveCallerName(String),
-    /// Save the person on the call under the name in the box.
-    #[allow(dead_code)] // see the note on `Message`
-    SaveCaller,
     /// Mark the contact with this key (hex) verified, or not.
     MarkVerified(String, bool),
 
@@ -153,9 +98,6 @@ pub enum Message {
     DeleteChat(u64),
     /// Toggle our reaction on a message.
     React(u64, String),
-    /// Set the open conversation's disappearing-message timer.
-    #[allow(dead_code)] // see the note on `Message`
-    Expiry(Expiry),
 
     // Files.
     /// Open the system file picker to send a file to the person whose
@@ -168,30 +110,16 @@ pub enum Message {
     DeclineOffer,
     /// Stop receiving the file arriving.
     CancelIncoming,
-    /// Pause (`true`) or resume the file being sent.
-    #[allow(dead_code)] // see the note on `Message`
-    PauseSend(bool),
     /// Stop sending the file being sent.
     CancelSend,
     /// Move a queued file one place earlier.
-    #[allow(dead_code)] // see the note on `Message`
     QueueUp(u64),
     /// Move a queued file one place later.
-    #[allow(dead_code)] // see the note on `Message`
     QueueDown(u64),
     /// Hold (`true`) or release a queued file.
-    #[allow(dead_code)] // see the note on `Message`
     QueueHold(u64, bool),
     /// Take a file out of the queue.
     QueueRemove(u64),
-
-    // Recent calls.
-    /// Call back the call at this index in the history, newest first.
-    #[allow(dead_code)] // see the note on `Message`
-    CallBack(usize),
-    /// Clear the call history; the first press only arms it.
-    #[allow(dead_code)] // see the note on `Message`
-    ClearCalls,
 
     // Settings.
     /// The display name box changed.
@@ -311,11 +239,6 @@ pub struct App {
     push: crate::push::Push,
     /// Past calls, newest first.
     calls: Vec<CallRecord>,
-    /// The first press of "Clear call history" has been made.
-    clear_calls_armed: bool,
-    /// The name box for saving the person on the call. Filled from their
-    /// Hello when it arrives and the box is still empty.
-    save_name: String,
     /// What this phone dialled for the call in progress, or `None` when
     /// the call came in. Kept for "save as contact".
     dialled: Option<String>,
@@ -508,8 +431,6 @@ impl App {
             backup_key,
             devices,
             calls,
-            clear_calls_armed: false,
-            save_name: String::new(),
             dialled: None,
             chat: None,
             draft: String::new(),
@@ -861,7 +782,7 @@ impl App {
         let live = self.engine.live();
         let live_peer = live.as_ref().map(|l| hex(&l.peer_key));
         if live_peer != self.live_peer {
-            self.live_peer = live_peer.clone();
+            self.live_peer.clone_from(&live_peer);
             self.peer_display_name = None;
             self.peer_card = None;
             self.unread = 0;
@@ -883,7 +804,6 @@ impl App {
                 if let Some(chat) = self.chat.as_mut() {
                     chat.flush_outbox(live);
                 }
-                self.save_name = String::new();
             }
             changed = true;
         }
@@ -895,9 +815,6 @@ impl App {
                 if let ControlMessage::Hello(hello) = message {
                     let name = hello.display_name.trim().to_string();
                     if !name.is_empty() {
-                        if self.save_name.is_empty() {
-                            self.save_name = name.clone();
-                        }
                         self.peer_display_name = Some(name);
                     }
                     continue;
@@ -1006,7 +923,7 @@ impl App {
 
     /// Saves a changed profile, gives the engine the copy it sends when a
     /// call connects, and tells the person on the call now.
-    fn profile_changed(&mut self) {
+    fn profile_changed(&self) {
         self.save();
         let card = card_of(&self.settings);
         self.engine.set_profile(&self.settings.status_message, card.clone());
@@ -1046,7 +963,7 @@ impl App {
 
     /// Hands the changed chain to the engine, which applies it at once, and
     /// saves it.
-    fn chain_changed(&mut self) {
+    fn chain_changed(&self) {
         self.engine.set_chain(self.settings.chain.clone());
         self.save();
     }
@@ -1073,9 +990,6 @@ impl App {
             }
             self.refresh();
             return;
-        }
-        if !matches!(message, Message::ClearCalls) {
-            self.clear_calls_armed = false;
         }
         match message {
             Message::PortChanged(value) => {
@@ -1130,32 +1044,9 @@ impl App {
                 let chain = &mut self.settings.chain;
                 match stage {
                     Stage::NoiseSuppress => chain.noise_suppress.enabled = on,
-                    Stage::NoiseGate => chain.noise_gate.enabled = on,
-                    Stage::HighPass => chain.high_pass.enabled = on,
-                    Stage::LowPass => chain.low_pass.enabled = on,
-                    Stage::DeEsser => chain.de_esser.enabled = on,
-                    Stage::Compressor => chain.compressor.enabled = on,
-                    Stage::Limiter => chain.limiter.enabled = on,
                     Stage::AutoGain => match &mut chain.gain {
                         GainConfig::Fixed { enabled, .. } | GainConfig::Auto { enabled, .. } => *enabled = on,
                     },
-                    Stage::PitchShift => chain.pitch_shift.enabled = on,
-                    Stage::Reverb => chain.reverb.enabled = on,
-                }
-                self.chain_changed();
-            }
-            Message::Param(param, value) => {
-                let chain = &mut self.settings.chain;
-                match param {
-                    Param::SuppressStrength => chain.noise_suppress.strength = value,
-                    Param::GateThreshold => chain.noise_gate.threshold_db = value,
-                    Param::HighPassCutoff => chain.high_pass.cutoff_hz = value,
-                    Param::LowPassCutoff => chain.low_pass.cutoff_hz = value,
-                    Param::CompressorThreshold => chain.compressor.threshold_db = value,
-                    Param::CompressorRatio => chain.compressor.ratio = value,
-                    Param::PitchSemitones => chain.pitch_shift.semitones = value,
-                    Param::ReverbMix => chain.reverb.wet_dry = value,
-                    Param::ReverbRoom => chain.reverb.room_size = value,
                 }
                 self.chain_changed();
             }
@@ -1209,30 +1100,9 @@ impl App {
                         self.notice = Some(format!(
                             "There is no address saved for {}. Ask them for an invite with their address and add it again.",
                             contact.name
-                        ))
+                        ));
                     }
                 }
-            }
-            Message::SaveCallerName(value) => self.save_name = value,
-            Message::SaveCaller => {
-                let Phase::Connected { peer_key, .. } = self.engine.phase() else { return };
-                let name = self.save_name.trim().to_string();
-                if name.is_empty() {
-                    self.notice = Some("Give them a name first. It is only for you; they never see it.".into());
-                    return;
-                }
-                // Only an outgoing call's target is somewhere they listen;
-                // an incoming call's source port is not.
-                let dialled = self
-                    .calls_in_progress_target()
-                    .unwrap_or_default();
-                self.contacts.add_from_call(&name, &peer_key, &dialled, now_secs());
-                // What they sent about themselves this call is kept too.
-                if let Some(card) = self.peer_card.clone() {
-                    self.receive_card(&hex(&peer_key), card);
-                }
-                self.contacts.save(&self.dir);
-                self.notice = Some(format!("Saved {name}."));
             }
             Message::MarkVerified(key, verified) => {
                 if let Some(contact) = self.contacts.by_key_mut(&key) {
@@ -1267,20 +1137,6 @@ impl App {
                     }
                 }
             }
-            Message::Expiry(expiry) => {
-                let Some(chat) = self.chat.as_mut() else { return };
-                chat.set_expiry(expiry.secs());
-                match self.contacts.by_key_mut(&chat.peer_hex) {
-                    Some(contact) => {
-                        contact.expire_after_secs = expiry.secs();
-                        self.contacts.save(&self.dir);
-                    }
-                    // Kept for this conversation only while it is open: the
-                    // setting lives on a contact, as on the desktop.
-                    None => self.notice = Some("Save them as a contact to keep this setting after the call.".into()),
-                }
-            }
-
             Message::PickFile => {
                 // The open conversation says who it is for; with none open,
                 // the person on the call. A file can be picked for someone
@@ -1308,7 +1164,6 @@ impl App {
                     self.files.cancel_incoming(live);
                 }
             }
-            Message::PauseSend(paused) => self.files.set_user_paused(live.as_deref(), paused),
             Message::CancelSend => self.files.cancel_active(live.as_deref()),
             Message::QueueUp(id) => {
                 self.files.queue.move_up(id);
@@ -1325,30 +1180,6 @@ impl App {
             Message::QueueRemove(id) => {
                 self.files.queue.remove(id);
                 self.files.save_queue();
-            }
-
-            Message::CallBack(index) => {
-                let Some(record) = self.calls.get(index) else { return };
-                let target = self
-                    .contacts
-                    .by_key(&record.peer_key)
-                    .and_then(|c| c.dial_target())
-                    .or_else(|| record.outgoing.then(|| record.remote.clone()));
-                match target {
-                    Some(target) => self.start_call(&target),
-                    None => self.notice = Some("They called you, so there is no address to call back. Save them as a contact with their invite.".into()),
-                }
-            }
-            Message::ClearCalls => {
-                if self.clear_calls_armed {
-                    self.calls.clear();
-                    if let Ok(key) = &self.backup_key {
-                        call_log::save(&self.dir, key, &self.calls);
-                    }
-                    self.clear_calls_armed = false;
-                } else {
-                    self.clear_calls_armed = true;
-                }
             }
 
             Message::DisplayName(value) => {
@@ -1385,17 +1216,6 @@ impl App {
             }
             _ => {}
         }
-    }
-
-    /// What the call in progress was dialled with, if this phone dialled.
-    fn calls_in_progress_target(&self) -> Option<String> {
-        // The engine's phase only keeps the resolved address; the dial box
-        // or the contact holds what was typed, which is what to save.
-        let Phase::Connected { peer_key, .. } = self.engine.phase() else { return None };
-        if let Some(contact) = self.contacts.by_key(&hex(&peer_key)) {
-            return Some(contact.address.clone());
-        }
-        self.dialled.clone()
     }
 
     /// Restoring takes two presses: replacing an identity makes this phone

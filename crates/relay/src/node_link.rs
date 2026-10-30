@@ -6,6 +6,8 @@
 //! names the address people reach it at); the app reads one from a
 //! picture of the code, or from the link pasted.
 
+use std::fmt::Write as _;
+
 /// How a node link starts.
 pub const PREFIX: &str = "stoop://node/";
 
@@ -29,7 +31,8 @@ impl NodeLink {
                 if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
                     link.push(b as char);
                 } else {
-                    link.push_str(&format!("%{b:02X}"));
+                    // Writing to a String cannot fail.
+                    let _ = write!(link, "%{b:02X}");
                 }
             }
         }

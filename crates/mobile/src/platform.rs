@@ -286,13 +286,13 @@ pub fn install(platform: impl Platform) {
 
 /// The installed platform, if [`install`] has run.
 fn get() -> Option<&'static dyn Platform> {
-    PLATFORM.get().map(|p| p.as_ref())
+    PLATFORM.get().map(AsRef::as_ref)
 }
 
 /// [`Platform::has_mic_permission`], or `false` before a platform is
 /// installed.
 pub fn has_mic_permission() -> bool {
-    get().is_some_and(|p| p.has_mic_permission())
+    get().is_some_and(Platform::has_mic_permission)
 }
 
 /// [`Platform::request_mic_permission`].
@@ -323,25 +323,25 @@ pub fn open_link(url: &str) -> bool {
 
 /// [`Platform::read_clipboard`].
 pub fn read_clipboard() -> Option<String> {
-    get().and_then(|p| p.read_clipboard())
+    get().and_then(Platform::read_clipboard)
 }
 
 /// [`Platform::system_insets`], in physical pixels as (top, bottom), or
 /// none before a platform is installed.
 pub fn system_insets() -> (f32, f32) {
-    get().map_or((0.0, 0.0), |p| p.system_insets())
+    get().map_or((0.0, 0.0), Platform::system_insets)
 }
 
 /// [`Platform::network`], or [`Network::Unknown`] before a platform is
 /// installed.
 pub fn network() -> Network {
-    get().map_or(Network::Unknown, |p| p.network())
+    get().map_or(Network::Unknown, Platform::network)
 }
 
 /// [`Platform::battery_saver`], or `false` before a platform is
 /// installed.
 pub fn battery_saver() -> bool {
-    get().is_some_and(|p| p.battery_saver())
+    get().is_some_and(Platform::battery_saver)
 }
 
 /// [`Platform::set_background_work`].
@@ -361,24 +361,24 @@ pub fn pick_file() {
 /// [`Platform::read_file`], or `Unsupported` before a platform is
 /// installed.
 pub fn read_file(handle: &str) -> std::io::Result<Vec<u8>> {
-    get().map_or(Err(std::io::ErrorKind::Unsupported.into()), |p| p.read_file(handle))
+    get().map_or_else(|| Err(std::io::ErrorKind::Unsupported.into()), |p| p.read_file(handle))
 }
 
 /// [`Platform::file_size`], or `Unsupported` before a platform is
 /// installed.
 pub fn file_size(handle: &str) -> std::io::Result<u64> {
-    get().map_or(Err(std::io::ErrorKind::Unsupported.into()), |p| p.file_size(handle))
+    get().map_or_else(|| Err(std::io::ErrorKind::Unsupported.into()), |p| p.file_size(handle))
 }
 
 /// [`Platform::read_file_range`], or `Unsupported` before a platform is
 /// installed.
 pub fn read_file_range(handle: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
-    get().map_or(Err(std::io::ErrorKind::Unsupported.into()), |p| p.read_file_range(handle, offset, len))
+    get().map_or_else(|| Err(std::io::ErrorKind::Unsupported.into()), |p| p.read_file_range(handle, offset, len))
 }
 
 /// [`Platform::downloads_dir`].
 pub fn downloads_dir() -> Option<std::path::PathBuf> {
-    get().and_then(|p| p.downloads_dir())
+    get().and_then(Platform::downloads_dir)
 }
 
 /// [`Platform::notify`].
@@ -430,13 +430,13 @@ pub fn request_battery_exemption() {
 
 /// [`Platform::has_camera`], or `false` before a platform is installed.
 pub fn has_camera() -> bool {
-    get().is_some_and(|p| p.has_camera())
+    get().is_some_and(Platform::has_camera)
 }
 
 /// [`Platform::has_camera_permission`], or `false` before a platform is
 /// installed.
 pub fn has_camera_permission() -> bool {
-    get().is_some_and(|p| p.has_camera_permission())
+    get().is_some_and(Platform::has_camera_permission)
 }
 
 /// [`Platform::request_camera_permission`].
@@ -448,7 +448,7 @@ pub fn request_camera_permission() {
 
 /// [`Platform::start_camera`], or an error before a platform is installed.
 pub fn start_camera(request: crate::camera::CameraRequest) -> Result<(), String> {
-    get().map_or(Err("No camera".into()), |p| p.start_camera(request))
+    get().map_or_else(|| Err("No camera".into()), |p| p.start_camera(request))
 }
 
 /// [`Platform::stop_camera`].

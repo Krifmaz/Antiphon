@@ -337,7 +337,7 @@ pub async fn run_node_full(
 /// Every service on one socket, and federation with other relays if
 /// `federation` is given (see [`federation`]). Each call bridged to a peer
 /// relay gets a socket of its own, read by a small task like an onion exit's.
-#[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "each optional service the node runs is its own argument")]
 pub async fn run_node_with_federation(
     socket: Arc<UdpSocket>,
     relay: Arc<std::sync::Mutex<Relay>>,

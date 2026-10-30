@@ -310,7 +310,7 @@ impl Updater {
     }
 
     /// Starts a look on a thread of its own.
-    fn look(&mut self, asked: bool) {
+    fn look(&self, asked: bool) {
         self.lock().status = Status::Checking;
         let (shared, current, latest) = (self.shared.clone(), self.current, self.net.latest);
         std::thread::Builder::new()
@@ -397,6 +397,7 @@ mod tests {
     }
 
     /// GitHub, answering with [`newer`].
+    #[expect(clippy::unnecessary_wraps, reason = "stands in for the network call, which can fail")]
     fn found() -> Result<Option<Release>, String> {
         Ok(Some(newer()))
     }
@@ -407,6 +408,7 @@ mod tests {
     }
 
     /// A download that writes three bytes and succeeds.
+    #[expect(clippy::unnecessary_wraps, reason = "stands in for the download, which can fail")]
     fn downloaded(_: &Release, asset: &Asset, dir: &Path, progress: &dyn Fn(u64, Option<u64>), _: &AtomicBool) -> Result<PathBuf, String> {
         std::fs::create_dir_all(dir).unwrap();
         let path = dir.join(&asset.name);
@@ -488,6 +490,7 @@ mod tests {
     #[test]
     fn the_same_version_is_up_to_date() {
         /// GitHub, with the running version as its newest.
+        #[expect(clippy::unnecessary_wraps, reason = "stands in for the network call, which can fail")]
         fn same() -> Result<Option<Release>, String> {
             Ok(Some(Release { version: Version::parse("0.3.0").unwrap(), ..newer() }))
         }

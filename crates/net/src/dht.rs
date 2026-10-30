@@ -916,12 +916,12 @@ impl DhtNode {
         self.tick(now)
     }
 
-    fn send(&mut self, out: &mut Out, to: SocketAddr, expect: Option<[u8; 32]>, kind: Pending, body: Request, now: Instant) {
+    fn send(&mut self, out: &mut Out, to: SocketAddr, expect: Option<[u8; 32]>, kind: Pending, body: &Request, now: Instant) {
         if self.pending.len() >= MAX_PENDING {
             return;
         }
         let txid = new_txid();
-        out.push((to, Message::encode_request(txid, Some(&self.key), &body)));
+        out.push((to, Message::encode_request(txid, Some(&self.key), body)));
         self.pending.insert(txid, InFlight { to, expect, kind, sent: now });
     }
 
@@ -995,7 +995,7 @@ impl DhtNode {
                                 {
                                     continue;
                                 }
-                                self.send(&mut out, node.addr, Some(node.public), Pending::Explore, Request::FindNode(self.id()), now);
+                                self.send(&mut out, node.addr, Some(node.public), Pending::Explore, &Request::FindNode(self.id()), now);
                             }
                         }
                     }
@@ -1020,7 +1020,7 @@ impl DhtNode {
             }
         }
         if !self.pending_to(&info.addr) {
-            self.send(out, info.addr, Some(info.public), Pending::Verify, Request::Ping, now);
+            self.send(out, info.addr, Some(info.public), Pending::Verify, &Request::Ping, now);
         }
     }
 
@@ -1028,7 +1028,7 @@ impl DhtNode {
     fn learn(&mut self, info: NodeInfo, now: Instant, out: &mut Out) {
         if let Insert::Contest(old) = self.table.insert(info, now) {
             if !self.pending_to(&old.addr) {
-                self.send(out, old.addr, Some(old.public), Pending::Contest { old, newcomer: info }, Request::Ping, now);
+                self.send(out, old.addr, Some(old.public), Pending::Contest { old, newcomer: info }, &Request::Ping, now);
             }
         }
     }
@@ -1084,16 +1084,16 @@ impl DhtNode {
             self.explored.clear();
             let own = self.id();
             for addr in self.bootstrap.clone() {
-                self.send(&mut out, addr, None, Pending::Explore, Request::FindNode(own), now);
+                self.send(&mut out, addr, None, Pending::Explore, &Request::FindNode(own), now);
             }
             for node in self.table.closest(&own, K) {
                 self.explored.insert(node.id());
-                self.send(&mut out, node.addr, Some(node.public), Pending::Explore, Request::FindNode(own), now);
+                self.send(&mut out, node.addr, Some(node.public), Pending::Explore, &Request::FindNode(own), now);
             }
             if let Some(cutoff) = now.checked_sub(self.config.refresh_every) {
                 for node in self.table.stale(cutoff) {
                     if !self.pending_to(&node.addr) {
-                        self.send(&mut out, node.addr, Some(node.public), Pending::Liveness(node), Request::Ping, now);
+                        self.send(&mut out, node.addr, Some(node.public), Pending::Liveness(node), &Request::Ping, now);
                     }
                 }
             }
@@ -1246,7 +1246,7 @@ pub async fn lookup(
                 return Err(NetError::DhtUnreachable);
             }
             seeds.sort_by_key(|n| distance(&n.id(), &target));
-            for (i, info) in seeds.drain(..).enumerate() {
+            for (i, info) in std::mem::take(&mut seeds).into_iter().enumerate() {
                 candidates.push(Candidate { info, path: i % paths, state: State::Fresh });
             }
             seeded = true;
@@ -1590,13 +1590,11 @@ mod tests {
         let moved = NodeInfo { addr: addr(9, 9, 9), ..n };
         assert_eq!(t.insert(moved, now), Insert::Contest(n));
         // Fill bucket 0 (ids whose first bit differs from ours).
-        let mut first = None;
         let mut a = 2u8;
         while t.buckets[0].len() < K {
             let f = fake(a as u16, a);
             if t.bucket_of(&f.id()) == Some(0) {
                 t.insert(f, now);
-                first.get_or_insert(f);
             }
             a = a.wrapping_add(1);
         }

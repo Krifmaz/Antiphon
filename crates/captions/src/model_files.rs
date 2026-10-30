@@ -22,7 +22,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -159,8 +159,8 @@ impl Progress {
 
 /// Downloads every file into `dir`, verifying each. Blocking; run it on a
 /// thread. Leaves nothing half-written behind on failure.
-pub fn download(dir: &Path, progress: Arc<Progress>) {
-    let result = download_inner(dir, &progress);
+pub fn download(dir: &Path, progress: &Progress) {
+    let result = download_inner(dir, progress);
     if let Err(e) = result {
         for f in FILES {
             let _ = std::fs::remove_file(dir.join(format!("{}.part", f.name)));

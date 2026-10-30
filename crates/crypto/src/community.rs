@@ -283,6 +283,7 @@ pub struct Manifest {
 /// The longest slow mode a community can set: six hours.
 pub const MAX_SLOW_MODE_SECS: u32 = 6 * 60 * 60;
 
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if hands over a reference")]
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }

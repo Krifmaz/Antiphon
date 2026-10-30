@@ -378,7 +378,7 @@ mod tests {
 
         let heard = heard.lock().unwrap().clone();
         let exit_ip: std::net::IpAddr = "127.0.0.3".parse().unwrap();
-        assert_eq!(heard, [exit_ip].into_iter().collect(), "the holder heard from someone other than the exit");
+        assert_eq!(heard, std::iter::once(exit_ip).collect(), "the holder heard from someone other than the exit");
     }
 
     #[tokio::test]

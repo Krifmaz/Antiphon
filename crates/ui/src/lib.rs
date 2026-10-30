@@ -1786,7 +1786,9 @@ impl Ui {
                     if !draft.is_empty() && !draft.ends_with(' ') {
                         draft.push(' ');
                     }
-                    draft.push_str(&format!(":{name}: "));
+                    draft.push(':');
+                    draft.push_str(&name);
+                    draft.push_str(": ");
                 }
                 self.set_dialog(None);
                 Vec::new()

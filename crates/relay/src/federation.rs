@@ -313,7 +313,7 @@ impl Federation {
             }
             Some(Message::Hello { static_public, ephemeral_public }) => self.on_hello(from, static_public, ephemeral_public, now),
             Some(Message::HelloBack { static_public, ephemeral_public, confirm }) => {
-                self.on_hello_back(from, HelloBack { static_public, ephemeral_public, confirm }, now)
+                self.on_hello_back(from, &HelloBack { static_public, ephemeral_public, confirm }, now)
             }
             Some(Message::Sealed(sealed)) => self.on_sealed(from, &sealed, relay, now),
             // Keys, lists and refusals are answers for apps and for
@@ -365,9 +365,9 @@ impl Federation {
     }
 
     /// Finishes a handshake this relay started, and proves itself at once.
-    fn on_hello_back(&mut self, from: SocketAddr, back: HelloBack, now: Instant) -> Vec<Action> {
+    fn on_hello_back(&mut self, from: SocketAddr, back: &HelloBack, now: Instant) -> Vec<Action> {
         let Some((init, _)) = self.initiating.remove(&from) else { return vec![] };
-        let Ok(mut session) = init.finish(&self.key, &back) else {
+        let Ok(mut session) = init.finish(&self.key, back) else {
             self.failed(from, now);
             return vec![];
         };

@@ -134,7 +134,7 @@ pub fn view<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, M
     let Some(c) = m.communities.iter().find(|c| c.id == id) else {
         return container(empty(Icon::Spaces, "Not here any more", "You may have left it, or it was forgotten on this device.")).center(Length::Fill).into();
     };
-    let ch = c.channels.iter().find(|x| x.id == channel).or(c.channels.first());
+    let ch = c.channels.iter().find(|x| x.id == channel).or_else(|| c.channels.first());
     let main = column![
         header(c, ch, false),
         divider(),
@@ -152,7 +152,7 @@ pub fn phone<'a>(ui: &'a Ui, m: &'a Model, id: &'a str, channel: u32) -> El<'a, 
     let Some(c) = m.communities.iter().find(|c| c.id == id) else {
         return list(ui, m, true);
     };
-    let ch = c.channels.iter().find(|x| x.id == channel).or(c.channels.first());
+    let ch = c.channels.iter().find(|x| x.id == channel).or_else(|| c.channels.first());
     let mut col = column![header(c, ch, true), divider()];
     if !c.group && c.channels.len() > 1 {
         let mut chips = row![].spacing(6);

@@ -173,7 +173,7 @@ impl MoveSender {
         let thread_stop = stop.clone();
         std::thread::Builder::new()
             .name("account-move".into())
-            .spawn(move || serve(listener, key, make, thread_status, thread_stop))?;
+            .spawn(move || serve(&listener, key, make, &thread_status, &thread_stop))?;
         Ok(MoveSender { link, status, stop })
     }
 
@@ -202,7 +202,7 @@ impl Drop for MoveSender {
 /// The offer's thread: accepts until one device takes the account, the
 /// offer is stopped, or it expires. A connection that fails the hello is
 /// dropped and the offer stays open for the real one.
-fn serve(listener: TcpListener, key: [u8; 32], mut make: MakeAccount, status: Arc<Mutex<MoveStatus>>, stop: Arc<AtomicBool>) {
+fn serve(listener: &TcpListener, key: [u8; 32], mut make: MakeAccount, status: &Mutex<MoveStatus>, stop: &AtomicBool) {
     let key = Zeroizing::new(key);
     let deadline = Instant::now() + OFFER_LIFETIME;
     let set = |s: MoveStatus| *status.lock().unwrap() = s;

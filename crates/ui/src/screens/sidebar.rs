@@ -186,7 +186,9 @@ pub fn person_row<'a>(ui: &'a Ui, m: &'a Model, person: &'a Person) -> El<'a, Ms
     .align_y(Alignment::Center);
     let mut name = person.name.clone();
     if person.unread > 0 {
-        name.push_str(&format!(", {} unread", person.unread));
+        name.push_str(", ");
+        name.push_str(&person.unread.to_string());
+        name.push_str(" unread");
     }
     if on_call {
         name.push_str(", on a call");

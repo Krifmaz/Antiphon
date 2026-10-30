@@ -140,7 +140,7 @@ impl App {
 
         let chain = &self.settings.chain;
         let mut presets = vec![NATURAL.to_string()];
-        presets.extend(antiphon_audio::eq_preset_names().iter().map(|s| s.to_string()));
+        presets.extend(antiphon_audio::eq_preset_names().iter().map(ToString::to_string));
         let preset = self.eq_choice.clone().unwrap_or_else(|| NATURAL.to_string());
         let settings = stoop::Settings {
             theme: self.settings.theme.clone(),
@@ -274,7 +274,7 @@ impl App {
     }
 
     /// Carries out one of the update buttons.
-    fn update_action(&mut self, action: Action) {
+    fn update_action(&mut self, action: &Action) {
         match action {
             Action::UpdateCheck => {
                 // Looking again after the installer was dismissed starts
@@ -285,7 +285,7 @@ impl App {
             Action::UpdateInstall if self.updater.can_install() => self.updater.start(),
             Action::UpdateInstall | Action::UpdatePage => crate::platform::open_url(&self.updater.page()),
             Action::UpdateLater => self.updater.later(),
-            Action::UpdateAuto(on) => self.updater.set_auto(on),
+            Action::UpdateAuto(on) => self.updater.set_auto(*on),
             _ => {}
         }
         self.refresh();
@@ -658,7 +658,7 @@ impl App {
             // does not run; the setting is the desktop's.
             Action::Note(..) | Action::Relay(_) | Action::LendRelay(_) | Action::Input(_) | Action::Output(_) | Action::BindPtt => {}
             Action::NotifyMessages(_) | Action::OpenOnStart(_) | Action::RefreshInvite | Action::OpenDownloads => {}
-            Action::UpdateCheck | Action::UpdateInstall | Action::UpdateLater | Action::UpdatePage | Action::UpdateAuto(_) => self.update_action(action),
+            Action::UpdateCheck | Action::UpdateInstall | Action::UpdateLater | Action::UpdatePage | Action::UpdateAuto(_) => self.update_action(&action),
             // Voice messages aren't recorded on the phone yet (the
             // button is hidden by `Device::voice_messages`).
             Action::RecordVoice(_) | Action::FinishVoice { .. } | Action::PlayVoice { .. } => {}

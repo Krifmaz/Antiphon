@@ -409,6 +409,8 @@ impl HopNode {
     /// nothing outlives it, because nothing is written anywhere else.
     pub fn sweep(&mut self, now: Instant) -> Vec<Action> {
         let (idle, pending) = (self.limits.idle, self.limits.pending);
+        // Collected first: `remove` needs the whole of `self`.
+        #[expect(clippy::needless_collect, reason = "remove borrows self mutably while circuits is borrowed")]
         let expired: Vec<CircuitId> = self
             .circuits
             .iter()

@@ -457,20 +457,20 @@ mod tests {
         Mailbox::new(MailboxLimits { enabled: true, ..Default::default() })
     }
 
-    fn ask(m: &mut Mailbox, msg: Message, now: Instant) -> Vec<Message> {
+    fn ask(m: &mut Mailbox, msg: &Message, now: Instant) -> Vec<Message> {
         m.handle(FROM, &msg.encode(), now).into_iter().map(|(_, b)| Message::decode(&b).unwrap()).collect()
     }
 
     fn register(m: &mut Mailbox, label: Label, secret: [u8; 32], now: Instant) {
         let fetch_hash = antiphon_crypto::mail::fetch_hash(&secret);
-        let r = ask(m, Message::Register { label, fetch_hash, code: vec![] }, now);
+        let r = ask(m, &Message::Register { label, fetch_hash, code: vec![] }, now);
         assert!(matches!(r[0], Message::Registered { .. }), "{r:?}");
     }
 
     #[test]
     fn off_by_default() {
         let mut m = Mailbox::new(MailboxLimits::default());
-        let r = ask(&mut m, Message::Fetch { label: [0; 32], secret: [0; 32] }, Instant::now());
+        let r = ask(&mut m, &Message::Fetch { label: [0; 32], secret: [0; 32] }, Instant::now());
         assert_eq!(r, vec![Message::Refused(Refusal::Disabled)]);
     }
 
@@ -479,21 +479,21 @@ mod tests {
         let mut m = node();
         let now = Instant::now();
         register(&mut m, [1; 32], [2; 32], now);
-        let r = ask(&mut m, Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![9; 100] }, now);
+        let r = ask(&mut m, &Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![9; 100] }, now);
         assert_eq!(r, vec![Message::Deposited { id: [3; 16] }]);
-        let r = ask(&mut m, Message::Fetch { label: [1; 32], secret: [2; 32] }, now);
+        let r = ask(&mut m, &Message::Fetch { label: [1; 32], secret: [2; 32] }, now);
         assert_eq!(r, vec![Message::Mail { id: [3; 16], blob: vec![9; 100] }, Message::FetchDone { count: 1 }]);
         assert_eq!(m.stats().held_bytes, 100);
-        ask(&mut m, Message::Ack { label: [1; 32], secret: [2; 32], id: [3; 16] }, now);
+        ask(&mut m, &Message::Ack { label: [1; 32], secret: [2; 32], id: [3; 16] }, now);
         assert_eq!(m.stats().held_bytes, 0);
-        let r = ask(&mut m, Message::Fetch { label: [1; 32], secret: [2; 32] }, now);
+        let r = ask(&mut m, &Message::Fetch { label: [1; 32], secret: [2; 32] }, now);
         assert_eq!(r, vec![Message::FetchDone { count: 0 }]);
     }
 
     #[test]
     fn strangers_cannot_fill_a_node() {
         let mut m = node();
-        let r = ask(&mut m, Message::Deposit { label: [7; 32], id: [0; 16], blob: vec![1; 500] }, Instant::now());
+        let r = ask(&mut m, &Message::Deposit { label: [7; 32], id: [0; 16], blob: vec![1; 500] }, Instant::now());
         assert_eq!(r, vec![Message::Refused(Refusal::UnknownLabel)]);
         assert_eq!(m.stats().held_bytes, 0);
         assert_eq!(m.stats().inboxes, 0);
@@ -504,17 +504,17 @@ mod tests {
         let mut m = node();
         let now = Instant::now();
         register(&mut m, [1; 32], [2; 32], now);
-        ask(&mut m, Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![9; 10] }, now);
+        ask(&mut m, &Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![9; 10] }, now);
         for wrong in [
             Message::Fetch { label: [1; 32], secret: [9; 32] },
             Message::Ack { label: [1; 32], secret: [9; 32], id: [3; 16] },
             Message::Status { label: [1; 32], secret: [9; 32] },
         ] {
-            assert_eq!(ask(&mut m, wrong, now), vec![Message::Refused(Refusal::WrongSecret)]);
+            assert_eq!(ask(&mut m, &wrong, now), vec![Message::Refused(Refusal::WrongSecret)]);
         }
         // Nor can someone else take the label over by re-registering it.
         let hijack = Message::Register { label: [1; 32], fetch_hash: [0; 32], code: vec![] };
-        assert_eq!(ask(&mut m, hijack, now), vec![Message::Refused(Refusal::WrongSecret)]);
+        assert_eq!(ask(&mut m, &hijack, now), vec![Message::Refused(Refusal::WrongSecret)]);
         assert_eq!(m.stats().held, 1);
     }
 
@@ -529,20 +529,20 @@ mod tests {
         let now = Instant::now();
         register(&mut m, [1; 32], [2; 32], now);
         for i in 0..2u8 {
-            ask(&mut m, Message::Deposit { label: [1; 32], id: [i; 16], blob: vec![0; 100] }, now);
+            ask(&mut m, &Message::Deposit { label: [1; 32], id: [i; 16], blob: vec![0; 100] }, now);
         }
-        let r = ask(&mut m, Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 100] }, now);
+        let r = ask(&mut m, &Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 100] }, now);
         assert_eq!(r, vec![Message::Refused(Refusal::Full)]);
 
         let mut m = Mailbox::new(MailboxLimits { enabled: true, deposits_per_minute: 3, ..Default::default() });
         register(&mut m, [1; 32], [2; 32], now);
         for i in 0..3u8 {
-            ask(&mut m, Message::Deposit { label: [1; 32], id: [i; 16], blob: vec![0; 10] }, now);
+            ask(&mut m, &Message::Deposit { label: [1; 32], id: [i; 16], blob: vec![0; 10] }, now);
         }
-        let r = ask(&mut m, Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 10] }, now);
+        let r = ask(&mut m, &Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 10] }, now);
         assert_eq!(r, vec![Message::Refused(Refusal::RateLimited)]);
         let later = now + Duration::from_secs(61);
-        let r = ask(&mut m, Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 10] }, later);
+        let r = ask(&mut m, &Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 10] }, later);
         assert_eq!(r, vec![Message::Deposited { id: [9; 16] }]);
     }
 
@@ -551,9 +551,9 @@ mod tests {
         let mut m =
             Mailbox::new(MailboxLimits { enabled: true, member_code: Some(b"guild".to_vec()), ..Default::default() });
         let now = Instant::now();
-        let r = ask(&mut m, Message::Register { label: [1; 32], fetch_hash: [0; 32], code: b"nope".to_vec() }, now);
+        let r = ask(&mut m, &Message::Register { label: [1; 32], fetch_hash: [0; 32], code: b"nope".to_vec() }, now);
         assert_eq!(r, vec![Message::Refused(Refusal::NotAMember)]);
-        let r = ask(&mut m, Message::Register { label: [1; 32], fetch_hash: [0; 32], code: b"guild".to_vec() }, now);
+        let r = ask(&mut m, &Message::Register { label: [1; 32], fetch_hash: [0; 32], code: b"guild".to_vec() }, now);
         assert!(matches!(r[0], Message::Registered { .. }));
     }
 
@@ -567,10 +567,10 @@ mod tests {
         });
         let now = Instant::now();
         register(&mut m, [1; 32], [2; 32], now);
-        ask(&mut m, Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![0; 10] }, now);
+        ask(&mut m, &Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![0; 10] }, now);
         m.sweep(now + Duration::from_secs(60));
         assert_eq!(m.stats().inboxes, 1, "still holds mail");
-        let r = ask(&mut m, Message::Deposit { label: [1; 32], id: [4; 16], blob: vec![0; 10] }, now + Duration::from_secs(60));
+        let r = ask(&mut m, &Message::Deposit { label: [1; 32], id: [4; 16], blob: vec![0; 10] }, now + Duration::from_secs(60));
         assert_eq!(r, vec![Message::Refused(Refusal::UnknownLabel)], "lapsed registration takes no new mail");
         m.sweep(now + Duration::from_secs(101));
         assert_eq!(m.stats(), MailboxStats { refused: 1, bytes_in: m.stats().bytes_in, bytes_out: m.stats().bytes_out, ..Default::default() });
@@ -590,9 +590,9 @@ mod tests {
         let mut m = node();
         let now = Instant::now();
         register(&mut m, [1; 32], [2; 32], now);
-        let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
+        let r = ask(&mut m, &Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
         assert_eq!(r, vec![Message::Refused(Refusal::NoPush)]);
-        let r = ask(&mut m, Message::Wake { code: vec![], endpoint: "https://h/x".into(), sealed: vec![0; antiphon_net::mailbox::WAKE_LEN] }, now);
+        let r = ask(&mut m, &Message::Wake { code: vec![], endpoint: "https://h/x".into(), sealed: vec![0; antiphon_net::mailbox::WAKE_LEN] }, now);
         assert_eq!(r, vec![Message::Refused(Refusal::NoPush)]);
     }
 
@@ -608,16 +608,16 @@ mod tests {
         let now = Instant::now();
         let mut m = push_node(now);
         let endpoint = "https://ntfy.sh/upX".to_string();
-        let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: endpoint.clone() }, now);
+        let r = ask(&mut m, &Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: endpoint.clone() }, now);
         assert_eq!(r, vec![Message::PushRegistered { node_key: [0xEE; 32] }]);
         for i in 0..3u8 {
-            ask(&mut m, Message::Deposit { label: [1; 32], id: [i; 16], blob: vec![0; 10] }, now);
+            ask(&mut m, &Message::Deposit { label: [1; 32], id: [i; 16], blob: vec![0; 10] }, now);
         }
         let target = Target { push_key: [3; 32], transport: Transport::UnifiedPush(endpoint) };
         assert_eq!(m.take_wakes(), vec![WakeJob::Seal(target.clone())], "three deposits, one wake-up");
         assert!(m.take_wakes().is_empty());
         let later = now + Duration::from_secs(61);
-        ask(&mut m, Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 10] }, later);
+        ask(&mut m, &Message::Deposit { label: [1; 32], id: [9; 16], blob: vec![0; 10] }, later);
         assert_eq!(m.take_wakes(), vec![WakeJob::Seal(target)]);
     }
 
@@ -626,11 +626,11 @@ mod tests {
     fn only_the_owner_sets_or_clears_the_endpoint() {
         let now = Instant::now();
         let mut m = push_node(now);
-        let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [9; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
+        let r = ask(&mut m, &Message::RegisterPush { label: [1; 32], secret: [9; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
         assert_eq!(r, vec![Message::Refused(Refusal::WrongSecret)]);
-        ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
-        ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: String::new() }, now);
-        ask(&mut m, Message::Deposit { label: [1; 32], id: [1; 16], blob: vec![0; 10] }, now);
+        ask(&mut m, &Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: "https://h/x".into() }, now);
+        ask(&mut m, &Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: String::new() }, now);
+        ask(&mut m, &Message::Deposit { label: [1; 32], id: [1; 16], blob: vec![0; 10] }, now);
         assert!(m.take_wakes().is_empty(), "cleared endpoints are not woken");
     }
 
@@ -641,13 +641,13 @@ mod tests {
         let mut m = push_node(now);
         let voip = format!("apns-voip:{}", "ab".repeat(32));
         for endpoint in [voip.as_str(), "not a url"] {
-            let r = ask(&mut m, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: endpoint.into() }, now);
+            let r = ask(&mut m, &Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: endpoint.into() }, now);
             assert_eq!(r, vec![Message::Refused(Refusal::NoPush)], "{endpoint}");
         }
         let mut with_apns = node();
         with_apns.enable_push([0; 32], true);
         register(&mut with_apns, [1; 32], [2; 32], now);
-        let r = ask(&mut with_apns, Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: voip }, now);
+        let r = ask(&mut with_apns, &Message::RegisterPush { label: [1; 32], secret: [2; 32], push_key: [3; 32], endpoint: voip }, now);
         assert!(matches!(r[0], Message::PushRegistered { .. }));
     }
 
@@ -658,9 +658,9 @@ mod tests {
         let mut m = push_node(now);
         let wake = |n: u8| Message::Wake { code: vec![], endpoint: "https://h/x".into(), sealed: vec![n; antiphon_net::mailbox::WAKE_LEN] };
         for n in 0..3 {
-            assert_eq!(ask(&mut m, wake(n), now), vec![Message::Woken]);
+            assert_eq!(ask(&mut m, &wake(n), now), vec![Message::Woken]);
         }
-        assert_eq!(ask(&mut m, wake(3), now), vec![Message::Refused(Refusal::RateLimited)]);
+        assert_eq!(ask(&mut m, &wake(3), now), vec![Message::Refused(Refusal::RateLimited)]);
         let jobs = m.take_wakes();
         assert_eq!(jobs.len(), 3);
         assert_eq!(jobs[0], WakeJob::Forward { transport: Transport::UnifiedPush("https://h/x".into()), sealed: vec![0; antiphon_net::mailbox::WAKE_LEN] });
@@ -672,8 +672,8 @@ mod tests {
         let mut m = Mailbox::new(MailboxLimits { enabled: true, member_code: Some(b"guild".to_vec()), ..Default::default() });
         m.enable_push([0; 32], false);
         let msg = |code: &[u8]| Message::Wake { code: code.to_vec(), endpoint: "https://h/x".into(), sealed: vec![0; antiphon_net::mailbox::WAKE_LEN] };
-        assert_eq!(ask(&mut m, msg(b"nope"), Instant::now()), vec![Message::Refused(Refusal::NotAMember)]);
-        assert_eq!(ask(&mut m, msg(b"guild"), Instant::now()), vec![Message::Woken]);
+        assert_eq!(ask(&mut m, &msg(b"nope"), Instant::now()), vec![Message::Refused(Refusal::NotAMember)]);
+        assert_eq!(ask(&mut m, &msg(b"guild"), Instant::now()), vec![Message::Woken]);
     }
 
     #[test]
@@ -682,7 +682,7 @@ mod tests {
         let now = Instant::now();
         register(&mut m, [1; 32], [2; 32], now);
         for _ in 0..3 {
-            ask(&mut m, Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![0; 10] }, now);
+            ask(&mut m, &Message::Deposit { label: [1; 32], id: [3; 16], blob: vec![0; 10] }, now);
         }
         assert_eq!(m.stats().held, 1);
     }
@@ -704,8 +704,8 @@ mod tests {
         assert_eq!((m.stats().boards, m.stats().board_bytes), (1, 900));
         // The board's bytes leave less room for inbox mail.
         let label = [5; 32];
-        ask(&mut m, Message::Register { label, fetch_hash: antiphon_crypto::mail::fetch_hash(&[6; 32]), code: vec![] }, Instant::now());
-        let deposit = ask(&mut m, Message::Deposit { label, id: [0; 16], blob: vec![0; 200] }, Instant::now());
+        ask(&mut m, &Message::Register { label, fetch_hash: antiphon_crypto::mail::fetch_hash(&[6; 32]), code: vec![] }, Instant::now());
+        let deposit = ask(&mut m, &Message::Deposit { label, id: [0; 16], blob: vec![0; 200] }, Instant::now());
         assert_eq!(deposit, vec![Message::Refused(Refusal::Full)]);
     }
 }

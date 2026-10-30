@@ -99,7 +99,7 @@ impl SealedRing {
                     audio[i - at] = source(i);
                 }
                 *block = self.seal(&audio);
-                audio.iter_mut().for_each(|s| *s = 0.0);
+                audio.fill(0.0);
             }
             at = block_end;
         }

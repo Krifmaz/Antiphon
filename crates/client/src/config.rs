@@ -1281,7 +1281,7 @@ mod tests {
         let pre_lpf: Vec<String> = AUDIO_SECTION_IDS
             .iter()
             .filter(|id| **id != "lpf")
-            .map(std::string::ToString::to_string)
+            .map(ToString::to_string)
             .collect();
         let merged = sanitize_order(pre_lpf, AUDIO_SECTION_IDS);
         assert!(merged.contains(&"lpf".to_string()));

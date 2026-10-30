@@ -163,7 +163,7 @@ fn start_cpal_capture(
     let host = host();
     let device = find_input_device(&host, device_name).ok_or(AudioError::NoInputDevice)?;
     let config = device.default_input_config()?;
-    capture_from(device, config, on_frame)
+    capture_from(&device, config, on_frame)
 }
 
 /// Starts recording **what this computer plays** -- the system's output
@@ -202,7 +202,7 @@ pub fn start_system_capture(on_frame: impl FnMut(&[f32]) + Send + 'static) -> Re
             .min_by_key(|d| d.description().map(|desc| desc.name() != "default_sink").unwrap_or(true))
             .ok_or(AudioError::NoLoopback)?;
         let config = device.default_input_config()?;
-        capture_from(device, config, on_frame)
+        capture_from(&device, config, on_frame)
     }
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
@@ -210,14 +210,14 @@ pub fn start_system_capture(on_frame: impl FnMut(&[f32]) + Send + 'static) -> Re
         // stream takes the output's own format.
         let device = host.default_output_device().ok_or(AudioError::NoOutputDevice)?;
         let config = device.default_output_config()?;
-        capture_from(device, config, on_frame)
+        capture_from(&device, config, on_frame)
     }
 }
 
 /// Records from `device` (a microphone, or an output device opened for
 /// loopback) in `config`, mixed down to mono.
 fn capture_from(
-    device: cpal::Device,
+    device: &cpal::Device,
     config: cpal::SupportedStreamConfig,
     mut on_frame: impl FnMut(&[f32]) + Send + 'static,
 ) -> Result<CaptureHandle, AudioError> {

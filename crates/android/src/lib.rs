@@ -34,6 +34,7 @@ use winit::platform::android::EventLoopBuilderExtAndroid;
 /// Entry point, called by `android-activity` on its own thread once the
 /// NativeActivity has been created.
 #[no_mangle]
+#[expect(clippy::needless_pass_by_value, reason = "android-activity calls this entry point with the app by value")]
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()

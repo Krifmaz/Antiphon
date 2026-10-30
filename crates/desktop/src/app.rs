@@ -1,7 +1,7 @@
 //! The iced application: the shared interface on top of the engine (or on
 //! top of made-up data, for `--demo` and `--screenshot-tour`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -460,11 +460,11 @@ impl App {
 
     /// Installs a downloaded update, once the updater hands one over: closes
     /// down for an installer or a restart, or says what the system will do.
-    fn install_update(&mut self, file: PathBuf) -> Task<Message> {
+    fn install_update(&mut self, file: &Path) -> Task<Message> {
         let Some(u) = &mut self.updater else { return Task::none() };
         let version = u.status().release().map(|r| r.version.to_string()).unwrap_or_default();
         self.installing = Some(version.clone());
-        let result = update::install::install(u.target(), &file);
+        let result = update::install::install(u.target(), file);
         let task = match result {
             Ok(update::After::Quit) => Task::done(Message::Close),
             Ok(update::After::Restart(path)) => match update::install::relaunch(&path) {
@@ -525,7 +525,7 @@ impl App {
                         engine.tick(open.as_deref());
                         let drained = self.drain();
                         match ready {
-                            Some(file) => Task::batch([drained, self.install_update(file)]),
+                            Some(file) => Task::batch([drained, self.install_update(&file)]),
                             None => drained,
                         }
                     }
